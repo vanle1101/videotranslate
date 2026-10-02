@@ -3,360 +3,551 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Douyin2TikTok AI Studio - Realtime Streaming Dub & Sub</title>
+  <title>Douyin2TikTok AI Studio - Desktop Application</title>
   <script src="https://cdn.tailwindcss.com"></script>
   <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
   <link rel="stylesheet" href="/static/style.css">
 </head>
 <body class="bg-[#0b0d13] text-gray-100 min-h-screen font-sans antialiased selection:bg-pink-500 selection:text-white">
   
-  <!-- Header -->
-  <header class="border-b border-gray-800/80 bg-[#12151f]/90 backdrop-blur sticky top-0 z-50 px-6 py-3 flex items-center justify-between shadow-md">
-    <div class="flex items-center space-x-3">
-      <div class="h-9 w-9 rounded-xl bg-gradient-to-tr from-pink-500 via-rose-500 to-violet-600 flex items-center justify-center shadow-lg shadow-pink-500/25">
-        <i class="fa-solid fa-bolt-lightning text-white text-base"></i>
+  <!-- App Header -->
+  <header class="border-b border-gray-800/80 bg-[#12151f]/95 backdrop-blur sticky top-0 z-50 px-6 py-2.5 flex items-center justify-between shadow-md select-none">
+    <div class="flex items-center space-x-6">
+      <!-- Logo -->
+      <div class="flex items-center space-x-3">
+        <div class="h-9 w-9 rounded-xl bg-gradient-to-tr from-pink-500 via-rose-500 to-violet-600 flex items-center justify-center shadow-lg shadow-pink-500/25">
+          <i class="fa-solid fa-bolt-lightning text-white text-base"></i>
+        </div>
+        <div>
+          <h1 class="font-bold text-sm tracking-tight text-white flex items-center gap-2">
+            Douyin2TikTok <span class="text-[9px] bg-gradient-to-r from-pink-500/20 to-violet-500/20 text-pink-400 px-2 py-0.5 rounded-full border border-pink-500/30 font-mono font-semibold">DESKTOP STUDIO</span>
+          </h1>
+          <p class="text-[10px] text-gray-400">SenseVoice ASR · Gemini · VieNeu-TTS v3 Turbo · BS-RoFormer</p>
+        </div>
       </div>
-      <div>
-        <h1 class="font-bold text-base tracking-tight text-white flex items-center gap-2">
-          Douyin2TikTok <span class="text-[10px] bg-gradient-to-r from-emerald-500/20 to-teal-500/20 text-emerald-400 px-2 py-0.5 rounded-full border border-emerald-500/30 font-mono font-semibold">STREAMING REALTIME</span>
-        </h1>
-        <p class="text-[10px] text-gray-400">Xem ngay không cần chờ render · SenseVoice ASR · VieNeu-TTS v3 Turbo</p>
-      </div>
+
+      <!-- Navigation Tabs -->
+      <nav class="flex items-center space-x-1 bg-[#090b10] p-1 rounded-xl border border-gray-800">
+        <button id="tab-studio" class="nav-btn px-3 py-1.5 rounded-lg text-xs font-semibold text-white bg-pink-600/80 shadow transition flex items-center gap-1.5">
+          <i class="fa-solid fa-play text-pink-300"></i> Studio
+        </button>
+        <button id="tab-tasks" class="nav-btn px-3 py-1.5 rounded-lg text-xs font-semibold text-gray-400 hover:text-gray-200 transition flex items-center gap-1.5">
+          <i class="fa-solid fa-list-check text-teal-400"></i> Tác Vụ
+        </button>
+        <button id="tab-models" class="nav-btn px-3 py-1.5 rounded-lg text-xs font-semibold text-gray-400 hover:text-gray-200 transition flex items-center gap-1.5">
+          <i class="fa-solid fa-server text-violet-400"></i> Models
+        </button>
+        <button id="tab-diagnostics" class="nav-btn px-3 py-1.5 rounded-lg text-xs font-semibold text-gray-400 hover:text-gray-200 transition flex items-center gap-1.5">
+          <i class="fa-solid fa-terminal text-yellow-400"></i> Diagnostics
+        </button>
+        <button id="tab-settings" class="nav-btn px-3 py-1.5 rounded-lg text-xs font-semibold text-gray-400 hover:text-gray-200 transition flex items-center gap-1.5">
+          <i class="fa-solid fa-gear text-cyan-400"></i> Cài Đặt
+        </button>
+      </nav>
     </div>
     
-    <!-- Hardware & Modals -->
+    <!-- Hardware Status -->
     <div class="flex items-center space-x-3">
-      <div id="hardware-pill" class="hidden md:flex items-center gap-2 bg-[#08090d] border border-gray-800 px-3 py-1.5 rounded-lg text-xs font-mono text-gray-300">
+      <div id="hardware-pill" class="flex items-center gap-2 bg-[#08090d] border border-gray-800 px-3 py-1 rounded-lg text-xs font-mono text-gray-300">
         <i class="fa-solid fa-microchip text-violet-400"></i>
         <span id="gpu-info-text">Detecting hardware...</span>
       </div>
-
-      <button id="btn-models-modal" class="text-gray-300 hover:text-white transition px-3 py-1.5 rounded-lg border border-gray-800 hover:border-gray-700 bg-gray-900/60 text-xs flex items-center gap-1.5">
-        <i class="fa-solid fa-server text-pink-400"></i> Models
-      </button>
-
-      <button id="btn-settings-modal" class="text-gray-300 hover:text-white transition px-3 py-1.5 rounded-lg border border-gray-800 hover:border-gray-700 bg-gray-900/60 text-xs flex items-center gap-1.5">
-        <i class="fa-solid fa-key text-yellow-400"></i> API Keys
-      </button>
     </div>
   </header>
 
-  <!-- Live Telemetry Ribbon -->
-  <section class="border-b border-gray-800/80 bg-[#151926]/90 px-6 py-2.5">
-    <div class="max-w-7xl mx-auto flex flex-wrap items-center justify-between gap-4 text-xs font-mono">
-      <div class="flex items-center gap-5 flex-wrap">
-        <div class="flex items-center gap-1.5 text-gray-400">
-          <i class="fa-regular fa-clock text-pink-400"></i>
-          <span>Đang phát:</span>
-          <span id="tel-playing" class="text-white font-bold">00:00</span>
-        </div>
-        <div class="flex items-center gap-1.5 text-gray-400">
-          <i class="fa-solid fa-shield-halved text-emerald-400"></i>
-          <span>Playable:</span>
-          <span id="tel-playable" class="text-emerald-300 font-bold">00:00</span>
-        </div>
-        <div class="flex items-center gap-1.5 text-gray-400">
-          <i class="fa-solid fa-battery-half text-teal-400"></i>
-          <span>Buffer Ahead:</span>
-          <span id="tel-buffer" class="px-2 py-0.5 rounded text-[11px] font-bold bg-emerald-950/80 text-emerald-400 border border-emerald-800/80">+0.0s</span>
-        </div>
-        <div class="flex items-center gap-1.5 text-gray-400">
-          <i class="fa-solid fa-stopwatch text-violet-400"></i>
-          <span>Time To First Play (TTFP):</span>
-          <span id="tel-ttfp" class="text-violet-300 font-bold">--</span>
-        </div>
-        <div class="flex items-center gap-1.5 text-gray-400">
-          <i class="fa-solid fa-gauge-high text-yellow-400"></i>
-          <span>Realtime Factor:</span>
-          <span id="tel-rtf" class="text-yellow-300 font-bold">0.0x</span>
-        </div>
-        <div class="flex items-center gap-1.5 text-gray-400">
-          <i class="fa-solid fa-volume-xmark text-rose-400"></i>
-          <span>Vocal Engine:</span>
-          <span id="tel-vocal-engine" class="text-rose-300 font-bold">DSP Formant & Center</span>
-        </div>
-        <div class="flex items-center gap-1.5 text-gray-400">
-          <i class="fa-solid fa-sliders text-cyan-400"></i>
-          <span>Suppression:</span>
-          <span id="tel-suppression" class="px-2 py-0.5 rounded text-[11px] font-bold bg-cyan-950/80 text-cyan-400 border border-cyan-800/80">-26.0 dB</span>
-        </div>
-      </div>
-
-      <div class="flex items-center gap-2 text-[11px]">
-        <span class="text-gray-400">Workers:</span>
-        <span id="worker-asr-badge" class="px-2 py-0.5 rounded bg-gray-800 text-gray-300">ASR: Idle</span>
-        <span id="worker-trans-badge" class="px-2 py-0.5 rounded bg-gray-800 text-gray-300">Trans: Idle</span>
-        <span id="worker-tts-badge" class="px-2 py-0.5 rounded bg-gray-800 text-gray-300">TTS: Idle</span>
-      </div>
-    </div>
-  </section>
-
-  <!-- Main Grid: Player Centric Layout -->
-  <main class="max-w-7xl mx-auto p-6 grid grid-cols-1 lg:grid-cols-12 gap-6">
-    
-    <!-- Center Left: Large Video Player (7 Cols) -->
-    <div class="lg:col-span-7 space-y-4">
-      
-      <!-- Video Player Card -->
-      <div class="bg-[#12151f] border border-gray-800 rounded-2xl p-4 shadow-2xl space-y-3 relative">
-        <div class="flex items-center justify-between pb-2 border-b border-gray-800 text-xs text-gray-300">
-          <span class="font-bold flex items-center gap-2">
-            <i class="fa-solid fa-tv text-pink-500"></i> MÀN HÌNH PHÁT REALTIME (9:16)
-          </span>
-          <div class="flex items-center gap-3">
-            <label class="flex items-center gap-1.5 cursor-pointer text-[11px] text-gray-400 hover:text-gray-200">
-              <input type="checkbox" id="toggle-mask-chinese" checked class="rounded border-gray-700 text-pink-600 focus:ring-0">
-              Che phụ đề Trung
-            </label>
-            <label class="flex items-center gap-1.5 cursor-pointer text-[11px] text-gray-400 hover:text-gray-200">
-              <input type="checkbox" id="toggle-subtitles" checked class="rounded border-gray-700 text-pink-600 focus:ring-0">
-              Hiện Sub Việt
-            </label>
+  <!-- ======================================================== -->
+  <!-- 1. STUDIO VIEW (HOME PLAYER & REALTIME PROCESSING) -->
+  <!-- ======================================================== -->
+  <div id="view-studio" class="app-view">
+    <!-- Live Telemetry Ribbon -->
+    <section class="border-b border-gray-800/80 bg-[#151926]/90 px-6 py-2 select-none">
+      <div class="max-w-7xl mx-auto flex flex-wrap items-center justify-between gap-4 text-xs font-mono">
+        <div class="flex items-center gap-5 flex-wrap">
+          <div class="flex items-center gap-1.5 text-gray-400">
+            <i class="fa-regular fa-clock text-pink-400"></i>
+            <span>Đang phát:</span>
+            <span id="tel-playing" class="text-white font-bold">00:00</span>
+          </div>
+          <div class="flex items-center gap-1.5 text-gray-400">
+            <i class="fa-solid fa-shield-halved text-emerald-400"></i>
+            <span>Playable:</span>
+            <span id="tel-playable" class="text-emerald-300 font-bold">00:00</span>
+          </div>
+          <div class="flex items-center gap-1.5 text-gray-400">
+            <i class="fa-solid fa-battery-half text-teal-400"></i>
+            <span>Buffer:</span>
+            <span id="tel-buffer" class="px-2 py-0.5 rounded text-[11px] font-bold bg-emerald-950/80 text-emerald-400 border border-emerald-800/80">+0.0s</span>
+          </div>
+          <div class="flex items-center gap-1.5 text-gray-400">
+            <i class="fa-solid fa-stopwatch text-violet-400"></i>
+            <span>TTFP:</span>
+            <span id="tel-ttfp" class="text-violet-300 font-bold">--</span>
+          </div>
+          <div class="flex items-center gap-1.5 text-gray-400">
+            <i class="fa-solid fa-gauge-high text-yellow-400"></i>
+            <span>RTF:</span>
+            <span id="tel-rtf" class="text-yellow-300 font-bold">0.0x</span>
+          </div>
+          <div class="flex items-center gap-1.5 text-gray-400">
+            <i class="fa-solid fa-sliders text-cyan-400"></i>
+            <span>Vocal Suppression:</span>
+            <span id="tel-suppression" class="px-2 py-0.5 rounded text-[11px] font-bold bg-cyan-950/80 text-cyan-400 border border-cyan-800/80">-26.0 dB</span>
           </div>
         </div>
 
-        <!-- Player Viewport with Dynamic Subtitle Overlay -->
-        <div id="player-container" class="aspect-[9/16] max-h-[540px] mx-auto bg-black rounded-xl overflow-hidden relative flex items-center justify-center border border-gray-800 shadow-inner group">
-          
-          <video id="video-player" playsinline class="w-full h-full object-contain"></video>
+        <div class="flex items-center gap-2 text-[11px]">
+          <span class="text-gray-400">Workers:</span>
+          <span id="worker-asr-badge" class="px-2 py-0.5 rounded bg-gray-800 text-gray-300">ASR: Idle</span>
+          <span id="worker-trans-badge" class="px-2 py-0.5 rounded bg-gray-800 text-gray-300">Gemini: Idle</span>
+          <span id="worker-tts-badge" class="px-2 py-0.5 rounded bg-gray-800 text-gray-300">VieNeu: Idle</span>
+        </div>
+      </div>
+    </section>
 
-          <!-- Chinese Subtitle Blur Mask Bar -->
-          <div id="chinese-sub-mask" class="absolute bottom-16 left-0 right-0 h-14 bg-black/65 backdrop-blur-md pointer-events-none transition-opacity duration-300"></div>
-
-          <!-- Real-Time Vietnamese Subtitle Overlay -->
-          <div id="subtitle-overlay" class="absolute bottom-16 left-4 right-4 text-center pointer-events-none z-10 transition-all duration-200">
-            <span id="subtitle-text" class="inline-block px-3 py-1 rounded-md text-base md:text-lg font-bold text-yellow-300 bg-black/75 shadow-lg border border-black/40 text-center tracking-wide leading-tight">
-              <!-- Dynamic sub text injected here -->
+    <!-- Main Grid: Player Centric Layout -->
+    <main class="max-w-7xl mx-auto p-6 grid grid-cols-1 lg:grid-cols-12 gap-6">
+      
+      <!-- Center Left: Large Video Player (7 Cols) -->
+      <div class="lg:col-span-7 space-y-4">
+        
+        <!-- Video Player Card -->
+        <div class="bg-[#12151f] border border-gray-800 rounded-2xl p-4 shadow-2xl space-y-3 relative">
+          <div class="flex items-center justify-between pb-2 border-b border-gray-800 text-xs text-gray-300">
+            <span class="font-bold flex items-center gap-2">
+              <i class="fa-solid fa-tv text-pink-500"></i> MÀN HÌNH PHÁT REALTIME (9:16)
             </span>
+            <div class="flex items-center gap-3">
+              <label class="flex items-center gap-1.5 cursor-pointer text-[11px] text-gray-400 hover:text-gray-200">
+                <input type="checkbox" id="toggle-mask-chinese" checked class="rounded border-gray-700 text-pink-600 focus:ring-0">
+                Che phụ đề Trung
+              </label>
+              <label class="flex items-center gap-1.5 cursor-pointer text-[11px] text-gray-400 hover:text-gray-200">
+                <input type="checkbox" id="toggle-subtitles" checked class="rounded border-gray-700 text-pink-600 focus:ring-0">
+                Hiện Sub Việt
+              </label>
+            </div>
           </div>
 
-          <!-- Buffering Alert Overlay -->
-          <div id="buffering-alert" class="absolute inset-0 bg-black/70 backdrop-blur-sm flex flex-col items-center justify-center gap-3 z-20 hidden">
-            <i class="fa-solid fa-spinner fa-spin text-3xl text-pink-500"></i>
-            <p class="text-xs text-gray-200 font-mono" id="buffering-text">Đang tải giọng lồng tiếng...</p>
+          <!-- Player Viewport with Dynamic Subtitle Overlay -->
+          <div id="player-container" class="aspect-[9/16] max-h-[530px] mx-auto bg-black rounded-xl overflow-hidden relative flex items-center justify-center border border-gray-800 shadow-inner group">
+            
+            <video id="video-player" playsinline class="w-full h-full object-contain"></video>
+
+            <!-- Chinese Subtitle Blur Mask Bar -->
+            <div id="chinese-sub-mask" class="absolute bottom-16 left-0 right-0 h-14 bg-black/65 backdrop-blur-md pointer-events-none transition-opacity duration-300"></div>
+
+            <!-- Real-Time Vietnamese Subtitle Overlay -->
+            <div id="subtitle-overlay" class="absolute bottom-16 left-4 right-4 text-center pointer-events-none z-10 transition-all duration-200">
+              <span id="subtitle-text" class="inline-block px-3 py-1 rounded-md text-base md:text-lg font-bold text-yellow-300 bg-black/75 shadow-lg border border-black/40 text-center tracking-wide leading-tight">
+                <!-- Dynamic sub text injected here -->
+              </span>
+            </div>
+
+            <!-- Buffering Alert Overlay -->
+            <div id="buffering-alert" class="absolute inset-0 bg-black/70 backdrop-blur-sm flex flex-col items-center justify-center gap-3 z-20 hidden">
+              <i class="fa-solid fa-spinner fa-spin text-3xl text-pink-500"></i>
+              <p class="text-xs text-gray-200 font-mono" id="buffering-text">Đang tải giọng lồng tiếng...</p>
+            </div>
+
+            <!-- Placeholder when no video loaded -->
+            <div id="player-placeholder" class="absolute inset-0 flex flex-col items-center justify-center text-center p-6 text-gray-500">
+              <i class="fa-brands fa-tiktok text-4xl mb-2 text-pink-500/60"></i>
+              <p class="text-sm text-gray-300 font-medium">Chưa có video được nạp</p>
+              <p class="text-xs text-gray-500 mt-1">Dán link Douyin hoặc kéo thả video từ Windows Explorer vào đây</p>
+            </div>
           </div>
 
-          <!-- Placeholder when no video loaded -->
-          <div id="player-placeholder" class="absolute inset-0 flex flex-col items-center justify-center text-center p-6 text-gray-500">
-            <i class="fa-brands fa-tiktok text-4xl mb-2 text-pink-500/60"></i>
-            <p class="text-sm text-gray-300 font-medium">Chưa có video được nạp</p>
-            <p class="text-xs text-gray-500 mt-1">Dán link Douyin hoặc chọn file ở cột bên phải và bấm Bắt đầu</p>
+          <!-- Segment Buffer Progress Bar -->
+          <div class="space-y-1 pt-1">
+            <div class="flex items-center justify-between text-[10px] font-mono text-gray-400">
+              <span id="bar-current-time">00:00</span>
+              <span class="text-pink-400 font-semibold" id="bar-buffer-info">Buffer: 0.0s</span>
+              <span id="bar-total-time">00:00</span>
+            </div>
+            <!-- Visual Segment Slices Track -->
+            <div id="segments-timeline-track" class="w-full h-2.5 bg-gray-900 rounded-full overflow-hidden flex relative border border-gray-800 cursor-pointer">
+              <div id="playback-head-marker" class="absolute top-0 bottom-0 w-1 bg-white z-10 shadow-glow" style="left: 0%;"></div>
+            </div>
+          </div>
+
+          <!-- Audio Volume & Sidechain Controls -->
+          <div class="bg-[#090b10] border border-gray-800/80 rounded-xl p-3 flex flex-wrap items-center justify-between gap-4 text-xs">
+            <!-- Vietnamese Dub Audio Volume -->
+            <div class="flex items-center gap-2 flex-1 min-w-[190px]">
+              <i class="fa-solid fa-microphone-lines text-pink-400"></i>
+              <span class="text-gray-300 text-[11px] font-medium">Giọng Việt:</span>
+              <input type="range" id="vol-dub" min="0" max="1" step="0.05" value="1.0" class="w-full accent-pink-500 h-1.5 bg-gray-700 rounded-lg cursor-pointer">
+              <span id="vol-dub-val" class="font-mono text-gray-400 text-[10px] w-8">100%</span>
+            </div>
+
+            <!-- Original Audio / BGM Volume -->
+            <div class="flex items-center gap-2 flex-1 min-w-[190px]">
+              <i class="fa-solid fa-music text-violet-400"></i>
+              <span class="text-gray-300 text-[11px] font-medium">BGM & SFX:</span>
+              <input type="range" id="vol-bgm" min="0" max="1" step="0.05" value="0.30" class="w-full accent-violet-500 h-1.5 bg-gray-700 rounded-lg cursor-pointer">
+              <span id="vol-bgm-val" class="font-mono text-gray-400 text-[10px] w-8">30%</span>
+            </div>
+
+            <!-- Vocal Suppression Badge -->
+            <div class="flex items-center gap-2 bg-gray-900 px-2 py-1 rounded text-[10px] text-gray-300 font-mono border border-gray-800">
+              <span class="text-rose-400">Lọc thoại Trung:</span>
+              <span id="player-suppression-badge" class="text-cyan-300 font-bold">-26.0 dB</span>
+              <span class="text-gray-500">|</span>
+              <span class="text-emerald-400">BGM:</span>
+              <span class="text-gray-200">Giữ nguyên</span>
+            </div>
           </div>
         </div>
 
-        <!-- Segment Buffer Progress Bar -->
-        <div class="space-y-1 pt-1">
-          <div class="flex items-center justify-between text-[10px] font-mono text-gray-400">
-            <span id="bar-current-time">00:00</span>
-            <span class="text-pink-400 font-semibold" id="bar-buffer-info">Buffer: 0.0s</span>
-            <span id="bar-total-time">00:00</span>
-          </div>
-          <!-- Visual Segment Slices Track -->
-          <div id="segments-timeline-track" class="w-full h-2.5 bg-gray-900 rounded-full overflow-hidden flex relative border border-gray-800 cursor-pointer">
-            <div id="playback-head-marker" class="absolute top-0 bottom-0 w-1 bg-white z-10 shadow-glow" style="left: 0%;"></div>
-          </div>
-        </div>
-
-        <!-- Audio Volume & Sidechain Controls -->
-        <div class="bg-[#090b10] border border-gray-800/80 rounded-xl p-3 flex flex-wrap items-center justify-between gap-4 text-xs">
-          <!-- Vietnamese Dub Audio Volume -->
-          <div class="flex items-center gap-2 flex-1 min-w-[200px]">
-            <i class="fa-solid fa-microphone-lines text-pink-400"></i>
-            <span class="text-gray-300 text-[11px] font-medium">Giọng Việt:</span>
-            <input type="range" id="vol-dub" min="0" max="1" step="0.05" value="1.0" class="w-full accent-pink-500 h-1.5 bg-gray-700 rounded-lg cursor-pointer">
-            <span id="vol-dub-val" class="font-mono text-gray-400 text-[10px] w-8">100%</span>
-          </div>
-
-          <!-- Original Audio / BGM Volume -->
-          <div class="flex items-center gap-2 flex-1 min-w-[200px]">
-            <i class="fa-solid fa-music text-violet-400"></i>
-            <span class="text-gray-300 text-[11px] font-medium">BGM & SFX (Tách thoại):</span>
-            <input type="range" id="vol-bgm" min="0" max="1" step="0.05" value="0.30" class="w-full accent-violet-500 h-1.5 bg-gray-700 rounded-lg cursor-pointer">
-            <span id="vol-bgm-val" class="font-mono text-gray-400 text-[10px] w-8">30%</span>
-          </div>
-
-          <!-- Vocal Suppression & Ducking Depth Badge -->
-          <div class="flex items-center gap-2 bg-gray-900 px-2 py-1 rounded text-[10px] text-gray-300 font-mono border border-gray-800">
-            <span class="text-rose-400">Lọc thoại Trung:</span>
-            <span id="player-suppression-badge" class="text-cyan-300 font-bold">-26.0 dB</span>
-            <span class="text-gray-500">|</span>
-            <span class="text-emerald-400">BGM/SFX:</span>
-            <span class="text-gray-200">Giữ nguyên</span>
-          </div>
-        </div>
       </div>
 
+      <!-- Center Right: Input & Realtime Controls (5 Cols) -->
+      <div class="lg:col-span-5 space-y-4">
+        
+        <!-- Input Card -->
+        <div class="bg-[#12151f] border border-gray-800 rounded-2xl p-4 shadow-xl space-y-3">
+          <h2 class="text-xs font-bold text-gray-200 uppercase tracking-wider flex items-center gap-2">
+            <i class="fa-brands fa-tiktok text-pink-500"></i> 1. Video Nguồn (Douyin / URL / File)
+          </h2>
+
+          <div>
+            <input type="text" id="video-url" placeholder="Dán link Douyin hoặc link video trực tiếp..."
+              class="w-full bg-[#08090d] border border-gray-700 focus:border-pink-500 rounded-xl px-3 py-2 text-xs text-gray-100 placeholder-gray-500 focus:outline-none transition">
+          </div>
+
+          <div class="flex items-center justify-between text-[10px] text-gray-500">
+            <div class="border-t border-gray-800 flex-1"></div>
+            <span class="px-2">hoặc chọn file từ máy / kéo thả</span>
+            <div class="border-t border-gray-800 flex-1"></div>
+          </div>
+
+          <!-- Drag & Drop Zone with Native File Picker Button -->
+          <div id="drop-zone" class="border-2 border-dashed border-gray-700 hover:border-pink-500/80 rounded-xl p-3 text-center cursor-pointer transition bg-[#08090d]/60 group">
+            <input type="file" id="video-file" accept="video/*" class="hidden">
+            <i class="fa-solid fa-folder-open text-2xl text-pink-400 group-hover:scale-110 transition duration-200 mb-1"></i>
+            <p class="text-xs text-gray-200 font-semibold" id="file-name-display">Chọn file từ máy (Native Dialog)</p>
+            <p class="text-[10px] text-gray-400 mt-0.5">Hỗ trợ: MP4, MOV, WebM, MKV (Kéo thả trực tiếp từ Explorer)</p>
+          </div>
+        </div>
+
+        <!-- Realtime Engine Configuration Card -->
+        <div class="bg-[#12151f] border border-gray-800 rounded-2xl p-4 shadow-xl space-y-3">
+          <h2 class="text-xs font-bold text-gray-200 uppercase tracking-wider flex items-center gap-2">
+            <i class="fa-solid fa-sliders text-pink-400"></i> 2. Cấu Hình Realtime
+          </h2>
+
+          <!-- Buffer Ahead Setting -->
+          <div class="grid grid-cols-2 gap-3">
+            <div>
+              <label class="text-[11px] text-gray-400 block mb-1">Đệm trước phát (Initial Buffer):</label>
+              <select id="buffer-select" class="w-full bg-[#08090d] border border-gray-700 rounded-xl px-3 py-1.5 text-xs text-gray-200 focus:outline-none focus:border-pink-500">
+                <option value="5">5 giây (Nhanh nhất)</option>
+                <option value="10" selected>10 giây (Khuyên dùng)</option>
+                <option value="15">15 giây (Ổn định)</option>
+                <option value="30">30 giây (An toàn)</option>
+              </select>
+            </div>
+
+            <div>
+              <label class="text-[11px] text-gray-400 block mb-1">Giọng lồng tiếng (VieNeu):</label>
+              <select id="voice-select" class="w-full bg-[#08090d] border border-gray-700 rounded-xl px-3 py-1.5 text-xs text-gray-200 focus:outline-none focus:border-pink-500">
+                <option value="Trúc Ly" selected>Trúc Ly (Nữ - Truyền cảm)</option>
+                <option value="Thiện Minh">Thiện Minh (Nam - Trầm ấm)</option>
+                <option value="Mai Anh">Mai Anh (Nữ - Tươi trẻ)</option>
+                <option value="Hải Đăng">Hải Đăng (Nam - Tự nhiên)</option>
+                <option value="Adam bựa">Adam bựa (Nam - Hài hước)</option>
+              </select>
+            </div>
+          </div>
+
+          <!-- Execution Action Buttons -->
+          <div class="pt-1 space-y-2">
+            <button id="btn-start" class="w-full py-3 px-4 rounded-xl bg-gradient-to-r from-pink-500 via-rose-500 to-violet-600 hover:opacity-95 text-white font-bold text-xs shadow-lg shadow-pink-500/25 flex items-center justify-center gap-2 transition active:scale-[0.99]">
+              <i class="fa-solid fa-play"></i> BẮT ĐẦU DỊCH & PHÁT REALTIME
+            </button>
+            
+            <div class="flex gap-2">
+              <button id="btn-pause-worker" class="hidden flex-1 py-2 px-3 rounded-lg bg-amber-600/80 hover:bg-amber-600 text-white text-xs font-semibold transition">
+                <i class="fa-solid fa-pause"></i> Tạm dừng
+              </button>
+              <button id="btn-resume-worker" class="hidden flex-1 py-2 px-3 rounded-lg bg-emerald-600/80 hover:bg-emerald-600 text-white text-xs font-semibold transition">
+                <i class="fa-solid fa-play"></i> Tiếp tục
+              </button>
+              <button id="btn-stop-worker" class="hidden py-2 px-3 rounded-lg bg-rose-700/80 hover:bg-rose-700 text-white text-xs font-semibold transition">
+                <i class="fa-solid fa-stop"></i> Dừng hẳn
+              </button>
+            </div>
+
+            <!-- HQ Export Button -->
+            <button id="btn-export-hq" class="w-full py-2.5 px-3 rounded-xl border border-violet-500/50 hover:bg-violet-600/20 text-violet-300 font-semibold text-xs flex items-center justify-center gap-2 transition">
+              <i class="fa-solid fa-film text-pink-400"></i> Xuất Video Hoàn Chỉnh (BS-RoFormer HQ)
+            </button>
+          </div>
+        </div>
+
+        <!-- Live Segments Drawer -->
+        <div class="bg-[#12151f] border border-gray-800 rounded-2xl p-4 shadow-xl space-y-2.5">
+          <div class="flex items-center justify-between pb-1.5 border-b border-gray-800">
+            <h3 class="text-xs font-bold text-gray-200 uppercase tracking-wider flex items-center gap-1.5">
+              <i class="fa-solid fa-list-check text-pink-400"></i> Danh Sách Câu Thoại Realtime
+            </h3>
+            <span id="segments-count-badge" class="text-[10px] font-mono text-gray-400 bg-gray-900 px-2 py-0.5 rounded">0 câu</span>
+          </div>
+
+          <div id="segments-list" class="space-y-2 max-h-[260px] overflow-y-auto pr-1 font-mono text-xs">
+            <div class="text-center py-8 text-gray-500 text-xs">
+              Chưa có câu thoại nào. Bấm Bắt đầu để nạp video.
+            </div>
+          </div>
+        </div>
+
+      </div>
+    </main>
+  </div>
+
+  <!-- ======================================================== -->
+  <!-- 2. TASKS VIEW (TASK MANAGER) -->
+  <!-- ======================================================== -->
+  <div id="view-tasks" class="app-view hidden max-w-6xl mx-auto p-6 space-y-6">
+    <div class="flex items-center justify-between pb-3 border-b border-gray-800">
+      <div>
+        <h2 class="text-base font-bold text-white flex items-center gap-2">
+          <i class="fa-solid fa-list-check text-teal-400"></i> Quản Lý Tác Vụ (Task Manager)
+        </h2>
+        <p class="text-xs text-gray-400">Theo dõi tiến trình dịch realtime, xuất video HQ và tải checkpoint AI.</p>
+      </div>
+      <button id="btn-refresh-tasks" class="px-3 py-1.5 rounded-lg border border-gray-700 bg-gray-800 hover:bg-gray-700 text-xs text-gray-200 flex items-center gap-1.5">
+        <i class="fa-solid fa-rotate-right"></i> Làm mới
+      </button>
     </div>
 
-    <!-- Center Right: Input & Realtime Controls (5 Cols) -->
-    <div class="lg:col-span-5 space-y-4">
+    <!-- Active Tasks Table -->
+    <div class="bg-[#12151f] border border-gray-800 rounded-2xl overflow-hidden shadow-xl">
+      <table class="w-full text-left text-xs text-gray-300">
+        <thead class="bg-gray-900/80 text-gray-400 uppercase text-[10px] border-b border-gray-800">
+          <tr>
+            <th class="p-3.5">Mã Tác Vụ</th>
+            <th class="p-3.5">Loại Tác Vụ</th>
+            <th class="p-3.5">Tiến Trình</th>
+            <th class="p-3.5">Thời Lượng</th>
+            <th class="p-3.5">Trạng Thái</th>
+            <th class="p-3.5 text-right">Điều Khiển</th>
+          </tr>
+        </thead>
+        <tbody id="tasks-table-body" class="divide-y divide-gray-800/60 font-mono">
+          <!-- Dynamic Task Row -->
+          <tr>
+            <td colspan="6" class="p-8 text-center text-gray-500 font-sans">
+              Không có tác vụ nào đang hoạt động.
+            </td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+  </div>
+
+  <!-- ======================================================== -->
+  <!-- 3. MODELS VIEW (MODEL MANAGER) -->
+  <!-- ======================================================== -->
+  <div id="view-models" class="app-view hidden max-w-6xl mx-auto p-6 space-y-6">
+    <div class="flex items-center justify-between pb-3 border-b border-gray-800">
+      <div>
+        <h2 class="text-base font-bold text-white flex items-center gap-2">
+          <i class="fa-solid fa-server text-violet-400"></i> Quản Lý Models & Checkpoints
+        </h2>
+        <p class="text-xs text-gray-400">Kiểm tra tính sẵn sàng, dung lượng bộ nhớ và trạng thái thiết bị của các AI Engine.</p>
+      </div>
+      <button id="btn-reload-models" class="px-3 py-1.5 rounded-lg border border-gray-700 bg-gray-800 hover:bg-gray-700 text-xs text-gray-200 flex items-center gap-1.5">
+        <i class="fa-solid fa-arrows-rotate"></i> Kiểm tra lại
+      </button>
+    </div>
+
+    <div class="bg-[#12151f] border border-gray-800 rounded-2xl overflow-hidden shadow-xl">
+      <table class="w-full text-left text-xs text-gray-300">
+        <thead class="bg-gray-900/80 text-gray-400 uppercase text-[10px] border-b border-gray-800">
+          <tr>
+            <th class="p-3.5">Engine</th>
+            <th class="p-3.5">Tên Model / Checkpoint</th>
+            <th class="p-3.5">Kích thước</th>
+            <th class="p-3.5">Thiết bị</th>
+            <th class="p-3.5">Trạng Thái</th>
+            <th class="p-3.5 text-right">Thao Tác</th>
+          </tr>
+        </thead>
+        <tbody id="models-full-table-body" class="divide-y divide-gray-800/60 font-mono">
+          <!-- Dynamic Models populated by JS -->
+        </tbody>
+      </table>
+    </div>
+  </div>
+
+  <!-- ======================================================== -->
+  <!-- 4. DIAGNOSTICS VIEW (LOG VIEWER) -->
+  <!-- ======================================================== -->
+  <div id="view-diagnostics" class="app-view hidden max-w-6xl mx-auto p-6 space-y-4">
+    <div class="flex items-center justify-between pb-3 border-b border-gray-800">
+      <div>
+        <h2 class="text-base font-bold text-white flex items-center gap-2">
+          <i class="fa-solid fa-terminal text-yellow-400"></i> Nhật Ký & Chẩn Đoán (Diagnostics)
+        </h2>
+        <p class="text-xs text-gray-400">Xem log hệ thống, theo dõi tiến trình AI và chẩn đoán lỗi trong workspace/logs/.</p>
+      </div>
+      <div class="flex items-center gap-2">
+        <button id="btn-copy-log" class="px-3 py-1.5 rounded-lg border border-gray-700 bg-gray-800 hover:bg-gray-700 text-xs text-gray-200 flex items-center gap-1.5">
+          <i class="fa-regular fa-copy"></i> Sao chép Log
+        </button>
+        <button id="btn-open-log-folder" class="px-3 py-1.5 rounded-lg border border-gray-700 bg-gray-800 hover:bg-gray-700 text-xs text-gray-200 flex items-center gap-1.5">
+          <i class="fa-regular fa-folder-open text-pink-400"></i> Mở Thư Mục Logs
+        </button>
+        <button id="btn-clear-log" class="px-3 py-1.5 rounded-lg border border-rose-800/60 bg-rose-950/40 hover:bg-rose-900/60 text-xs text-rose-300 flex items-center gap-1.5">
+          <i class="fa-solid fa-trash-can"></i> Xóa Log
+        </button>
+      </div>
+    </div>
+
+    <!-- Log Category Tabs -->
+    <div class="flex items-center gap-2 border-b border-gray-800 pb-2">
+      <button data-cat="app" class="diag-cat-btn px-3 py-1 rounded-lg text-xs font-mono font-bold bg-pink-600/80 text-white">Application Log</button>
+      <button data-cat="ai" class="diag-cat-btn px-3 py-1 rounded-lg text-xs font-mono text-gray-400 hover:text-white">AI Log</button>
+      <button data-cat="pipeline" class="diag-cat-btn px-3 py-1 rounded-lg text-xs font-mono text-gray-400 hover:text-white">Pipeline Log</button>
+      <button data-cat="errors" class="diag-cat-btn px-3 py-1 rounded-lg text-xs font-mono text-gray-400 hover:text-white">Errors Log</button>
+      <div class="ml-auto flex items-center gap-2">
+        <label class="text-[11px] text-gray-400 flex items-center gap-1 cursor-pointer">
+          <input type="checkbox" id="chk-auto-scroll-log" checked class="rounded border-gray-700 text-pink-600">
+          Auto Scroll
+        </label>
+        <button id="btn-refresh-log" class="text-xs text-gray-400 hover:text-white p-1">
+          <i class="fa-solid fa-arrows-rotate"></i>
+        </button>
+      </div>
+    </div>
+
+    <!-- Log Console Output -->
+    <div class="bg-[#07090e] border border-gray-800 rounded-2xl p-4 font-mono text-xs text-gray-300 h-[520px] overflow-y-auto leading-relaxed shadow-inner" id="log-console-output">
+      Đang tải log...
+    </div>
+  </div>
+
+  <!-- ======================================================== -->
+  <!-- 5. SETTINGS VIEW (SYSTEM & ENGINE CONFIGURATION) -->
+  <!-- ======================================================== -->
+  <div id="view-settings" class="app-view hidden max-w-4xl mx-auto p-6 space-y-6">
+    <div class="pb-3 border-b border-gray-800">
+      <h2 class="text-base font-bold text-white flex items-center gap-2">
+        <i class="fa-solid fa-gear text-cyan-400"></i> Cài Đặt Hệ Thống & AI Engines
+      </h2>
+      <p class="text-xs text-gray-400">Cấu hình API dịch thuật, mô hình giọng đọc và quy tắc lọc âm thanh.</p>
+    </div>
+
+    <div class="grid grid-cols-1 md:grid-cols-2 gap-6">
       
-      <!-- Input Card -->
-      <div class="bg-[#12151f] border border-gray-800 rounded-2xl p-4 shadow-xl space-y-3">
-        <h2 class="text-xs font-bold text-gray-200 uppercase tracking-wider flex items-center gap-2">
-          <i class="fa-brands fa-tiktok text-pink-500"></i> 1. Video Nguồn (Douyin / TikTok)
-        </h2>
+      <!-- AI Translation Settings -->
+      <div class="bg-[#12151f] border border-gray-800 rounded-2xl p-5 shadow-xl space-y-4">
+        <h3 class="text-xs font-bold text-pink-400 uppercase tracking-wider flex items-center gap-2">
+          <i class="fa-solid fa-language"></i> 1. AI Dịch Thuật (Translation)
+        </h3>
 
         <div>
-          <input type="text" id="video-url" placeholder="Dán link Douyin hoặc link MP4..."
-            class="w-full bg-[#08090d] border border-gray-700 focus:border-pink-500 rounded-xl px-3 py-2 text-xs text-gray-100 placeholder-gray-500 focus:outline-none transition">
+          <label class="text-xs text-gray-300 block mb-1">Nhà cung cấp (LLM Provider):</label>
+          <select id="settings-llm-provider" class="w-full bg-[#08090d] border border-gray-700 rounded-xl px-3 py-2 text-xs text-gray-100 focus:outline-none focus:border-pink-500">
+            <option value="gemini" selected>Google Gemini (Khuyên dùng · gemini-2.0-flash)</option>
+            <option value="deepseek">DeepSeek AI (Văn phong kịch tính)</option>
+            <option value="openai">OpenAI Compatible API</option>
+            <option value="ollama">Ollama Local LLM</option>
+          </select>
         </div>
 
-        <div class="flex items-center justify-between text-[10px] text-gray-500">
-          <div class="border-t border-gray-800 flex-1"></div>
-          <span class="px-2">hoặc kéo thả file</span>
-          <div class="border-t border-gray-800 flex-1"></div>
+        <div>
+          <div class="flex items-center justify-between mb-1">
+            <label class="text-xs text-gray-300">Google Gemini API Key:</label>
+            <span class="text-[10px] text-gray-500">Lưu an toàn tại .env</span>
+          </div>
+          <div class="relative">
+            <input type="password" id="settings-gemini-key" placeholder="AIzaSy..." class="w-full bg-[#08090d] border border-gray-700 rounded-xl pl-3 pr-10 py-2 text-xs text-gray-100 focus:outline-none focus:border-pink-500 font-mono">
+            <button type="button" id="btn-toggle-gemini-key" class="absolute right-3 top-2.5 text-gray-500 hover:text-gray-300">
+              <i class="fa-regular fa-eye text-xs"></i>
+            </button>
+          </div>
         </div>
 
-        <div id="drop-zone" class="border-2 border-dashed border-gray-700 hover:border-pink-500/60 rounded-xl p-3 text-center cursor-pointer transition bg-[#08090d]/50">
-          <input type="file" id="video-file" accept="video/*" class="hidden">
-          <i class="fa-solid fa-cloud-arrow-up text-xl text-gray-500 mb-0.5"></i>
-          <p class="text-xs text-gray-300 font-medium" id="file-name-display">Chọn file video</p>
-          <p class="text-[10px] text-gray-500">MP4, MOV, WebM</p>
+        <div>
+          <label class="text-xs text-gray-300 block mb-1">Gemini Model:</label>
+          <select id="settings-gemini-model" class="w-full bg-[#08090d] border border-gray-700 rounded-xl px-3 py-2 text-xs text-gray-100 focus:outline-none focus:border-pink-500">
+            <option value="gemini-2.0-flash" selected>gemini-2.0-flash (Siêu tốc & chính xác)</option>
+            <option value="gemini-1.5-flash">gemini-1.5-flash (Chuẩn ổn định)</option>
+            <option value="gemini-1.5-pro">gemini-1.5-pro (Văn phong cao cấp)</option>
+          </select>
+        </div>
+
+        <!-- Gemini Test Connection Button & Result -->
+        <div class="pt-2 flex items-center justify-between">
+          <button id="btn-test-gemini" class="px-3 py-1.5 rounded-xl border border-pink-500/50 hover:bg-pink-600/20 text-pink-300 text-xs font-semibold flex items-center gap-1.5 transition">
+            <i class="fa-solid fa-plug-circle-check"></i> Kiểm tra kết nối Gemini
+          </button>
+          <span id="gemini-test-result" class="text-xs font-mono text-gray-400"></span>
+        </div>
+
+        <div class="border-t border-gray-800 pt-3">
+          <label class="text-xs text-gray-300 block mb-1">DeepSeek API Key (Tùy chọn):</label>
+          <input type="password" id="settings-deepseek-key" placeholder="sk-..." class="w-full bg-[#08090d] border border-gray-700 rounded-xl px-3 py-2 text-xs text-gray-100 focus:outline-none focus:border-pink-500 font-mono">
         </div>
       </div>
 
-      <!-- Realtime Engine Configuration Card -->
-      <div class="bg-[#12151f] border border-gray-800 rounded-2xl p-4 shadow-xl space-y-3">
-        <h2 class="text-xs font-bold text-gray-200 uppercase tracking-wider flex items-center gap-2">
-          <i class="fa-solid fa-sliders text-pink-400"></i> 2. Cấu Hình Realtime
-        </h2>
+      <!-- Voice & Audio Settings -->
+      <div class="bg-[#12151f] border border-gray-800 rounded-2xl p-5 shadow-xl space-y-4">
+        <h3 class="text-xs font-bold text-violet-400 uppercase tracking-wider flex items-center gap-2">
+          <i class="fa-solid fa-headphones"></i> 2. Âm Thanh & Tách Giọng
+        </h3>
 
-        <!-- Buffer Ahead Setting -->
-        <div class="grid grid-cols-2 gap-3">
-          <div>
-            <label class="text-[11px] text-gray-400 block mb-1">Initial Buffer (Đệm trước khi phát):</label>
-            <select id="buffer-select" class="w-full bg-[#08090d] border border-gray-700 rounded-xl px-3 py-1.5 text-xs text-gray-200 focus:outline-none focus:border-pink-500">
-              <option value="5">5 giây (Nhanh nhất)</option>
-              <option value="10" selected>10 giây (Khuyên dùng)</option>
-              <option value="15">15 giây (Ổn định)</option>
-              <option value="30">30 giây (An toàn cao)</option>
-            </select>
-          </div>
-
-          <div>
-            <label class="text-[11px] text-gray-400 block mb-1">Giọng lồng tiếng (VieNeu):</label>
-            <select id="voice-select" class="w-full bg-[#08090d] border border-gray-700 rounded-xl px-3 py-1.5 text-xs text-gray-200 focus:outline-none focus:border-pink-500">
-              <option value="Trúc Ly" selected>Trúc Ly (Nữ - Truyền cảm)</option>
-              <option value="Thiện Minh">Thiện Minh (Nam - Trầm ấm)</option>
-              <option value="Mai Anh">Mai Anh (Nữ - Tươi trẻ)</option>
-              <option value="Hải Đăng">Hải Đăng (Nam - Tự nhiên)</option>
-              <option value="Adam bựa">Adam bựa (Nam - Hài hước)</option>
-            </select>
-          </div>
-        </div>
-
-        <!-- Voice Cloning Upload -->
         <div>
-          <label class="text-[11px] text-gray-400 block mb-1">Voice Clone (Mẫu audio 3-5s tuỳ chọn):</label>
-          <input type="file" id="ref-audio-file" accept="audio/*" class="w-full text-xs text-gray-400 file:mr-2 file:py-1 file:px-2.5 file:rounded-lg file:border-0 file:text-[11px] file:bg-gray-800 file:text-gray-300 hover:file:bg-gray-700">
+          <label class="text-xs text-gray-300 block mb-1">Engine Tách Thoại Realtime:</label>
+          <select id="settings-suppression-mode" class="w-full bg-[#08090d] border border-gray-700 rounded-xl px-3 py-2 text-xs text-gray-100 focus:outline-none focus:border-pink-500">
+            <option value="AUTO" selected>Tự động nhận diện (Stereo Cancel hoặc Formant Notch - Khuyên dùng)</option>
+            <option value="DSP_MONO_ADAPTIVE_FORMANT">Đơn kênh: Multi-band Formant Notch (-20dB)</option>
+            <option value="DSP_STEREO_CENTER_CANCEL">Đa kênh: Mid-Side Phase Cancel (-26dB)</option>
+          </select>
         </div>
 
-        <!-- Execution Action Buttons -->
-        <div class="pt-1 space-y-2">
-          <button id="btn-start" class="w-full py-3 px-4 rounded-xl bg-gradient-to-r from-pink-500 via-rose-500 to-violet-600 hover:opacity-95 text-white font-bold text-xs shadow-lg shadow-pink-500/25 flex items-center justify-center gap-2 transition active:scale-[0.99]">
-            <i class="fa-solid fa-play"></i> BẮT ĐẦU DỊCH & PHÁT REALTIME
-          </button>
-          
-          <div class="flex gap-2">
-            <button id="btn-pause-worker" class="hidden flex-1 py-2 px-3 rounded-lg bg-amber-600/80 hover:bg-amber-600 text-white text-xs font-semibold transition">
-              <i class="fa-solid fa-pause"></i> Tạm dừng Worker
-            </button>
-            <button id="btn-resume-worker" class="hidden flex-1 py-2 px-3 rounded-lg bg-emerald-600/80 hover:bg-emerald-600 text-white text-xs font-semibold transition">
-              <i class="fa-solid fa-play"></i> Tiếp tục Worker
-            </button>
-            <button id="btn-stop-worker" class="hidden py-2 px-3 rounded-lg bg-rose-700/80 hover:bg-rose-700 text-white text-xs font-semibold transition">
-              <i class="fa-solid fa-stop"></i> Dừng hẳn
-            </button>
-          </div>
-
-          <!-- HQ Export Button -->
-          <button id="btn-export-hq" class="w-full py-2.5 px-3 rounded-xl border border-violet-500/50 hover:bg-violet-600/20 text-violet-300 font-semibold text-xs flex items-center justify-center gap-2 transition">
-            <i class="fa-solid fa-film text-pink-400"></i> Xuất Video Hoàn Chỉnh (HQ Export: BS-RoFormer)
-          </button>
-        </div>
-      </div>
-
-      <!-- Live Segments Drawer -->
-      <div class="bg-[#12151f] border border-gray-800 rounded-2xl p-4 shadow-xl space-y-2.5">
-        <div class="flex items-center justify-between pb-1.5 border-b border-gray-800">
-          <h3 class="text-xs font-bold text-gray-200 uppercase tracking-wider flex items-center gap-1.5">
-            <i class="fa-solid fa-list-check text-pink-400"></i> Danh Sách Câu Thoại Realtime
-          </h3>
-          <span id="segments-count-badge" class="text-[10px] font-mono text-gray-400 bg-gray-900 px-2 py-0.5 rounded">0 câu</span>
+        <div>
+          <label class="text-xs text-gray-300 block mb-1">Engine Xuất Video Hoàn Chỉnh (HQ):</label>
+          <select class="w-full bg-[#08090d] border border-gray-700 rounded-xl px-3 py-2 text-xs text-gray-100 focus:outline-none focus:border-pink-500" disabled>
+            <option selected>BS-RoFormer HQ (Nomadkaraoke Checkpoint)</option>
+          </select>
         </div>
 
-        <div id="segments-list" class="space-y-2 max-h-[300px] overflow-y-auto pr-1">
-          <div class="text-center py-8 text-gray-500 text-xs">
-            Chưa có câu thoại nào. Bấm Bắt đầu để nạp video.
-          </div>
+        <div>
+          <label class="text-xs text-gray-300 block mb-1">Mức giảm BGM khi có thoại (Sidechain Ducking):</label>
+          <select id="settings-ducking-level" class="w-full bg-[#08090d] border border-gray-700 rounded-xl px-3 py-2 text-xs text-gray-100 focus:outline-none focus:border-pink-500">
+            <option value="-12">-12 dB (Nhẹ nhàng)</option>
+            <option value="-14" selected>-14 dB (Tiêu chuẩn TikTok - Khuyên dùng)</option>
+            <option value="-18">-18 dB (Rõ thoại tối đa)</option>
+            <option value="-24">-24 dB (Ngắt gần hết nhạc nền)</option>
+          </select>
+        </div>
+
+        <div>
+          <label class="text-xs text-gray-300 block mb-1">Độ trễ đệm tối thiểu (Buffer Target):</label>
+          <select id="settings-buffer-target" class="w-full bg-[#08090d] border border-gray-700 rounded-xl px-3 py-2 text-xs text-gray-100 focus:outline-none focus:border-pink-500">
+            <option value="5">5s (Nhanh nhất)</option>
+            <option value="10" selected>10s (Cân bằng tốt)</option>
+            <option value="15">15s (An toàn không giật)</option>
+          </select>
         </div>
       </div>
 
     </div>
-  </main>
 
-  <!-- Models Manager Modal -->
-  <div id="models-modal" class="fixed inset-0 bg-black/80 backdrop-blur-sm z-50 flex items-center justify-center p-4 hidden">
-    <div class="bg-[#161922] border border-gray-800 rounded-2xl max-w-2xl w-full p-6 space-y-4 shadow-2xl">
-      <div class="flex items-center justify-between pb-3 border-b border-gray-800">
-        <h3 class="text-sm font-bold text-white flex items-center gap-2">
-          <i class="fa-solid fa-server text-pink-500"></i> Trạng Thái Checkpoints & Engine Models
-        </h3>
-        <button id="btn-close-models-modal" class="text-gray-400 hover:text-white">
-          <i class="fa-solid fa-xmark text-lg"></i>
-        </button>
-      </div>
-
-      <div class="overflow-x-auto">
-        <table class="w-full text-left text-xs text-gray-300">
-          <thead class="bg-gray-900/60 text-gray-400 uppercase text-[10px]">
-            <tr>
-              <th class="p-2.5">Engine</th>
-              <th class="p-2.5">Model Name</th>
-              <th class="p-2.5">Dung lượng</th>
-              <th class="p-2.5">Device</th>
-              <th class="p-2.5">Trạng thái</th>
-            </tr>
-          </thead>
-          <tbody id="models-table-body" class="divide-y divide-gray-800"></tbody>
-        </table>
-      </div>
+    <!-- Save Settings Action -->
+    <div class="flex justify-end gap-3 pt-2">
+      <button id="btn-save-settings" class="bg-gradient-to-r from-pink-500 via-rose-500 to-violet-600 hover:opacity-95 text-white font-bold text-xs px-6 py-2.5 rounded-xl shadow-lg transition active:scale-[0.98]">
+        <i class="fa-solid fa-floppy-disk mr-1.5"></i> Lưu Cấu Hình Hệ Thống
+      </button>
     </div>
   </div>
 
-  <!-- API Settings Modal -->
-  <div id="settings-modal" class="fixed inset-0 bg-black/80 backdrop-blur-sm z-50 flex items-center justify-center p-4 hidden">
-    <div class="bg-[#161922] border border-gray-800 rounded-2xl max-w-md w-full p-6 space-y-4 shadow-2xl">
-      <div class="flex items-center justify-between pb-3 border-b border-gray-800">
-        <h3 class="text-sm font-bold text-white flex items-center gap-2">
-          <i class="fa-solid fa-key text-yellow-400"></i> Cấu hình API Keys Dịch Thuật
-        </h3>
-        <button id="btn-close-modal" class="text-gray-400 hover:text-white">
-          <i class="fa-solid fa-xmark text-lg"></i>
-        </button>
-      </div>
-
-      <div class="space-y-3">
-        <div>
-          <label class="text-xs text-gray-400 block mb-1">Google Gemini API Key:</label>
-          <input type="password" id="modal-gemini-key" placeholder="AIzaSy..." class="w-full bg-[#08090d] border border-gray-700 rounded-xl px-3 py-2 text-xs text-gray-100 focus:outline-none focus:border-pink-500">
-        </div>
-        <div>
-          <label class="text-xs text-gray-400 block mb-1">DeepSeek API Key:</label>
-          <input type="password" id="modal-deepseek-key" placeholder="sk-..." class="w-full bg-[#08090d] border border-gray-700 rounded-xl px-3 py-2 text-xs text-gray-100 focus:outline-none focus:border-pink-500">
-        </div>
-      </div>
-
-      <div class="pt-3 flex justify-end gap-3">
-        <button id="btn-save-keys" class="bg-pink-600 hover:bg-pink-500 text-white text-xs font-semibold px-4 py-2 rounded-xl transition">
-          Lưu cấu hình
-        </button>
-      </div>
-    </div>
-  </div>
-
-  <!-- HQ Export Modal -->
+  <!-- ======================================================== -->
+  <!-- MODAL: HQ EXPORT -->
+  <!-- ======================================================== -->
   <div id="export-modal" class="fixed inset-0 bg-black/85 backdrop-blur-sm z-50 flex items-center justify-center p-4 hidden">
     <div class="bg-[#161922] border border-gray-800 rounded-2xl max-w-md w-full p-6 space-y-4 shadow-2xl">
       <div class="flex items-center justify-between pb-3 border-b border-gray-800">
@@ -369,7 +560,7 @@
       </div>
 
       <div id="export-modal-body" class="space-y-4 text-xs text-gray-300">
-        <p>Hệ thống sẽ sử dụng <strong>BS-RoFormer</strong> để bóc tách nhạc nền gốc/tiếng động chuẩn studio, mix với giọng đọc <strong>VieNeu-TTS</strong> bằng Dynamic Sidechain Ducking, và biên dịch video TikTok 9:16 H.264.</p>
+        <p>Hệ thống sẽ chạy <strong>BS-RoFormer HQ</strong> tách sạch thoại tiếng Trung giữ nguyên 100% Foley và nhạc nền, mix giọng đọc <strong>VieNeu-TTS</strong> chuẩn và render video TikTok 9:16.</p>
         
         <div id="export-status-box" class="hidden bg-[#08090d] p-3 rounded-xl border border-gray-800 space-y-2">
           <div class="flex items-center gap-2 text-pink-400">
@@ -381,11 +572,11 @@
         <div id="export-result-box" class="hidden space-y-3">
           <div class="p-3 bg-emerald-950/60 border border-emerald-800/80 rounded-xl text-emerald-300 flex items-center gap-2">
             <i class="fa-solid fa-circle-check text-lg"></i>
-            <span>Render video hoàn tất thành công!</span>
+            <span>Xuất video hoàn tất thành công!</span>
           </div>
-          <a id="btn-download-hq" href="#" download class="block text-center py-2.5 bg-pink-600 hover:bg-pink-500 text-white font-bold rounded-xl transition">
-            <i class="fa-solid fa-download"></i> Tải Video MP4 Về Máy
-          </a>
+          <button id="btn-save-as-native" class="w-full py-2.5 bg-pink-600 hover:bg-pink-500 text-white font-bold rounded-xl transition flex items-center justify-center gap-2">
+            <i class="fa-solid fa-floppy-disk"></i> Lưu Video Về Máy (Save Video As...)
+          </button>
         </div>
 
         <div id="export-actions" class="flex justify-end gap-2 pt-2">
@@ -397,6 +588,7 @@
     </div>
   </div>
 
+  <script src="/static/qwebchannel.js"></script>
   <script src="/static/app.js"></script>
 </body>
 </html>

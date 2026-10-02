@@ -75,7 +75,7 @@ class ConfigRequest(BaseModel):
 
 @app.get("/", response_class=HTMLResponse)
 async def index(request: Request):
-    return templates.TemplateResponse("index.html", {"request": request})
+    return templates.TemplateResponse(request=request, name="index.html")
 
 @app.get("/api/hardware")
 async def get_hardware():
@@ -238,6 +238,104 @@ async def export_hq(req: ExportHQRequest):
         "video_url": f"/api/outputs/{result['output_filename']}",
         "elapsed_seconds": result["elapsed_seconds"]
     }
+
+class StreamLocalFileRequest(BaseModel):
+    file_path: str
+    initial_buffer_seconds: Optional[float] = 10.0
+    voice: Optional[str] = "Trúc Ly"
+    tts_engine: Optional[str] = "vieneu"
+    asr_engine: Optional[str] = "sensevoice"
+
+@app.post("/api/streaming/start-local-file")
+async def start_streaming_local_file(req: StreamLocalFileRequest):
+    p = Path(req.file_path)
+    if not p.exists():
+        raise HTTPException(status_code=404, detail=f"File không tồn tại: {req.file_path}")
+
+    task_id = str(uuid.uuid4())[:8]
+    session = create_streaming_session(
+        task_id=task_id,
+        video_path=p,
+        initial_buffer_seconds=req.initial_buffer_seconds or 10.0,
+        voice=req.voice or "Trúc Ly",
+        tts_engine_name=req.tts_engine or "vieneu",
+        asr_engine_name=req.asr_engine or "sensevoice",
+        event_callback=lambda event_type, data: broadcast_session_event(task_id, event_type, data)
+    )
+    asyncio.create_task(session.start())
+
+    return {
+        "task_id": task_id,
+        "video_url": f"/api/local-file?path={p.as_posix()}",
+        "initial_buffer_seconds": session.initial_buffer_seconds,
+        "status": "started"
+    }
+
+@app.get("/api/local-file")
+async def get_local_file(path: str):
+    p = Path(path)
+    if not p.exists():
+        raise HTTPException(status_code=404, detail="File không tồn tại")
+    return FileResponse(p)
+
+@app.get("/api/diagnostics/logs")
+async def get_diagnostics_logs(category: str = "app", lines: int = 100):
+    log_file = settings.WORKSPACE_DIR / "logs" / f"{category}.log"
+    if not log_file.exists():
+        return {"category": category, "logs": "(Không có dữ liệu log)"}
+    try:
+        content = log_file.read_text(encoding="utf-8", errors="ignore")
+        log_lines = content.strip().splitlines()[-lines:]
+        return {"category": category, "logs": "\n".join(log_lines) if log_lines else "(Log rỗng)"}
+    except Exception as e:
+        return {"category": category, "logs": f"Lỗi đọc log: {e}"}
+
+@app.post("/api/diagnostics/logs/clear")
+async def clear_diagnostics_logs(category: Optional[str] = None):
+    log_dir = settings.WORKSPACE_DIR / "logs"
+    if category:
+        targets = [log_dir / f"{category}.log"]
+    else:
+        targets = list(log_dir.glob("*.log"))
+    for t in targets:
+        if t.exists():
+            t.write_text("", encoding="utf-8")
+    return {"status": "ok", "message": "Đã xóa log thành công"}
+
+@app.post("/api/diagnostics/open-folder")
+async def open_diagnostics_folder():
+    log_dir = settings.WORKSPACE_DIR / "logs"
+    log_dir.mkdir(parents=True, exist_ok=True)
+    try:
+        os.startfile(str(log_dir))
+        return {"status": "ok"}
+    except Exception as e:
+        return {"status": "error", "message": str(e)}
+
+@app.post("/api/test-gemini")
+async def test_gemini_connection():
+    gemini_key = settings.GEMINI_API_KEY or os.getenv("GEMINI_API_KEY")
+    if not gemini_key:
+        return {"ok": False, "error": "Chưa có GEMINI_API_KEY. Vui lòng cấu hình trong Cài đặt."}
+    try:
+        t0 = time.time()
+        from google import genai
+        client = genai.Client(api_key=gemini_key)
+        resp = client.models.generate_content(
+            model=settings.GEMINI_MODEL,
+            contents=["Ping test: Trả về chữ OK."],
+            config=dict(temperature=0.1)
+        )
+        latency_ms = round((time.time() - t0) * 1000, 1)
+        return {
+            "ok": True,
+            "model": settings.GEMINI_MODEL,
+            "latency_ms": latency_ms,
+            "response": resp.text.strip()[:60]
+        }
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
+
 
 @app.websocket("/ws/stream/{task_id}")
 async def websocket_stream(websocket: WebSocket, task_id: str):

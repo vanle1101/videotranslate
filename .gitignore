@@ -4,8 +4,10 @@ workspace/cache/
 workspace/models/
 workspace/inputs/*
 workspace/outputs/*
+workspace/logs/
 !workspace/inputs/.gitkeep
 !workspace/outputs/.gitkeep
+!workspace/logs/.gitkeep
 __pycache__/
 *.pyc
 *.pyo
