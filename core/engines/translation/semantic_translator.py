@@ -57,16 +57,16 @@ class SemanticTranslator(TranslationEngine):
 
     @property
     def is_available(self) -> bool:
-        gemini_key = settings.GEMINI_API_KEY or os.getenv("GEMINI_API_KEY")
-        deepseek_key = settings.DEEPSEEK_API_KEY or os.getenv("DEEPSEEK_API_KEY")
-        openai_key = settings.OPENAI_API_KEY or os.getenv("OPENAI_API_KEY")
-        return bool(gemini_key or deepseek_key or openai_key)
+        return True
 
     def get_info(self) -> Dict[str, Any]:
+        gemini_key = settings.GEMINI_API_KEY or os.getenv("GEMINI_API_KEY")
+        deepseek_key = settings.DEEPSEEK_API_KEY or os.getenv("DEEPSEEK_API_KEY")
         return {
             "name": self.name,
             "provider": self.provider,
             "is_available": self.is_available,
+            "has_llm_key": bool(gemini_key or deepseek_key),
             "pipeline": ["Glossary/Summary", "Literal", "Natural Adaptation", "Duration-Constrained Rewrite"]
         }
 
@@ -214,14 +214,30 @@ class SemanticTranslator(TranslationEngine):
             except Exception as e:
                 print(f"[!] JSON parsing error in 3-tier translation: {e}")
 
-        # Fallback for missing ids
+        # Fallback for missing ids or empty results
         for item in payload:
             i = item["id"]
-            if i not in res_map:
+            if i not in res_map or not res_map[i].get("final_vi"):
+                trans = self._fallback_translate(item["text_zh"])
                 res_map[i] = {
-                    "literal_vi": item["text_zh"],
-                    "natural_vi": item["text_zh"],
-                    "final_vi": item["text_zh"]
+                    "literal_vi": trans,
+                    "natural_vi": trans,
+                    "final_vi": trans
                 }
 
         return res_map
+
+    def _fallback_translate(self, text: str) -> str:
+        if not text or not text.strip():
+            return ""
+        try:
+            import urllib.parse
+            import urllib.request
+            url = "https://translate.googleapis.com/translate_a/single?client=gtx&sl=zh-CN&tl=vi&dt=t&q=" + urllib.parse.quote(text)
+            req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+            with urllib.request.urlopen(req, timeout=5) as resp:
+                data = json.loads(resp.read().decode("utf-8"))
+                return "".join([part[0] for part in data[0] if part and part[0]])
+        except Exception as e:
+            print(f"[!] Fallback translation error: {e}")
+            return text

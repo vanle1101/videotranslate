@@ -1,9 +1,11 @@
 venv/
 workspace/temp/
+workspace/models/
 workspace/inputs/*
 workspace/outputs/*
 !workspace/inputs/.gitkeep
 !workspace/outputs/.gitkeep
 __pycache__/
 *.pyc
+*.pyo
 .env

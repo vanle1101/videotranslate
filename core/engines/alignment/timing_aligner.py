@@ -67,7 +67,9 @@ class TimingBudgetAligner(AlignmentEngine):
         segments: List[Dict[str, Any]],
         tts_engine: TTSEngine,
         translation_engine: Any,
-        speed_limits: Tuple[float, float] = (0.90, 1.15)
+        speed_limits: Tuple[float, float] = (0.90, 1.15),
+        voice: Optional[str] = "Trúc Ly",
+        ref_audio: Optional[Path] = None
     ) -> List[Dict[str, Any]]:
         self.min_speed, self.max_speed = speed_limits
         aligned_segments = []
@@ -86,7 +88,7 @@ class TimingBudgetAligner(AlignmentEngine):
             fitted_wav = self.temp_dir / f"seg_{seg_id}_fitted.wav"
 
             # 1. Synthesize with current TTS engine
-            tts_engine.synthesize(text_vi, raw_wav)
+            tts_engine.synthesize(text_vi, raw_wav, voice=voice, ref_audio=ref_audio)
             tts_dur = self.get_audio_duration(raw_wav)
             speed_ratio = round(tts_dur / max(0.5, slot_duration), 2)
 
@@ -103,7 +105,7 @@ class TimingBudgetAligner(AlignmentEngine):
                     shortened = " ".join(words[:target_word_count])
                     seg["final_vi"] = shortened
                     seg["vi_text"] = shortened
-                    tts_engine.synthesize(shortened, raw_wav)
+                    tts_engine.synthesize(shortened, raw_wav, voice=voice, ref_audio=ref_audio)
                     tts_dur = self.get_audio_duration(raw_wav)
                     speed_ratio = round(tts_dur / max(0.5, slot_duration), 2)
 
