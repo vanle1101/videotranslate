@@ -12,7 +12,7 @@ class EraXSmileF5TTSEngine(TTSEngine):
     dramatic expression, laughter, and emotional story narration.
     """
     def __init__(self):
-        self.erax_dir = Path("E:/DichVideoEngines/EraX-Smile-F5TTS")
+        self.erax_dir = settings.BASE_DIR / "engines" / "EraX-Smile-F5TTS"
         self.model = None
 
     @property

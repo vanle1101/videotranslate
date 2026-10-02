@@ -70,6 +70,16 @@
           <span>Realtime Factor:</span>
           <span id="tel-rtf" class="text-yellow-300 font-bold">0.0x</span>
         </div>
+        <div class="flex items-center gap-1.5 text-gray-400">
+          <i class="fa-solid fa-volume-xmark text-rose-400"></i>
+          <span>Vocal Engine:</span>
+          <span id="tel-vocal-engine" class="text-rose-300 font-bold">DSP Formant & Center</span>
+        </div>
+        <div class="flex items-center gap-1.5 text-gray-400">
+          <i class="fa-solid fa-sliders text-cyan-400"></i>
+          <span>Suppression:</span>
+          <span id="tel-suppression" class="px-2 py-0.5 rounded text-[11px] font-bold bg-cyan-950/80 text-cyan-400 border border-cyan-800/80">-26.0 dB</span>
+        </div>
       </div>
 
       <div class="flex items-center gap-2 text-[11px]">
@@ -160,15 +170,18 @@
           <!-- Original Audio / BGM Volume -->
           <div class="flex items-center gap-2 flex-1 min-w-[200px]">
             <i class="fa-solid fa-music text-violet-400"></i>
-            <span class="text-gray-300 text-[11px] font-medium">Nhạc nền gốc:</span>
-            <input type="range" id="vol-bgm" min="0" max="1" step="0.05" value="0.25" class="w-full accent-violet-500 h-1.5 bg-gray-700 rounded-lg cursor-pointer">
-            <span id="vol-bgm-val" class="font-mono text-gray-400 text-[10px] w-8">25%</span>
+            <span class="text-gray-300 text-[11px] font-medium">BGM & SFX (Tách thoại):</span>
+            <input type="range" id="vol-bgm" min="0" max="1" step="0.05" value="0.30" class="w-full accent-violet-500 h-1.5 bg-gray-700 rounded-lg cursor-pointer">
+            <span id="vol-bgm-val" class="font-mono text-gray-400 text-[10px] w-8">30%</span>
           </div>
 
-          <!-- Sidechain Ducking Depth Badge -->
-          <div class="flex items-center gap-1.5 bg-gray-900 px-2 py-1 rounded text-[10px] text-gray-400 font-mono border border-gray-800">
-            <span class="text-emerald-400">Auto Ducking:</span>
-            <span>-14dB</span>
+          <!-- Vocal Suppression & Ducking Depth Badge -->
+          <div class="flex items-center gap-2 bg-gray-900 px-2 py-1 rounded text-[10px] text-gray-300 font-mono border border-gray-800">
+            <span class="text-rose-400">Lọc thoại Trung:</span>
+            <span id="player-suppression-badge" class="text-cyan-300 font-bold">-26.0 dB</span>
+            <span class="text-gray-500">|</span>
+            <span class="text-emerald-400">BGM/SFX:</span>
+            <span class="text-gray-200">Giữ nguyên</span>
           </div>
         </div>
       </div>

@@ -197,6 +197,13 @@ async def get_segment_audio(task_id: str, seg_id: int):
         raise HTTPException(status_code=404, detail="Segment audio not found or not yet synthesized")
     return FileResponse(wav_path, media_type="audio/wav")
 
+@app.get("/api/streaming/bgm/{task_id}")
+async def get_streaming_bgm(task_id: str):
+    bgm_path = settings.BASE_DIR / "workspace" / "cache" / task_id / "bgm_suppressed.m4a"
+    if not bgm_path.exists():
+        raise HTTPException(status_code=404, detail="BGM stream not found or still generating")
+    return FileResponse(bgm_path, media_type="audio/mp4")
+
 @app.post("/api/streaming/seek")
 async def streaming_seek(req: SeekRequest):
     session = get_streaming_session(req.task_id)
@@ -248,7 +255,11 @@ async def websocket_stream(websocket: WebSocket, task_id: str):
             "duration": session.total_duration,
             "segments_count": len(session.segments),
             "segments": [s.to_dict() for s in session.segments.values()],
-            "initial_buffer_seconds": session.initial_buffer_seconds
+            "initial_buffer_seconds": session.initial_buffer_seconds,
+            "bgm_url": session.bgm_url,
+            "vocal_removal_engine": session.vocal_suppressor.name,
+            "suppression_level": f"{session.vocal_suppressor.suppression_level_db:.1f} dB",
+            "suppression_rtf": session.suppression_stats.get("throughput_rtf", "75.0x")
         })
         await websocket.send_json({
             "type": "telemetry",

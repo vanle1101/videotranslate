@@ -27,7 +27,7 @@ class SmartSubtitleRemovalEngine(SubtitleRemovalEngine):
         return True
 
     def _check_propainter(self):
-        propainter_path = Path("E:/DichVideoEngines/video-subtitle-remover/backend/inpaint/propainter_inpaint.py")
+        propainter_path = settings.BASE_DIR / "engines" / "video-subtitle-remover" / "backend" / "inpaint" / "propainter_inpaint.py"
         self.propainter_available = propainter_path.exists()
 
     def get_info(self) -> Dict[str, Any]:

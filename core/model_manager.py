@@ -62,7 +62,7 @@ class ModelManager:
         })
 
         # 5. ProPainter / Video Subtitle Remover
-        vsr_path = Path("E:/DichVideoEngines/video-subtitle-remover")
+        vsr_path = settings.BASE_DIR / "engines" / "video-subtitle-remover"
         models.append({
             "engine": "YaoFANGUK/VSR + ProPainter",
             "model_name": "ProPainter & Targeted Mask",

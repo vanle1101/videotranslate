@@ -36,6 +36,9 @@ document.addEventListener("DOMContentLoaded", () => {
   const telBuffer = document.getElementById("tel-buffer");
   const telTtfp = document.getElementById("tel-ttfp");
   const telRtf = document.getElementById("tel-rtf");
+  const telVocalEngine = document.getElementById("tel-vocal-engine");
+  const telSuppression = document.getElementById("tel-suppression");
+  const playerSuppressionBadge = document.getElementById("player-suppression-badge");
   const workerAsrBadge = document.getElementById("worker-asr-badge");
   const workerTransBadge = document.getElementById("worker-trans-badge");
   const workerTtsBadge = document.getElementById("worker-tts-badge");
@@ -83,6 +86,8 @@ document.addEventListener("DOMContentLoaded", () => {
   let segments = {}; // segId -> segment data
   let activeAudio = null;
   let activePlayingSegId = null;
+  let bgmAudio = null;
+  let bgmUrl = null;
   let isBufferingUnderrun = false;
   let lastWsReportTime = 0;
 
@@ -194,8 +199,35 @@ document.addEventListener("DOMContentLoaded", () => {
   });
   volBgmSlider.addEventListener("input", () => {
     volBgmVal.textContent = `${Math.round(volBgmSlider.value * 100)}%`;
-    if (!activePlayingSegId) {
-      videoPlayer.volume = parseFloat(volBgmSlider.value);
+    if (bgmAudio) {
+      bgmAudio.volume = parseFloat(volBgmSlider.value);
+    }
+  });
+
+  videoPlayer.addEventListener("play", () => {
+    if (bgmAudio) {
+      bgmAudio.currentTime = videoPlayer.currentTime;
+      bgmAudio.play().catch(e => console.log("BGM play error:", e));
+    }
+  });
+
+  videoPlayer.addEventListener("pause", () => {
+    if (bgmAudio) {
+      bgmAudio.pause();
+    }
+    if (activeAudio) {
+      activeAudio.pause();
+    }
+  });
+
+  videoPlayer.addEventListener("seeking", () => {
+    if (bgmAudio) {
+      bgmAudio.currentTime = videoPlayer.currentTime;
+    }
+    if (activeAudio) {
+      activeAudio.pause();
+      activeAudio = null;
+      activePlayingSegId = null;
     }
   });
 
@@ -294,6 +326,28 @@ document.addEventListener("DOMContentLoaded", () => {
         barTotalTime.textContent = formatTime(totalVideoDuration);
         segmentsCountBadge.textContent = `${msg.segments_count} câu`;
 
+        if (msg.bgm_url) {
+          bgmUrl = msg.bgm_url;
+          if (bgmAudio) {
+            bgmAudio.pause();
+            bgmAudio = null;
+          }
+          bgmAudio = new Audio(bgmUrl);
+          bgmAudio.volume = parseFloat(volBgmSlider.value);
+          videoPlayer.muted = true; // Mute raw video element so Chinese vocal is suppressed!
+        }
+
+        if (msg.vocal_removal_engine && telVocalEngine) {
+          telVocalEngine.textContent = msg.vocal_removal_engine;
+        }
+        if (msg.suppression_level) {
+          if (telSuppression) telSuppression.textContent = msg.suppression_level;
+          if (playerSuppressionBadge) playerSuppressionBadge.textContent = msg.suppression_level;
+        }
+        if (msg.suppression_rtf && telRtf) {
+          telRtf.textContent = msg.suppression_rtf;
+        }
+
         msg.segments.forEach(s => {
           segments[s.id] = s;
         });
@@ -340,6 +394,13 @@ document.addEventListener("DOMContentLoaded", () => {
         }
         if (msg.time_to_first_play) {
           telTtfp.textContent = `${msg.time_to_first_play.toFixed(1)}s`;
+        }
+        if (msg.vocal_removal_engine && telVocalEngine) {
+          telVocalEngine.textContent = msg.vocal_removal_engine;
+        }
+        if (msg.suppression_level) {
+          if (telSuppression) telSuppression.textContent = msg.suppression_level;
+          if (playerSuppressionBadge) playerSuppressionBadge.textContent = msg.suppression_level;
         }
 
         // Resume if was buffering underrun
@@ -399,6 +460,11 @@ document.addEventListener("DOMContentLoaded", () => {
       subtitleOverlay.classList.add("opacity-0");
     }
 
+    // Sync check between BGM and video
+    if (bgmAudio && !bgmAudio.paused && Math.abs(bgmAudio.currentTime - cur) > 0.25) {
+      bgmAudio.currentTime = cur;
+    }
+
     // Real-Time Audio Ducking & Dub Playback
     if (matchedSeg && matchedSeg.status === "READY" && matchedSeg.audio_url) {
       if (activePlayingSegId !== matchedSeg.id) {
@@ -412,21 +478,25 @@ document.addEventListener("DOMContentLoaded", () => {
         activeAudio = new Audio(matchedSeg.audio_url);
         activeAudio.volume = parseFloat(volDubSlider.value);
 
-        // Sidechain: duck video volume to 20%
-        const originalVol = parseFloat(volBgmSlider.value);
-        videoPlayer.volume = originalVol * 0.2;
+        // BGM is already Chinese-vocal suppressed (-26dB).
+        // Gentle broadcast ducking (65%) so Vietnamese TTS leads cleanly while BGM & SFX remain lively
+        if (bgmAudio) {
+          const originalBgmVol = parseFloat(volBgmSlider.value);
+          bgmAudio.volume = originalBgmVol * 0.65;
+        }
 
         activeAudio.play().catch(e => console.log("Dub play error:", e));
 
         activeAudio.onended = () => {
-          // Restore video volume
-          videoPlayer.volume = parseFloat(volBgmSlider.value);
+          if (bgmAudio) {
+            bgmAudio.volume = parseFloat(volBgmSlider.value);
+          }
           activePlayingSegId = null;
         };
       }
     } else {
-      if (!activePlayingSegId) {
-        videoPlayer.volume = parseFloat(volBgmSlider.value);
+      if (!activePlayingSegId && bgmAudio) {
+        bgmAudio.volume = parseFloat(volBgmSlider.value);
       }
     }
   });
