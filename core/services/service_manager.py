@@ -126,6 +126,7 @@ class ServiceManager:
             port=self.port,
             log_level="warning",
             access_log=False,
+            log_config=None,
             loop="asyncio"
         )
         self.uvicorn_server = uvicorn.Server(config)

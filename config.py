@@ -3,20 +3,73 @@ import sys
 from pathlib import Path
 from pydantic_settings import BaseSettings
 
-if hasattr(sys.stdout, "reconfigure"):
+BASE_DIR = Path(__file__).resolve().parent
+WORKSPACE_DIR = BASE_DIR / "workspace"
+LOGS_DIR = WORKSPACE_DIR / "logs"
+LOGS_DIR.mkdir(parents=True, exist_ok=True)
+
+class SafeStream:
+    """Safe stream wrapper for Windows GUI / pythonw.exe where stdout/stderr is None."""
+    def __init__(self, target_stream=None, log_file=None):
+        self.target = target_stream
+        self.log_file = log_file
+        self.encoding = "utf-8"
+        self.errors = "replace"
+
+    def write(self, s):
+        if not s:
+            return 0
+        if self.target is not None:
+            try:
+                self.target.write(s)
+            except Exception:
+                pass
+        if self.log_file:
+            try:
+                with open(self.log_file, "a", encoding="utf-8", errors="replace") as f:
+                    f.write(s)
+            except Exception:
+                pass
+        return len(s)
+
+    def flush(self):
+        if self.target is not None and hasattr(self.target, "flush"):
+            try:
+                self.target.flush()
+            except Exception:
+                pass
+
+    def isatty(self):
+        if self.target is not None and hasattr(self.target, "isatty"):
+            try:
+                return bool(self.target.isatty())
+            except Exception:
+                pass
+        return False
+
+    def reconfigure(self, **kwargs):
+        if self.target is not None and hasattr(self.target, "reconfigure"):
+            try:
+                self.target.reconfigure(**kwargs)
+            except Exception:
+                pass
+
+# Protect against pythonw.exe None stdout/stderr
+if sys.stdout is None:
+    sys.stdout = SafeStream(log_file=LOGS_DIR / "stdout.log")
+elif hasattr(sys.stdout, "reconfigure"):
     try:
         sys.stdout.reconfigure(encoding="utf-8", errors="replace")
     except Exception:
         pass
-if hasattr(sys.stderr, "reconfigure"):
+
+if sys.stderr is None:
+    sys.stderr = SafeStream(log_file=LOGS_DIR / "stderr.log")
+elif hasattr(sys.stderr, "reconfigure"):
     try:
         sys.stderr.reconfigure(encoding="utf-8", errors="replace")
     except Exception:
         pass
-
-BASE_DIR = Path(__file__).resolve().parent
-WORKSPACE_DIR = BASE_DIR / "workspace"
-WORKSPACE_DIR.mkdir(parents=True, exist_ok=True)
 
 class Settings(BaseSettings):
     # App config

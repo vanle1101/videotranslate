@@ -9,6 +9,9 @@ APP_ROOT = Path(__file__).resolve().parent
 if str(APP_ROOT) not in sys.path:
     sys.path.insert(0, str(APP_ROOT))
 
+# Initialize safe stdout/stderr streams immediately (critical for pythonw.exe)
+from config import settings, SafeStream
+
 from PySide6.QtCore import (
     Qt, QThread, Signal, Slot, QObject, QTimer, QSize, QUrl
 )
