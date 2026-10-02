@@ -1,71 +1,92 @@
 document.addEventListener("DOMContentLoaded", () => {
   // Elements
+  const videoPlayer = document.getElementById("video-player");
+  const playerPlaceholder = document.getElementById("player-placeholder");
+  const subtitleOverlay = document.getElementById("subtitle-overlay");
+  const subtitleText = document.getElementById("subtitle-text");
+  const chineseSubMask = document.getElementById("chinese-sub-mask");
+  const bufferingAlert = document.getElementById("buffering-alert");
+  const bufferingText = document.getElementById("buffering-text");
+
+  // Controls
+  const videoUrlInput = document.getElementById("video-url");
   const dropZone = document.getElementById("drop-zone");
   const fileInput = document.getElementById("video-file");
   const fileNameDisplay = document.getElementById("file-name-display");
-  const videoUrlInput = document.getElementById("video-url");
-  const btnStart = document.getElementById("btn-start");
-  const btnPause = document.getElementById("btn-pause");
-  const btnResume = document.getElementById("btn-resume");
-  const btnStop = document.getElementById("btn-stop");
-
-  // Selectors
-  const asrSelect = document.getElementById("asr-select");
-  const ttsEngineSelect = document.getElementById("tts-engine-select");
+  const bufferSelect = document.getElementById("buffer-select");
   const voiceSelect = document.getElementById("voice-select");
   const refAudioFile = document.getElementById("ref-audio-file");
-  const separatorSelect = document.getElementById("separator-select");
+  const btnStart = document.getElementById("btn-start");
+  const btnPauseWorker = document.getElementById("btn-pause-worker");
+  const btnResumeWorker = document.getElementById("btn-resume-worker");
+  const btnStopWorker = document.getElementById("btn-stop-worker");
+  const btnExportHQ = document.getElementById("btn-export-hq");
 
-  // Monitor UI
-  const stagesList = document.getElementById("stages-list");
-  const overallPercent = document.getElementById("overall-percent");
-  const liveLogBox = document.getElementById("live-log-box");
-  const gpuInfoText = document.getElementById("gpu-info-text");
+  // Toggles & Volumes
+  const toggleMaskChinese = document.getElementById("toggle-mask-chinese");
+  const toggleSubtitles = document.getElementById("toggle-subtitles");
+  const volDubSlider = document.getElementById("vol-dub");
+  const volDubVal = document.getElementById("vol-dub-val");
+  const volBgmSlider = document.getElementById("vol-bgm");
+  const volBgmVal = document.getElementById("vol-bgm-val");
+
+  // Telemetry Ribbon
+  const telPlaying = document.getElementById("tel-playing");
+  const telPlayable = document.getElementById("tel-playable");
+  const telBuffer = document.getElementById("tel-buffer");
+  const telTtfp = document.getElementById("tel-ttfp");
+  const telRtf = document.getElementById("tel-rtf");
+  const workerAsrBadge = document.getElementById("worker-asr-badge");
+  const workerTransBadge = document.getElementById("worker-trans-badge");
+  const workerTtsBadge = document.getElementById("worker-tts-badge");
+
+  // Timeline
+  const timelineTrack = document.getElementById("segments-timeline-track");
+  const playbackHeadMarker = document.getElementById("playback-head-marker");
+  const barCurrentTime = document.getElementById("bar-current-time");
+  const barTotalTime = document.getElementById("bar-total-time");
+  const barBufferInfo = document.getElementById("bar-buffer-info");
+
+  // Segments Drawer
+  const segmentsList = document.getElementById("segments-list");
+  const segmentsCountBadge = document.getElementById("segments-count-badge");
+
+  // Modals
   const hardwarePill = document.getElementById("hardware-pill");
-
-  // Results UI
-  const resultCard = document.getElementById("result-card");
-  const videoPlayer = document.getElementById("output-video-player");
-  const downloadVideoBtn = document.getElementById("download-video-btn");
-  const downloadSrtBtn = document.getElementById("download-srt-btn");
-  const segmentsContainer = document.getElementById("segments-container");
-  const btnReRender = document.getElementById("btn-re-render");
-
-  // Models Modal
+  const gpuInfoText = document.getElementById("gpu-info-text");
   const btnModelsModal = document.getElementById("btn-models-modal");
   const modelsModal = document.getElementById("models-modal");
   const btnCloseModelsModal = document.getElementById("btn-close-models-modal");
   const modelsTableBody = document.getElementById("models-table-body");
-
-  // Settings Modal
-  const settingsModal = document.getElementById("settings-modal");
   const btnSettingsModal = document.getElementById("btn-settings-modal");
+  const settingsModal = document.getElementById("settings-modal");
   const btnCloseModal = document.getElementById("btn-close-modal");
   const btnSaveKeys = document.getElementById("btn-save-keys");
   const modalGeminiKey = document.getElementById("modal-gemini-key");
   const modalDeepseekKey = document.getElementById("modal-deepseek-key");
 
-  let selectedFile = null;
+  // Export Modal
+  const exportModal = document.getElementById("export-modal");
+  const btnCloseExportModal = document.getElementById("btn-close-export-modal");
+  const btnConfirmExport = document.getElementById("btn-confirm-export");
+  const exportStatusBox = document.getElementById("export-status-box");
+  const exportStatusText = document.getElementById("export-status-text");
+  const exportResultBox = document.getElementById("export-result-box");
+  const exportActions = document.getElementById("export-actions");
+  const btnDownloadHQ = document.getElementById("btn-download-hq");
+
+  // Session State
   let currentTaskId = null;
   let currentWs = null;
-  let currentSegments = [];
+  let selectedFile = null;
+  let totalVideoDuration = 0;
+  let segments = {}; // segId -> segment data
+  let activeAudio = null;
+  let activePlayingSegId = null;
+  let isBufferingUnderrun = false;
+  let lastWsReportTime = 0;
 
-  const STAGE_ORDER = [
-    "stage-download",
-    "stage-extract",
-    "stage-roformer",
-    "stage-asr",
-    "stage-glossary",
-    "stage-translate",
-    "stage-tts",
-    "stage-timing",
-    "stage-timeline",
-    "stage-ducking",
-    "stage-subtitles",
-    "stage-render"
-  ];
-
-  // 1. Detect Hardware on Startup
+  // 1. Hardware Detection
   async function loadHardware() {
     try {
       const res = await fetch("/api/hardware");
@@ -73,8 +94,7 @@ document.addEventListener("DOMContentLoaded", () => {
         const data = await res.json();
         if (data.gpu_name) {
           const vram = data.vram_total_mb ? ` (${Math.round(data.vram_total_mb)}MB VRAM)` : "";
-          const cuda = data.cuda_version ? ` · CUDA ${data.cuda_version}` : "";
-          gpuInfoText.textContent = `${data.gpu_name}${vram}${cuda}`;
+          gpuInfoText.textContent = `${data.gpu_name}${vram}`;
         } else {
           gpuInfoText.textContent = `CPU Mode (${data.cpu_count || 4} Cores)`;
         }
@@ -86,10 +106,10 @@ document.addEventListener("DOMContentLoaded", () => {
   }
   loadHardware();
 
-  // 2. Models Manager Modal
+  // 2. Modals Handling
   btnModelsModal.addEventListener("click", async () => {
     modelsModal.classList.remove("hidden");
-    modelsTableBody.innerHTML = `<tr><td colspan="5" class="p-4 text-center text-gray-500"><i class="fa-solid fa-spinner fa-spin"></i> Đang tải thông tin checkpoints...</td></tr>`;
+    modelsTableBody.innerHTML = `<tr><td colspan="5" class="p-4 text-center text-gray-500"><i class="fa-solid fa-spinner fa-spin"></i> Đang tải...</td></tr>`;
     try {
       const res = await fetch("/api/models");
       const data = await res.json();
@@ -97,26 +117,24 @@ document.addEventListener("DOMContentLoaded", () => {
       data.models.forEach(m => {
         const tr = document.createElement("tr");
         tr.className = "hover:bg-gray-800/40 transition";
-        const statusBadge = m.downloaded
-          ? `<span class="bg-emerald-950/80 text-emerald-400 border border-emerald-800/80 px-2 py-0.5 rounded text-[10px] font-mono"><i class="fa-solid fa-check"></i> SẴN SÀNG</span>`
-          : `<span class="bg-amber-950/80 text-amber-400 border border-amber-800/80 px-2 py-0.5 rounded text-[10px] font-mono">CHƯA TẢI</span>`;
-
+        const badge = m.downloaded
+          ? `<span class="bg-emerald-950 text-emerald-400 border border-emerald-800 px-2 py-0.5 rounded text-[10px] font-mono"><i class="fa-solid fa-check"></i> SẴN SÀNG</span>`
+          : `<span class="bg-amber-950 text-amber-400 border border-amber-800 px-2 py-0.5 rounded text-[10px] font-mono">CHƯA TẢI</span>`;
         tr.innerHTML = `
           <td class="p-2.5 font-semibold text-gray-200">${m.engine}</td>
           <td class="p-2.5 font-mono text-[11px] text-pink-300">${m.model_name}</td>
           <td class="p-2.5 font-mono text-gray-400">${m.size_mb} MB</td>
           <td class="p-2.5 text-gray-400 font-mono text-[11px]">${m.device}</td>
-          <td class="p-2.5">${statusBadge}</td>
+          <td class="p-2.5">${badge}</td>
         `;
         modelsTableBody.appendChild(tr);
       });
-    } catch (err) {
-      modelsTableBody.innerHTML = `<tr><td colspan="5" class="p-4 text-center text-rose-400">Lỗi nạp danh sách model</td></tr>`;
+    } catch (e) {
+      modelsTableBody.innerHTML = `<tr><td colspan="5" class="p-4 text-center text-rose-400">Lỗi tải danh sách</td></tr>`;
     }
   });
   btnCloseModelsModal.addEventListener("click", () => modelsModal.classList.add("hidden"));
 
-  // 3. Settings Modal
   btnSettingsModal.addEventListener("click", () => {
     modalGeminiKey.value = localStorage.getItem("gemini_key") || "";
     modalDeepseekKey.value = localStorage.getItem("deepseek_key") || "";
@@ -135,10 +153,10 @@ document.addEventListener("DOMContentLoaded", () => {
       })
     });
     settingsModal.classList.add("hidden");
-    alert("Đã lưu API Keys thành công!");
+    alert("Đã lưu API Keys!");
   });
 
-  // 4. Drag & Drop File Handling
+  // 3. Drag & Drop File Upload
   dropZone.addEventListener("click", () => fileInput.click());
   fileInput.addEventListener("change", (e) => {
     if (e.target.files.length > 0) {
@@ -159,335 +177,420 @@ document.addEventListener("DOMContentLoaded", () => {
     }
   });
 
-  function addLog(msg) {
-    const time = new Date().toLocaleTimeString();
-    const div = document.createElement("div");
-    div.textContent = `[${time}] ${msg}`;
-    liveLogBox.appendChild(div);
-    liveLogBox.scrollTop = liveLogBox.scrollHeight;
-  }
+  // Toggles
+  toggleMaskChinese.addEventListener("change", () => {
+    chineseSubMask.style.display = toggleMaskChinese.checked ? "block" : "none";
+  });
+  toggleSubtitles.addEventListener("change", () => {
+    subtitleOverlay.style.display = toggleSubtitles.checked ? "block" : "none";
+  });
 
-  function resetStages() {
-    STAGE_ORDER.forEach(id => {
-      const el = document.getElementById(id);
-      if (el) {
-        el.className = "stage-item flex items-center justify-between p-1.5 rounded-lg bg-gray-900/40";
-        const badge = el.querySelector(".stage-badge");
-        if (badge) {
-          badge.className = "stage-badge text-gray-500";
-          badge.textContent = "Queued";
-        }
-      }
-    });
-    overallPercent.textContent = "0%";
-    liveLogBox.innerHTML = "";
-  }
-
-  function updateStageUI(currentStageId, percent, msg) {
-    overallPercent.textContent = `${percent}%`;
-    addLog(msg);
-
-    const currentIdx = STAGE_ORDER.indexOf(currentStageId);
-
-    STAGE_ORDER.forEach((id, idx) => {
-      const el = document.getElementById(id);
-      if (!el) return;
-      const badge = el.querySelector(".stage-badge");
-
-      if (currentIdx !== -1) {
-        if (idx < currentIdx) {
-          // Completed
-          el.className = "stage-item flex items-center justify-between p-1.5 rounded-lg bg-emerald-950/20 border border-emerald-900/40";
-          badge.className = "stage-badge text-emerald-400 font-medium";
-          badge.innerHTML = `<i class="fa-solid fa-circle-check"></i> Xong`;
-        } else if (idx === currentIdx) {
-          // Running
-          el.className = "stage-item flex items-center justify-between p-1.5 rounded-lg bg-pink-950/30 border border-pink-700/60 shadow-sm";
-          badge.className = "stage-badge text-pink-400 font-semibold animate-pulse";
-          badge.innerHTML = `<i class="fa-solid fa-circle-notch fa-spin"></i> Đang chạy`;
-        } else {
-          // Queued
-          el.className = "stage-item flex items-center justify-between p-1.5 rounded-lg bg-gray-900/40";
-          badge.className = "stage-badge text-gray-500";
-          badge.textContent = "Queued";
-        }
-      }
-    });
-
-    if (percent === 100) {
-      STAGE_ORDER.forEach(id => {
-        const el = document.getElementById(id);
-        if (el) {
-          el.className = "stage-item flex items-center justify-between p-1.5 rounded-lg bg-emerald-950/20 border border-emerald-900/40";
-          const badge = el.querySelector(".stage-badge");
-          badge.className = "stage-badge text-emerald-400 font-medium";
-          badge.innerHTML = `<i class="fa-solid fa-circle-check"></i> Xong`;
-        }
-      });
+  // Volume Sliders
+  volDubSlider.addEventListener("input", () => {
+    volDubVal.textContent = `${Math.round(volDubSlider.value * 100)}%`;
+    if (activeAudio) {
+      activeAudio.volume = parseFloat(volDubSlider.value);
     }
+  });
+  volBgmSlider.addEventListener("input", () => {
+    volBgmVal.textContent = `${Math.round(volBgmSlider.value * 100)}%`;
+    if (!activePlayingSegId) {
+      videoPlayer.volume = parseFloat(volBgmSlider.value);
+    }
+  });
+
+  function formatTime(secs) {
+    if (isNaN(secs) || secs < 0) return "00:00";
+    const m = Math.floor(secs / 60);
+    const s = Math.floor(secs % 60);
+    return `${m.toString().padStart(2, "0")}:${s.toString().padStart(2, "0")}`;
   }
 
-  // 5. Start Pipeline Execution
+  // 4. Start Streaming Pipeline
   btnStart.addEventListener("click", async () => {
     const url = videoUrlInput.value.trim();
     if (!url && !selectedFile) {
-      alert("Vui lòng dán link video Douyin/TikTok hoặc chọn một file video!");
+      alert("Vui lòng dán link video Douyin/TikTok hoặc chọn file video!");
       return;
     }
 
     btnStart.classList.add("hidden");
-    btnPause.classList.remove("hidden");
-    btnResume.classList.add("hidden");
-    btnStop.classList.remove("hidden");
+    btnPauseWorker.classList.remove("hidden");
+    btnResumeWorker.classList.add("hidden");
+    btnStopWorker.classList.remove("hidden");
 
-    resultCard.classList.add("hidden");
-    resetStages();
-    updateStageUI("stage-download", 5, "Khởi động pipeline cao cấp...");
+    segments = {};
+    segmentsList.innerHTML = "";
+    timelineTrack.innerHTML = '<div id="playback-head-marker" class="absolute top-0 bottom-0 w-1 bg-white z-10 shadow-glow" style="left: 0%;"></div>';
+
+    telTtfp.textContent = "--";
+    telBuffer.textContent = "+0.0s";
+    bufferingAlert.classList.remove("hidden");
+    bufferingText.textContent = "Đang nạp video và phân tích câu thoại...";
 
     try {
-      let response;
+      let res;
       if (selectedFile) {
         const formData = new FormData();
         formData.append("file", selectedFile);
-        formData.append("asr_engine", asrSelect.value);
-        formData.append("tts_engine", ttsEngineSelect.value);
+        formData.append("initial_buffer_seconds", bufferSelect.value);
         formData.append("voice", voiceSelect.value);
-        formData.append("separator_engine", separatorSelect.value);
+        formData.append("tts_engine", "vieneu");
+        formData.append("asr_engine", "sensevoice");
         if (refAudioFile.files.length > 0) {
           formData.append("ref_audio", refAudioFile.files[0]);
         }
-        formData.append("mask_chinese", true);
-
-        response = await fetch("/api/process-upload", {
-          method: "POST",
-          body: formData
-        });
+        res = await fetch("/api/streaming/start-upload", { method: "POST", body: formData });
       } else {
-        response = await fetch("/api/process-url", {
+        res = await fetch("/api/streaming/start-url", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
             url: url,
-            asr_engine: asrSelect.value,
-            tts_engine: ttsEngineSelect.value,
+            initial_buffer_seconds: parseFloat(bufferSelect.value),
             voice: voiceSelect.value,
-            separator_engine: separatorSelect.value,
-            mask_chinese: true
+            tts_engine: "vieneu",
+            asr_engine: "sensevoice"
           })
         });
       }
 
-      if (!response.ok) {
-        const err = await response.json();
-        throw new Error(err.detail || "Xử lý thất bại");
+      if (!res.ok) {
+        const err = await res.json();
+        throw new Error(err.detail || "Không thể khởi động session");
       }
 
-      const data = await response.json();
+      const data = await res.json();
       currentTaskId = data.task_id;
-      setupWebSocket(currentTaskId);
 
-    } catch (err) {
-      alert("Lỗi: " + err.message);
-      resetControls();
+      // Attach video source to player
+      videoPlayer.src = data.video_url;
+      videoPlayer.load();
+      videoPlayer.volume = parseFloat(volBgmSlider.value);
+      playerPlaceholder.classList.add("hidden");
+
+      // Connect WebSocket
+      setupStreamingWebSocket(currentTaskId);
+
+    } catch (e) {
+      alert("Lỗi: " + e.message);
+      resetWorkerControls();
+      bufferingAlert.classList.add("hidden");
     }
   });
 
-  // 6. WebSocket Setup & Handlers
-  function setupWebSocket(taskId) {
-    if (currentWs) {
-      currentWs.close();
-    }
-    const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
-    currentWs = new WebSocket(`${protocol}//${window.location.host}/ws/progress/${taskId}`);
+  // 5. Streaming WebSocket
+  function setupStreamingWebSocket(taskId) {
+    if (currentWs) currentWs.close();
+
+    const proto = window.location.protocol === "https:" ? "wss:" : "ws:";
+    currentWs = new WebSocket(`${proto}//${window.location.host}/ws/stream/${taskId}`);
 
     currentWs.onmessage = (event) => {
-      const data = JSON.parse(event.data);
-      if (data.type === "progress") {
-        updateStageUI(data.stage, data.percent, data.message);
-      } else if (data.type === "done") {
-        updateStageUI("stage-render", 100, "Hoàn tất xuất sắc toàn bộ quy trình!");
-        resetControls();
-        renderResults(data.result);
-        currentWs.close();
-      } else if (data.type === "error") {
-        alert("Lỗi xử lý: " + data.message);
-        addLog("LỖI: " + data.message);
-        resetControls();
-        currentWs.close();
+      const msg = JSON.parse(event.data);
+
+      if (msg.type === "init") {
+        totalVideoDuration = msg.duration;
+        barTotalTime.textContent = formatTime(totalVideoDuration);
+        segmentsCountBadge.textContent = `${msg.segments_count} câu`;
+
+        msg.segments.forEach(s => {
+          segments[s.id] = s;
+        });
+        renderTimelineSlices();
+        renderSegmentsDrawer();
+      }
+      else if (msg.type === "segment_update") {
+        segments[msg.id] = msg;
+        updateSegmentSlice(msg);
+        updateSegmentDrawerItem(msg);
+
+        // Update worker badges
+        if (msg.status === "ASR") {
+          workerAsrBadge.className = "px-2 py-0.5 rounded bg-pink-900/60 text-pink-300 font-bold animate-pulse";
+          workerAsrBadge.textContent = `ASR: #${msg.id}`;
+        } else if (msg.status === "TRANSLATING") {
+          workerTransBadge.className = "px-2 py-0.5 rounded bg-amber-900/60 text-amber-300 font-bold animate-pulse";
+          workerTransBadge.textContent = `Trans: #${msg.id}`;
+        } else if (msg.status === "TTS") {
+          workerTtsBadge.className = "px-2 py-0.5 rounded bg-violet-900/60 text-violet-300 font-bold animate-pulse";
+          workerTtsBadge.textContent = `TTS: #${msg.id}`;
+        } else if (msg.status === "READY") {
+          workerAsrBadge.className = "px-2 py-0.5 rounded bg-gray-800 text-gray-300";
+          workerTransBadge.className = "px-2 py-0.5 rounded bg-gray-800 text-gray-300";
+          workerTtsBadge.className = "px-2 py-0.5 rounded bg-gray-800 text-gray-300";
+        }
+      }
+      else if (msg.type === "telemetry") {
+        telPlayable.textContent = formatTime(msg.playable_until);
+        const buf = msg.buffer_ahead || 0;
+        telBuffer.textContent = `+${buf.toFixed(1)}s`;
+        barBufferInfo.textContent = `Buffer: +${buf.toFixed(1)}s`;
+
+        if (buf > 10) {
+          telBuffer.className = "px-2 py-0.5 rounded text-[11px] font-bold bg-emerald-950/80 text-emerald-400 border border-emerald-800/80";
+        } else if (buf > 3) {
+          telBuffer.className = "px-2 py-0.5 rounded text-[11px] font-bold bg-amber-950/80 text-amber-400 border border-amber-800/80";
+        } else {
+          telBuffer.className = "px-2 py-0.5 rounded text-[11px] font-bold bg-rose-950/80 text-rose-400 border border-rose-800/80 animate-pulse";
+        }
+
+        if (msg.realtime_factor) {
+          telRtf.textContent = `${msg.realtime_factor.toFixed(1)}x`;
+        }
+        if (msg.time_to_first_play) {
+          telTtfp.textContent = `${msg.time_to_first_play.toFixed(1)}s`;
+        }
+
+        // Resume if was buffering underrun
+        if (isBufferingUnderrun && buf >= 3.0) {
+          isBufferingUnderrun = false;
+          bufferingAlert.classList.add("hidden");
+          videoPlayer.play();
+        }
+      }
+      else if (msg.type === "ready_to_play") {
+        bufferingAlert.classList.add("hidden");
+        telTtfp.textContent = `${msg.time_to_first_play}s`;
+        videoPlayer.play().catch(e => console.log("Autoplay policy:", e));
+      }
+      else if (msg.type === "finished") {
+        workerAsrBadge.textContent = "ASR: Xong";
+        workerTransBadge.textContent = "Trans: Xong";
+        workerTtsBadge.textContent = "TTS: Xong";
       }
     };
-
-    currentWs.onerror = (err) => {
-      console.error("WebSocket error:", err);
-    };
   }
 
-  function resetControls() {
+  // 6. Video Time Update & Realtime Audio Sync
+  videoPlayer.addEventListener("timeupdate", () => {
+    const cur = videoPlayer.currentTime;
+    telPlaying.textContent = formatTime(cur);
+    barCurrentTime.textContent = formatTime(cur);
+
+    // Update marker on timeline
+    if (totalVideoDuration > 0) {
+      const pct = (cur / totalVideoDuration) * 100;
+      document.getElementById("playback-head-marker").style.left = `${pct}%`;
+    }
+
+    // Send playback position to WebSocket (throttled every 400ms)
+    const now = Date.now();
+    if (now - lastWsReportTime > 400 && currentWs && currentWs.readyState === WebSocket.OPEN) {
+      currentWs.send(JSON.stringify({ type: "playback_position", time: cur }));
+      lastWsReportTime = now;
+    }
+
+    // Subtitle & Dubbing Sync
+    let matchedSeg = null;
+    for (const id in segments) {
+      const s = segments[id];
+      if (cur >= s.start && cur <= s.end) {
+        matchedSeg = s;
+        break;
+      }
+    }
+
+    // Subtitle Overlay
+    if (matchedSeg && toggleSubtitles.checked && (matchedSeg.final_vi || matchedSeg.text_vi)) {
+      subtitleText.textContent = matchedSeg.final_vi || matchedSeg.text_vi;
+      subtitleOverlay.classList.remove("opacity-0");
+    } else {
+      subtitleOverlay.classList.add("opacity-0");
+    }
+
+    // Real-Time Audio Ducking & Dub Playback
+    if (matchedSeg && matchedSeg.status === "READY" && matchedSeg.audio_url) {
+      if (activePlayingSegId !== matchedSeg.id) {
+        activePlayingSegId = matchedSeg.id;
+
+        if (activeAudio) {
+          activeAudio.pause();
+          activeAudio = null;
+        }
+
+        activeAudio = new Audio(matchedSeg.audio_url);
+        activeAudio.volume = parseFloat(volDubSlider.value);
+
+        // Sidechain: duck video volume to 20%
+        const originalVol = parseFloat(volBgmSlider.value);
+        videoPlayer.volume = originalVol * 0.2;
+
+        activeAudio.play().catch(e => console.log("Dub play error:", e));
+
+        activeAudio.onended = () => {
+          // Restore video volume
+          videoPlayer.volume = parseFloat(volBgmSlider.value);
+          activePlayingSegId = null;
+        };
+      }
+    } else {
+      if (!activePlayingSegId) {
+        videoPlayer.volume = parseFloat(volBgmSlider.value);
+      }
+    }
+  });
+
+  // 7. Timeline Slices Rendering
+  function renderTimelineSlices() {
+    timelineTrack.innerHTML = '<div id="playback-head-marker" class="absolute top-0 bottom-0 w-1 bg-white z-10 shadow-glow" style="left: 0%;"></div>';
+    if (totalVideoDuration <= 0) return;
+
+    for (const id in segments) {
+      const s = segments[id];
+      const slice = document.createElement("div");
+      slice.id = `slice-seg-${s.id}`;
+      const leftPct = (s.start / totalVideoDuration) * 100;
+      const widthPct = Math.max(0.5, (s.duration / totalVideoDuration) * 100);
+      slice.style.left = `${leftPct}%`;
+      slice.style.width = `${widthPct}%`;
+      slice.className = "absolute top-0 bottom-0 bg-gray-700/60 hover:brightness-125 transition-colors";
+      slice.title = `#${s.id} (${s.start}s - ${s.end}s)`;
+      timelineTrack.appendChild(slice);
+    }
+  }
+
+  function updateSegmentSlice(seg) {
+    const el = document.getElementById(`slice-seg-${seg.id}`);
+    if (!el) return;
+    if (seg.status === "READY" || seg.status === "PLAYED") {
+      el.className = "absolute top-0 bottom-0 bg-emerald-500/80 transition-colors shadow-sm";
+    } else if (seg.status === "TTS") {
+      el.className = "absolute top-0 bottom-0 bg-violet-500/80 animate-pulse transition-colors";
+    } else if (seg.status === "TRANSLATING") {
+      el.className = "absolute top-0 bottom-0 bg-amber-500/80 animate-pulse transition-colors";
+    } else if (seg.status === "ASR") {
+      el.className = "absolute top-0 bottom-0 bg-pink-500/80 animate-pulse transition-colors";
+    }
+  }
+
+  // Seek clicking on Timeline
+  timelineTrack.addEventListener("click", (e) => {
+    if (totalVideoDuration <= 0) return;
+    const rect = timelineTrack.getBoundingClientRect();
+    const clickX = e.clientX - rect.left;
+    const pct = Math.max(0, Math.min(1, clickX / rect.width));
+    const targetTime = pct * totalVideoDuration;
+
+    videoPlayer.currentTime = targetTime;
+    if (currentWs && currentWs.readyState === WebSocket.OPEN) {
+      currentWs.send(JSON.stringify({ type: "seek", time: targetTime }));
+    }
+  });
+
+  // 8. Segments Drawer
+  function renderSegmentsDrawer() {
+    segmentsList.innerHTML = "";
+    for (const id in segments) {
+      const s = segments[id];
+      const item = document.createElement("div");
+      item.id = `drawer-seg-${s.id}`;
+      item.className = "p-2.5 rounded-xl bg-[#090b10] border border-gray-800 space-y-1.5 hover:border-gray-700 transition";
+      item.innerHTML = getDrawerItemHtml(s);
+      segmentsList.appendChild(item);
+    }
+  }
+
+  function updateSegmentDrawerItem(seg) {
+    const el = document.getElementById(`drawer-seg-${seg.id}`);
+    if (el) {
+      el.innerHTML = getDrawerItemHtml(seg);
+    }
+  }
+
+  function getDrawerItemHtml(s) {
+    let badgeClass = "bg-gray-800 text-gray-400";
+    if (s.status === "READY") badgeClass = "bg-emerald-950 text-emerald-400 border border-emerald-800/80";
+    else if (s.status === "TTS") badgeClass = "bg-violet-950 text-violet-400 animate-pulse";
+    else if (s.status === "TRANSLATING") badgeClass = "bg-amber-950 text-amber-400 animate-pulse";
+    else if (s.status === "ASR") badgeClass = "bg-pink-950 text-pink-400 animate-pulse";
+
+    return `
+      <div class="flex items-center justify-between text-[10px] text-gray-400">
+        <span class="font-mono text-pink-400 font-semibold">${s.start.toFixed(1)}s - ${s.end.toFixed(1)}s (${s.duration.toFixed(1)}s)</span>
+        <span class="px-2 py-0.5 rounded text-[9px] font-mono ${badgeClass}">${s.status}</span>
+      </div>
+      <div class="text-[11px] text-gray-300 italic font-sans">${s.text_zh || "..."}</div>
+      <div class="text-xs text-yellow-300 font-medium">${s.final_vi || s.text_vi || "..."}</div>
+    `;
+  }
+
+  // 9. Worker Controls
+  btnPauseWorker.addEventListener("click", () => {
+    if (currentWs && currentWs.readyState === WebSocket.OPEN) {
+      currentWs.send(JSON.stringify({ type: "pause" }));
+      btnPauseWorker.classList.add("hidden");
+      btnResumeWorker.classList.remove("hidden");
+    }
+  });
+
+  btnResumeWorker.addEventListener("click", () => {
+    if (currentWs && currentWs.readyState === WebSocket.OPEN) {
+      currentWs.send(JSON.stringify({ type: "resume" }));
+      btnResumeWorker.classList.add("hidden");
+      btnPauseWorker.classList.remove("hidden");
+    }
+  });
+
+  btnStopWorker.addEventListener("click", () => {
+    if (confirm("Bạn có chắc muốn dừng pipeline?")) {
+      if (currentWs && currentWs.readyState === WebSocket.OPEN) {
+        currentWs.send(JSON.stringify({ type: "stop" }));
+      }
+      resetWorkerControls();
+    }
+  });
+
+  function resetWorkerControls() {
     btnStart.classList.remove("hidden");
-    btnPause.classList.add("hidden");
-    btnResume.classList.add("hidden");
-    btnStop.classList.add("hidden");
+    btnPauseWorker.classList.add("hidden");
+    btnResumeWorker.classList.add("hidden");
+    btnStopWorker.classList.add("hidden");
   }
 
-  // 7. Pause, Resume, Stop Buttons
-  btnPause.addEventListener("click", async () => {
-    if (!currentTaskId) return;
-    try {
-      await fetch(`/api/task/${currentTaskId}/action`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ action: "pause" })
-      });
-      btnPause.classList.add("hidden");
-      btnResume.classList.remove("hidden");
-      addLog("[Tạm dừng] Đã gửi lệnh tạm dừng tới pipeline.");
-    } catch (e) {
-      console.error(e);
-    }
-  });
-
-  btnResume.addEventListener("click", async () => {
-    if (!currentTaskId) return;
-    try {
-      await fetch(`/api/task/${currentTaskId}/action`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ action: "resume" })
-      });
-      btnResume.classList.add("hidden");
-      btnPause.classList.remove("hidden");
-      addLog("[Tiếp tục] Đã gửi lệnh tiếp tục tới pipeline.");
-    } catch (e) {
-      console.error(e);
-    }
-  });
-
-  btnStop.addEventListener("click", async () => {
-    if (!currentTaskId) return;
-    if (!confirm("Bạn có chắc chắn muốn hủy bỏ tiến trình đang chạy?")) return;
-    try {
-      await fetch(`/api/task/${currentTaskId}/action`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ action: "stop" })
-      });
-      addLog("[Hủy bỏ] Đã gửi lệnh hủy tiến trình.");
-      resetControls();
-    } catch (e) {
-      console.error(e);
-    }
-  });
-
-  // 8. Render Results
-  function renderResults(result) {
-    resultCard.classList.remove("hidden");
-    const videoUrl = `/api/outputs/${result.output_filename}`;
-    videoPlayer.src = videoUrl;
-    videoPlayer.load();
-
-    downloadVideoBtn.href = videoUrl;
-    downloadVideoBtn.setAttribute("download", result.output_filename);
-    downloadSrtBtn.href = `/api/download-srt/${result.task_id}`;
-
-    currentSegments = result.segments || [];
-    renderSegmentsEditor(currentSegments);
-  }
-
-  // 9. VideoLingo Multi-Tier Subtitle Editor
-  function renderSegmentsEditor(segments) {
-    segmentsContainer.innerHTML = "";
-    btnReRender.classList.remove("hidden");
-
-    if (!segments || segments.length === 0) {
-      segmentsContainer.innerHTML = `<p class="text-xs text-gray-500 py-6 text-center">Không có câu thoại nào</p>`;
+  // 10. HQ Export Handling
+  btnExportHQ.addEventListener("click", () => {
+    if (!currentTaskId) {
+      alert("Chưa có video nào đang chạy để xuất HQ!");
       return;
     }
+    exportModal.classList.remove("hidden");
+    exportStatusBox.classList.add("hidden");
+    exportResultBox.classList.add("hidden");
+    exportActions.classList.remove("hidden");
+  });
+  btnCloseExportModal.addEventListener("click", () => exportModal.classList.add("hidden"));
 
-    segments.forEach((seg, index) => {
-      const item = document.createElement("div");
-      item.className = "segment-item bg-[#0d0f14] border border-gray-800 rounded-xl p-3.5 space-y-2.5 hover:border-gray-700 transition";
-      
-      const emotionTag = seg.emotion && seg.emotion !== "<|NEUTRAL|>"
-        ? `<span class="bg-violet-900/60 text-violet-300 border border-violet-700/60 px-2 py-0.5 rounded text-[10px] font-mono">${seg.emotion}</span>`
-        : "";
-
-      item.innerHTML = `
-        <div class="flex items-center justify-between text-[11px] text-gray-400">
-          <span class="font-mono text-pink-400 font-semibold flex items-center gap-1.5">
-            <i class="fa-regular fa-clock"></i> ${seg.start.toFixed(2)}s - ${seg.end.toFixed(2)}s (${(seg.duration || (seg.end - seg.start)).toFixed(2)}s)
-          </span>
-          <div class="flex items-center gap-2">
-            ${emotionTag}
-            <span class="bg-gray-800 text-gray-400 px-2 py-0.5 rounded text-[10px] font-mono">#${index + 1}</span>
-          </div>
-        </div>
-
-        <!-- Chinese Raw Text -->
-        <div class="text-xs text-gray-300 bg-gray-900/70 p-2.5 rounded-lg border border-gray-800/80 font-sans">
-          <span class="text-[10px] text-gray-500 block mb-0.5 font-semibold">GỐC (TIẾNG TRUNG):</span>
-          ${seg.text_zh || seg.text || "—"}
-        </div>
-
-        <!-- Literal Translation -->
-        <div class="text-[11px] text-gray-400 bg-gray-900/40 p-2 rounded-lg border border-gray-800/40">
-          <span class="text-[10px] text-gray-500 block mb-0.5">Dịch sát nghĩa (Literal):</span>
-          ${seg.literal_vi || "—"}
-        </div>
-
-        <!-- Final Vietnamese Translation (Editable) -->
-        <div>
-          <label class="text-[10px] text-pink-400 font-semibold block mb-1">
-            Bản dịch TikTok & Lồng tiếng (Final Vietnamese):
-          </label>
-          <input type="text" data-seg-id="${seg.id}" value="${(seg.final_vi || seg.vi_text || "").replace(/"/g, '&quot;')}"
-            class="seg-vi-input w-full bg-[#161922] border border-gray-700 focus:border-pink-500 rounded-lg px-2.5 py-1.5 text-xs text-gray-100 focus:outline-none transition">
-        </div>
-      `;
-      segmentsContainer.appendChild(item);
-    });
-  }
-
-  // 10. Re-render with User Edits
-  btnReRender.addEventListener("click", async () => {
-    const inputs = document.querySelectorAll(".seg-vi-input");
-    const updatedSegments = currentSegments.map(seg => {
-      const copy = { ...seg };
-      inputs.forEach(inp => {
-        if (parseInt(inp.dataset.segId) === seg.id) {
-          copy.final_vi = inp.value.trim();
-          copy.vi_text = inp.value.trim();
-        }
-      });
-      return copy;
-    });
-
-    btnReRender.disabled = true;
-    btnReRender.innerHTML = `<i class="fa-solid fa-spinner fa-spin"></i> Đang render lại...`;
-    resetStages();
-    updateStageUI("stage-tts", 68, "Bắt đầu tổng hợp lại giọng nói và render video...");
+  btnConfirmExport.addEventListener("click", async () => {
+    exportActions.classList.add("hidden");
+    exportStatusBox.classList.remove("hidden");
+    exportStatusText.textContent = "Đang chạy BS-RoFormer bóc tách BGM & render TikTok 9:16...";
 
     try {
-      const res = await fetch("/api/re-render", {
+      const res = await fetch("/api/streaming/export-hq", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           task_id: currentTaskId,
-          segments: updatedSegments,
-          voice: voiceSelect.value,
-          tts_engine: ttsEngineSelect.value,
-          mask_chinese: true
+          mask_chinese: toggleMaskChinese.checked
         })
       });
 
-      if (!res.ok) throw new Error("Xuất lại thất bại");
+      if (!res.ok) {
+        const err = await res.json();
+        throw new Error(err.detail || "Xuất thất bại");
+      }
+
       const data = await res.json();
-      currentTaskId = data.task_id;
-      setupWebSocket(data.task_id);
-    } catch (err) {
-      alert("Lỗi: " + err.message);
-    } finally {
-      btnReRender.disabled = false;
-      btnReRender.innerHTML = `<i class="fa-solid fa-rotate"></i> Render lại với bản sửa`;
+      exportStatusBox.classList.add("hidden");
+      exportResultBox.classList.remove("hidden");
+      btnDownloadHQ.href = data.video_url;
+      btnDownloadHQ.setAttribute("download", data.output_filename);
+
+    } catch (e) {
+      alert("Lỗi xuất HQ: " + e.message);
+      exportActions.classList.remove("hidden");
+      exportStatusBox.classList.add("hidden");
     }
   });
 });

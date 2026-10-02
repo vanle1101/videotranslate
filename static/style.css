@@ -4,14 +4,23 @@
   height: 6px;
 }
 ::-webkit-scrollbar-track {
-  background: #0f1117;
+  background: #0b0d13;
 }
 ::-webkit-scrollbar-thumb {
-  background: #272c3d;
+  background: #1f2433;
   border-radius: 9999px;
 }
 ::-webkit-scrollbar-thumb:hover {
-  background: #3b435c;
+  background: #373e57;
+}
+
+.shadow-glow {
+  box-shadow: 0 0 10px rgba(236, 72, 153, 0.8), 0 0 20px rgba(168, 85, 247, 0.6);
+}
+
+#subtitle-text {
+  text-shadow: 2px 2px 0px #000, -2px -2px 0px #000, 2px -2px 0px #000, -2px 2px 0px #000, 0 3px 6px rgba(0, 0, 0, 0.9);
+  letter-spacing: 0.02em;
 }
 
 .segment-item {

@@ -230,6 +230,7 @@ class SemanticTranslator(TranslationEngine):
     def _fallback_translate(self, text: str) -> str:
         if not text or not text.strip():
             return ""
+        # 1. Try Google Translate API
         try:
             import urllib.parse
             import urllib.request
@@ -237,7 +238,111 @@ class SemanticTranslator(TranslationEngine):
             req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
             with urllib.request.urlopen(req, timeout=5) as resp:
                 data = json.loads(resp.read().decode("utf-8"))
-                return "".join([part[0] for part in data[0] if part and part[0]])
+                res = "".join([part[0] for part in data[0] if part and part[0]])
+                if res.strip():
+                    return res
+        except Exception:
+            pass
+
+        # 2. Try MyMemory API
+        try:
+            import urllib.parse
+            import urllib.request
+            url = f"https://api.mymemory.translated.net/get?q={urllib.parse.quote(text)}&langpair=zh|vi"
+            req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+            with urllib.request.urlopen(req, timeout=5) as resp:
+                data = json.loads(resp.read().decode("utf-8"))
+                trans = data.get("responseData", {}).get("translatedText", "")
+                if trans and "MYMEMORY WARNING" not in trans:
+                    return trans
         except Exception as e:
-            print(f"[!] Fallback translation error: {e}")
-            return text
+            print(f"[!] MyMemory fallback error: {e}")
+
+        return text
+
+    def translate_single_segment(
+        self,
+        text_zh: str,
+        duration: float,
+        rolling_context: Optional[List[Dict[str, str]]] = None,
+        pronouns: str = "mình - các bạn"
+    ) -> Dict[str, str]:
+        """
+        Translates a single segment with rolling context and strict duration budgeting.
+        """
+        clean_zh = text_zh.strip()
+        if not clean_zh:
+            return {"literal_vi": "", "natural_vi": "", "final_vi": ""}
+
+        target_words = max(3, int(duration * 3.0))
+        gemini_key = settings.GEMINI_API_KEY or os.getenv("GEMINI_API_KEY")
+        deepseek_key = settings.DEEPSEEK_API_KEY or os.getenv("DEEPSEEK_API_KEY")
+        openai_key = settings.OPENAI_API_KEY or os.getenv("OPENAI_API_KEY")
+
+        if gemini_key or deepseek_key or openai_key:
+            ctx_text = ""
+            if rolling_context:
+                ctx_lines = [f"- Trung: {c.get('zh', '')} -> Việt: {c.get('vi', '')}" for c in rolling_context[-5:]]
+                ctx_text = "\n".join(ctx_lines)
+
+            sys_instruction = f"""Bạn là chuyên gia chuyển ngữ video Douyin sang tiếng Việt TikTok trong thời gian thực.
+Ngữ cảnh 5 câu thoại trước đó:
+{ctx_text or '(Đầu video)'}
+
+Quy tắc bắt buộc:
+1. Dịch câu tiếng Trung: "{clean_zh}"
+2. Xưng hô: {pronouns}
+3. Thời lượng đọc cho phép: {duration:.1f} giây (tối đa {target_words} từ tiếng Việt).
+4. Phải dịch thoát ý, văn nói tự nhiên của người Việt, ngắn gọn để vừa khít thời lượng nói trên mà không bị ép tốc độ.
+5. Trả về JSON:
+{{"literal_vi": "...", "natural_vi": "...", "final_vi": "..."}}
+"""
+            if gemini_key:
+                try:
+                    from google import genai
+                    client = genai.Client(api_key=gemini_key)
+                    resp = client.models.generate_content(
+                        model=settings.GEMINI_MODEL,
+                        contents=[f"Dịch câu: {clean_zh}"],
+                        config=dict(system_instruction=sys_instruction, response_mime_type="application/json")
+                    )
+                    data = json.loads(resp.text)
+                    return {
+                        "literal_vi": data.get("literal_vi", clean_zh),
+                        "natural_vi": data.get("natural_vi", clean_zh),
+                        "final_vi": data.get("final_vi", data.get("natural_vi", clean_zh))
+                    }
+                except Exception as e:
+                    print(f"[!] Gemini single translate error: {e}")
+
+            if deepseek_key or openai_key:
+                try:
+                    from openai import OpenAI
+                    client = OpenAI(api_key=deepseek_key or openai_key, base_url="https://api.deepseek.com/v1" if deepseek_key else settings.OPENAI_BASE_URL)
+                    resp = client.chat.completions.create(
+                        model=settings.DEEPSEEK_MODEL if deepseek_key else "gpt-4o-mini",
+                        messages=[{"role": "system", "content": sys_instruction}, {"role": "user", "content": f"Dịch: {clean_zh}"}],
+                        response_format={"type": "json_object"}
+                    )
+                    data = json.loads(resp.choices[0].message.content)
+                    return {
+                        "literal_vi": data.get("literal_vi", clean_zh),
+                        "natural_vi": data.get("natural_vi", clean_zh),
+                        "final_vi": data.get("final_vi", data.get("natural_vi", clean_zh))
+                    }
+                except Exception as e:
+                    print(f"[!] DeepSeek single translate error: {e}")
+
+        # Fallback translation
+        raw_vi = self._fallback_translate(clean_zh)
+        words = raw_vi.split()
+        if len(words) > target_words * 1.3:
+            final_vi = " ".join(words[:target_words])
+        else:
+            final_vi = raw_vi
+
+        return {
+            "literal_vi": raw_vi,
+            "natural_vi": raw_vi,
+            "final_vi": final_vi
+        }

@@ -1,5 +1,6 @@
 venv/
 workspace/temp/
+workspace/cache/
 workspace/models/
 workspace/inputs/*
 workspace/outputs/*

@@ -2,6 +2,7 @@ import asyncio
 import os
 import shutil
 import uuid
+import time
 from pathlib import Path
 from typing import Dict, Any, Optional, List
 from fastapi import FastAPI, UploadFile, File, Form, WebSocket, WebSocketDisconnect, HTTPException
@@ -12,43 +13,65 @@ from fastapi.requests import Request
 from pydantic import BaseModel
 
 from config import settings
-from core.pipeline import VideoTranslationPipeline
+from core.downloader import VideoDownloader
 from core.hardware import detect_hardware
 from core.model_manager import ModelManager
-from core.task_controller import get_task_controller, remove_task_controller
+from core.streaming.pipeline import (
+    create_streaming_session,
+    get_streaming_session,
+    active_streaming_sessions
+)
+from core.streaming.export import HQExporter
 
-app = FastAPI(title=settings.APP_NAME)
+app = FastAPI(title=f"{settings.APP_NAME} - Realtime Streaming Studio")
 
-# Static and Templates
+# Static and Mounts
 app.mount("/static", StaticFiles(directory=str(settings.BASE_DIR / "static")), name="static")
 app.mount("/api/outputs", StaticFiles(directory=str(settings.OUTPUT_DIR)), name="outputs")
+app.mount("/api/inputs", StaticFiles(directory=str(settings.INPUT_DIR)), name="inputs")
 templates = Jinja2Templates(directory=str(settings.BASE_DIR / "templates"))
 
-# Active WebSockets: task_id -> list of WebSockets
-active_connections: Dict[str, List[WebSocket]] = {}
-task_results: Dict[str, Any] = {}
+# Active WebSocket connections per session
+stream_sockets: Dict[str, List[WebSocket]] = {}
+downloader = VideoDownloader()
 
-class ProcessUrlRequest(BaseModel):
+@app.on_event("startup")
+async def startup_warmup():
+    """Pre-loads models in background thread so Time To First Play is ~3-5s."""
+    def _warmup():
+        print("[*] Pre-warming models for zero-latency streaming...")
+        try:
+            from core.engines.asr.sensevoice_engine import SenseVoiceEngine
+            SenseVoiceEngine()._ensure_loaded()
+        except Exception as e:
+            print(f"[!] SenseVoice pre-warm warning: {e}")
+        try:
+            from core.engines.tts.vieneu_engine import VieNeuEngine
+            VieNeuEngine()._ensure_loaded()
+        except Exception as e:
+            print(f"[!] VieNeu pre-warm warning: {e}")
+        print("[+] Engines pre-warmed and ready for instant playback!")
+
+    asyncio.get_event_loop().run_in_executor(None, _warmup)
+
+class StreamUrlRequest(BaseModel):
     url: str
+    initial_buffer_seconds: Optional[float] = 10.0
+    voice: Optional[str] = "Trúc Ly"
+    tts_engine: Optional[str] = "vieneu"
     asr_engine: Optional[str] = "sensevoice"
-    tts_engine: Optional[str] = "vieneu"
-    voice: Optional[str] = "Trúc Ly"
-    separator_engine: Optional[str] = "bs_roformer"
-    mask_chinese: Optional[bool] = True
 
-class ReRenderRequest(BaseModel):
+class SeekRequest(BaseModel):
     task_id: str
-    segments: List[Dict[str, Any]]
-    voice: Optional[str] = "Trúc Ly"
-    tts_engine: Optional[str] = "vieneu"
+    time: float
+
+class ExportHQRequest(BaseModel):
+    task_id: str
     mask_chinese: Optional[bool] = True
 
 class ConfigRequest(BaseModel):
     gemini_key: Optional[str] = None
     deepseek_key: Optional[str] = None
-
-class TaskActionRequest(BaseModel):
-    action: str
 
 @app.get("/", response_class=HTMLResponse)
 async def index(request: Request):
@@ -72,154 +95,64 @@ async def update_config(req: ConfigRequest):
         os.environ["DEEPSEEK_API_KEY"] = req.deepseek_key
     return {"status": "ok", "message": "API keys saved successfully"}
 
-@app.post("/api/task/{task_id}/action")
-async def control_task(task_id: str, req: TaskActionRequest):
-    controller = get_task_controller(task_id)
-    action = req.action.lower()
-    if action == "pause":
-        controller.pause()
-        return {"status": "ok", "state": "paused"}
-    elif action == "resume":
-        controller.resume()
-        return {"status": "ok", "state": "resumed"}
-    elif action == "stop":
-        controller.stop()
-        return {"status": "ok", "state": "stopped"}
-    else:
-        raise HTTPException(status_code=400, detail="Hành động không hợp lệ (chỉ chấp nhận: pause, resume, stop)")
+# -------------------------------------------------------------
+# REAL-TIME STREAMING API
+# -------------------------------------------------------------
 
-@app.websocket("/ws/progress/{task_id}")
-async def websocket_progress(websocket: WebSocket, task_id: str):
-    await websocket.accept()
-    if task_id not in active_connections:
-        active_connections[task_id] = []
-    active_connections[task_id].append(websocket)
-
-    # If task is already finished, send result immediately
-    if task_id in task_results:
-        await websocket.send_json({"type": "done", "result": task_results[task_id]})
-
-    controller = get_task_controller(task_id)
-
-    try:
-        while True:
-            data = await websocket.receive_json()
-            if isinstance(data, dict):
-                act = data.get("action")
-                if act == "pause":
-                    controller.pause()
-                    await websocket.send_json({"type": "status", "state": "paused"})
-                elif act == "resume":
-                    controller.resume()
-                    await websocket.send_json({"type": "status", "state": "resumed"})
-                elif act == "stop":
-                    controller.stop()
-                    await websocket.send_json({"type": "status", "state": "stopped"})
-    except WebSocketDisconnect:
-        if task_id in active_connections and websocket in active_connections[task_id]:
-            active_connections[task_id].remove(websocket)
-
-async def notify_progress(task_id: str, percent: int, message: str, stage: Optional[str] = None):
-    if task_id in active_connections:
+async def broadcast_session_event(task_id: str, event_type: str, data: Dict[str, Any]):
+    if task_id in stream_sockets:
         dead_conns = []
-        for ws in active_connections[task_id]:
+        payload = {"type": event_type, "task_id": task_id, **data}
+        for ws in stream_sockets[task_id]:
             try:
-                await ws.send_json({
-                    "type": "progress",
-                    "percent": percent,
-                    "message": message,
-                    "stage": stage
-                })
+                await ws.send_json(payload)
             except Exception:
                 dead_conns.append(ws)
         for ws in dead_conns:
-            active_connections[task_id].remove(ws)
+            stream_sockets[task_id].remove(ws)
 
-async def notify_done(task_id: str, result: Dict[str, Any]):
-    task_results[task_id] = result
-    if task_id in active_connections:
-        for ws in active_connections[task_id]:
-            try:
-                await ws.send_json({
-                    "type": "done",
-                    "result": result
-                })
-            except Exception:
-                pass
-    remove_task_controller(task_id)
-
-async def run_pipeline_task(
-    task_id: str,
-    video_input: str,
-    asr_engine_name: str = "sensevoice",
-    tts_engine_name: str = "vieneu",
-    voice: str = "Trúc Ly",
-    ref_audio: Optional[Path] = None,
-    mask_chinese: bool = True,
-    custom_segments: Optional[List[Dict[str, Any]]] = None
-):
-    pipeline = VideoTranslationPipeline()
-    controller = get_task_controller(task_id)
-
-    async def progress_cb(percent: int, message: str, stage: Optional[str] = None):
-        await notify_progress(task_id, percent, message, stage)
-
-    try:
-        result = await pipeline.run(
-            video_input=video_input,
-            asr_engine_name=asr_engine_name,
-            tts_engine_name=tts_engine_name,
-            voice=voice,
-            ref_audio=ref_audio,
-            custom_segments=custom_segments,
-            progress_callback=progress_cb,
-            task_controller=controller
-        )
-        await notify_done(task_id, result)
-    except asyncio.CancelledError:
-        print(f"[*] Task {task_id} was stopped by user.")
-        if task_id in active_connections:
-            for ws in active_connections[task_id]:
-                try:
-                    await ws.send_json({"type": "error", "message": "Tiến trình đã bị người dùng hủy bỏ."})
-                except Exception:
-                    pass
-        remove_task_controller(task_id)
-    except Exception as e:
-        print(f"[!] Pipeline error in task {task_id}: {e}")
-        if task_id in active_connections:
-            for ws in active_connections[task_id]:
-                try:
-                    await ws.send_json({"type": "error", "message": str(e)})
-                except Exception:
-                    pass
-        remove_task_controller(task_id)
-
-@app.post("/api/process-url")
-async def process_url(req: ProcessUrlRequest):
+@app.post("/api/streaming/start-url")
+async def start_streaming_url(req: StreamUrlRequest):
     if not req.url:
         raise HTTPException(status_code=400, detail="Vui lòng cung cấp link video")
-    
-    task_id = str(uuid.uuid4())[:8]
-    asyncio.create_task(run_pipeline_task(
-        task_id=task_id,
-        video_input=req.url,
-        asr_engine_name=req.asr_engine or "sensevoice",
-        tts_engine_name=req.tts_engine or "vieneu",
-        voice=req.voice or "Trúc Ly",
-        mask_chinese=req.mask_chinese if req.mask_chinese is not None else True
-    ))
-    return {"task_id": task_id, "status": "processing"}
 
-@app.post("/api/process-upload")
-async def process_upload(
+    task_id = str(uuid.uuid4())[:8]
+
+    # Resolve / Download video
+    try:
+        video_info = downloader.download(req.url)
+        video_path = Path(video_info["file_path"])
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Không thể tải video: {e}")
+
+    # Create session
+    session = create_streaming_session(
+        task_id=task_id,
+        video_path=video_path,
+        initial_buffer_seconds=req.initial_buffer_seconds or 10.0,
+        voice=req.voice or "Trúc Ly",
+        tts_engine_name=req.tts_engine or "vieneu",
+        asr_engine_name=req.asr_engine or "sensevoice",
+        event_callback=lambda event_type, data: broadcast_session_event(task_id, event_type, data)
+    )
+
+    asyncio.create_task(session.start())
+
+    return {
+        "task_id": task_id,
+        "video_url": f"/api/inputs/{video_path.name}",
+        "initial_buffer_seconds": session.initial_buffer_seconds,
+        "status": "started"
+    }
+
+@app.post("/api/streaming/start-upload")
+async def start_streaming_upload(
     file: UploadFile = File(...),
-    asr_engine: str = Form("sensevoice"),
-    tts_engine: str = Form("vieneu"),
+    initial_buffer_seconds: float = Form(10.0),
     voice: str = Form("Trúc Ly"),
-    separator_engine: str = Form("bs_roformer"),
-    ref_audio: Optional[UploadFile] = File(None),
-    mask_chinese: bool = Form(True)
+    tts_engine: str = Form("vieneu"),
+    asr_engine: str = Form("sensevoice"),
+    ref_audio: Optional[UploadFile] = File(None)
 ):
     task_id = str(uuid.uuid4())[:8]
     ext = Path(file.filename).suffix or ".mp4"
@@ -236,47 +169,116 @@ async def process_upload(
             shutil.copyfileobj(ref_audio.file, buffer)
         ref_audio_path = ref_path
 
-    asyncio.create_task(run_pipeline_task(
+    # Create session
+    session = create_streaming_session(
         task_id=task_id,
-        video_input=str(saved_path),
-        asr_engine_name=asr_engine,
-        tts_engine_name=tts_engine,
+        video_path=saved_path,
+        initial_buffer_seconds=initial_buffer_seconds,
         voice=voice,
+        tts_engine_name=tts_engine,
+        asr_engine_name=asr_engine,
         ref_audio=ref_audio_path,
-        mask_chinese=mask_chinese
-    ))
-    return {"task_id": task_id, "status": "processing"}
+        event_callback=lambda event_type, data: broadcast_session_event(task_id, event_type, data)
+    )
 
-@app.post("/api/re-render")
-async def re_render(req: ReRenderRequest):
-    task_dir = settings.TEMP_DIR / req.task_id
-    if not task_dir.exists():
-        raise HTTPException(status_code=404, detail="Task ID không tồn tại")
+    asyncio.create_task(session.start())
 
-    possible_videos = list(settings.INPUT_DIR.glob(f"*{req.task_id}*"))
-    if not possible_videos:
-        raise HTTPException(status_code=404, detail="Không tìm thấy video gốc")
+    return {
+        "task_id": task_id,
+        "video_url": f"/api/inputs/{saved_path.name}",
+        "initial_buffer_seconds": session.initial_buffer_seconds,
+        "status": "started"
+    }
 
-    orig_video = str(possible_videos[0])
-    new_task_id = str(uuid.uuid4())[:8]
+@app.get("/api/streaming/audio/{task_id}/{seg_id}")
+async def get_segment_audio(task_id: str, seg_id: int):
+    wav_path = settings.BASE_DIR / "workspace" / "cache" / task_id / "segments" / f"seg_{seg_id}.wav"
+    if not wav_path.exists():
+        raise HTTPException(status_code=404, detail="Segment audio not found or not yet synthesized")
+    return FileResponse(wav_path, media_type="audio/wav")
 
-    asyncio.create_task(run_pipeline_task(
-        task_id=new_task_id,
-        video_input=orig_video,
-        asr_engine_name="sensevoice",
-        tts_engine_name=req.tts_engine or "vieneu",
-        voice=req.voice or "Trúc Ly",
-        mask_chinese=req.mask_chinese if req.mask_chinese is not None else True,
-        custom_segments=req.segments
-    ))
-    return {"task_id": new_task_id, "status": "processing"}
+@app.post("/api/streaming/seek")
+async def streaming_seek(req: SeekRequest):
+    session = get_streaming_session(req.task_id)
+    if not session:
+        raise HTTPException(status_code=404, detail="Session not found")
+    await session.seek(req.time)
+    return {"status": "ok", "seek_time": req.time}
 
-@app.get("/api/download-srt/{task_id}")
-async def download_srt(task_id: str):
-    srt_file = settings.TEMP_DIR / task_id / "subtitles.srt"
-    if not srt_file.exists():
-        raise HTTPException(status_code=404, detail="SRT không tìm thấy")
-    return FileResponse(srt_file, media_type="application/x-subrip", filename=f"subtitles_{task_id}.srt")
+@app.post("/api/streaming/export-hq")
+async def export_hq(req: ExportHQRequest):
+    session = get_streaming_session(req.task_id)
+    if not session:
+        raise HTTPException(status_code=404, detail="Session not found")
+
+    segments_data = [s.to_dict() for s in session.segments.values() if s.status in ["READY", "PLAYED"]]
+    if not segments_data:
+        raise HTTPException(status_code=400, detail="Chưa có câu thoại nào sẵn sàng để xuất HQ")
+
+    exporter = HQExporter()
+    result = await asyncio.to_thread(
+        exporter.export,
+        task_id=req.task_id,
+        video_path=session.video_path,
+        segments=segments_data,
+        total_duration=session.total_duration,
+        mask_chinese=req.mask_chinese if req.mask_chinese is not None else True
+    )
+
+    return {
+        "status": "ok",
+        "output_filename": result["output_filename"],
+        "video_url": f"/api/outputs/{result['output_filename']}",
+        "elapsed_seconds": result["elapsed_seconds"]
+    }
+
+@app.websocket("/ws/stream/{task_id}")
+async def websocket_stream(websocket: WebSocket, task_id: str):
+    await websocket.accept()
+    if task_id not in stream_sockets:
+        stream_sockets[task_id] = []
+    stream_sockets[task_id].append(websocket)
+
+    session = get_streaming_session(task_id)
+    if session:
+        # Send current state immediately upon connection
+        await websocket.send_json({
+            "type": "init",
+            "task_id": task_id,
+            "duration": session.total_duration,
+            "segments_count": len(session.segments),
+            "segments": [s.to_dict() for s in session.segments.values()],
+            "initial_buffer_seconds": session.initial_buffer_seconds
+        })
+        await websocket.send_json({
+            "type": "telemetry",
+            "task_id": task_id,
+            **session.get_telemetry()
+        })
+
+    try:
+        while True:
+            data = await websocket.receive_json()
+            if not isinstance(data, dict):
+                continue
+            act = data.get("type") or data.get("action")
+            sess = get_streaming_session(task_id)
+            if not sess:
+                continue
+
+            if act == "playback_position":
+                sess.update_playback_position(float(data.get("time", 0.0)))
+            elif act == "seek":
+                await sess.seek(float(data.get("time", 0.0)))
+            elif act == "pause":
+                sess.pause()
+            elif act == "resume":
+                sess.resume()
+            elif act == "stop":
+                sess.stop()
+    except WebSocketDisconnect:
+        if task_id in stream_sockets and websocket in stream_sockets[task_id]:
+            stream_sockets[task_id].remove(websocket)
 
 if __name__ == "__main__":
     import uvicorn

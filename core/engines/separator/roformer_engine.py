@@ -84,7 +84,14 @@ class BSRoFormerSeparator(SeparatorEngine):
         instrumental_path = output_dir / "instrumental.wav"
 
         for f in output_files:
-            file_p = output_dir / f
+            file_p = None
+            for cand in [output_dir / f, Path(self.separator.output_dir) / f, settings.TEMP_DIR / f, Path(f)]:
+                if cand.exists():
+                    file_p = cand
+                    break
+            if not file_p:
+                continue
+
             lower = f.lower()
             if "vocals" in lower or "(vocals)" in lower:
                 shutil.move(str(file_p), str(vocals_path))
@@ -92,9 +99,15 @@ class BSRoFormerSeparator(SeparatorEngine):
                 shutil.move(str(file_p), str(instrumental_path))
 
         if not vocals_path.exists() and len(output_files) >= 1:
-            shutil.copyfile(str(output_dir / output_files[0]), str(vocals_path))
+            for cand in [output_dir / output_files[0], settings.TEMP_DIR / output_files[0], Path(output_files[0])]:
+                if cand.exists():
+                    shutil.copyfile(str(cand), str(vocals_path))
+                    break
         if not instrumental_path.exists() and len(output_files) >= 2:
-            shutil.copyfile(str(output_dir / output_files[1]), str(instrumental_path))
+            for cand in [output_dir / output_files[1], settings.TEMP_DIR / output_files[1], Path(output_files[1])]:
+                if cand.exists():
+                    shutil.copyfile(str(cand), str(instrumental_path))
+                    break
 
         if progress_callback:
             progress_callback(100, f"Tách âm hoàn tất ({elapsed:.1f}s)")

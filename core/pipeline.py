@@ -42,6 +42,7 @@ class VideoTranslationPipeline:
         voice: Optional[str] = "Trúc Ly",
         ref_audio: Optional[Path] = None,
         subtitle_mode: str = "auto",         # 'auto', 'fast', 'ai'
+        mask_chinese: bool = True,
         custom_segments: Optional[List[Dict[str, Any]]] = None,
         progress_callback: Optional[Callable[[int, str, Optional[str]], Any]] = None,
         task_controller: Optional[TaskController] = None
@@ -172,7 +173,7 @@ class VideoTranslationPipeline:
             audio_path=master_audio,
             subtitle_path=ass_path,
             output_path=final_video_path,
-            mask_chinese_sub=True
+            mask_chinese_sub=mask_chinese
         )
 
         elapsed = round(time.time() - start_time, 1)
