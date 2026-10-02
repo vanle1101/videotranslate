@@ -1,6 +1,18 @@
 import os
+import sys
 from pathlib import Path
 from pydantic_settings import BaseSettings
+
+if hasattr(sys.stdout, "reconfigure"):
+    try:
+        sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+    except Exception:
+        pass
+if hasattr(sys.stderr, "reconfigure"):
+    try:
+        sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+    except Exception:
+        pass
 
 BASE_DIR = Path(__file__).resolve().parent
 WORKSPACE_DIR = BASE_DIR / "workspace"
@@ -10,7 +22,7 @@ class Settings(BaseSettings):
     # App config
     APP_NAME: str = "Douyin2TikTok AI Studio"
     HOST: str = "127.0.0.1"
-    PORT: int = 8000
+    PORT: int = 0  # 0 indicates dynamic ephemeral port allocation
     DEBUG: bool = True
 
     # Directories

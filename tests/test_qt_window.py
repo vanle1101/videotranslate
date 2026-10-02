@@ -25,9 +25,10 @@ def test_qt_components():
     splash.set_progress(45, "Testing splash status update...")
     print("[+] Splash screen initialized and styled correctly.")
 
-    # 3. Test Main Window Instantiation with Mock Port
-    mock_port = 8000
-    win = StudioMainWindow(mock_port)
+    # 3. Test Main Window Instantiation with Dynamic Free Port
+    from core.services.service_manager import service_manager
+    dynamic_port = service_manager.find_free_port()
+    win = StudioMainWindow(dynamic_port)
     assert win.minimumWidth() >= 1280, "Minimum width must be at least 1280px"
     assert win.minimumHeight() >= 800, "Minimum height must be at least 800px"
     assert win.windowTitle() == "Douyin2TikTok AI Studio"

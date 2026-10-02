@@ -373,7 +373,8 @@ class StudioMainWindow(QMainWindow):
     # Close confirmation & clean process shutdown
     def closeEvent(self, event):
         from core.streaming.pipeline import active_streaming_sessions
-        is_processing = len(active_streaming_sessions) > 0
+        running_sessions = [s for s in active_streaming_sessions.values() if getattr(s, "is_running", False)]
+        is_processing = len(running_sessions) > 0
 
         if is_processing:
             reply = QMessageBox.question(

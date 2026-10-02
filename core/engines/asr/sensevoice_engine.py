@@ -103,9 +103,10 @@ class SenseVoiceEngine(ASREngine):
         # Clean temp
         if temp_16k.exists():
             temp_16k.unlink()
-
-        print(f"[+] SenseVoice decoded in {elapsed:.2f}s: {raw_text} (Emotion: {emotion})")
-
+        try:
+            print(f"[+] SenseVoice decoded in {elapsed:.2f}s: {raw_text} (Emotion: {emotion})")
+        except Exception:
+            pass
         if not raw_text:
             return []
 

@@ -372,6 +372,7 @@ class StreamingPipelineSession:
         self.pause_event.set()
         if self.worker_task:
             self.worker_task.cancel()
+        active_streaming_sessions.pop(self.task_id, None)
 
 # Session Manager
 active_streaming_sessions: Dict[str, StreamingPipelineSession] = {}

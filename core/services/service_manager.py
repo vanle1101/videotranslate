@@ -113,8 +113,9 @@ class ServiceManager:
             return self.port
 
         self.port = port or self.find_free_port()
+        settings.PORT = self.port
         self.backend_url = f"http://127.0.0.1:{self.port}"
-        logger.info(f"Starting internal FastAPI service on {self.backend_url}...")
+        logger.info(f"Starting internal FastAPI service on {self.backend_url} (dynamic port)...")
 
         import uvicorn
         from main import app
@@ -218,15 +219,22 @@ class ServiceManager:
         try:
             from core.engines.translation.semantic_translator import SemanticTranslator
             trans = SemanticTranslator()
-            info = trans.get_info()
-            status["gemini"] = info.get("has_llm_key", False)
-            if status["gemini"]:
-                update(82, f"Gemini Connected ({settings.GEMINI_MODEL})")
+            gemini_key = os.getenv("GEMINI_API_KEY", "").strip() or settings.GEMINI_API_KEY.strip()
+            if gemini_key:
+                t0 = time.time()
+                res = trans.translate_single_segment(text_zh="你好，欢迎来到这里。", duration=3.0)
+                lat = round((time.time() - t0) * 1000, 1)
+                status["gemini"] = True
+                status["gemini_latency_ms"] = lat
+                logging.getLogger("ai").info(f"Gemini Diagnostics: Provider=Google Gemini | Model={settings.GEMINI_MODEL} | Latency={lat}ms | Status=Success")
+                update(82, f"Gemini Connected ({settings.GEMINI_MODEL}, {lat}ms)")
             else:
-                update(82, "Gemini Ready (Awaiting API Key in Settings)")
+                status["gemini"] = False
+                logging.getLogger("ai").info("Gemini Diagnostics: Provider=Google Gemini | Model=gemini-2.0-flash | Latency=N/A | Status=Standby (Set API Key in Settings)")
+                update(82, "Gemini Standby (Enter API Key in Settings)")
         except Exception as e:
             logging.getLogger("errors").warning(f"Gemini connection check warning: {e}")
-            update(82, "Translation Engine Ready")
+            update(82, "Translation Engine Ready (Offline Fallback)")
 
         # 5. Audio Vocal Suppressor
         update(85, "Configuring Realtime Vocal Suppressor...")

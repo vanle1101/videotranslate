@@ -98,5 +98,6 @@ class HQExporter:
         return {
             "output_filename": output_filename,
             "final_video_path": str(final_video_path.resolve()),
+            "output_path": str(final_video_path.resolve()),
             "elapsed_seconds": elapsed
         }
