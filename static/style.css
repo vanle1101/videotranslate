@@ -1,0 +1,23 @@
+/* Custom scrollbar and glassmorphism styling */
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+::-webkit-scrollbar-track {
+  background: #0f1117;
+}
+::-webkit-scrollbar-thumb {
+  background: #272c3d;
+  border-radius: 9999px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: #3b435c;
+}
+
+.segment-item {
+  transition: all 0.2s ease-in-out;
+}
+.segment-item:hover {
+  border-color: rgba(236, 72, 153, 0.4);
+  background-color: #1a1e29;
+}

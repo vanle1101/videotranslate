@@ -1,0 +1,219 @@
+<!DOCTYPE html>
+<html lang="vi">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Douyin2TikTok AI Studio - Dịch & Lồng Tiếng Video Triệu View</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+  <link rel="stylesheet" href="/static/style.css">
+</head>
+<body class="bg-[#0f1117] text-gray-100 min-h-screen font-sans antialiased">
+  
+  <!-- Header -->
+  <header class="border-b border-gray-800 bg-[#161922]/80 backdrop-blur sticky top-0 z-50 px-6 py-4 flex items-center justify-between">
+    <div class="flex items-center space-x-3">
+      <div class="h-10 w-10 rounded-xl bg-gradient-to-tr from-pink-500 to-violet-600 flex items-center justify-center shadow-lg shadow-pink-500/20">
+        <i class="fa-solid fa-wand-magic-sparkles text-white text-lg"></i>
+      </div>
+      <div>
+        <h1 class="font-bold text-lg tracking-tight text-white flex items-center gap-2">
+          Douyin2TikTok <span class="text-xs bg-pink-500/20 text-pink-400 px-2 py-0.5 rounded-full border border-pink-500/30">STUDIO PRO</span>
+        </h1>
+        <p class="text-xs text-gray-400">Pipeline Dịch Thoát Ý, TTS Việt Chuẩn Accent, Giữ BGM Gốc & Xử Lý Chữ Cứng</p>
+      </div>
+    </div>
+    
+    <div class="flex items-center space-x-4">
+      <button id="btn-settings-modal" class="text-gray-400 hover:text-white transition px-3 py-1.5 rounded-lg border border-gray-800 hover:border-gray-700 bg-gray-900/50 text-sm flex items-center gap-2">
+        <i class="fa-solid fa-gear"></i> Cấu hình API
+      </button>
+      <span class="inline-flex items-center gap-1.5 text-xs text-emerald-400 bg-emerald-500/10 px-2.5 py-1 rounded-full border border-emerald-500/20">
+        <span class="h-1.5 w-1.5 rounded-full bg-emerald-400 animate-pulse"></span> Sẵn sàng
+      </span>
+    </div>
+  </header>
+
+  <!-- Main Container -->
+  <main class="max-w-7xl mx-auto p-6 grid grid-cols-1 lg:grid-cols-12 gap-8">
+    
+    <!-- Left Column: Input & Controls (5 cols) -->
+    <div class="lg:col-span-5 space-y-6">
+      
+      <!-- Video Input Card -->
+      <div class="bg-[#161922] border border-gray-800/80 rounded-2xl p-6 shadow-xl">
+        <h2 class="text-sm font-semibold text-gray-300 uppercase tracking-wider mb-4 flex items-center gap-2">
+          <i class="fa-brands fa-tiktok text-pink-500"></i> Nguồn Video Trung Quốc
+        </h2>
+
+        <!-- URL Input -->
+        <div class="space-y-3">
+          <label class="text-xs text-gray-400">Dán link Douyin / Kuaishou / Bilibili / TikTok:</label>
+          <div class="relative">
+            <input type="text" id="video-url" placeholder="Dán link hoặc cả đoạn text chia sẻ Douyin..."
+              class="w-full bg-[#0d0f14] border border-gray-700 focus:border-pink-500 rounded-xl px-4 py-3 text-sm text-gray-100 placeholder-gray-500 focus:outline-none transition">
+          </div>
+        </div>
+
+        <div class="my-4 flex items-center justify-between text-xs text-gray-500">
+          <div class="border-t border-gray-800 flex-1"></div>
+          <span class="px-3">hoặc tải file lên</span>
+          <div class="border-t border-gray-800 flex-1"></div>
+        </div>
+
+        <!-- File Drag & Drop -->
+        <div id="drop-zone" class="border-2 border-dashed border-gray-700 hover:border-pink-500/60 rounded-xl p-6 text-center cursor-pointer transition bg-[#0d0f14]/50">
+          <input type="file" id="video-file" accept="video/*" class="hidden">
+          <i class="fa-solid fa-cloud-arrow-up text-3xl text-gray-500 mb-2"></i>
+          <p class="text-sm text-gray-300 font-medium" id="file-name-display">Kéo thả video vào đây hoặc bấm để chọn</p>
+          <p class="text-xs text-gray-500 mt-1">Hỗ trợ .mp4, .mov, .mkv (tối đa 500MB)</p>
+        </div>
+      </div>
+
+      <!-- Settings Card -->
+      <div class="bg-[#161922] border border-gray-800/80 rounded-2xl p-6 shadow-xl space-y-4">
+        <h2 class="text-sm font-semibold text-gray-300 uppercase tracking-wider flex items-center gap-2">
+          <i class="fa-solid fa-sliders text-violet-400"></i> Tuỳ Chọn Lồng Tiếng & Subtitle
+        </h2>
+
+        <div class="grid grid-cols-2 gap-4">
+          <!-- Voice Select -->
+          <div>
+            <label class="text-xs text-gray-400 block mb-1.5">Giọng lồng tiếng Việt:</label>
+            <select id="voice-select" class="w-full bg-[#0d0f14] border border-gray-700 rounded-xl px-3 py-2.5 text-xs text-gray-200 focus:outline-none focus:border-pink-500">
+              <option value="vi-VN-HoaiMyNeural" selected>Hoài My (Nữ truyền cảm, ngọt ngào)</option>
+              <option value="vi-VN-NamMinhNeural">Nam Minh (Nam MC kịch tính, dứt khoát)</option>
+            </select>
+          </div>
+
+          <!-- Translation Model -->
+          <div>
+            <label class="text-xs text-gray-400 block mb-1.5">AI Dịch Thoát Ý:</label>
+            <select id="llm-select" class="w-full bg-[#0d0f14] border border-gray-700 rounded-xl px-3 py-2.5 text-xs text-gray-200 focus:outline-none focus:border-pink-500">
+              <option value="gemini" selected>Gemini 2.0 Flash (Khuyên dùng, siêu tốc)</option>
+              <option value="deepseek">DeepSeek-V3 (Văn phong mượt mà)</option>
+            </select>
+          </div>
+        </div>
+
+        <!-- Chinese Subtitle Mask -->
+        <div class="pt-2 flex items-center justify-between">
+          <div>
+            <p class="text-sm font-medium text-gray-200">Che chữ cứng tiếng Trung</p>
+            <p class="text-xs text-gray-400">Tạo thanh làm mờ mượt mà (Frosted glass) đè lên chữ cũ</p>
+          </div>
+          <label class="relative inline-flex items-center cursor-pointer">
+            <input type="checkbox" id="mask-sub-checkbox" checked class="sr-only peer">
+            <div class="w-11 h-6 bg-gray-700 peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-pink-600"></div>
+          </label>
+        </div>
+
+        <!-- Action Button -->
+        <div class="pt-3">
+          <button id="btn-start" class="w-full py-3.5 px-6 rounded-xl bg-gradient-to-r from-pink-500 via-rose-500 to-violet-600 hover:opacity-95 text-white font-semibold text-sm shadow-lg shadow-pink-500/25 flex items-center justify-center gap-2 transition active:scale-[0.98]">
+            <i class="fa-solid fa-play"></i> BẮT ĐẦU CHUYỂN NGỮ & XUẤT VIDEO
+          </button>
+        </div>
+      </div>
+
+      <!-- Realtime Progress Card -->
+      <div id="progress-card" class="bg-[#161922] border border-gray-800/80 rounded-2xl p-6 shadow-xl hidden">
+        <div class="flex items-center justify-between mb-2">
+          <span id="progress-status-text" class="text-xs font-medium text-pink-400 flex items-center gap-2">
+            <i class="fa-solid fa-spinner fa-spin"></i> Đang khởi tạo...
+          </span>
+          <span id="progress-percent" class="text-xs font-bold text-white">0%</span>
+        </div>
+        <div class="w-full bg-gray-800 rounded-full h-2.5 overflow-hidden">
+          <div id="progress-bar-fill" class="bg-gradient-to-r from-pink-500 to-violet-500 h-2.5 rounded-full transition-all duration-300" style="width: 0%"></div>
+        </div>
+        <div id="log-console" class="mt-4 bg-[#0a0c10] rounded-xl p-3 text-[11px] font-mono text-gray-400 max-h-36 overflow-y-auto space-y-1">
+          <div>[00:00] Sẵn sàng xử lý...</div>
+        </div>
+      </div>
+
+    </div>
+
+    <!-- Right Column: Interactive Subtitle Editor & Video Result (7 cols) -->
+    <div class="lg:col-span-7 space-y-6">
+
+      <!-- Result Video Preview Card -->
+      <div id="result-card" class="bg-[#161922] border border-gray-800/80 rounded-2xl p-6 shadow-xl hidden">
+        <div class="flex items-center justify-between mb-4">
+          <h2 class="text-sm font-semibold text-emerald-400 uppercase tracking-wider flex items-center gap-2">
+            <i class="fa-solid fa-circle-check"></i> Video TikTok Hoàn Chỉnh
+          </h2>
+          <div class="flex items-center gap-2">
+            <a id="download-video-btn" href="#" download class="text-xs bg-pink-600 hover:bg-pink-500 text-white px-3 py-1.5 rounded-lg flex items-center gap-1.5 transition">
+              <i class="fa-solid fa-download"></i> Tải Video MP4
+            </a>
+            <a id="download-srt-btn" href="#" download class="text-xs bg-gray-800 hover:bg-gray-700 text-gray-200 px-3 py-1.5 rounded-lg flex items-center gap-1.5 transition">
+              <i class="fa-solid fa-closed-captioning"></i> Tải Sub SRT
+            </a>
+          </div>
+        </div>
+
+        <div class="aspect-[9/16] max-h-[520px] mx-auto bg-black rounded-xl overflow-hidden flex items-center justify-center border border-gray-800 shadow-2xl">
+          <video id="output-video-player" controls class="w-full h-full object-contain"></video>
+        </div>
+      </div>
+
+      <!-- Subtitle Editor Card -->
+      <div class="bg-[#161922] border border-gray-800/80 rounded-2xl p-6 shadow-xl">
+        <div class="flex items-center justify-between mb-4">
+          <div>
+            <h2 class="text-sm font-semibold text-gray-300 uppercase tracking-wider flex items-center gap-2">
+              <i class="fa-solid fa-language text-pink-400"></i> Bảng Lời Thoại & Dịch Thuật
+            </h2>
+            <p class="text-xs text-gray-500">So sánh câu thoại gốc tiếng Trung và câu dịch tiếng Việt (có thể bấm vào để sửa trước khi xuất)</p>
+          </div>
+          <button id="btn-re-render" class="hidden text-xs bg-violet-600 hover:bg-violet-500 text-white px-3 py-1.5 rounded-lg items-center gap-1.5 transition">
+            <i class="fa-solid fa-rotate"></i> Xuất lại với bản sửa
+          </button>
+        </div>
+
+        <div id="segments-container" class="space-y-3 max-h-[580px] overflow-y-auto pr-2">
+          <div class="text-center py-16 text-gray-500 text-xs">
+            <i class="fa-regular fa-comment-dots text-4xl mb-3 text-gray-600 block"></i>
+            Chưa có dữ liệu thoại. Hãy dán link hoặc chọn video và bấm bắt đầu!
+          </div>
+        </div>
+      </div>
+
+    </div>
+  </main>
+
+  <!-- Settings Modal -->
+  <div id="settings-modal" class="fixed inset-0 bg-black/70 backdrop-blur-sm z-50 flex items-center justify-center p-4 hidden">
+    <div class="bg-[#161922] border border-gray-800 rounded-2xl max-w-md w-full p-6 space-y-4 shadow-2xl">
+      <div class="flex items-center justify-between pb-3 border-b border-gray-800">
+        <h3 class="text-base font-bold text-white flex items-center gap-2">
+          <i class="fa-solid fa-key text-pink-500"></i> Cấu hình API Keys
+        </h3>
+        <button id="btn-close-modal" class="text-gray-400 hover:text-white">
+          <i class="fa-solid fa-xmark text-lg"></i>
+        </button>
+      </div>
+
+      <div class="space-y-3">
+        <div>
+          <label class="text-xs text-gray-400 block mb-1">Google Gemini API Key:</label>
+          <input type="password" id="modal-gemini-key" placeholder="AIzaSy..." class="w-full bg-[#0d0f14] border border-gray-700 rounded-xl px-3 py-2 text-xs text-gray-100 focus:outline-none focus:border-pink-500">
+        </div>
+        <div>
+          <label class="text-xs text-gray-400 block mb-1">DeepSeek API Key (nếu dùng):</label>
+          <input type="password" id="modal-deepseek-key" placeholder="sk-..." class="w-full bg-[#0d0f14] border border-gray-700 rounded-xl px-3 py-2 text-xs text-gray-100 focus:outline-none focus:border-pink-500">
+        </div>
+      </div>
+
+      <div class="pt-3 flex justify-end gap-3">
+        <button id="btn-save-keys" class="bg-pink-600 hover:bg-pink-500 text-white text-xs font-semibold px-4 py-2 rounded-xl transition">
+          Lưu cấu hình
+        </button>
+      </div>
+    </div>
+  </div>
+
+  <script src="/static/app.js"></script>
+</body>
+</html>

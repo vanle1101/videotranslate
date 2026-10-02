@@ -1,0 +1,29 @@
+# Web API & Interface
+fastapi>=0.110.0
+uvicorn[standard]>=0.28.0
+pydantic>=2.6.0
+pydantic-settings>=2.2.0
+python-multipart>=0.0.9
+jinja2>=3.1.3
+aiofiles>=23.2.1
+websockets>=12.0
+
+# Video & Audio Downloader
+yt-dlp>=2024.3.10
+
+# Speech Recognition (ASR)
+faster-whisper>=1.0.1
+
+# AI Translation
+google-genai>=1.0.0
+openai>=1.14.0
+
+# Text-to-Speech (TTS)
+edge-tts>=6.1.10
+
+# Audio & Video Processing
+pydub>=0.25.1
+numpy>=1.24.0
+scipy>=1.11.0
+requests>=2.31.0
+tqdm>=4.66.0
