@@ -34,16 +34,16 @@ Hãy dịch từng câu tiếng Trung sang tiếng Việt qua 3 cấp độ:
 
 Đầu ra JSON duy nhất:
 ```json
-{
+{{
   "results": [
-    {
+    {{
       "id": 0,
       "literal_vi": "...",
       "natural_vi": "...",
       "final_vi": "..."
-    }
+    }}
   ]
-}
+}}
 ```
 """
 
