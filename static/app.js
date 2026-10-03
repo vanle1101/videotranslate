@@ -61,8 +61,32 @@ document.addEventListener("DOMContentLoaded", () => {
   const btnConfirmExport = document.getElementById("btn-confirm-export");
   const exportStatusBox = document.getElementById("export-status-box");
   const exportStatusText = document.getElementById("export-status-text");
+  const exportProgressBar = document.getElementById("export-progress-bar");
+  const exportProgressPct = document.getElementById("export-progress-pct");
+  const btnCancelExport = document.getElementById("btn-cancel-export");
   const exportResultBox = document.getElementById("export-result-box");
   const btnSaveAsNative = document.getElementById("btn-save-as-native");
+
+  // Settings Elements
+  const settingsLlmProvider = document.getElementById("settings-llm-provider");
+  const settingsGeminiKey = document.getElementById("settings-gemini-key");
+  const settingsDeepseekKey = document.getElementById("settings-deepseek-key");
+  const settingsGeminiModel = document.getElementById("settings-gemini-model");
+  const settingsSuppressionMode = document.getElementById("settings-suppression-mode");
+  const settingsDuckingLevel = document.getElementById("settings-ducking-level");
+  const settingsBufferTarget = document.getElementById("settings-buffer-target");
+  const btnToggleGeminiKey = document.getElementById("btn-toggle-gemini-key");
+  const btnTestGemini = document.getElementById("btn-test-gemini");
+  const geminiTestResult = document.getElementById("gemini-test-result");
+  const btnSaveSettings = document.getElementById("btn-save-settings");
+
+  // Connect to Desktop Bridge via QWebChannel
+  if (typeof QWebChannel !== "undefined" && window.qt && window.qt.webChannelTransport) {
+    new QWebChannel(window.qt.webChannelTransport, function(channel) {
+      window.desktopBridge = channel.objects.desktopBridge;
+      console.log("[Bridge] Native desktop bridge connected successfully.");
+    });
+  }
 
   // Session State
   let currentTaskId = null;
@@ -412,8 +436,14 @@ document.addEventListener("DOMContentLoaded", () => {
           bgmAudio.play().catch(() => {});
         }
       }
+      else if (msg.type === "export_progress") {
+        if (exportProgressBar) exportProgressBar.style.width = `${msg.progress}%`;
+        if (exportProgressPct) exportProgressPct.textContent = `${msg.progress}%`;
+        if (exportStatusText) exportStatusText.innerHTML = `<i class="fa-solid fa-spinner fa-spin text-pink-400"></i> ${msg.stage}`;
+      }
       else if (msg.type === "finished") {
         resetWorkerControls();
+        updateTasksTable();
       }
     };
   }
@@ -604,48 +634,134 @@ document.addEventListener("DOMContentLoaded", () => {
   // =========================================================
   // 7. TASK MANAGER VIEW
   // =========================================================
-  function updateTasksTable() {
+  window.pauseTask = async (id) => {
+    try {
+      await fetch(`/api/tasks/${id}/pause`, { method: "POST" });
+      updateTasksTable();
+    } catch (e) {
+      alert("Lỗi tạm dừng tác vụ: " + e.message);
+    }
+  };
+
+  window.resumeTask = async (id) => {
+    try {
+      await fetch(`/api/tasks/${id}/resume`, { method: "POST" });
+      updateTasksTable();
+    } catch (e) {
+      alert("Lỗi tiếp tục tác vụ: " + e.message);
+    }
+  };
+
+  window.stopTask = async (id) => {
+    try {
+      await fetch(`/api/tasks/${id}/stop`, { method: "POST" });
+      if (id === currentTaskId) resetWorkerControls();
+      updateTasksTable();
+    } catch (e) {
+      alert("Lỗi hủy tác vụ: " + e.message);
+    }
+  };
+
+  async function updateTasksTable() {
     const tbody = document.getElementById("tasks-table-body");
     if (!tbody) return;
 
-    if (!currentTaskId) {
-      tbody.innerHTML = `<tr><td colspan="6" class="p-8 text-center text-gray-500 font-sans">Không có tác vụ nào đang hoạt động.</td></tr>`;
-      return;
-    }
+    try {
+      const res = await fetch("/api/tasks");
+      const data = await res.json();
+      const tasks = data.tasks || [];
 
-    const readyCount = Object.values(segments).filter(s => s.status === "READY" || s.status === "PLAYED").length;
-    const totalCount = Object.keys(segments).length || 1;
-    const pct = Math.round((readyCount / totalCount) * 100);
+      if (tasks.length === 0) {
+        tbody.innerHTML = `<tr><td colspan="6" class="p-8 text-center text-gray-500 font-sans">Không có tác vụ nào đang hoạt động.</td></tr>`;
+        return;
+      }
 
-    tbody.innerHTML = `
-      <tr class="hover:bg-gray-800/40 transition">
-        <td class="p-3.5 font-bold text-white">${currentTaskId}</td>
-        <td class="p-3.5 text-pink-400">Realtime Dubbing</td>
-        <td class="p-3.5">
-          <div class="flex items-center gap-2">
-            <div class="w-24 bg-gray-800 h-2 rounded-full overflow-hidden">
-              <div class="bg-gradient-to-r from-pink-500 to-violet-500 h-full" style="width: ${pct}%"></div>
+      tbody.innerHTML = "";
+      tasks.forEach(t => {
+        const tr = document.createElement("tr");
+        tr.className = "hover:bg-gray-800/40 transition";
+
+        let statusBadge = "";
+        if (t.status === "RUNNING") {
+          statusBadge = `<span class="px-2 py-0.5 rounded bg-emerald-950 text-emerald-400 border border-emerald-800 text-[10px] animate-pulse">ĐANG CHẠY</span>`;
+        } else if (t.status === "PAUSED") {
+          statusBadge = `<span class="px-2 py-0.5 rounded bg-amber-950 text-amber-400 border border-amber-800 text-[10px]">TẠM DỪNG</span>`;
+        } else if (t.status === "COMPLETED") {
+          statusBadge = `<span class="px-2 py-0.5 rounded bg-blue-950 text-blue-400 border border-blue-800 text-[10px]">HOÀN THÀNH</span>`;
+        } else if (t.status === "CANCELLED" || t.status === "STOPPED") {
+          statusBadge = `<span class="px-2 py-0.5 rounded bg-gray-800 text-gray-400 border border-gray-700 text-[10px]">ĐÃ DỪNG</span>`;
+        } else {
+          statusBadge = `<span class="px-2 py-0.5 rounded bg-rose-950 text-rose-400 border border-rose-800 text-[10px]">LỖI</span>`;
+        }
+
+        let actionButtons = "";
+        if (t.can_pause) {
+          actionButtons += `<button onclick="window.pauseTask('${t.task_id}')" class="px-2 py-1 bg-amber-600/80 hover:bg-amber-600 text-white rounded text-[10px]"><i class="fa-solid fa-pause mr-1"></i>Tạm dừng</button> `;
+        }
+        if (t.can_resume) {
+          actionButtons += `<button onclick="window.resumeTask('${t.task_id}')" class="px-2 py-1 bg-emerald-600/80 hover:bg-emerald-600 text-white rounded text-[10px]"><i class="fa-solid fa-play mr-1"></i>Tiếp tục</button> `;
+        }
+        if (t.can_stop) {
+          actionButtons += `<button onclick="window.stopTask('${t.task_id}')" class="px-2 py-1 bg-rose-700/80 hover:bg-rose-700 text-white rounded text-[10px]"><i class="fa-solid fa-stop mr-1"></i>Hủy</button> `;
+        }
+        if (t.status === "COMPLETED" && t.video_url) {
+          actionButtons += `<a href="${t.video_url}" target="_blank" class="px-2 py-1 bg-pink-600 hover:bg-pink-500 text-white rounded text-[10px] inline-flex items-center gap-1"><i class="fa-solid fa-circle-play"></i>Xem kết quả</a> `;
+        }
+
+        tr.innerHTML = `
+          <td class="p-3.5 font-bold text-white">${t.task_id}</td>
+          <td class="p-3.5 text-pink-400 font-semibold">${t.task_type}</td>
+          <td class="p-3.5">
+            <div class="flex items-center gap-2">
+              <div class="w-24 bg-gray-800 h-2 rounded-full overflow-hidden">
+                <div class="bg-gradient-to-r from-pink-500 to-violet-500 h-full transition-all duration-300" style="width: ${t.progress_pct}%"></div>
+              </div>
+              <span class="text-[10px] text-gray-300 font-sans">${t.progress_pct}% (${t.stage || ''})</span>
             </div>
-            <span class="text-[10px] text-gray-400">${pct}% (${readyCount}/${totalCount})</span>
-          </div>
-        </td>
-        <td class="p-3.5 text-gray-300">${formatTime(totalVideoDuration)}</td>
-        <td class="p-3.5">
-          <span class="px-2 py-0.5 rounded bg-emerald-950 text-emerald-400 border border-emerald-800 text-[10px]">ĐANG CHẠY</span>
-        </td>
-        <td class="p-3.5 text-right space-x-1">
-          <button onclick="window.studioPause()" class="px-2 py-1 bg-amber-600/80 hover:bg-amber-600 text-white rounded text-[10px]">Tạm dừng</button>
-          <button onclick="window.studioResume()" class="px-2 py-1 bg-emerald-600/80 hover:bg-emerald-600 text-white rounded text-[10px]">Tiếp tục</button>
-          <button onclick="window.studioStop()" class="px-2 py-1 bg-rose-700/80 hover:bg-rose-700 text-white rounded text-[10px]">Hủy</button>
-        </td>
-      </tr>
-    `;
+          </td>
+          <td class="p-3.5 text-gray-300">${formatTime(t.duration)}</td>
+          <td class="p-3.5">${statusBadge}</td>
+          <td class="p-3.5 text-right space-x-1">${actionButtons || '<span class="text-gray-500 text-[10px]">-</span>'}</td>
+        `;
+        tbody.appendChild(tr);
+      });
+    } catch (e) {
+      console.error("Error loading tasks:", e);
+    }
   }
   document.getElementById("btn-refresh-tasks")?.addEventListener("click", updateTasksTable);
 
   // =========================================================
   // 8. MODEL MANAGER VIEW
   // =========================================================
+  window.verifyModel = async (query, btnElement) => {
+    const origHtml = btnElement.innerHTML;
+    btnElement.disabled = true;
+    btnElement.innerHTML = '<i class="fa-solid fa-spinner fa-spin mr-1"></i> Đang test...';
+
+    try {
+      const res = await fetch("/api/models/verify", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ query: query })
+      });
+      const data = await res.json();
+      if (data.ok) {
+        btnElement.className = "px-2.5 py-1 rounded bg-emerald-950 text-emerald-300 border border-emerald-800 text-[11px] font-semibold";
+        btnElement.innerHTML = '<i class="fa-solid fa-circle-check mr-1"></i> Đã xác thực';
+        alert(`[Xác Thực Checkpoint Toàn Vẹn]\nModel: ${data.model_name}\nDung lượng: ${data.size_mb} MB\nThiết bị: ${data.device}\nTrạng thái: ${data.status}\n\n${data.message}`);
+      } else {
+        btnElement.className = "px-2.5 py-1 rounded bg-rose-950 text-rose-300 border border-rose-800 text-[11px] font-semibold";
+        btnElement.innerHTML = '<i class="fa-solid fa-circle-xmark mr-1"></i> Chưa có file';
+        alert(`[Xác Thực Thất Bại]\n${data.message}`);
+      }
+    } catch (e) {
+      btnElement.innerHTML = origHtml;
+      btnElement.disabled = false;
+      alert("Lỗi kiểm tra model: " + e.message);
+    }
+  };
+
   async function loadModelsTable() {
     const tbody = document.getElementById("models-full-table-body");
     if (!tbody) return;
@@ -663,6 +779,7 @@ document.addEventListener("DOMContentLoaded", () => {
           ? `<span class="bg-emerald-950 text-emerald-400 border border-emerald-800 px-2.5 py-1 rounded text-[10px] font-bold"><i class="fa-solid fa-circle-check mr-1"></i> SẴN SÀNG</span>`
           : `<span class="bg-amber-950 text-amber-400 border border-amber-800 px-2.5 py-1 rounded text-[10px] font-bold">CHƯA TẢI</span>`;
 
+        const safeName = m.model_name.replace(/'/g, "\\'");
         tr.innerHTML = `
           <td class="p-3.5 font-bold text-gray-100">${m.engine}</td>
           <td class="p-3.5 font-mono text-[11px] text-pink-300">${m.model_name}</td>
@@ -670,8 +787,8 @@ document.addEventListener("DOMContentLoaded", () => {
           <td class="p-3.5 font-mono text-cyan-400">${m.device}</td>
           <td class="p-3.5">${badge}</td>
           <td class="p-3.5 text-right">
-            <button class="px-2.5 py-1 rounded bg-gray-800 hover:bg-gray-700 text-[11px] text-gray-200 border border-gray-700 transition" onclick="alert('Checkpoint ${m.model_name} đã được xác thực toàn vẹn!')">
-              <i class="fa-solid fa-shield-halved mr-1"></i> Verify
+            <button class="px-2.5 py-1 rounded bg-gray-800 hover:bg-gray-700 text-[11px] text-gray-200 border border-gray-700 transition" onclick="window.verifyModel('${safeName}', this)">
+              <i class="fa-solid fa-shield-halved mr-1"></i> Verify Checkpoint
             </button>
           </td>
         `;
@@ -742,17 +859,24 @@ document.addEventListener("DOMContentLoaded", () => {
   // =========================================================
   // 10. SETTINGS & GEMINI TEST CONNECTION
   // =========================================================
-  const settingsGeminiKey = document.getElementById("settings-gemini-key");
-  const settingsDeepseekKey = document.getElementById("settings-deepseek-key");
-  const settingsGeminiModel = document.getElementById("settings-gemini-model");
-  const btnToggleGeminiKey = document.getElementById("btn-toggle-gemini-key");
-  const btnTestGemini = document.getElementById("btn-test-gemini");
-  const geminiTestResult = document.getElementById("gemini-test-result");
-  const btnSaveSettings = document.getElementById("btn-save-settings");
-
-  function loadSettingsForm() {
-    if (settingsGeminiKey) settingsGeminiKey.value = localStorage.getItem("gemini_key") || "";
-    if (settingsDeepseekKey) settingsDeepseekKey.value = localStorage.getItem("deepseek_key") || "";
+  async function loadSettingsForm() {
+    try {
+      const res = await fetch("/api/settings");
+      if (res.ok) {
+        const cfg = await res.json();
+        if (settingsLlmProvider && cfg.llm_provider) settingsLlmProvider.value = cfg.llm_provider;
+        if (settingsGeminiKey && cfg.gemini_key) settingsGeminiKey.value = cfg.gemini_key;
+        if (settingsGeminiModel && cfg.gemini_model) settingsGeminiModel.value = cfg.gemini_model;
+        if (settingsDeepseekKey && cfg.deepseek_key) settingsDeepseekKey.value = cfg.deepseek_key;
+        if (settingsSuppressionMode && cfg.suppression_mode) settingsSuppressionMode.value = cfg.suppression_mode;
+        if (settingsDuckingLevel && cfg.ducking_level) settingsDuckingLevel.value = cfg.ducking_level;
+        if (settingsBufferTarget && cfg.buffer_target) settingsBufferTarget.value = cfg.buffer_target;
+      }
+    } catch (e) {
+      console.warn("Could not load backend settings:", e);
+      if (settingsGeminiKey) settingsGeminiKey.value = localStorage.getItem("gemini_key") || "";
+      if (settingsDeepseekKey) settingsDeepseekKey.value = localStorage.getItem("deepseek_key") || "";
+    }
   }
 
   btnToggleGeminiKey?.addEventListener("click", () => {
@@ -781,18 +905,41 @@ document.addEventListener("DOMContentLoaded", () => {
   });
 
   btnSaveSettings?.addEventListener("click", async () => {
-    const gKey = settingsGeminiKey.value.trim();
-    const dKey = settingsDeepseekKey.value.trim();
-    localStorage.setItem("gemini_key", gKey);
-    localStorage.setItem("deepseek_key", dKey);
+    const payload = {
+      llm_provider: settingsLlmProvider?.value || "gemini",
+      gemini_key: settingsGeminiKey?.value.trim() || "",
+      gemini_model: settingsGeminiModel?.value || "gemini-2.0-flash",
+      deepseek_key: settingsDeepseekKey?.value.trim() || "",
+      suppression_mode: settingsSuppressionMode?.value || "AUTO",
+      ducking_level: settingsDuckingLevel?.value || "-14",
+      buffer_target: settingsBufferTarget?.value || "10"
+    };
 
-    await fetch("/api/config", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ gemini_key: gKey, deepseek_key: dKey })
-    });
+    localStorage.setItem("gemini_key", payload.gemini_key);
+    localStorage.setItem("deepseek_key", payload.deepseek_key);
 
-    alert("Đã lưu cấu hình hệ thống thành công!");
+    const origText = btnSaveSettings.innerHTML;
+    btnSaveSettings.disabled = true;
+    btnSaveSettings.innerHTML = '<i class="fa-solid fa-spinner fa-spin mr-1.5"></i> Đang lưu cấu hình...';
+
+    try {
+      const res = await fetch("/api/settings", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload)
+      });
+      const data = await res.json();
+      btnSaveSettings.innerHTML = '<i class="fa-solid fa-check mr-1.5"></i> Đã lưu thành công!';
+      setTimeout(() => {
+        btnSaveSettings.innerHTML = origText;
+        btnSaveSettings.disabled = false;
+      }, 2000);
+      alert(data.message || "Đã lưu cấu hình hệ thống thành công vào .env!");
+    } catch (e) {
+      btnSaveSettings.innerHTML = origText;
+      btnSaveSettings.disabled = false;
+      alert("Lỗi lưu cấu hình: " + e.message);
+    }
   });
 
   // =========================================================
@@ -811,10 +958,44 @@ document.addEventListener("DOMContentLoaded", () => {
 
   btnCloseExportModal.addEventListener("click", () => exportModal.classList.add("hidden"));
 
+  btnCancelExport?.addEventListener("click", async () => {
+    if (!currentTaskId) return;
+    try {
+      await fetch(`/api/streaming/export-hq/cancel/${currentTaskId}`, { method: "POST" });
+      if (exportStatusText) exportStatusText.textContent = "Đang hủy tác vụ xuất video...";
+      setTimeout(() => {
+        exportStatusBox.classList.add("hidden");
+        btnConfirmExport.classList.remove("hidden");
+        updateTasksTable();
+      }, 1000);
+    } catch (e) {
+      alert("Lỗi hủy xuất: " + e.message);
+    }
+  });
+
   btnConfirmExport.addEventListener("click", async () => {
     btnConfirmExport.classList.add("hidden");
     exportStatusBox.classList.remove("hidden");
-    exportStatusText.textContent = "BS-RoFormer đang bóc tách vocal & ProPainter khử sub...";
+    exportResultBox.classList.add("hidden");
+    if (exportProgressBar) exportProgressBar.style.width = "5%";
+    if (exportProgressPct) exportProgressPct.textContent = "5%";
+    exportStatusText.innerHTML = '<i class="fa-solid fa-spinner fa-spin text-pink-400"></i> Khởi động BS-RoFormer tách vocal & Foley...';
+
+    // Poll for status updates
+    const pollInterval = setInterval(async () => {
+      try {
+        const sRes = await fetch(`/api/streaming/export-hq/status/${currentTaskId}`);
+        if (sRes.ok) {
+          const sData = await sRes.json();
+          if (exportProgressBar) exportProgressBar.style.width = `${sData.progress}%`;
+          if (exportProgressPct) exportProgressPct.textContent = `${sData.progress}%`;
+          if (exportStatusText) exportStatusText.innerHTML = `<i class="fa-solid fa-spinner fa-spin text-pink-400"></i> ${sData.stage}`;
+          if (sData.status === "COMPLETED" || sData.status === "FAILED" || sData.status === "CANCELLED") {
+            clearInterval(pollInterval);
+          }
+        }
+      } catch (_) {}
+    }, 1000);
 
     try {
       const res = await fetch("/api/streaming/export-hq", {
@@ -822,12 +1003,16 @@ document.addEventListener("DOMContentLoaded", () => {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ task_id: currentTaskId, mask_chinese: toggleMaskChinese.checked })
       });
+      clearInterval(pollInterval);
       const data = await res.json();
       if (!res.ok) throw new Error(data.detail || "Lỗi xuất video");
 
+      if (exportProgressBar) exportProgressBar.style.width = "100%";
+      if (exportProgressPct) exportProgressPct.textContent = "100%";
       exportStatusBox.classList.add("hidden");
       exportResultBox.classList.remove("hidden");
       lastExportedFileUrl = data.video_url;
+      updateTasksTable();
 
       // Native desktop notification if available
       if (window.desktopBridge && typeof window.desktopBridge.showNotification === "function") {
@@ -838,6 +1023,7 @@ document.addEventListener("DOMContentLoaded", () => {
       }
 
     } catch (e) {
+      clearInterval(pollInterval);
       exportStatusBox.classList.remove("hidden");
       exportStatusText.textContent = `Lỗi xuất video: ${e.message}`;
       btnConfirmExport.classList.remove("hidden");

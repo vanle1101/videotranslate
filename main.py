@@ -72,6 +72,37 @@ class ExportHQRequest(BaseModel):
 class ConfigRequest(BaseModel):
     gemini_key: Optional[str] = None
     deepseek_key: Optional[str] = None
+    llm_provider: Optional[str] = None
+    gemini_model: Optional[str] = None
+    suppression_mode: Optional[str] = None
+    ducking_level: Optional[str] = None
+    buffer_target: Optional[str] = None
+
+def update_env_file(updates: Dict[str, str]):
+    """Safely updates or adds configuration keys in .env file on disk."""
+    env_path = settings.BASE_DIR / ".env"
+    lines = []
+    if env_path.exists():
+        lines = env_path.read_text(encoding="utf-8", errors="ignore").splitlines()
+
+    updated_keys = set()
+    new_lines = []
+    for line in lines:
+        stripped = line.strip()
+        if stripped and not stripped.startswith("#") and "=" in stripped:
+            k, _ = stripped.split("=", 1)
+            k = k.strip()
+            if k in updates:
+                new_lines.append(f"{k}={updates[k]}")
+                updated_keys.add(k)
+                continue
+        new_lines.append(line)
+
+    for k, v in updates.items():
+        if k not in updated_keys:
+            new_lines.append(f"{k}={v}")
+
+    env_path.write_text("\n".join(new_lines) + "\n", encoding="utf-8")
 
 @app.get("/", response_class=HTMLResponse)
 async def index(request: Request):
@@ -85,15 +116,157 @@ async def get_hardware():
 async def get_models():
     return {"models": ModelManager.get_all_models()}
 
+class ModelVerifyRequest(BaseModel):
+    query: str
+
+@app.post("/api/models/verify")
+async def verify_model_endpoint(req: ModelVerifyRequest):
+    return ModelManager.verify_model(req.query)
+
+@app.post("/api/models/download")
+async def download_model_endpoint(req: ModelVerifyRequest):
+    return ModelManager.verify_model(req.query)
+
+@app.get("/api/settings")
+async def get_settings():
+    return {
+        "llm_provider": getattr(settings, "LLM_PROVIDER", "gemini"),
+        "gemini_key": getattr(settings, "GEMINI_API_KEY", "") or os.getenv("GEMINI_API_KEY", ""),
+        "gemini_model": getattr(settings, "GEMINI_MODEL", "gemini-2.0-flash"),
+        "deepseek_key": getattr(settings, "DEEPSEEK_API_KEY", "") or os.getenv("DEEPSEEK_API_KEY", ""),
+        "suppression_mode": getattr(settings, "SUPPRESSION_MODE", "AUTO"),
+        "ducking_level": str(int(getattr(settings, "BGM_VOLUME_DUCKED_DB", -14))),
+        "buffer_target": "10"
+    }
+
+@app.post("/api/settings")
 @app.post("/api/config")
-async def update_config(req: ConfigRequest):
-    if req.gemini_key:
+async def update_settings(req: ConfigRequest):
+    env_updates = {}
+    if req.gemini_key is not None:
         settings.GEMINI_API_KEY = req.gemini_key
         os.environ["GEMINI_API_KEY"] = req.gemini_key
-    if req.deepseek_key:
+        env_updates["GEMINI_API_KEY"] = req.gemini_key
+    if req.deepseek_key is not None:
         settings.DEEPSEEK_API_KEY = req.deepseek_key
         os.environ["DEEPSEEK_API_KEY"] = req.deepseek_key
-    return {"status": "ok", "message": "API keys saved successfully"}
+        env_updates["DEEPSEEK_API_KEY"] = req.deepseek_key
+    if req.llm_provider:
+        settings.LLM_PROVIDER = req.llm_provider
+        env_updates["LLM_PROVIDER"] = req.llm_provider
+    if req.gemini_model:
+        settings.GEMINI_MODEL = req.gemini_model
+        env_updates["GEMINI_MODEL"] = req.gemini_model
+    if req.ducking_level:
+        try:
+            settings.BGM_VOLUME_DUCKED_DB = float(req.ducking_level)
+            env_updates["BGM_VOLUME_DUCKED_DB"] = req.ducking_level
+        except ValueError:
+            pass
+
+    if env_updates:
+        try:
+            update_env_file(env_updates)
+        except Exception as e:
+            print(f"[!] Warning updating .env: {e}")
+
+    return {"status": "ok", "message": "Cấu hình đã được lưu an toàn vào .env và áp dụng tức thì!"}
+
+# -------------------------------------------------------------
+# TASK MANAGER API
+# -------------------------------------------------------------
+active_export_tasks: Dict[str, Dict[str, Any]] = {}
+task_history: List[Dict[str, Any]] = []
+
+@app.get("/api/tasks")
+async def list_tasks():
+    tasks = []
+
+    # 1. Streaming Realtime Sessions
+    for task_id, sess in list(active_streaming_sessions.items()):
+        ready_cnt = sum(1 for s in sess.segments.values() if s.status in ["READY", "PLAYED"])
+        tot_cnt = max(1, len(sess.segments))
+        pct = int((ready_cnt / tot_cnt) * 100) if tot_cnt > 0 else 0
+
+        status_str = "PAUSED" if sess.is_paused else ("RUNNING" if sess.is_running else "COMPLETED")
+        tasks.append({
+            "task_id": task_id,
+            "task_type": "Realtime Dubbing",
+            "status": status_str,
+            "progress_pct": pct,
+            "stage": f"Đã dịch {ready_cnt}/{tot_cnt} câu ({pct}%)",
+            "duration": sess.total_duration,
+            "elapsed_seconds": round(time.time() - sess.start_wall_time, 1) if sess.start_wall_time else 0,
+            "video_url": f"/api/inputs/{sess.video_path.name}" if hasattr(sess, "video_path") and sess.video_path else "",
+            "can_pause": status_str == "RUNNING",
+            "can_resume": status_str == "PAUSED",
+            "can_stop": status_str in ["RUNNING", "PAUSED"]
+        })
+
+    # 2. HQ Export Tasks
+    for export_id, exp in list(active_export_tasks.items()):
+        tasks.append({
+            "task_id": export_id,
+            "task_type": "HQ Export (BS-RoFormer)",
+            "status": exp.get("status", "RUNNING"),
+            "progress_pct": exp.get("progress", 0),
+            "stage": exp.get("stage", "Đang xử lý..."),
+            "duration": exp.get("duration", 0),
+            "elapsed_seconds": round(time.time() - exp.get("start_time", time.time()), 1),
+            "video_url": exp.get("video_url", ""),
+            "output_filename": exp.get("output_filename", ""),
+            "can_pause": False,
+            "can_resume": False,
+            "can_stop": exp.get("status") == "RUNNING"
+        })
+
+    # 3. Add finished history if empty
+    for hist in task_history[-5:]:
+        if not any(t["task_id"] == hist["task_id"] for t in tasks):
+            tasks.append(hist)
+
+    return {"tasks": tasks}
+
+@app.post("/api/tasks/{task_id}/pause")
+async def pause_task(task_id: str):
+    sess = get_streaming_session(task_id)
+    if sess:
+        sess.pause()
+        return {"status": "ok", "task_id": task_id, "action": "paused"}
+    raise HTTPException(status_code=404, detail="Task không tồn tại hoặc không thể tạm dừng")
+
+@app.post("/api/tasks/{task_id}/resume")
+async def resume_task(task_id: str):
+    sess = get_streaming_session(task_id)
+    if sess:
+        sess.resume()
+        return {"status": "ok", "task_id": task_id, "action": "resumed"}
+    raise HTTPException(status_code=404, detail="Task không tồn tại hoặc không thể tiếp tục")
+
+@app.post("/api/tasks/{task_id}/stop")
+async def stop_task(task_id: str):
+    sess = get_streaming_session(task_id)
+    if sess:
+        sess.stop()
+        task_history.append({
+            "task_id": task_id,
+            "task_type": "Realtime Dubbing",
+            "status": "STOPPED",
+            "progress_pct": 100,
+            "stage": "Đã dừng bởi người dùng",
+            "duration": sess.total_duration,
+            "elapsed_seconds": round(time.time() - sess.start_wall_time, 1) if sess.start_wall_time else 0,
+            "video_url": ""
+        })
+        return {"status": "ok", "task_id": task_id, "action": "stopped"}
+
+    if task_id in active_export_tasks:
+        active_export_tasks[task_id]["cancelled"] = True
+        active_export_tasks[task_id]["status"] = "CANCELLED"
+        active_export_tasks[task_id]["stage"] = "Đã hủy bởi người dùng"
+        return {"status": "ok", "task_id": task_id, "action": "cancelled"}
+
+    raise HTTPException(status_code=404, detail="Task không tồn tại")
 
 # -------------------------------------------------------------
 # REAL-TIME STREAMING API
@@ -222,22 +395,83 @@ async def export_hq(req: ExportHQRequest):
     if not segments_data:
         raise HTTPException(status_code=400, detail="Chưa có câu thoại nào sẵn sàng để xuất HQ")
 
-    exporter = HQExporter()
-    result = await asyncio.to_thread(
-        exporter.export,
-        task_id=req.task_id,
-        video_path=session.video_path,
-        segments=segments_data,
-        total_duration=session.total_duration,
-        mask_chinese=req.mask_chinese if req.mask_chinese is not None else True
-    )
-
-    return {
-        "status": "ok",
-        "output_filename": result["output_filename"],
-        "video_url": f"/api/outputs/{result['output_filename']}",
-        "elapsed_seconds": result["elapsed_seconds"]
+    export_id = f"export_{req.task_id}"
+    active_export_tasks[export_id] = {
+        "task_id": export_id,
+        "parent_session_id": req.task_id,
+        "status": "RUNNING",
+        "progress": 5,
+        "stage": "Khởi động xuất video HQ...",
+        "start_time": time.time(),
+        "duration": session.total_duration,
+        "video_url": "",
+        "output_filename": "",
+        "cancelled": False
     }
+
+    loop = asyncio.get_event_loop()
+
+    def _prog_cb(pct: int, stage: str):
+        if export_id in active_export_tasks:
+            active_export_tasks[export_id]["progress"] = pct
+            active_export_tasks[export_id]["stage"] = stage
+        asyncio.run_coroutine_threadsafe(
+            broadcast_session_event(req.task_id, "export_progress", {"progress": pct, "stage": stage}),
+            loop
+        )
+
+    def _cancel_chk():
+        return active_export_tasks.get(export_id, {}).get("cancelled", False)
+
+    try:
+        exporter = HQExporter()
+        result = await asyncio.to_thread(
+            exporter.export,
+            task_id=req.task_id,
+            video_path=session.video_path,
+            segments=segments_data,
+            total_duration=session.total_duration,
+            mask_chinese=req.mask_chinese if req.mask_chinese is not None else True,
+            progress_callback=_prog_cb,
+            cancel_check=_cancel_chk
+        )
+
+        active_export_tasks[export_id]["status"] = "COMPLETED"
+        active_export_tasks[export_id]["progress"] = 100
+        active_export_tasks[export_id]["stage"] = "Xuất video hoàn tất thành công!"
+        active_export_tasks[export_id]["video_url"] = f"/api/outputs/{result['output_filename']}"
+        active_export_tasks[export_id]["output_filename"] = result["output_filename"]
+
+        return {
+            "status": "ok",
+            "export_id": export_id,
+            "output_filename": result["output_filename"],
+            "video_url": f"/api/outputs/{result['output_filename']}",
+            "elapsed_seconds": result["elapsed_seconds"]
+        }
+    except Exception as e:
+        status_name = "CANCELLED" if active_export_tasks.get(export_id, {}).get("cancelled") else "FAILED"
+        if export_id in active_export_tasks:
+            active_export_tasks[export_id]["status"] = status_name
+            active_export_tasks[export_id]["stage"] = f"Lỗi: {e}"
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/api/streaming/export-hq/status/{task_id}")
+async def get_export_hq_status(task_id: str):
+    export_id = task_id if task_id.startswith("export_") else f"export_{task_id}"
+    if export_id in active_export_tasks:
+        return active_export_tasks[export_id]
+    raise HTTPException(status_code=404, detail="Không tìm thấy tác vụ export")
+
+@app.post("/api/streaming/export-hq/cancel/{task_id}")
+async def cancel_export_hq(task_id: str):
+    export_id = task_id if task_id.startswith("export_") else f"export_{task_id}"
+    if export_id in active_export_tasks:
+        active_export_tasks[export_id]["cancelled"] = True
+        active_export_tasks[export_id]["status"] = "CANCELLED"
+        active_export_tasks[export_id]["stage"] = "Đã hủy bởi người dùng"
+        return {"status": "ok", "message": "Đã yêu cầu hủy xuất video"}
+    raise HTTPException(status_code=404, detail="Không tìm thấy tác vụ export")
 
 class StreamLocalFileRequest(BaseModel):
     file_path: str

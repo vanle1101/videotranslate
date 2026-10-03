@@ -27,23 +27,42 @@ class HQExporter:
         video_path: Path,
         segments: List[Dict[str, Any]],
         total_duration: float,
-        mask_chinese: bool = True
+        mask_chinese: bool = True,
+        progress_callback: Optional[Any] = None,
+        cancel_check: Optional[Any] = None
     ) -> Dict[str, Any]:
         t0 = time.time()
         task_dir = settings.TEMP_DIR / f"hq_export_{task_id}"
         task_dir.mkdir(parents=True, exist_ok=True)
 
+        def _report(pct: int, stage: str):
+            if progress_callback:
+                try:
+                    progress_callback(pct, stage)
+                except Exception:
+                    pass
+
+        def _check_cancel():
+            if cancel_check and cancel_check():
+                raise RuntimeError("Tác vụ xuất video HQ đã bị hủy bởi người dùng.")
+
         # 1. Extract Master Audio
+        _report(10, "1/6 Trích xuất âm thanh gốc (Master Audio)...")
+        _check_cancel()
         raw_audio = task_dir / "raw_audio.wav"
         import subprocess
         cmd = ["ffmpeg", "-y", "-i", str(video_path), "-vn", "-acodec", "pcm_s16le", "-ar", "44100", "-ac", "2", str(raw_audio)]
         subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=True)
 
         # 2. BS-RoFormer Separation
+        _report(35, "2/6 BS-RoFormer bóc tách sạch giọng Trung, giữ 100% BGM & SFX...")
+        _check_cancel()
         sep_dir = task_dir / "separated"
         vocals_path, instrumental_path = self.separator.separate(raw_audio, sep_dir)
 
         # 3. Assemble Voice Timeline
+        _report(55, "3/6 Ráp timeline giọng đọc tiếng Việt chuẩn VieNeu-TTS...")
+        _check_cancel()
         voice_wav = task_dir / "voice_timeline.wav"
         valid_items = [s for s in segments if s.get("audio_path") and Path(s["audio_path"]).exists()]
 
@@ -68,6 +87,8 @@ class HQExporter:
             subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=True)
 
         # 4. Sidechain Audio Ducking
+        _report(70, "4/6 Dynamic Sidechain Ducking & Foley Master...")
+        _check_cancel()
         master_audio = task_dir / "master_audio_ducked.wav"
         self.mixer.mix(
             instrumental_path=instrumental_path,
@@ -77,12 +98,16 @@ class HQExporter:
         )
 
         # 5. Subtitles
+        _report(85, "5/6 Tạo phụ đề tiếng Việt ASS & Masking Hardsub...")
+        _check_cancel()
         srt_path = task_dir / "subtitles.srt"
         ass_path = task_dir / "subtitles.ass"
         self.sub_gen.generate_srt(segments, srt_path)
         self.sub_gen.generate_ass(segments, ass_path)
 
         # 6. Render final TikTok 9:16 Video
+        _report(95, "6/6 Render hoàn chỉnh TikTok 9:16 MP4...")
+        _check_cancel()
         output_filename = f"douyin_translated_{task_id}_hq.mp4"
         final_video_path = settings.OUTPUT_DIR / output_filename
 
@@ -95,6 +120,7 @@ class HQExporter:
         )
 
         elapsed = round(time.time() - t0, 1)
+        _report(100, "Xuất video hoàn tất thành công!")
         return {
             "output_filename": output_filename,
             "final_video_path": str(final_video_path.resolve()),

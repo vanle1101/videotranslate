@@ -118,7 +118,9 @@ class StreamingPipelineSession:
             if asyncio.iscoroutinefunction(self.event_callback):
                 await self.event_callback(event_type, payload)
             else:
-                self.event_callback(event_type, payload)
+                res = self.event_callback(event_type, payload)
+                if asyncio.iscoroutine(res):
+                    await res
 
     async def start(self):
         """Initializes audio extraction, segmentation, and launches worker loop."""

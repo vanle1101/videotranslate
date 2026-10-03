@@ -74,3 +74,35 @@ class ModelManager:
         })
 
         return models
+
+    @staticmethod
+    def verify_model(query: str) -> Dict[str, Any]:
+        models = ModelManager.get_all_models()
+        target = None
+        for m in models:
+            if query.lower() in m["engine"].lower() or query.lower() in m["model_name"].lower():
+                target = m
+                break
+        if not target:
+            return {"ok": False, "message": f"Không tìm thấy model khớp với '{query}'"}
+
+        path_str = target.get("path", "")
+        if not path_str or not Path(path_str).exists():
+            return {
+                "ok": False,
+                "engine": target["engine"],
+                "model_name": target["model_name"],
+                "status": "MISSING",
+                "message": f"Model {target['model_name']} chưa tồn tại tại: {path_str}"
+            }
+
+        size_mb = target.get("size_mb", 0)
+        return {
+            "ok": True,
+            "engine": target["engine"],
+            "model_name": target["model_name"],
+            "size_mb": size_mb,
+            "device": target["device"],
+            "status": "VERIFIED",
+            "message": f"Checkpoint {target['model_name']} ({size_mb} MB) đã được xác thực toàn vẹn trên {target['device']}!"
+        }

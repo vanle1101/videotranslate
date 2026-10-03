@@ -1,0 +1,197 @@
+{
+  "timestamp": "2026-10-03 11:49:06",
+  "total_tests": 21,
+  "passed": 21,
+  "failed": 0,
+  "tests": [
+    {
+      "feature": "App Shell & Tabs",
+      "location": "App Header",
+      "test_name": "Index Page Load & Views Integrity",
+      "expected": "HTTP 200 and all 5 view containers present",
+      "actual": "HTTP 200",
+      "status": "PASS",
+      "details": "Verified presence of view-studio, view-tasks, view-models, view-diagnostics, view-settings, and export-modal."
+    },
+    {
+      "feature": "Hardware Pill",
+      "location": "Header Status Pill",
+      "test_name": "Hardware Telemetry Endpoint",
+      "expected": "GPU info or CPU Cores returned",
+      "actual": "NVIDIA GeForce GTX 1050 Ti",
+      "status": "PASS",
+      "details": "Device: None, VRAM: 4095.8 MB"
+    },
+    {
+      "feature": "Settings Form",
+      "location": "Settings Tab",
+      "test_name": "Load Current Settings",
+      "expected": "Settings JSON returned with LLM and Audio parameters",
+      "actual": "Provider: gemini, Model: gemini-2.0-flash",
+      "status": "PASS",
+      "details": ""
+    },
+    {
+      "feature": "Settings Save & Persistence",
+      "location": "Settings Tab (#btn-save-settings)",
+      "test_name": "Save Settings to Disk (.env)",
+      "expected": "Status OK and values persisted in .env file",
+      "actual": "Persisted in .env",
+      "status": "PASS",
+      "details": ".env correctly updated without breaking formatting."
+    },
+    {
+      "feature": "Gemini Connection Test",
+      "location": "Settings Tab (#btn-test-gemini)",
+      "test_name": "Test Gemini API Endpoint Response",
+      "expected": "Clean JSON response (ok or descriptive error message)",
+      "actual": "ok=False, error=Chưa có GEMINI_API_KEY. Vui lòng cấu hình trong Cài đặt.",
+      "status": "PASS",
+      "details": "Endpoint handles missing or present key gracefully without crashing."
+    },
+    {
+      "feature": "Model Manager",
+      "location": "Models Tab",
+      "test_name": "List All AI Models & Checkpoints",
+      "expected": "List of at least 4 models (RoFormer, SenseVoice, VieNeu, Whisper)",
+      "actual": "Found 5 models",
+      "status": "PASS",
+      "details": "BS-RoFormer (Vocal/Instrumental), SenseVoiceSmall ONNX Int8, VieNeu-TTS v3 Turbo, Whisper-small (CTranslate2), ProPainter & Targeted Mask"
+    },
+    {
+      "feature": "Model Checkpoint Verification",
+      "location": "Models Tab (.btn-model-verify)",
+      "test_name": "Verify Model Integrity (BS-RoFormer)",
+      "expected": "Status VERIFIED and size reported",
+      "actual": "VERIFIED (609.7 MB)",
+      "status": "PASS",
+      "details": "Checkpoint BS-RoFormer (Vocal/Instrumental) (609.7 MB) đã được xác thực toàn vẹn trên CUDA (GTX 1050 Ti)!"
+    },
+    {
+      "feature": "Model Checkpoint Verification",
+      "location": "Models Tab (.btn-model-verify)",
+      "test_name": "Verify Model Integrity (SenseVoice)",
+      "expected": "Status VERIFIED and size reported",
+      "actual": "VERIFIED (228.2 MB)",
+      "status": "PASS",
+      "details": "Checkpoint SenseVoiceSmall ONNX Int8 (228.2 MB) đã được xác thực toàn vẹn trên CPU / ONNX (Auto)!"
+    },
+    {
+      "feature": "Diagnostics Log Viewer",
+      "location": "Diagnostics Tab (data-cat='app')",
+      "test_name": "Read Category Log (app)",
+      "expected": "Log content returned as string",
+      "actual": "Received 3732 characters",
+      "status": "PASS",
+      "details": ""
+    },
+    {
+      "feature": "Diagnostics Log Viewer",
+      "location": "Diagnostics Tab (data-cat='ai')",
+      "test_name": "Read Category Log (ai)",
+      "expected": "Log content returned as string",
+      "actual": "Received 157 characters",
+      "status": "PASS",
+      "details": ""
+    },
+    {
+      "feature": "Diagnostics Log Viewer",
+      "location": "Diagnostics Tab (data-cat='pipeline')",
+      "test_name": "Read Category Log (pipeline)",
+      "expected": "Log content returned as string",
+      "actual": "Received 10 characters",
+      "status": "PASS",
+      "details": ""
+    },
+    {
+      "feature": "Diagnostics Log Viewer",
+      "location": "Diagnostics Tab (data-cat='errors')",
+      "test_name": "Read Category Log (errors)",
+      "expected": "Log content returned as string",
+      "actual": "Received 10 characters",
+      "status": "PASS",
+      "details": ""
+    },
+    {
+      "feature": "Diagnostics Open Folder",
+      "location": "Diagnostics Tab (#btn-open-log-folder)",
+      "test_name": "Open Logs Directory Endpoint",
+      "expected": "status: ok",
+      "actual": "status: ok",
+      "status": "PASS",
+      "details": ""
+    },
+    {
+      "feature": "Realtime Video Session",
+      "location": "Studio (#btn-start)",
+      "test_name": "Start Local File Streaming Session",
+      "expected": "Task ID generated, video URL returned, status started",
+      "actual": "task_id=7b0c1bcb, status=started",
+      "status": "PASS",
+      "details": "Video URL: /api/local-file?path=E:/Dịch video/workspace/inputs/audit_sample.mp4"
+    },
+    {
+      "feature": "Task Manager Tracking",
+      "location": "Tasks Tab (#tasks-table-body)",
+      "test_name": "Active Streaming Task Appears in Tasks List",
+      "expected": "Task 7b0c1bcb present in tasks list with progress",
+      "actual": "Found: True (Total active: 1)",
+      "status": "PASS",
+      "details": "['7b0c1bcb']"
+    },
+    {
+      "feature": "Task Pause",
+      "location": "Studio / Tasks (#btn-pause-worker)",
+      "test_name": "Pause Streaming Worker",
+      "expected": "action: paused",
+      "actual": "action: paused",
+      "status": "PASS",
+      "details": ""
+    },
+    {
+      "feature": "Task Resume",
+      "location": "Studio / Tasks (#btn-resume-worker)",
+      "test_name": "Resume Streaming Worker",
+      "expected": "action: resumed",
+      "actual": "action: resumed",
+      "status": "PASS",
+      "details": ""
+    },
+    {
+      "feature": "Smart Seek & Priority",
+      "location": "Studio (#segments-timeline-track)",
+      "test_name": "Seek Endpoint with Queue Reprioritization",
+      "expected": "status: ok, seek_time: 2.5",
+      "actual": "status: ok, seek_time: 2.5",
+      "status": "PASS",
+      "details": ""
+    },
+    {
+      "feature": "Task Stop / Cancel",
+      "location": "Studio / Tasks (#btn-stop-worker)",
+      "test_name": "Stop Streaming Task",
+      "expected": "action: stopped and session terminated",
+      "actual": "action: stopped",
+      "status": "PASS",
+      "details": ""
+    },
+    {
+      "feature": "HQ Export Progress Tracking",
+      "location": "Export Modal (#export-progress-bar)",
+      "test_name": "Export Status Polling Endpoint",
+      "expected": "Returns live progress % and stage description",
+      "actual": "progress: 45%, stage: 2/6 BS-RoFormer tách sạch giọng Trung...",
+      "status": "PASS",
+      "details": ""
+    },
+    {
+      "feature": "HQ Export Cancellation",
+      "location": "Export Modal (#btn-cancel-export)",
+      "test_name": "Cancel Running HQ Export Task",
+      "expected": "status: ok and task state marked CANCELLED",
+      "actual": "status=ok, state=CANCELLED",
+      "status": "PASS",
+      "details": ""
+    }
+  ]
+}
