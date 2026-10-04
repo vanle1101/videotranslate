@@ -14,8 +14,14 @@ import threading
 import urllib.error
 import urllib.request
 
+from config import settings
+
 BASE_DIR = Path(__file__).resolve().parents[2]
 ERRORS = {
+    "chrome_connection_required": (
+        "Trong Chrome đang dùng, mở chrome://inspect/#remote-debugging và bật "
+        "Allow remote debugging. Kết nối lại Muse rồi chấp nhận hộp thoại kết nối của Chrome."
+    ),
     "login_required": "Hãy đăng nhập Meta trong cửa sổ Muse rồi thử lại.",
     "approval_required": "Muse đang chờ bạn xác nhận trong cửa sổ trình duyệt.",
     "timed_out": "Muse trả lời quá lâu. Bản dịch chưa hoàn tất, hãy thử lại.",
@@ -29,6 +35,10 @@ ERRORS = {
 class MuseError(RuntimeError):
     """Safe user-facing failure; never contains browser state or credentials."""
 
+    def __init__(self, message: str, *, code: str | None = None):
+        super().__init__(message)
+        self.code = code if code in ERRORS else None
+
 
 class MuseService:
     def __init__(self, base_dir: Path = BASE_DIR):
@@ -41,6 +51,8 @@ class MuseService:
         self._lock = threading.RLock()
         self._lifecycle_lock = threading.RLock()
         self._shutdown = threading.Event()
+        self._configuration_epoch = 0
+        self._reconfiguring = False
         self._http = urllib.request.build_opener(urllib.request.ProxyHandler({}))
 
     def _installed(self):
@@ -55,6 +67,23 @@ class MuseService:
     def _check_open(self):
         if self._shutdown.is_set():
             raise MuseError("Ứng dụng đang đóng; Muse đã dừng.")
+        if self._reconfiguring:
+            raise MuseError("Đang đổi chế độ Chrome của Muse. Hãy thử lại sau khi lưu xong.")
+
+    def _request_generation(self):
+        with self._lifecycle_lock:
+            self._check_open()
+            return self._configuration_epoch
+
+    def _check_generation(self, generation):
+        self._check_open()
+        if generation != self._configuration_epoch:
+            raise MuseError("Chế độ Chrome của Muse đã thay đổi. Hãy gửi lại yêu cầu.")
+
+    @staticmethod
+    def browser_mode():
+        mode = settings.MUSE_BROWSER_MODE
+        return mode if mode in {"dedicated", "existing"} else "dedicated"
 
     def _request(self, path, body=None, timeout=15):
         if path != "/shutdown":
@@ -75,7 +104,7 @@ class MuseService:
                 code = json.loads(exc.read(2048)).get("error")
             except (ValueError, OSError):
                 code = None
-            raise MuseError(ERRORS.get(code, "Muse không thể hoàn tất yêu cầu.")) from None
+            raise MuseError(ERRORS.get(code, "Muse không thể hoàn tất yêu cầu."), code=code) from None
         except (OSError, ValueError, TimeoutError):
             raise MuseError("Mất kết nối với Muse. Hãy kết nối lại rồi thử lại.") from None
         if not isinstance(result, dict):
@@ -84,7 +113,8 @@ class MuseService:
 
     def status(self):
         result = {"installed": self._installed(), "running": self._running(),
-                  "logged_in": False, "composer_ready": False}
+                  "logged_in": False, "composer_ready": False,
+                  "browser_mode": self.browser_mode()}
         if result["running"]:
             try:
                 state = self._request("/health", timeout=5)
@@ -107,7 +137,8 @@ class MuseService:
             if any(marker in name.upper() for marker in ("KEY", "TOKEN", "SECRET", "PASSWORD")) or name.startswith("MUSE_"):
                 env.pop(name, None)
         env.update(MUSE_BRIDGE_TOKEN=token, MUSE_RUNTIME_DIR=str(self.runtime_dir),
-                   MUSE_PROFILE_DIR=str(self.profile_dir), MUSE_HEADLESS="0", MUSE_CHANNEL="chrome")
+                   MUSE_PROFILE_DIR=str(self.profile_dir), MUSE_HEADLESS="0", MUSE_CHANNEL="chrome",
+                   MUSE_BROWSER_MODE=self.browser_mode())
         kwargs = {"creationflags": subprocess.CREATE_NO_WINDOW | subprocess.CREATE_NEW_PROCESS_GROUP} if os.name == "nt" else {"start_new_session": True}
         try:
             # Publish ownership atomically with shutdown so a process cannot escape
@@ -142,17 +173,19 @@ class MuseService:
             raise MuseError("Không khởi động được cầu nối Muse.") from None
 
     def start_login(self):
-        self._check_open()
+        generation = self._request_generation()
         with self._lock:
+            self._check_generation(generation)
             self._ensure_started()
             self._request("/login", {}, timeout=100)
             return self.status()
 
     def translate(self, prompt: str, system: str | None = None) -> str:
-        self._check_open()
+        generation = self._request_generation()
         if not isinstance(prompt, str) or not prompt.strip():
             raise MuseError("Không có văn bản để gửi đến Muse.")
         with self._lock:
+            self._check_generation(generation)
             self._ensure_started()
             state = self._request("/health")
             if not state.get("logged_in"):
@@ -165,6 +198,28 @@ class MuseService:
             if not isinstance(reply, str) or not reply.strip():
                 raise MuseError(ERRORS["empty_reply"])
             return reply.strip()
+
+    def change_browser_mode(self, mode, apply_config):
+        """Cancel the old bridge and fence queued work before changing configuration."""
+        if mode not in {"dedicated", "existing"}:
+            raise MuseError("Chế độ trình duyệt Muse không hợp lệ.")
+        with self._lifecycle_lock:
+            self._check_open()
+            self._configuration_epoch += 1
+            self._reconfiguring = True
+            try:
+                self._stop_process()
+            except BaseException:
+                self._reconfiguring = False
+                raise
+        try:
+            with self._lock:
+                if self._shutdown.is_set():
+                    raise MuseError("Ứng dụng đang đóng; Muse đã dừng.")
+                apply_config()
+        finally:
+            with self._lifecycle_lock:
+                self._reconfiguring = False
 
     def stop(self):
         # Do not wait on the translation lock: shutdown also cancels an active request.

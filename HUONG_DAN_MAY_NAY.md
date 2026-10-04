@@ -36,10 +36,13 @@ Tùy chọn **OpenCode Zen Free** dùng [CLI chính thức](https://opencode.ai/
 Tích hợp dựa trên driver MIT của [Muse-Chat-MCP](https://github.com/duclm1x1/Muse-Chat-MCP), cố định commit `6c00e8cf1bf2fb6718740e0c20d3578fb4c47286`. Đây là thao tác giao diện web qua Chrome, không phải API chính thức và không tự cấp token. Khả năng truy cập, model và hạn mức do tài khoản Muse/Meta quyết định; chưa có căn cứ xác nhận quảng cáo “1 tỷ token”.
 
 1. Chạy `setup_muse.bat` một lần nếu chuyển máy. Cần Node.js 20+ và Chrome; chỉ thêm khoảng 13 MB Playwright, không tải trình duyệt mới. Máy này đã cài phần kết nối.
-2. Mở **Cài đặt → Muse (thử nghiệm) → Mở đăng nhập Muse**. Đăng nhập trên cửa sổ Chrome vừa mở, rồi bấm **Kiểm tra đăng nhập** và **Thử dịch Muse**.
-3. Chỉ khi kiểm tra thành công, chọn nhà cung cấp **Muse** và lưu. Nếu tài khoản chưa có quyền truy cập, tiếp tục dùng Gemini hoặc OpenRouter Free.
+2. Trong **Cài đặt → Muse (thử nghiệm)**, chọn **Chrome đang dùng** nếu đã đăng nhập Muse ở Chrome cá nhân, rồi lưu. Trên Chrome hiện đại, mở `chrome://inspect/#remote-debugging` và bật **Allow remote debugging for this browser instance**. Bấm **Kết nối Muse** trong tool, rồi chấp nhận hộp thoại kết nối của Chrome. Không cần đăng nhập lại hoặc khởi động lại trình duyệt. Đây là [cơ chế kết nối Chrome được Playwright hỗ trợ](https://playwright.dev/mcp/configuration/browser-extension).
+3. Bấm **Kiểm tra đăng nhập** và **Thử dịch Muse**. Khi thành công, chọn nhà cung cấp **Muse** rồi lưu để dịch video qua tài khoản đó. Việc đăng nhập thành công ở Chrome cá nhân không đồng nghĩa hồ sơ Chrome riêng của tool đã đăng nhập.
+4. Có thể chọn **Chrome riêng của tool** nếu muốn tách phiên; đăng nhập một lần trong cửa sổ do tool mở. Chế độ này không cần bật kết nối trình duyệt cá nhân.
 
-Muse sử dụng hồ sơ Chrome riêng tại `workspace/muse-profile`, không lấy cookie hay key của trình duyệt cá nhân. Kết nối nội bộ chỉ nghe ở localhost và chỉ hỗ trợ đăng nhập/dịch; không mở chức năng gửi file hoặc đọc lịch sử chat. Đóng ứng dụng sẽ đóng trình duyệt do tích hợp mở. Runtime và hồ sơ đăng nhập không được đẩy GitHub. Driver phụ thuộc giao diện Muse nên có thể cần cập nhật khi trang thay đổi.
+Chế độ **Chrome đang dùng** mở một tab Muse mới bằng phiên đã đăng nhập, không sao chép cookie, key hoặc hồ sơ Chrome. Quyền remote debugging cho ứng dụng local khả năng điều khiển trình duyệt; phần tích hợp này chỉ thao tác tab Muse do nó tạo. Đóng tool sẽ đóng tab đó và ngắt kết nối, giữ Chrome và các tab khác. Có thể tắt remote debugging sau khi dùng. Tool không tự bật quyền này và không âm thầm chuyển sang Chrome khác khi kết nối lỗi.
+
+Chế độ **Chrome riêng** lưu phiên ở `workspace/muse-profile` và đóng trình duyệt riêng khi thoát. Kết nối nội bộ chỉ nghe ở localhost, có mã xác thực riêng mỗi lần chạy và chỉ hỗ trợ đăng nhập/dịch. Runtime và hồ sơ đăng nhập không được đẩy GitHub. Driver phụ thuộc giao diện Muse nên có thể cần cập nhật khi trang thay đổi.
 
 ## Kiểm tra và xử lý lỗi
 
@@ -54,6 +57,8 @@ venv\Scripts\python.exe -B -m pytest -p no:cacheprovider tests/test_local_runtim
 ```
 
 Hai script kiểm tra riêng: `tests/smoke_desktop.py` kiểm tra QtWebEngine và thao tác chọn file; `tests/smoke_local_video.py` tạo câu nói tiếng Trung tổng hợp, nhận giọng thật, dịch, đọc tiếng Việt và xuất video. Script video cần Internet và model đã tải, tự dọn media thử.
+
+Kết nối Chrome đang dùng có bộ kiểm thử `node --test tests/test_chrome_connection.mjs`: kiểm tra giữ nguyên các tab khác, ngắt kết nối đúng lúc và xử lý đóng tool trong khi đang kết nối. Cần người dùng bật quyền Chrome để kiểm tra Muse thật; các kiểm thử giả lập không xác nhận quyền tài khoản.
 
 Kết quả tại máy này: 148 bài hồi quy và 94 subtests đạt; thử desktop và các nút kiểm tra kết nối đạt; video tổng hợp 6,864 giây qua 3 đoạn thoại, đã chạy thật với OpenRouter Free ở lần trước và Gemini 2.5 Flash ở lần này, đọc tiếng Việt và xuất MP4 thành công. Gemini 2.5 Flash đã kiểm tra dịch một đoạn và theo lô bằng API thật, giữ nguyên ID/thời gian/metadata. Edge-TTS thử lại tối đa 3 lần nếu dịch vụ kết thúc mà không trả âm thanh. Bản dịch AI vẫn cần xem lại trước khi xuất bản. Chưa kiểm chứng trên video dài hoặc tài khoản tải video riêng của người dùng. `pip check` còn báo xung đột của các công cụ toàn cục có sẵn (aider-chat, patchright, selenium); các package toàn cục đó không được chỉnh sửa bởi lần cài này.
 

@@ -886,6 +886,8 @@ document.addEventListener("DOMContentLoaded", () => {
           settingsGeminiKey.placeholder = cfg.gemini_configured ? "Đã có key — để trống để giữ nguyên" : "Nhập Gemini API key";
         }
         if (settingsGeminiModel && cfg.gemini_model) settingsGeminiModel.value = cfg.gemini_model;
+        const museMode = document.getElementById("settings-muse-browser-mode");
+        if (museMode) museMode.value = cfg.muse_browser_mode || "dedicated";
         if (settingsOpenRouterModel) settingsOpenRouterModel.value = cfg.openrouter_model;
         if (openRouterAuthStatus) openRouterAuthStatus.textContent = cfg.openrouter_configured
           ? "Đã nhận key OpenRouter Free từ máy. Không cần nhập lại."
@@ -925,7 +927,9 @@ document.addEventListener("DOMContentLoaded", () => {
     museStatus.textContent = !state.installed
       ? "Chưa cài Muse. Chạy setup_muse.bat một lần rồi kiểm tra lại."
       : !state.running
-        ? "Đã cài Muse. Bấm Mở đăng nhập Muse để kết nối tài khoản của bạn."
+        ? (state.browser_mode === "existing"
+          ? "Đã cài Muse. Bấm Kết nối Muse để dùng phiên Chrome đã đăng nhập."
+          : "Đã cài Muse. Bấm Kết nối Muse để đăng nhập trong Chrome riêng của tool.")
         : state.logged_in && state.composer_ready
           ? "Muse đã đăng nhập và sẵn sàng. Bạn có thể thử dịch."
           : "Cửa sổ Muse đã mở. Hoàn tất đăng nhập hoặc yêu cầu truy cập trên trang, rồi kiểm tra lại.";
@@ -1036,6 +1040,7 @@ document.addEventListener("DOMContentLoaded", () => {
       opencode_model: settingsOpenCodeModel?.value || "big-pickle",
       gemini_key: settingsGeminiKey?.value.trim() || undefined,
       gemini_model: settingsGeminiModel?.value || "gemini-2.5-flash",
+      muse_browser_mode: document.getElementById("settings-muse-browser-mode")?.value || "dedicated",
       deepseek_key: settingsDeepseekKey?.value.trim() || undefined,
       suppression_mode: settingsSuppressionMode?.value || "AUTO",
       ducking_level: settingsDuckingLevel?.value || "-14",

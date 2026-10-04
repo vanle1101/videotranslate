@@ -525,10 +525,16 @@
 
         <details class="rounded-xl border border-gray-700 p-3 space-y-3">
           <summary class="text-xs text-gray-300 cursor-pointer">Muse qua tài khoản Meta (thử nghiệm)</summary>
-          <p class="text-xs text-gray-400">Dùng Muse-Chat-MCP qua Chrome riêng. Bạn tự đăng nhập Meta; tốc độ và hạn mức theo tài khoản Muse. Tên model không đảm bảo model thực tế của web.</p>
+          <p class="text-xs text-gray-400">Kết nối phiên Muse đã đăng nhập trong Chrome của bạn hoặc dùng Chrome riêng. Hạn mức và model phía sau do Muse quyết định.</p>
+          <label for="settings-muse-browser-mode" class="text-xs text-gray-300 block">Phiên Chrome cho Muse</label>
+          <select id="settings-muse-browser-mode" class="w-full bg-[#08090d] border border-gray-700 rounded-xl px-3 py-2 text-xs text-gray-100 focus:outline-none focus:border-pink-500">
+            <option value="existing">Chrome đang dùng — giữ phiên Muse đã đăng nhập</option>
+            <option value="dedicated">Chrome riêng của tool — đăng nhập một lần</option>
+          </select>
+          <p class="text-xs text-gray-400">Lưu cấu hình trước khi kết nối. Với Chrome đang dùng, mở <code>chrome://inspect/#remote-debugging</code>, bật <strong>Allow remote debugging for this browser instance</strong>, rồi cho phép khi Chrome hỏi kết nối. Quyền này cho ứng dụng local điều khiển trình duyệt; tool chỉ thao tác tab Muse do nó mở. Có thể tắt lại sau khi dùng.</p>
           <p id="muse-status" role="status" class="text-xs text-gray-400">Đang kiểm tra cài đặt Muse…</p>
           <div class="flex flex-wrap gap-2">
-            <button type="button" id="btn-muse-login" class="px-3 py-2 rounded-xl border border-pink-500/50 hover:bg-pink-600/20 text-pink-300 text-xs">Mở đăng nhập Muse</button>
+            <button type="button" id="btn-muse-login" class="px-3 py-2 rounded-xl border border-pink-500/50 hover:bg-pink-600/20 text-pink-300 text-xs">Kết nối Muse</button>
             <button type="button" id="btn-muse-status" class="px-3 py-2 rounded-xl border border-gray-700 hover:bg-gray-800 text-gray-300 text-xs">Kiểm tra đăng nhập</button>
             <button type="button" id="btn-test-muse" class="px-3 py-2 rounded-xl border border-gray-700 hover:bg-gray-800 text-gray-300 text-xs">Thử dịch Muse</button>
           </div>

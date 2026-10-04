@@ -27,7 +27,7 @@ from core.streaming.pipeline import (
     active_streaming_sessions
 )
 from core.streaming.export import HQExporter
-from core.services.muse_service import muse_service
+from core.services.muse_service import ERRORS as MUSE_ERRORS, MuseError, muse_service
 
 app = FastAPI(title=f"{settings.APP_NAME} - Realtime Streaming Studio")
 
@@ -78,6 +78,7 @@ class ConfigRequest(BaseModel):
     gemini_model: Optional[str] = None
     opencode_model: Optional[str] = None
     openrouter_model: Optional[str] = None
+    muse_browser_mode: Optional[str] = None
     suppression_mode: Optional[str] = None
     ducking_level: Optional[str] = None
     buffer_target: Optional[str] = None
@@ -143,6 +144,7 @@ async def get_settings():
         "device": settings.DEVICE,
         "whisper_model": settings.WHISPER_MODEL_SIZE,
         "llm_provider": settings.LLM_PROVIDER,
+        "muse_browser_mode": settings.MUSE_BROWSER_MODE,
         "opencode_model": settings.OPENCODE_MODEL,
         "opencode_configured": bool(resolve_api_key()),
         "opencode_cli_available": bool(find_opencode_executable()),
@@ -163,6 +165,8 @@ async def update_settings(req: ConfigRequest):
     # Validate before changing any active settings or persisting the local file.
     if req.llm_provider and req.llm_provider not in {"openrouter-free", "opencode", "free", "gemini", "deepseek", "openai", "muse"}:
         raise HTTPException(status_code=422, detail="Nhà cung cấp dịch không hợp lệ")
+    if req.muse_browser_mode is not None and req.muse_browser_mode not in {"dedicated", "existing"}:
+        raise HTTPException(status_code=422, detail="Chế độ trình duyệt Muse không hợp lệ")
     opencode_model = None
     if req.opencode_model is not None:
         try:
@@ -173,6 +177,8 @@ async def update_settings(req: ConfigRequest):
         if value is not None and ("\n" in value or "\r" in value):
             raise HTTPException(status_code=422, detail="Cấu hình không được chứa ký tự xuống dòng")
     env_updates = {}
+    if req.muse_browser_mode is not None:
+        env_updates["MUSE_BROWSER_MODE"] = req.muse_browser_mode
     if req.openrouter_model is not None:
         import re
         if not re.fullmatch(r"[a-zA-Z0-9_.-]+/[a-zA-Z0-9_.-]+:free", req.openrouter_model):
@@ -197,7 +203,7 @@ async def update_settings(req: ConfigRequest):
         except ValueError:
             raise HTTPException(status_code=422, detail="Mức giảm BGM phải từ -60 đến 0 dB") from None
 
-    if env_updates:
+    def apply_settings():
         try:
             update_env_file(env_updates)
         except OSError:
@@ -206,6 +212,15 @@ async def update_settings(req: ConfigRequest):
             setattr(settings, name, float(value) if name == "BGM_VOLUME_DUCKED_DB" else value)
             if name in {"GEMINI_API_KEY", "DEEPSEEK_API_KEY"}:
                 os.environ[name] = value
+
+    if env_updates:
+        if req.muse_browser_mode is not None and req.muse_browser_mode != settings.MUSE_BROWSER_MODE:
+            try:
+                await asyncio.to_thread(muse_service.change_browser_mode, req.muse_browser_mode, apply_settings)
+            except MuseError:
+                raise HTTPException(status_code=409, detail="Muse đang đổi chế độ hoặc ứng dụng đang đóng. Hãy thử lưu lại.") from None
+        else:
+            apply_settings()
 
     return {"status": "ok", "message": "Cấu hình đã được lưu an toàn vào .env và áp dụng tức thì!"}
 
@@ -676,8 +691,19 @@ async def test_openrouter_connection():
 
 def _public_muse_status(state):
     # Only expose lifecycle flags, never profile paths, browser text or credentials.
-    return {name: state.get(name) is True for name in
-            ("installed", "running", "logged_in", "composer_ready")}
+    result = {name: state.get(name) is True for name in
+              ("installed", "running", "logged_in", "composer_ready")}
+    mode = state.get("browser_mode")
+    result["browser_mode"] = mode if mode in {"dedicated", "existing"} else "dedicated"
+    return result
+
+
+def _known_muse_failure(error):
+    # Reconstruct messages only from our code allowlist, never echo exception text.
+    code = error.code if isinstance(error, MuseError) else None
+    if code in MUSE_ERRORS:
+        return {"ok": False, "error_code": code, "error": MUSE_ERRORS[code]}
+    return None
 
 
 @app.get("/api/muse/status")
@@ -695,7 +721,10 @@ async def muse_login():
     try:
         state = await asyncio.to_thread(muse_service.start_login)
         return {"ok": True, **_public_muse_status(state)}
-    except Exception:
+    except Exception as error:
+        known = _known_muse_failure(error)
+        if known:
+            return known
         return {"ok": False, "error_code": "login_failed",
                 "error": "Chưa mở được Muse. Chạy setup_muse.bat, kiểm tra Chrome rồi thử kết nối lại."}
 
@@ -732,7 +761,10 @@ async def test_muse_connection():
         # Browser access cannot attest which underlying model the Muse account uses.
         return {"ok": True, "model": "muse-browser",
                 "latency_ms": round((time.monotonic() - started) * 1000)}
-    except Exception:
+    except Exception as error:
+        known = _known_muse_failure(error)
+        if known:
+            return known
         return {"ok": False, "error_code": "connection_failed",
                 "error": "Muse chưa hoàn tất kiểm tra. Kiểm tra đăng nhập hoặc yêu cầu xác nhận trong Chrome rồi thử lại."}
 

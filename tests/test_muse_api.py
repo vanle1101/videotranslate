@@ -33,7 +33,7 @@ def test_status_only_reads_whitelisted_metadata_in_worker_thread(muse):
     result = client.get("/api/muse/status")
     assert result.status_code == 200
     assert result.json() == {"ok": True, "installed": True, "running": False,
-                             "logged_in": False, "composer_ready": False}
+                             "logged_in": False, "composer_ready": False, "browser_mode": "dedicated"}
     service.start_login.assert_not_called()
     service.translate.assert_not_called()
 
@@ -108,3 +108,48 @@ def test_settings_accept_muse_without_touching_local_secrets(muse, monkeypatch):
     assert result.status_code == 200
     assert settings.LLM_PROVIDER == "muse"
     save.assert_called_once_with({"LLM_PROVIDER": "muse"})
+
+
+def test_existing_mode_saved_only_after_service_reconfiguration(muse, monkeypatch):
+    service, client = muse
+    monkeypatch.setattr(settings, "MUSE_BROWSER_MODE", "dedicated")
+    save = Mock()
+    monkeypatch.setattr(main, "update_env_file", save)
+    def change(mode, apply):
+        assert mode == "existing"
+        save.assert_not_called()
+        apply()
+    service.change_browser_mode.side_effect = change
+    result = client.post("/api/settings", json={"muse_browser_mode": "existing"})
+    assert result.status_code == 200
+    assert client.get("/api/settings").json()["muse_browser_mode"] == "existing"
+    save.assert_called_once_with({"MUSE_BROWSER_MODE": "existing"})
+    service.change_browser_mode.assert_called_once()
+
+
+def test_invalid_browser_mode_changes_nothing(muse, monkeypatch):
+    service, client = muse
+    save = Mock()
+    monkeypatch.setattr(main, "update_env_file", save)
+    result = client.post("/api/settings", json={"muse_browser_mode": "http://external/"})
+    assert result.status_code == 422
+    save.assert_not_called()
+    service.change_browser_mode.assert_not_called()
+
+
+def test_chrome_permission_error_is_fixed_and_actionable(muse):
+    service, client = muse
+    service.start_login.side_effect = MuseError("private chrome details", code="chrome_connection_required")
+    data = client.post("/api/muse/login").json()
+    assert data["error_code"] == "chrome_connection_required"
+    assert "chrome://inspect/#remote-debugging" in data["error"]
+    assert "private" not in data["error"]
+
+
+def test_status_allows_only_known_browser_modes(muse):
+    service, client = muse
+    for value, expected in [("existing", "existing"), ("secret arbitrary value", "dedicated")]:
+        service.status.return_value["browser_mode"] = value
+        data = client.get("/api/muse/status").json()
+        assert data["browser_mode"] == expected
+        assert "secret" not in str(data)

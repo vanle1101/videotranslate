@@ -104,6 +104,7 @@ def main():
             provider: document.getElementById('settings-llm-provider').value,
             model: document.getElementById('settings-opencode-model').value,
             freeModel: document.getElementById('settings-openrouter-model').value,
+            museMode: document.getElementById('settings-muse-browser-mode').value,
             modelCount: document.getElementById('settings-opencode-model').options.length,
             status: document.getElementById('opencode-auth-status').textContent,
             geminiKey: document.getElementById('settings-gemini-key').value,
@@ -113,6 +114,7 @@ def main():
         assert config['provider'] == settings.LLM_PROVIDER
         assert config['model'] == settings.OPENCODE_MODEL
         assert config['freeModel'] == settings.OPENROUTER_MODEL
+        assert config['museMode'] == settings.MUSE_BROWSER_MODE
         assert config['modelCount'] >= 1
         assert config['status'] and 'Đang kiểm tra' not in config['status']
         assert not config['geminiKey'] and not config['deepseekKey']

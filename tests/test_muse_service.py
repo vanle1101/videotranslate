@@ -10,10 +10,12 @@ import urllib.request
 import pytest
 
 from core.services.muse_service import BASE_DIR, MuseError, MuseService
+from config import settings
 
 
 @pytest.fixture
 def service(tmp_path, monkeypatch):
+    monkeypatch.setattr(settings, "MUSE_BROWSER_MODE", "dedicated")
     if not shutil.which("node"):
         pytest.skip("Node is required only for optional Muse bridge tests")
     bridge = tmp_path / "integrations/muse/bridge.mjs"
@@ -49,7 +51,7 @@ export const driver = {
 
 
 def test_status_never_starts_browser_or_process(service):
-    assert service.status() == {"installed": True, "running": False, "logged_in": False, "composer_ready": False}
+    assert service.status() == {"installed": True, "running": False, "logged_in": False, "composer_ready": False, "browser_mode": "dedicated"}
     assert service._process is None
     service._ensure_started()
     assert service.status()["logged_in"] is False
@@ -204,3 +206,35 @@ def test_setup_removes_cdp_and_stealth_launch_paths():
     assert "ignoreDefaultArgs" not in patched
     assert "AutomationControlled" not in patched
     assert "chromium.launchPersistentContext(PROFILE_DIR" in patched
+
+
+def test_mode_change_stops_old_bridge_before_applying_configuration(service, monkeypatch):
+    service.start_login()
+    process = service._process
+    seen = []
+
+    def apply():
+        assert process.poll() is not None
+        seen.append(True)
+        monkeypatch.setattr(settings, "MUSE_BROWSER_MODE", "existing")
+
+    old_generation = service._request_generation()
+    service.change_browser_mode("existing", apply)
+    assert seen and service._process is None
+    assert service.status()["browser_mode"] == "existing"
+    with pytest.raises(MuseError, match="thay đổi"):
+        service._check_generation(old_generation)
+
+
+def test_mode_change_failure_releases_fence_and_invalid_mode_keeps_connection(service):
+    service.start_login()
+    process = service._process
+    with pytest.raises(MuseError):
+        service.change_browser_mode("other", lambda: None)
+    assert service._process is process and process.poll() is None
+    def fail():
+        raise OSError("write failed")
+    with pytest.raises(OSError):
+        service.change_browser_mode("existing", fail)
+    assert not service._reconfiguring
+    assert service.start_login()["logged_in"]

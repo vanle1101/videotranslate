@@ -1,6 +1,7 @@
 import os
 import sys
 from pathlib import Path
+from typing import Literal
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 BASE_DIR = Path(__file__).resolve().parent
@@ -89,6 +90,7 @@ class Settings(BaseSettings):
     # LLM Translation API Settings
     # OpenCode reuses its local login; no translation LLM is loaded into RAM.
     LLM_PROVIDER: str = "openrouter-free" # also 'opencode', 'free', 'gemini', 'deepseek', 'openai', 'muse'
+    MUSE_BROWSER_MODE: Literal["dedicated", "existing"] = "dedicated"
     OPENCODE_API_KEY: str = "" # Optional local override; otherwise read OpenCode auth.json.
     OPENCODE_MODEL: str = "big-pickle"
     OPENCODE_TIMEOUT: float = 60.0

@@ -10,6 +10,13 @@ delete process.env.MUSE_CDP;
 process.env.MUSE_URL = 'https://muse.ai/';
 process.env.MUSE_HEADLESS = '0';
 const { driver, SELECTORS } = await import(pathToFileURL(path.join(process.env.MUSE_RUNTIME_DIR, 'muse-driver.mjs')).href);
+const browserMode = process.env.MUSE_BROWSER_MODE || 'dedicated';
+if (!['existing', 'dedicated'].includes(browserMode)) process.exit(1);
+if (browserMode === 'existing') {
+  const { installChromeConnection } = await import('./chrome_connection.mjs');
+  const { chromium } = await import(pathToFileURL(path.join(process.env.MUSE_RUNTIME_DIR, 'node_modules/playwright-core/index.mjs')).href);
+  installChromeConnection(driver, chromium, browserMode);
+}
 const send = (res, status, data) => {
   if (res.destroyed || res.writableEnded) return;
   res.writeHead(status, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' });
@@ -79,6 +86,9 @@ const server = http.createServer(async (req, res) => {
     if (typeof result.reply !== 'string' || !result.reply.trim()) return send(res, 502, { error: 'empty_reply' });
     send(res, 200, { reply: result.reply.trim() });
   } catch (err) {
+    if (err.message === 'chrome_connection_required') {
+      return send(res, 409, { error: 'chrome_connection_required' });
+    }
     send(res, err instanceof SyntaxError || err.message === 'invalid_request' ? 400 : 502,
       { error: err instanceof SyntaxError || err.message === 'invalid_request' ? 'invalid_request' : 'browser_error' });
   }
