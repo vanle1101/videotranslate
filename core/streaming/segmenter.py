@@ -20,7 +20,8 @@ class AudioSegmenter:
             "-of", "default=noprint_wrappers=1:nokey=1",
             str(audio_path)
         ]
-        res = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        res = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                             text=True, encoding="utf-8", errors="replace", check=True)
         try:
             return float(res.stdout.strip())
         except Exception:
@@ -33,7 +34,8 @@ class AudioSegmenter:
             "-af", f"silencedetect=noise={self.noise_threshold_db}dB:d={self.min_silence_duration}",
             "-f", "null", "-"
         ]
-        res = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        res = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                             text=True, encoding="utf-8", errors="replace", check=True)
         output = res.stderr
 
         silences = []
@@ -80,8 +82,7 @@ class AudioSegmenter:
             speech_intervals.append((round(cur_pos, 2), round(total_duration, 2)))
 
         if not speech_intervals:
-            # Fallback: if no silence detected (e.g. loud continuous audio)
-            speech_intervals = [(0.0, round(total_duration, 2))]
+            return []
 
         # Merge short fragments (< min_segment_duration) into adjacent segment
         merged = []

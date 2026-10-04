@@ -1,5 +1,7 @@
 # Douyin2TikTok AI Studio
 
+> **Bản cấu hình Windows / RAM 16 GB:** xem [hướng dẫn cài đặt và vận hành](HUONG_DAN_MAY_NAY.md). Chạy `setup.bat` cho máy mới, `start.bat` để mở. Cấu hình mặc định hiện tại: Whisper Small CPU int8, Edge-TTS và DSP; các engine cao cấp trong phần giới thiệu bên dưới là tùy chọn cần cài riêng.
+
 <div align="center">
 
 ![Douyin2TikTok AI Studio Banner](docs/images/banner.png)

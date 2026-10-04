@@ -8,7 +8,7 @@
   <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
   <link rel="stylesheet" href="/static/style.css">
 </head>
-<body class="bg-[#0b0d13] text-gray-100 min-h-screen font-sans antialiased selection:bg-pink-500 selection:text-white">
+<body data-asr-engine="{{ settings.ASR_ENGINE }}" data-tts-engine="{{ settings.TTS_ENGINE }}" class="bg-[#0b0d13] text-gray-100 min-h-screen font-sans antialiased selection:bg-pink-500 selection:text-white">
   
   <!-- App Header -->
   <header class="border-b border-gray-800/80 bg-[#12151f]/95 backdrop-blur sticky top-0 z-50 px-6 py-2.5 flex items-center justify-between shadow-md select-none">
@@ -22,7 +22,7 @@
           <h1 class="font-bold text-sm tracking-tight text-white flex items-center gap-2">
             Douyin2TikTok <span class="text-[9px] bg-gradient-to-r from-pink-500/20 to-violet-500/20 text-pink-400 px-2 py-0.5 rounded-full border border-pink-500/30 font-mono font-semibold">DESKTOP STUDIO</span>
           </h1>
-          <p class="text-[10px] text-gray-400">SenseVoice ASR · Gemini · VieNeu-TTS v3 Turbo · BS-RoFormer</p>
+          <p class="text-[10px] text-gray-400">{{ settings.ASR_ENGINE }} {{ settings.WHISPER_MODEL_SIZE }} · {{ settings.DEVICE | upper }} · {{ settings.TTS_ENGINE }}</p>
         </div>
       </div>
 
@@ -98,8 +98,8 @@
         <div class="flex items-center gap-2 text-[11px]">
           <span class="text-gray-400">Workers:</span>
           <span id="worker-asr-badge" class="px-2 py-0.5 rounded bg-gray-800 text-gray-300">ASR: Idle</span>
-          <span id="worker-trans-badge" class="px-2 py-0.5 rounded bg-gray-800 text-gray-300">Gemini: Idle</span>
-          <span id="worker-tts-badge" class="px-2 py-0.5 rounded bg-gray-800 text-gray-300">VieNeu: Idle</span>
+          <span id="worker-trans-badge" class="px-2 py-0.5 rounded bg-gray-800 text-gray-300">Dịch: Idle</span>
+          <span id="worker-tts-badge" class="px-2 py-0.5 rounded bg-gray-800 text-gray-300">TTS: Idle</span>
         </div>
       </div>
     </section>
@@ -144,7 +144,7 @@
             </div>
 
             <!-- Buffering Alert Overlay -->
-            <div id="buffering-alert" class="absolute inset-0 bg-black/70 backdrop-blur-sm flex flex-col items-center justify-center gap-3 z-20 hidden">
+            <div id="buffering-alert" role="status" aria-live="polite" class="absolute inset-0 bg-black/70 backdrop-blur-sm flex flex-col items-center justify-center gap-3 z-20 hidden">
               <i class="fa-solid fa-spinner fa-spin text-3xl text-pink-500"></i>
               <p class="text-xs text-gray-200 font-mono" id="buffering-text">Đang tải giọng lồng tiếng...</p>
             </div>
@@ -249,13 +249,15 @@
             </div>
 
             <div>
-              <label class="text-[11px] text-gray-400 block mb-1">Giọng lồng tiếng (VieNeu):</label>
+              <label class="text-[11px] text-gray-400 block mb-1">Giọng lồng tiếng:</label>
               <select id="voice-select" class="w-full bg-[#08090d] border border-gray-700 rounded-xl px-3 py-1.5 text-xs text-gray-200 focus:outline-none focus:border-pink-500">
-                <option value="Trúc Ly" selected>Trúc Ly (Nữ - Truyền cảm)</option>
-                <option value="Thiện Minh">Thiện Minh (Nam - Trầm ấm)</option>
-                <option value="Mai Anh">Mai Anh (Nữ - Tươi trẻ)</option>
-                <option value="Hải Đăng">Hải Đăng (Nam - Tự nhiên)</option>
-                <option value="Adam bựa">Adam bựa (Nam - Hài hước)</option>
+                {% if settings.TTS_ENGINE in ['edge', 'edge-tts'] %}
+                <option value="vi-VN-HoaiMyNeural" {% if settings.EDGE_VOICE == 'vi-VN-HoaiMyNeural' %}selected{% endif %}>Hoài My (Nữ)</option>
+                <option value="vi-VN-NamMinhNeural" {% if settings.EDGE_VOICE == 'vi-VN-NamMinhNeural' %}selected{% endif %}>Nam Minh (Nam)</option>
+                {% else %}
+                <option value="Trúc Ly" selected>Trúc Ly (Nữ)</option>
+                <option value="Thiện Minh">Thiện Minh (Nam)</option>
+                {% endif %}
               </select>
             </div>
           </div>
@@ -280,7 +282,7 @@
 
             <!-- HQ Export Button -->
             <button id="btn-export-hq" class="w-full py-2.5 px-3 rounded-xl border border-violet-500/50 hover:bg-violet-600/20 text-violet-300 font-semibold text-xs flex items-center justify-center gap-2 transition">
-              <i class="fa-solid fa-film text-pink-400"></i> Xuất Video Hoàn Chỉnh (BS-RoFormer HQ)
+              <i class="fa-solid fa-film text-pink-400"></i> Xuất Video Hoàn Chỉnh (MP4)
             </button>
           </div>
         </div>
@@ -450,10 +452,10 @@
         <div>
           <label class="text-xs text-gray-300 block mb-1">Nhà cung cấp (LLM Provider):</label>
           <select id="settings-llm-provider" class="w-full bg-[#08090d] border border-gray-700 rounded-xl px-3 py-2 text-xs text-gray-100 focus:outline-none focus:border-pink-500">
-            <option value="gemini" selected>Google Gemini (Khuyên dùng · gemini-2.0-flash)</option>
+            <option value="free" selected>Dịch miễn phí (cần Internet)</option>
+            <option value="gemini">Google Gemini (cần API key)</option>
             <option value="deepseek">DeepSeek AI (Văn phong kịch tính)</option>
             <option value="openai">OpenAI Compatible API</option>
-            <option value="ollama">Ollama Local LLM</option>
           </select>
         </div>
 
@@ -472,11 +474,7 @@
 
         <div>
           <label class="text-xs text-gray-300 block mb-1">Gemini Model:</label>
-          <select id="settings-gemini-model" class="w-full bg-[#08090d] border border-gray-700 rounded-xl px-3 py-2 text-xs text-gray-100 focus:outline-none focus:border-pink-500">
-            <option value="gemini-2.0-flash" selected>gemini-2.0-flash (Siêu tốc & chính xác)</option>
-            <option value="gemini-1.5-flash">gemini-1.5-flash (Chuẩn ổn định)</option>
-            <option value="gemini-1.5-pro">gemini-1.5-pro (Văn phong cao cấp)</option>
-          </select>
+          <input id="settings-gemini-model" value="{{ settings.GEMINI_MODEL }}" placeholder="Tên model Gemini" class="w-full bg-[#08090d] border border-gray-700 rounded-xl px-3 py-2 text-xs text-gray-100 focus:outline-none focus:border-pink-500">
         </div>
 
         <!-- Gemini Test Connection Button & Result -->
@@ -511,7 +509,7 @@
         <div>
           <label class="text-xs text-gray-300 block mb-1">Engine Xuất Video Hoàn Chỉnh (HQ):</label>
           <select class="w-full bg-[#08090d] border border-gray-700 rounded-xl px-3 py-2 text-xs text-gray-100 focus:outline-none focus:border-pink-500" disabled>
-            <option selected>BS-RoFormer HQ (Nomadkaraoke Checkpoint)</option>
+            <option selected>{{ settings.SEPARATION_ENGINE }} (theo cấu hình máy)</option>
           </select>
         </div>
 
@@ -560,7 +558,7 @@
       </div>
 
       <div id="export-modal-body" class="space-y-4 text-xs text-gray-300">
-        <p>Hệ thống sẽ chạy <strong>BS-RoFormer HQ</strong> tách sạch thoại tiếng Trung giữ nguyên 100% Foley và nhạc nền, mix giọng đọc <strong>VieNeu-TTS</strong> chuẩn và render video TikTok 9:16.</p>
+        <p>Xuất MP4 với giọng Việt và phụ đề, giữ tỉ lệ video gốc. Chế độ DSP giảm giọng gốc có thể ảnh hưởng nhạc nền; mức tách giọng tùy từng video.</p>
         
         <div id="export-status-box" class="hidden bg-[#08090d] p-3.5 rounded-xl border border-gray-800 space-y-3">
           <div class="flex items-center justify-between text-xs">
@@ -598,7 +596,7 @@
     </div>
   </div>
 
-  <script src="/static/qwebchannel.js"></script>
+  <script src="/qtwebchannel.js"></script>
   <script src="/static/app.js"></script>
 </body>
 </html>

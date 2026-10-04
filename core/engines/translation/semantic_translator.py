@@ -51,6 +51,14 @@ class SemanticTranslator(TranslationEngine):
     def __init__(self, provider: Optional[str] = None):
         self.provider = provider or settings.LLM_PROVIDER
 
+    def _api_keys(self):
+        # Only the selected provider may receive transcript data or incur usage.
+        return (
+            (settings.GEMINI_API_KEY or os.getenv("GEMINI_API_KEY")) if self.provider == "gemini" else None,
+            (settings.DEEPSEEK_API_KEY or os.getenv("DEEPSEEK_API_KEY")) if self.provider == "deepseek" else None,
+            (settings.OPENAI_API_KEY or os.getenv("OPENAI_API_KEY")) if self.provider == "openai" else None,
+        )
+
     @property
     def name(self) -> str:
         return "VideoLingo-Semantic-Translator"
@@ -60,13 +68,12 @@ class SemanticTranslator(TranslationEngine):
         return True
 
     def get_info(self) -> Dict[str, Any]:
-        gemini_key = settings.GEMINI_API_KEY or os.getenv("GEMINI_API_KEY")
-        deepseek_key = settings.DEEPSEEK_API_KEY or os.getenv("DEEPSEEK_API_KEY")
+        gemini_key, deepseek_key, openai_key = self._api_keys()
         return {
             "name": self.name,
             "provider": self.provider,
             "is_available": self.is_available,
-            "has_llm_key": bool(gemini_key or deepseek_key),
+            "has_llm_key": bool(gemini_key or deepseek_key or openai_key),
             "pipeline": ["Glossary/Summary", "Literal", "Natural Adaptation", "Duration-Constrained Rewrite"]
         }
 
@@ -128,9 +135,7 @@ class SemanticTranslator(TranslationEngine):
         return merged
 
     def _extract_context_and_glossary(self, full_text: str) -> Dict[str, Any]:
-        gemini_key = settings.GEMINI_API_KEY or os.getenv("GEMINI_API_KEY")
-        deepseek_key = settings.DEEPSEEK_API_KEY or os.getenv("DEEPSEEK_API_KEY")
-        openai_key = settings.OPENAI_API_KEY or os.getenv("OPENAI_API_KEY")
+        gemini_key, deepseek_key, openai_key = self._api_keys()
 
         if gemini_key:
             from google import genai
@@ -151,9 +156,7 @@ class SemanticTranslator(TranslationEngine):
         return {"theme": "Video ngắn Douyin đời thường", "terms": [], "pronouns": "mình - các bạn"}
 
     def _execute_3tier_translation(self, payload: List[Dict[str, Any]], context_info: Dict[str, Any]) -> Dict[int, Dict[str, str]]:
-        gemini_key = settings.GEMINI_API_KEY or os.getenv("GEMINI_API_KEY")
-        deepseek_key = settings.DEEPSEEK_API_KEY or os.getenv("DEEPSEEK_API_KEY")
-        openai_key = settings.OPENAI_API_KEY or os.getenv("OPENAI_API_KEY")
+        gemini_key, deepseek_key, openai_key = self._api_keys()
 
         system_prompt = VIDEOLINGO_TRANSLATE_PROMPT.format(
             theme=context_info.get("theme", "Đời thường"),
@@ -204,7 +207,7 @@ class SemanticTranslator(TranslationEngine):
                 if clean.startswith("```json"): clean = clean[7:]
                 if clean.endswith("```"): clean = clean[:-3]
                 data = json.loads(clean)
-                items = data.get("results", data if isinstance(data, list) else [])
+                items = data if isinstance(data, list) else data.get("results", [])
                 for it in items:
                     res_map[int(it["id"])] = {
                         "literal_vi": it.get("literal_vi", ""),
@@ -258,7 +261,7 @@ class SemanticTranslator(TranslationEngine):
         except Exception as e:
             print(f"[!] MyMemory fallback error: {e}")
 
-        return text
+        raise RuntimeError("Không thể kết nối dịch thuật miễn phí. Kiểm tra Internet hoặc cấu hình API dịch trong Cài đặt.")
 
     def translate_single_segment(
         self,
@@ -275,9 +278,7 @@ class SemanticTranslator(TranslationEngine):
             return {"literal_vi": "", "natural_vi": "", "final_vi": ""}
 
         target_words = max(3, int(duration * 3.0))
-        gemini_key = settings.GEMINI_API_KEY or os.getenv("GEMINI_API_KEY")
-        deepseek_key = settings.DEEPSEEK_API_KEY or os.getenv("DEEPSEEK_API_KEY")
-        openai_key = settings.OPENAI_API_KEY or os.getenv("OPENAI_API_KEY")
+        gemini_key, deepseek_key, openai_key = self._api_keys()
 
         if gemini_key or deepseek_key or openai_key:
             ctx_text = ""
@@ -335,11 +336,8 @@ Quy tắc bắt buộc:
 
         # Fallback translation
         raw_vi = self._fallback_translate(clean_zh)
-        words = raw_vi.split()
-        if len(words) > target_words * 1.3:
-            final_vi = " ".join(words[:target_words])
-        else:
-            final_vi = raw_vi
+        # Never discard the end of a sentence to fit a time budget.
+        final_vi = raw_vi
 
         return {
             "literal_vi": raw_vi,

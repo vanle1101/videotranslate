@@ -1,5 +1,4 @@
 import asyncio
-import os
 import time
 import subprocess
 from pathlib import Path
@@ -8,6 +7,7 @@ from config import settings
 
 from core.streaming.segmenter import AudioSegmenter
 from core.engines.asr.sensevoice_engine import SenseVoiceEngine
+from core.engines.asr.faster_whisper_engine import FasterWhisperFallbackEngine
 from core.engines.translation.semantic_translator import SemanticTranslator
 from core.engines.tts.vieneu_engine import VieNeuEngine
 from core.engines.tts.edge_fallback import EdgeTTSFallbackEngine
@@ -30,6 +30,7 @@ class SegmentItem:
         self.speed_ratio = 1.0
         self.audio_path: Optional[str] = None
         self.audio_url: Optional[str] = None
+        self.error: Optional[str] = None
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -46,7 +47,8 @@ class SegmentItem:
             "text_vi": self.final_vi or self.literal_vi,
             "tts_duration": self.tts_duration,
             "speed_ratio": self.speed_ratio,
-            "audio_url": self.audio_url
+            "audio_url": self.audio_url,
+            "error": self.error
         }
 
 class StreamingPipelineSession:
@@ -59,18 +61,18 @@ class StreamingPipelineSession:
         task_id: str,
         video_path: Path,
         initial_buffer_seconds: float = 10.0,
-        voice: str = "Trúc Ly",
-        tts_engine_name: str = "vieneu",
-        asr_engine_name: str = "sensevoice",
+        voice: Optional[str] = None,
+        tts_engine_name: Optional[str] = None,
+        asr_engine_name: Optional[str] = None,
         ref_audio: Optional[Path] = None,
         event_callback: Optional[Callable[[str, Dict[str, Any]], Any]] = None
     ):
         self.task_id = task_id
         self.video_path = video_path
         self.initial_buffer_seconds = initial_buffer_seconds
-        self.voice = voice
-        self.tts_engine_name = tts_engine_name
-        self.asr_engine_name = asr_engine_name
+        self.voice = voice or settings.EDGE_VOICE
+        self.tts_engine_name = tts_engine_name or settings.TTS_ENGINE
+        self.asr_engine_name = asr_engine_name or settings.ASR_ENGINE
         self.ref_audio = ref_audio
         self.event_callback = event_callback
 
@@ -82,8 +84,9 @@ class StreamingPipelineSession:
         # Engines (Lazy loaded or shared)
         self.segmenter = AudioSegmenter()
         self.sensevoice = SenseVoiceEngine()
+        self.faster_whisper = FasterWhisperFallbackEngine()
         self.translator = SemanticTranslator()
-        self.vieneu = VieNeuEngine()
+        self.vieneu = None
         self.edge_tts = EdgeTTSFallbackEngine()
         self.aligner = TimingBudgetAligner()
         self.vocal_suppressor = RealtimeVocalSuppressor()
@@ -102,6 +105,8 @@ class StreamingPipelineSession:
         self.first_play_emitted = False
         self.total_processed_duration = 0.0
         self.realtime_factor = 0.0
+        self.error: Optional[str] = None
+        self.warnings: List[str] = []
 
         # Control flags & queues
         self.is_running = False
@@ -123,9 +128,36 @@ class StreamingPipelineSession:
                     await res
 
     async def start(self):
+        try:
+            await self._start()
+        except Exception as exc:
+            self.is_running = False
+            self.error = str(exc)
+            await self.emit("error", {"message": self.error})
+            await self.emit("finished", self.get_telemetry())
+            raise
+
+    async def _start(self):
         """Initializes audio extraction, segmentation, and launches worker loop."""
         self.is_running = True
         self.start_wall_time = time.time()
+        self.asr_engine = self.faster_whisper
+        if self.asr_engine_name == "sensevoice":
+            if self.sensevoice.is_available:
+                self.asr_engine = self.sensevoice
+            else:
+                self.warnings.append("SenseVoice chưa có model; sử dụng Faster-Whisper.")
+        elif self.asr_engine_name not in ("faster-whisper", "whisper"):
+            raise ValueError(f"ASR engine không được hỗ trợ: {self.asr_engine_name}")
+        self.tts_engine = self.edge_tts
+        if self.tts_engine_name in ("vieneu", "vieneu-tts"):
+            self.vieneu = VieNeuEngine()
+            if self.vieneu.is_available:
+                self.tts_engine = self.vieneu
+            else:
+                self.warnings.append("VieNeu chưa được cài; sử dụng giọng Edge-TTS.")
+        elif self.tts_engine_name != "edge-tts":
+            raise ValueError(f"TTS engine không được hỗ trợ: {self.tts_engine_name}")
 
         # 1. Extract 16kHz mono audio for fast slicing and ASR
         self.raw_audio_16k = self.cache_dir / "raw_audio_16k.wav"
@@ -134,10 +166,11 @@ class StreamingPipelineSession:
             "-vn", "-acodec", "pcm_s16le", "-ar", "16000", "-ac", "1",
             str(self.raw_audio_16k)
         ]
-        proc = await asyncio.create_subprocess_exec(*cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        await proc.wait()
+        await self._run_ffmpeg(cmd)
 
-        self.total_duration = self.segmenter.get_audio_duration(self.raw_audio_16k)
+        self.total_duration = await asyncio.to_thread(self.segmenter.get_audio_duration, self.raw_audio_16k)
+        if self.total_duration <= 0:
+            raise ValueError("Video không có âm thanh hợp lệ để dịch.")
 
         # 1.5 Extract suppressed BGM & SFX (Removes Chinese Speech by -26dB, preserves BGM & Foley)
         self.bgm_audio_path = self.cache_dir / "bgm_suppressed.m4a"
@@ -149,7 +182,7 @@ class StreamingPipelineSession:
         self.bgm_url = f"/api/streaming/bgm/{self.task_id}"
 
         # 2. Discover natural sentence segments
-        raw_segs = self.segmenter.segment_audio(self.raw_audio_16k)
+        raw_segs = await asyncio.to_thread(self.segmenter.segment_audio, self.raw_audio_16k)
         for s in raw_segs:
             item = SegmentItem(s["id"], s["start"], s["end"], s["duration"])
             self.segments[item.id] = item
@@ -167,7 +200,10 @@ class StreamingPipelineSession:
             "bgm_url": self.bgm_url,
             "vocal_removal_engine": self.vocal_suppressor.name,
             "suppression_level": f"{self.vocal_suppressor.suppression_level_db:.1f} dB",
-            "suppression_rtf": self.suppression_stats.get("throughput_rtf", "75.0x")
+            "suppression_rtf": self.suppression_stats.get("throughput_rtf", "0.0x"),
+            "asr_engine": self.asr_engine.name,
+            "tts_engine": self.tts_engine.name,
+            "warnings": self.warnings
         })
 
         # 5. Launch background worker
@@ -183,6 +219,7 @@ class StreamingPipelineSession:
         while not self.queue.empty():
             try:
                 _, seg_id = self.queue.get_nowait()
+                self.queue.task_done()
                 if self.segments[seg_id].status in ["WAITING", "FAILED"]:
                     unprocessed_ids.append(seg_id)
             except Exception:
@@ -220,12 +257,13 @@ class StreamingPipelineSession:
             if s.end <= now:
                 continue
             if s.status in ["READY", "PLAYED"]:
-                if s.start <= playable + 0.8: # small gap tolerance
-                    playable = max(playable, s.end)
-                else:
-                    break
+                # Silence between speech segments needs no synthesis.
+                playable = max(playable, s.end)
             else:
+                playable = max(playable, s.start)
                 break
+        else:
+            playable = max(playable, self.total_duration)
 
         self.playable_until = round(playable, 2)
         self.buffer_ahead = round(max(0.0, self.playable_until - self.current_playback_time), 2)
@@ -242,124 +280,130 @@ class StreamingPipelineSession:
             "realtime_factor": self.realtime_factor,
             "time_to_first_play": self.time_to_first_play,
             "ready_to_play": self.first_play_emitted,
-            "status": "running" if self.is_running else "finished",
+            "status": "failed" if self.error else ("running" if self.is_running else "finished"),
+            "error": self.error,
             "vocal_removal_engine": self.vocal_suppressor.name,
             "suppression_level": f"{self.vocal_suppressor.suppression_level_db:.1f} dB",
-            "suppression_rtf": self.suppression_stats.get("throughput_rtf", "75.0x")
+            "suppression_rtf": self.suppression_stats.get("throughput_rtf", "0.0x")
         }
 
-    async def _worker_loop(self):
-        """Sequential/Parallel Worker executing ASR -> Translation -> TTS -> Alignment."""
-        tts_engine = self.vieneu if self.tts_engine_name == "vieneu" else self.edge_tts
-
-        while self.is_running and not self.queue.empty():
-            await self.pause_event.wait()
-
-            try:
-                _, seg_id = await asyncio.wait_for(self.queue.get(), timeout=1.0)
-            except asyncio.TimeoutError:
-                continue
-
-            seg = self.segments.get(seg_id)
-            if not seg or seg.status == "READY":
-                continue
-
-            # Stage 1: Slicing & ASR
-            seg.status = "ASR"
-            await self.emit("segment_update", seg.to_dict())
-
-            slice_wav = self.cache_dir / f"slice_{seg.id}.wav"
-            cmd = [
-                "ffmpeg", "-y", "-ss", f"{seg.start:.3f}", "-to", f"{seg.end:.3f}",
-                "-i", str(self.raw_audio_16k), "-c", "copy", str(slice_wav)
-            ]
-            proc = await asyncio.create_subprocess_exec(*cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    async def _run_ffmpeg(self, cmd):
+        proc = await asyncio.create_subprocess_exec(
+            *cmd, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE
+        )
+        try:
+            _, stderr = await proc.communicate()
+        except asyncio.CancelledError:
+            if proc.returncode is None:
+                proc.kill()
             await proc.wait()
+            raise
+        if proc.returncode:
+            raise RuntimeError(stderr.decode("utf-8", errors="replace")[-1500:])
 
-            # FunAudioLLM / SenseVoice ASR
-            asr_res = await asyncio.to_thread(self.sensevoice.transcribe, slice_wav, language="zh")
-            if asr_res and len(asr_res) > 0:
-                seg.text_zh = asr_res[0].get("text_zh", "")
-                seg.emotion = asr_res[0].get("emotion", "<|NEUTRAL|>")
-            else:
-                seg.text_zh = ""
-                seg.emotion = "<|NEUTRAL|>"
+    async def _update_ready(self):
+        self._recalculate_telemetry()
+        if not self.first_play_emitted and (
+            self.buffer_ahead >= self.initial_buffer_seconds
+            or self.playable_until >= self.total_duration - 0.05
+        ):
+            self.first_play_emitted = True
+            self.time_to_first_play = round(time.time() - self.start_wall_time, 2)
+            await self.emit("ready_to_play", {
+                "time_to_first_play": self.time_to_first_play,
+                "playable_until": self.playable_until,
+            })
+        await self.emit("telemetry", self.get_telemetry())
 
-            # If no speech detected in slice
-            if not seg.text_zh.strip():
-                seg.status = "READY"
-                self.total_processed_duration += seg.duration
-                self._recalculate_telemetry()
+    async def _process_segment(self, seg):
+        seg.status = "ASR"
+        await self.emit("segment_update", seg.to_dict())
+        slice_wav = self.cache_dir / f"slice_{seg.id}.wav"
+        raw_tts_wav = self.cache_dir / f"tts_{seg.id}_raw.wav"
+        try:
+            await self._run_ffmpeg([
+                "ffmpeg", "-y", "-ss", f"{seg.start:.3f}",
+                "-i", str(self.raw_audio_16k), "-t", f"{seg.duration:.3f}",
+                "-c:a", "pcm_s16le", str(slice_wav),
+            ])
+            asr_res = await asyncio.to_thread(self.asr_engine.transcribe, slice_wav, language="zh")
+            # A slice can contain several sentences. Keep every recognized word.
+            seg.text_zh = " ".join(
+                part.get("text_zh", part.get("text", "")).strip() for part in (asr_res or [])
+            ).strip()
+            seg.emotion = asr_res[0].get("emotion", "<|NEUTRAL|>") if asr_res else "<|NEUTRAL|>"
+            if seg.text_zh:
+                seg.status = "TRANSLATING"
                 await self.emit("segment_update", seg.to_dict())
-                continue
+                trans = await asyncio.to_thread(
+                    self.translator.translate_single_segment,
+                    text_zh=seg.text_zh, duration=seg.duration,
+                    rolling_context=self.rolling_context, pronouns="mình - các bạn",
+                )
+                seg.literal_vi = trans.get("literal_vi", "")
+                seg.natural_vi = trans.get("natural_vi", "")
+                seg.final_vi = trans.get("final_vi") or seg.natural_vi or seg.literal_vi
+                if not seg.final_vi.strip():
+                    raise RuntimeError("Dịch thuật trả về nội dung trống.")
+                self.rolling_context.append({"zh": seg.text_zh, "vi": seg.final_vi})
+                self.rolling_context = self.rolling_context[-10:]
 
-            # Stage 2: VideoLingo Translation with Rolling Context & Time-Budget
-            seg.status = "TRANSLATING"
-            await self.emit("segment_update", seg.to_dict())
-
-            trans = await asyncio.to_thread(
-                self.translator.translate_single_segment,
-                text_zh=seg.text_zh,
-                duration=seg.duration,
-                rolling_context=self.rolling_context,
-                pronouns="mình - các bạn"
-            )
-            seg.literal_vi = trans.get("literal_vi", "")
-            seg.natural_vi = trans.get("natural_vi", "")
-            seg.final_vi = trans.get("final_vi", seg.natural_vi)
-
-            self.rolling_context.append({"zh": seg.text_zh, "vi": seg.final_vi})
-            if len(self.rolling_context) > 10:
-                self.rolling_context.pop(0)
-
-            # Stage 3: VieNeu-TTS v3 Turbo Synthesis
-            seg.status = "TTS"
-            await self.emit("segment_update", seg.to_dict())
-
-            raw_tts_wav = self.cache_dir / f"tts_{seg.id}_raw.wav"
-            final_seg_wav = self.segments_dir / f"seg_{seg.id}.wav"
-
-            await asyncio.to_thread(
-                tts_engine.synthesize,
-                text=seg.final_vi,
-                output_path=raw_tts_wav,
-                voice=self.voice,
-                ref_audio=self.ref_audio
-            )
-
-            # Stage 4: Timing Alignment & Clamp (0.90x - 1.15x)
-            seg.status = "ALIGNING"
-            tts_dur = self.aligner.get_audio_duration(raw_tts_wav)
-            speed_ratio = round(tts_dur / max(0.5, seg.duration), 2)
-
-            self.aligner.apply_atempo(raw_tts_wav, final_seg_wav, speed_ratio)
-
-            seg.tts_duration = tts_dur
-            seg.speed_ratio = speed_ratio
-            seg.audio_path = str(final_seg_wav.resolve())
-            seg.audio_url = f"/api/streaming/audio/{self.task_id}/{seg.id}"
+                seg.status = "TTS"
+                await self.emit("segment_update", seg.to_dict())
+                await asyncio.to_thread(
+                    self.tts_engine.synthesize, text=seg.final_vi,
+                    output_path=raw_tts_wav, voice=self.voice, ref_audio=self.ref_audio,
+                )
+                seg.status = "ALIGNING"
+                await self.emit("segment_update", seg.to_dict())
+                tts_dur = await asyncio.to_thread(self.aligner.get_audio_duration, raw_tts_wav)
+                if tts_dur <= 0:
+                    raise RuntimeError("Không đọc được âm thanh từ TTS.")
+                speed_ratio = max(self.aligner.min_speed, min(
+                    self.aligner.max_speed, tts_dur / max(0.5, seg.duration)
+                ))
+                final_seg_wav = self.segments_dir / f"seg_{seg.id}.wav"
+                await asyncio.to_thread(self.aligner.apply_atempo, raw_tts_wav, final_seg_wav, speed_ratio)
+                seg.tts_duration = tts_dur
+                seg.speed_ratio = round(speed_ratio, 2)
+                seg.audio_path = str(final_seg_wav.resolve())
+                seg.audio_url = f"/api/streaming/audio/{self.task_id}/{seg.id}"
             seg.status = "READY"
-
             self.total_processed_duration += seg.duration
-            self._recalculate_telemetry()
-
-            # Check Initial Buffer Trigger
-            if not self.first_play_emitted:
-                if self.playable_until >= self.initial_buffer_seconds or self.playable_until >= self.total_duration - 1.0:
-                    self.first_play_emitted = True
-                    self.time_to_first_play = round(time.time() - self.start_wall_time, 2)
-                    print(f"[🎯] TIME TO FIRST PLAY: {self.time_to_first_play}s (Buffered {self.playable_until:.1f}s)")
-                    await self.emit("ready_to_play", {
-                        "time_to_first_play": self.time_to_first_play,
-                        "playable_until": self.playable_until
-                    })
-
             await self.emit("segment_update", seg.to_dict())
-            await self.emit("telemetry", self.get_telemetry())
+            await self._update_ready()
+        finally:
+            slice_wav.unlink(missing_ok=True)
+            raw_tts_wav.unlink(missing_ok=True)
 
-        print(f"[*] Worker completed all segments for task {self.task_id}")
-        self.is_running = False
-        await self.emit("finished", self.get_telemetry())
+    async def _worker_loop(self):
+        try:
+            # Videos with no speech must still become playable.
+            await self._update_ready()
+            while self.is_running and not self.queue.empty():
+                await self.pause_event.wait()
+                if not self.is_running:
+                    break
+                _, seg_id = await self.queue.get()
+                seg = self.segments.get(seg_id)
+                try:
+                    if seg and seg.status not in ("READY", "PLAYED"):
+                        await self._process_segment(seg)
+                except Exception as exc:
+                    self.error = str(exc)
+                    if seg:
+                        seg.status = "FAILED"
+                        seg.error = self.error
+                        await self.emit("segment_update", seg.to_dict())
+                    await self.emit("error", {"message": self.error, "segment_id": seg_id})
+                    break
+                finally:
+                    self.queue.task_done()
+        except asyncio.CancelledError:
+            raise
+        finally:
+            self.is_running = False
+            await self.emit("finished", self.get_telemetry())
 
     def pause(self):
         self.is_paused = True
@@ -386,9 +430,9 @@ def create_streaming_session(
     task_id: str,
     video_path: Path,
     initial_buffer_seconds: float = 10.0,
-    voice: str = "Trúc Ly",
-    tts_engine_name: str = "vieneu",
-    asr_engine_name: str = "sensevoice",
+    voice: Optional[str] = None,
+    tts_engine_name: Optional[str] = None,
+    asr_engine_name: Optional[str] = None,
     ref_audio: Optional[Path] = None,
     event_callback: Optional[Callable] = None
 ) -> StreamingPipelineSession:

@@ -1,5 +1,7 @@
 # Douyin2TikTok AI Studio
 
+> **Windows / 16 GB profile:** run `setup.bat` once, then `start.bat`. Defaults use Whisper Small on CPU int8, Edge-TTS and DSP separation. Premium engines described below require separate installation. See [local setup notes](HUONG_DAN_MAY_NAY.md).
+
 <div align="center">
 
 ![Douyin2TikTok AI Studio Banner](docs/images/banner.png)

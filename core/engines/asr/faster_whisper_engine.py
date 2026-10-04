@@ -8,8 +8,8 @@ class FasterWhisperFallbackEngine(ASREngine):
     Fallback ASR engine using Faster-Whisper.
     Used when SenseVoice is unavailable or requested by user.
     """
-    def __init__(self, model_size: str = "small"):
-        self.model_size = model_size
+    def __init__(self, model_size: Optional[str] = None):
+        self.model_size = model_size or settings.WHISPER_MODEL_SIZE
         self.model = None
 
     @property
@@ -26,11 +26,8 @@ class FasterWhisperFallbackEngine(ASREngine):
 
     def _ensure_loaded(self):
         if self.model is None:
-            from faster_whisper import WhisperModel
-            import torch
-            device = "cuda" if torch.cuda.is_available() else "cpu"
-            compute_type = "float16" if device == "cuda" else "int8"
-            self.model = WhisperModel(self.model_size, device=device, compute_type=compute_type)
+            from core.asr import load_whisper_model
+            self.model = load_whisper_model(self.model_size)
 
     def get_info(self) -> Dict[str, Any]:
         return {

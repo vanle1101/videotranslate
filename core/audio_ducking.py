@@ -1,7 +1,7 @@
 import subprocess
+import math
 from pathlib import Path
-from typing import Optional, Dict, Any
-from config import settings
+from typing import Optional
 
 class PremiumAudioMixer:
     """
@@ -41,20 +41,32 @@ class PremiumAudioMixer:
         print(f"    Voice: {voice_path.name}")
         print(f"    Ducking: -{abs(self.duck_amount_db)}dB (Attack: {self.attack_ms}ms, Release: {self.release_ms}ms)")
 
-        # Calculate sidechain compression ratio from duck_amount_db
+        if total_duration is not None and (
+            not math.isfinite(total_duration) or total_duration <= 0
+        ):
+            raise ValueError("total_duration must be a positive, finite number")
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+
+        # Each filter output can be consumed only once. Split the voice for
+        # the sidechain detector and for the audible voiceover in the final mix.
+        # Padding both inputs also prevents a short voice track cutting BGM off.
         ratio = max(3.0, min(12.0, abs(self.duck_amount_db) / 2.5))
+        padding = f",apad=whole_dur={total_duration}" if total_duration else ""
+        voice_padding = padding if total_duration else ",apad"
+        trim = f",atrim=duration={total_duration}" if total_duration else ""
 
         filter_complex = (
-            f"[0:a]volume={self.bgm_gain_db}dB[bgm_in];"
-            f"[1:a]volume={self.voice_gain_db}dB[voice_in];"
-            f"[bgm_in][voice_in]sidechaincompress="
+            f"[0:a]asetpts=PTS-STARTPTS,volume={self.bgm_gain_db}dB{padding}[bgm_in];"
+            f"[1:a]asetpts=PTS-STARTPTS,volume={self.voice_gain_db}dB{voice_padding},"
+            f"asplit=2[voice_sidechain][voice_mix];"
+            f"[bgm_in][voice_sidechain]sidechaincompress="
             f"threshold=0.04:ratio={ratio:.1f}:attack={self.attack_ms}:release={self.release_ms}:makeup=1[bgm_ducked];"
-            f"[bgm_ducked][voice_in]amix=inputs=2:duration=longest:dropout_transition=0:normalize=0[mixed];"
-            f"[mixed]alimiter=limit=0.95[out]"
+            f"[bgm_ducked][voice_mix]amix=inputs=2:duration=first:dropout_transition=0:normalize=0[mixed];"
+            f"[mixed]alimiter=limit=0.95{trim}[out]"
         )
 
         cmd = [
-            "ffmpeg", "-y",
+            "ffmpeg", "-hide_banner", "-loglevel", "error", "-nostdin", "-y",
             "-i", str(instrumental_path),
             "-i", str(voice_path),
             "-filter_complex", filter_complex,
@@ -63,6 +75,9 @@ class PremiumAudioMixer:
             str(output_path)
         ]
 
-        subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=True)
+        result = subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+        if result.returncode:
+            detail = result.stderr.decode("utf-8", errors="replace").strip()
+            raise RuntimeError(f"FFmpeg audio mixing failed: {detail}")
         print(f"[+] Master audio successfully created: {output_path.name}")
         return output_path

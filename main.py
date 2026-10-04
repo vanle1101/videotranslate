@@ -4,9 +4,10 @@ import shutil
 import uuid
 import time
 from pathlib import Path
+from urllib.parse import quote
 from typing import Dict, Any, Optional, List
 from fastapi import FastAPI, UploadFile, File, Form, WebSocket, WebSocketDisconnect, HTTPException
-from fastapi.responses import HTMLResponse, FileResponse
+from fastapi.responses import HTMLResponse, FileResponse, Response
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from fastapi.requests import Request
@@ -35,31 +36,27 @@ templates = Jinja2Templates(directory=str(settings.BASE_DIR / "templates"))
 stream_sockets: Dict[str, List[WebSocket]] = {}
 downloader = VideoDownloader()
 
-@app.on_event("startup")
-async def startup_warmup():
-    """Pre-loads models in background thread so Time To First Play is ~3-5s."""
-    def _warmup():
-        print("[*] Pre-warming models for zero-latency streaming...")
-        try:
-            from core.engines.asr.sensevoice_engine import SenseVoiceEngine
-            SenseVoiceEngine()._ensure_loaded()
-        except Exception as e:
-            print(f"[!] SenseVoice pre-warm warning: {e}")
-        try:
-            from core.engines.tts.vieneu_engine import VieNeuEngine
-            VieNeuEngine()._ensure_loaded()
-        except Exception as e:
-            print(f"[!] VieNeu pre-warm warning: {e}")
-        print("[+] Engines pre-warmed and ready for instant playback!")
+@app.get("/api/health")
+async def health():
+    return {"status": "ok", "ffmpeg": bool(shutil.which("ffmpeg")),
+            "ffprobe": bool(shutil.which("ffprobe"))}
 
-    asyncio.get_event_loop().run_in_executor(None, _warmup)
+@app.get("/qtwebchannel.js")
+def qt_webchannel_client():
+    # Use the client matching the installed Qt version, including its license header.
+    from PySide6.QtCore import QFile, QIODevice
+    from PySide6 import QtWebChannel
+    resource = QFile(":/qtwebchannel/qwebchannel.js")
+    if not resource.open(QIODevice.OpenModeFlag.ReadOnly):
+        raise HTTPException(status_code=503, detail="Qt WebChannel client unavailable")
+    return Response(bytes(resource.readAll()), media_type="application/javascript")
 
 class StreamUrlRequest(BaseModel):
     url: str
     initial_buffer_seconds: Optional[float] = 10.0
-    voice: Optional[str] = "Trúc Ly"
-    tts_engine: Optional[str] = "vieneu"
-    asr_engine: Optional[str] = "sensevoice"
+    voice: Optional[str] = None
+    tts_engine: Optional[str] = None
+    asr_engine: Optional[str] = None
 
 class SeekRequest(BaseModel):
     task_id: str
@@ -106,7 +103,7 @@ def update_env_file(updates: Dict[str, str]):
 
 @app.get("/", response_class=HTMLResponse)
 async def index(request: Request):
-    return templates.TemplateResponse(request=request, name="index.html")
+    return templates.TemplateResponse(request=request, name="index.html", context={"settings": settings})
 
 @app.get("/api/hardware")
 async def get_hardware():
@@ -125,11 +122,19 @@ async def verify_model_endpoint(req: ModelVerifyRequest):
 
 @app.post("/api/models/download")
 async def download_model_endpoint(req: ModelVerifyRequest):
-    return ModelManager.verify_model(req.query)
+    result = ModelManager.verify_model(req.query)
+    if not result.get("ok"):
+        result["message"] += " Chạy setup.bat để tải Whisper; các model nâng cao cần cài riêng."
+    return result
 
 @app.get("/api/settings")
 async def get_settings():
     return {
+        "asr_engine": settings.ASR_ENGINE,
+        "tts_engine": settings.TTS_ENGINE,
+        "edge_voice": settings.EDGE_VOICE,
+        "device": settings.DEVICE,
+        "whisper_model": settings.WHISPER_MODEL_SIZE,
         "llm_provider": getattr(settings, "LLM_PROVIDER", "gemini"),
         "gemini_key": getattr(settings, "GEMINI_API_KEY", "") or os.getenv("GEMINI_API_KEY", ""),
         "gemini_model": getattr(settings, "GEMINI_MODEL", "gemini-2.0-flash"),
@@ -188,13 +193,13 @@ async def list_tasks():
         tot_cnt = max(1, len(sess.segments))
         pct = int((ready_cnt / tot_cnt) * 100) if tot_cnt > 0 else 0
 
-        status_str = "PAUSED" if sess.is_paused else ("RUNNING" if sess.is_running else "COMPLETED")
+        status_str = "FAILED" if sess.error else ("PAUSED" if sess.is_paused else ("RUNNING" if sess.is_running else "COMPLETED"))
         tasks.append({
             "task_id": task_id,
             "task_type": "Realtime Dubbing",
             "status": status_str,
             "progress_pct": pct,
-            "stage": f"Đã dịch {ready_cnt}/{tot_cnt} câu ({pct}%)",
+            "stage": sess.error or f"Đã dịch {ready_cnt}/{tot_cnt} câu ({pct}%)",
             "duration": sess.total_duration,
             "elapsed_seconds": round(time.time() - sess.start_wall_time, 1) if sess.start_wall_time else 0,
             "video_url": f"/api/inputs/{sess.video_path.name}" if hasattr(sess, "video_path") and sess.video_path else "",
@@ -284,6 +289,13 @@ async def broadcast_session_event(task_id: str, event_type: str, data: Dict[str,
         for ws in dead_conns:
             stream_sockets[task_id].remove(ws)
 
+async def run_session(session):
+    try:
+        await session.start()
+    except Exception:
+        # The pipeline records and broadcasts its startup error.
+        pass
+
 @app.post("/api/streaming/start-url")
 async def start_streaming_url(req: StreamUrlRequest):
     if not req.url:
@@ -293,7 +305,7 @@ async def start_streaming_url(req: StreamUrlRequest):
 
     # Resolve / Download video
     try:
-        video_info = downloader.download(req.url)
+        video_info = await asyncio.to_thread(downloader.download, req.url)
         video_path = Path(video_info["file_path"])
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Không thể tải video: {e}")
@@ -303,13 +315,13 @@ async def start_streaming_url(req: StreamUrlRequest):
         task_id=task_id,
         video_path=video_path,
         initial_buffer_seconds=req.initial_buffer_seconds or 10.0,
-        voice=req.voice or "Trúc Ly",
-        tts_engine_name=req.tts_engine or "vieneu",
-        asr_engine_name=req.asr_engine or "sensevoice",
+        voice=req.voice or settings.EDGE_VOICE,
+        tts_engine_name=req.tts_engine or settings.TTS_ENGINE,
+        asr_engine_name=req.asr_engine or settings.ASR_ENGINE,
         event_callback=lambda event_type, data: broadcast_session_event(task_id, event_type, data)
     )
 
-    asyncio.create_task(session.start())
+    asyncio.create_task(run_session(session))
 
     return {
         "task_id": task_id,
@@ -322,9 +334,9 @@ async def start_streaming_url(req: StreamUrlRequest):
 async def start_streaming_upload(
     file: UploadFile = File(...),
     initial_buffer_seconds: float = Form(10.0),
-    voice: str = Form("Trúc Ly"),
-    tts_engine: str = Form("vieneu"),
-    asr_engine: str = Form("sensevoice"),
+    voice: str = Form(settings.EDGE_VOICE),
+    tts_engine: str = Form(settings.TTS_ENGINE),
+    asr_engine: str = Form(settings.ASR_ENGINE),
     ref_audio: Optional[UploadFile] = File(None)
 ):
     task_id = str(uuid.uuid4())[:8]
@@ -354,7 +366,7 @@ async def start_streaming_upload(
         event_callback=lambda event_type, data: broadcast_session_event(task_id, event_type, data)
     )
 
-    asyncio.create_task(session.start())
+    asyncio.create_task(run_session(session))
 
     return {
         "task_id": task_id,
@@ -391,7 +403,12 @@ async def export_hq(req: ExportHQRequest):
     if not session:
         raise HTTPException(status_code=404, detail="Session not found")
 
-    segments_data = [s.to_dict() for s in session.segments.values() if s.status in ["READY", "PLAYED"]]
+    if session.is_running or session.error or any(
+        s.status not in ("READY", "PLAYED") for s in session.segments.values()
+    ):
+        raise HTTPException(status_code=409, detail="Hãy chờ dịch xong toàn bộ video trước khi xuất.")
+    segments_data = [dict(s.to_dict(), audio_path=s.audio_path)
+                     for s in session.segments.values() if s.status in ["READY", "PLAYED"]]
     if not segments_data:
         raise HTTPException(status_code=400, detail="Chưa có câu thoại nào sẵn sàng để xuất HQ")
 
@@ -476,14 +493,14 @@ async def cancel_export_hq(task_id: str):
 class StreamLocalFileRequest(BaseModel):
     file_path: str
     initial_buffer_seconds: Optional[float] = 10.0
-    voice: Optional[str] = "Trúc Ly"
-    tts_engine: Optional[str] = "vieneu"
-    asr_engine: Optional[str] = "sensevoice"
+    voice: Optional[str] = None
+    tts_engine: Optional[str] = None
+    asr_engine: Optional[str] = None
 
 @app.post("/api/streaming/start-local-file")
 async def start_streaming_local_file(req: StreamLocalFileRequest):
     p = Path(req.file_path)
-    if not p.exists():
+    if not p.is_file():
         raise HTTPException(status_code=404, detail=f"File không tồn tại: {req.file_path}")
 
     task_id = str(uuid.uuid4())[:8]
@@ -491,16 +508,16 @@ async def start_streaming_local_file(req: StreamLocalFileRequest):
         task_id=task_id,
         video_path=p,
         initial_buffer_seconds=req.initial_buffer_seconds or 10.0,
-        voice=req.voice or "Trúc Ly",
-        tts_engine_name=req.tts_engine or "vieneu",
-        asr_engine_name=req.asr_engine or "sensevoice",
+        voice=req.voice or settings.EDGE_VOICE,
+        tts_engine_name=req.tts_engine or settings.TTS_ENGINE,
+        asr_engine_name=req.asr_engine or settings.ASR_ENGINE,
         event_callback=lambda event_type, data: broadcast_session_event(task_id, event_type, data)
     )
-    asyncio.create_task(session.start())
+    asyncio.create_task(run_session(session))
 
     return {
         "task_id": task_id,
-        "video_url": f"/api/local-file?path={p.as_posix()}",
+        "video_url": f"/api/local-file?path={quote(p.as_posix(), safe='')}",
         "initial_buffer_seconds": session.initial_buffer_seconds,
         "status": "started"
     }
@@ -598,6 +615,10 @@ async def websocket_stream(websocket: WebSocket, task_id: str):
             "task_id": task_id,
             **session.get_telemetry()
         })
+        if session.error:
+            await websocket.send_json({"type": "error", "message": session.error, "task_id": task_id})
+        elif session.first_play_emitted:
+            await websocket.send_json({"type": "ready_to_play", "task_id": task_id})
 
     try:
         while True:

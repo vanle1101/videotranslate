@@ -1,0 +1,93 @@
+"""Offline regression checks using small, real FFmpeg inputs on Windows paths."""
+
+import json
+import shutil
+import subprocess
+import tempfile
+from pathlib import Path
+
+import pytest
+
+from config import settings
+from core.audio_ducking import PremiumAudioMixer
+from core.subtitle import SubtitleGenerator
+from core.video_composer import VideoComposer
+
+
+def ffmpeg(*args):
+    return subprocess.run(
+        ["ffmpeg", "-hide_banner", "-loglevel", "error", "-nostdin", "-y", *map(str, args)],
+        capture_output=True,
+        check=True,
+        timeout=30,
+    )
+
+
+def probe(path):
+    result = subprocess.run(
+        ["ffprobe", "-v", "error", "-show_streams", "-show_format", "-of", "json", str(path)],
+        capture_output=True,
+        check=True,
+        timeout=10,
+    )
+    return json.loads(result.stdout)
+
+
+@pytest.fixture(scope="module")
+def media():
+    if not shutil.which("ffmpeg") or not shutil.which("ffprobe"):
+        pytest.skip("FFmpeg and ffprobe are required for offline media integration checks")
+    settings.TEMP_DIR.mkdir(parents=True, exist_ok=True)
+    with tempfile.TemporaryDirectory(prefix="media-regression-", dir=settings.TEMP_DIR) as tmp:
+        folder = Path(tmp) / "Tiếng Việt O'Brien [bản 1],x;"
+        folder.mkdir()
+        video = folder / "video gốc.mp4"
+        bgm = folder / "nhạc nền.wav"
+        voice = folder / "giọng đọc.wav"
+        subtitles = folder / "phụ đề O'Brien [1],x;.ass"
+        ffmpeg("-f", "lavfi", "-i", "color=c=black:s=180x320:r=15:d=1.2", "-c:v", "libx264", "-pix_fmt", "yuv420p", video)
+        ffmpeg("-f", "lavfi", "-i", "sine=frequency=220:duration=1.2", bgm)
+        ffmpeg("-f", "lavfi", "-i", "sine=frequency=880:duration=0.6", voice)
+        SubtitleGenerator().generate_ass(
+            [{"start": 0, "end": 1.2, "vi_text": "Xin chào Việt Nam"}], subtitles
+        )
+        yield folder, video, bgm, voice, subtitles
+
+
+@pytest.mark.parametrize("duration", [None, 1.5])
+def test_mixer_splits_sidechain_and_preserves_duration(media, duration):
+    folder, _, bgm, voice, _ = media
+    output = folder / f"mix {duration}.wav"
+    PremiumAudioMixer().mix(bgm, voice, output, total_duration=duration)
+    metadata = probe(output)
+    assert float(metadata["format"]["duration"]) == pytest.approx(duration or 1.2, abs=0.03)
+    assert metadata["streams"][0]["channels"] == 2
+
+
+@pytest.mark.parametrize("mask", [False, True])
+def test_compose_unicode_paths_burns_subtitles_and_keeps_video_length(media, mask):
+    folder, video, bgm, voice, subtitles = media
+    mixed = folder / f"master {mask}.wav"
+    # Short audio must be padded by the composer instead of cutting off video.
+    PremiumAudioMixer().mix(bgm, voice, mixed, total_duration=0.8)
+    output = folder / "xuất video" / f"kết quả {mask}.mp4"
+    VideoComposer().compose(video, mixed, subtitles, output, mask_chinese_sub=mask)
+    metadata = probe(output)
+    assert {stream["codec_name"] for stream in metadata["streams"]} == {"h264", "aac"}
+    assert float(metadata["format"]["duration"]) == pytest.approx(1.2, abs=0.12)
+    frame = ffmpeg("-ss", "0.4", "-i", output, "-frames:v", "1", "-f", "rawvideo", "-pix_fmt", "rgb24", "pipe:1").stdout
+    # The source is black. Yellow pixels prove that the ASS text was burned in.
+    assert sum(r > 100 and g > 100 and b < 80 for r, g, b in zip(frame[::3], frame[1::3], frame[2::3])) > 10
+
+
+def test_missing_subtitles_reports_failure_instead_of_silent_fallback(media):
+    folder, video, bgm, _, _ = media
+    with pytest.raises(RuntimeError, match="FFmpeg video composition failed"):
+        VideoComposer().compose(video, bgm, folder / "missing.ass", folder / "failed.mp4", False)
+
+
+def test_subtitle_rounding_carries_to_the_next_second():
+    generator = SubtitleGenerator()
+    assert generator._format_time_ass(59.9999) == "0:01:00.00"
+    assert generator._format_time_srt(59.9999) == "00:01:00,000"
+    assert generator._format_time_ass(-0.1) == "0:00:00.00"

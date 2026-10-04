@@ -1,4 +1,3 @@
-import datetime
 from pathlib import Path
 from typing import List, Dict, Any
 from config import settings
@@ -10,34 +9,33 @@ class SubtitleGenerator:
         self.outline_color = settings.SUBTITLE_OUTLINE_COLOR # Black
 
     def _format_time_srt(self, seconds: float) -> str:
-        td = datetime.timedelta(seconds=seconds)
-        total_seconds = int(td.total_seconds())
+        total_millis = max(0, round(seconds * 1000))
+        total_seconds, millis = divmod(total_millis, 1000)
         hours = total_seconds // 3600
         minutes = (total_seconds % 3600) // 60
         secs = total_seconds % 60
-        millis = int((seconds - int(seconds)) * 1000)
         return f"{hours:02d}:{minutes:02d}:{secs:02d},{millis:03d}"
 
     def _format_time_ass(self, seconds: float) -> str:
-        td = datetime.timedelta(seconds=seconds)
-        total_seconds = int(td.total_seconds())
+        total_centis = max(0, round(seconds * 100))
+        total_seconds, centis = divmod(total_centis, 100)
         hours = total_seconds // 3600
         minutes = (total_seconds % 3600) // 60
         secs = total_seconds % 60
-        centis = int(round((seconds - int(seconds)) * 100))
         return f"{hours:01d}:{minutes:02d}:{secs:02d}.{centis:02d}"
 
     def generate_srt(self, segments: List[Dict[str, Any]], output_path: Path) -> Path:
         """Export clean standard SRT file."""
         lines = []
-        for idx, seg in enumerate(segments, 1):
+        for seg in segments:
             text = seg.get("vi_text", seg.get("text", "")).strip()
             if not text:
                 continue
             start_str = self._format_time_srt(seg["start"])
             end_str = self._format_time_srt(seg["end"])
-            lines.append(f"{idx}\n{start_str} --> {end_str}\n{text}\n")
+            lines.append(f"{len(lines) + 1}\n{start_str} --> {end_str}\n{text}\n")
 
+        output_path.parent.mkdir(parents=True, exist_ok=True)
         output_path.write_text("\n".join(lines), encoding="utf-8")
         return output_path
 
@@ -86,5 +84,6 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
             event_lines.append(f"Dialogue: 0,{start_ass},{end_ass},TikTokStyle,,0,0,0,,{text}")
 
         full_ass = ass_header + "\n".join(event_lines)
+        output_path.parent.mkdir(parents=True, exist_ok=True)
         output_path.write_text(full_ass, encoding="utf-8")
         return output_path

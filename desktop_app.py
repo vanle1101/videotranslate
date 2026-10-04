@@ -2,6 +2,7 @@ import os
 import sys
 import json
 import logging
+import shutil
 from pathlib import Path
 
 # Ensure application root is in sys.path
@@ -100,13 +101,24 @@ class DesktopBridge(QObject):
     @Slot(str, result=str)
     def saveVideoAs(self, default_name: str) -> str:
         """Opens native Windows save file picker for video export."""
+        source = settings.OUTPUT_DIR / Path(default_name).name
+        if not source.is_file():
+            QMessageBox.warning(self.main_window, "Chưa có video", "Hãy xuất video hoàn tất trước khi lưu.")
+            return ""
         file_path, _ = QFileDialog.getSaveFileName(
             self.main_window,
             "Lưu video đã lồng tiếng",
             str(settings.OUTPUT_DIR / (default_name or "translated_video.mp4")),
             "MP4 Video (*.mp4);;All files (*.*)"
         )
-        return file_path or ""
+        if file_path:
+            try:
+                if source.resolve() != Path(file_path).resolve():
+                    shutil.copy2(source, file_path)
+                return file_path
+            except OSError as exc:
+                QMessageBox.warning(self.main_window, "Không thể lưu", str(exc))
+        return ""
 
     @Slot(str, str)
     def showNotification(self, title: str, message: str):
@@ -207,7 +219,7 @@ class StudioSplashScreen(QWidget):
         titles = QVBoxLayout()
         title = QLabel("Douyin2TikTok AI Studio")
         title.setStyleSheet("font-size: 20px; font-weight: bold; color: #ffffff; font-family: 'Segoe UI', sans-serif;")
-        subtitle = QLabel("SenseVoice · VieNeu-TTS v3 Turbo · Gemini · BS-RoFormer")
+        subtitle = QLabel(f"{settings.ASR_ENGINE} {settings.WHISPER_MODEL_SIZE} · {settings.DEVICE.upper()} · {settings.TTS_ENGINE}")
         subtitle.setStyleSheet("font-size: 11px; color: #94a3b8; font-family: 'Segoe UI', sans-serif;")
         titles.addWidget(title)
         titles.addWidget(subtitle)
@@ -271,8 +283,9 @@ class StudioMainWindow(QMainWindow):
 
         self.setWindowTitle("Douyin2TikTok AI Studio")
         self.setWindowIcon(self.app_icon)
-        self.setMinimumSize(1280, 800)
-        self.resize(1366, 860)
+        available = QApplication.primaryScreen().availableGeometry()
+        self.setMinimumSize(min(1024, available.width()), min(640, available.height()))
+        self.resize(min(1366, available.width()), min(860, available.height()))
 
         # Enable Drag & Drop
         self.setAcceptDrops(True)
@@ -454,6 +467,7 @@ def main():
         local_server.newConnection.connect(handle_new_connection)
 
     def on_error(err_msg):
+        service_manager.shutdown_all()
         splash.close()
         QMessageBox.critical(
             None,
@@ -467,6 +481,7 @@ def main():
     worker.error.connect(on_error)
     worker.start()
 
+    app.aboutToQuit.connect(service_manager.shutdown_all)
     sys.exit(app.exec())
 
 if __name__ == "__main__":

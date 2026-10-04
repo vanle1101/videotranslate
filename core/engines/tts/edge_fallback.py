@@ -1,7 +1,11 @@
 import asyncio
+import subprocess
+import tempfile
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Dict, Any, Optional
 import edge_tts
+from config import settings
 from core.engines.tts.base import TTSEngine
 
 class EdgeTTSFallbackEngine(TTSEngine):
@@ -9,8 +13,8 @@ class EdgeTTSFallbackEngine(TTSEngine):
     Fallback TTS engine using Microsoft Edge-TTS.
     Marked strictly as fallback in UI and reports.
     """
-    def __init__(self, voice: str = "vi-VN-HoaiMyNeural"):
-        self.voice = voice
+    def __init__(self, voice: Optional[str] = None):
+        self.voice = voice or settings.EDGE_VOICE
 
     @property
     def name(self) -> str:
@@ -37,22 +41,36 @@ class EdgeTTSFallbackEngine(TTSEngine):
         speed: float = 1.0,
         progress_callback: Optional[callable] = None
     ) -> Path:
-        chosen_voice = voice or self.voice
+        output_path = Path(output_path)
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        if not text.strip():
+            raise ValueError("Không có nội dung tiếng Việt để đọc.")
+        # VieNeu preset names are not valid Microsoft voice IDs.
+        chosen_voice = voice if voice and voice.startswith("vi-VN-") else self.voice
         rate_str = f"+{int((speed - 1.0) * 100)}%" if speed >= 1.0 else f"{int((speed - 1.0) * 100)}%"
-        
-        async def _run():
-            com = edge_tts.Communicate(text, chosen_voice, rate=rate_str)
-            await com.save(str(output_path))
+        # Edge returns MP3 bytes. Convert to real PCM when a WAV is requested.
+        with tempfile.TemporaryDirectory(prefix="edge_tts_", dir=output_path.parent) as temp_dir:
+            mp3_path = Path(temp_dir) / "speech.mp3"
 
-        try:
-            loop = asyncio.get_event_loop()
-            if loop.is_running():
-                import nest_asyncio
-                nest_asyncio.apply()
-                loop.run_until_complete(_run())
+            async def _run():
+                com = edge_tts.Communicate(text, chosen_voice, rate=rate_str)
+                await com.save(str(mp3_path))
+
+            try:
+                asyncio.get_running_loop()
+            except RuntimeError:
+                asyncio.run(_run())
             else:
-                loop.run_until_complete(_run())
-        except Exception:
-            asyncio.run(_run())
+                with ThreadPoolExecutor(max_workers=1) as executor:
+                    executor.submit(lambda: asyncio.run(_run())).result()
 
+            if output_path.suffix.lower() == ".mp3":
+                mp3_path.replace(output_path)
+            else:
+                result = subprocess.run(
+                    ["ffmpeg", "-y", "-i", str(mp3_path), "-vn", "-ac", "1", "-ar", "24000", str(output_path)],
+                    capture_output=True,
+                )
+                if result.returncode:
+                    raise RuntimeError(result.stderr.decode("utf-8", errors="replace")[-1500:])
         return output_path

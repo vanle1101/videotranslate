@@ -43,7 +43,8 @@ class RealtimeVocalSuppressor:
         ]
         try:
             import json
-            probe_res = subprocess.run(probe_cmd, capture_output=True, text=True)
+            probe_res = subprocess.run(probe_cmd, capture_output=True, text=True,
+                                       encoding="utf-8", errors="replace", check=True)
             probe_data = json.loads(probe_res.stdout)
             channels = int(probe_data["streams"][0].get("channels", 2))
         except Exception:
@@ -59,17 +60,12 @@ class RealtimeVocalSuppressor:
             }
 
         # Sample 5 seconds of PCM data to compute L-R correlation
-        temp_pcm = input_audio_path.parent / f"_probe_{input_audio_path.stem}.raw"
         pcm_cmd = [
             "ffmpeg", "-y", "-ss", "0", "-t", "5", "-i", str(input_audio_path),
-            "-vn", "-f", "s16le", "-ac", "2", "-ar", "22050", str(temp_pcm)
+            "-vn", "-f", "s16le", "-ac", "2", "-ar", "22050", "pipe:1"
         ]
-        subprocess.run(pcm_cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-
         try:
-            raw_bytes = temp_pcm.read_bytes()
-            if temp_pcm.exists():
-                temp_pcm.unlink()
+            raw_bytes = subprocess.run(pcm_cmd, capture_output=True, check=True).stdout
             data = np.frombuffer(raw_bytes, dtype=np.int16).reshape(-1, 2).astype(np.float32)
             L, R = data[:, 0], data[:, 1]
             denom = np.sqrt(np.sum(L**2) * np.sum(R**2))
@@ -153,23 +149,26 @@ class RealtimeVocalSuppressor:
             str(output_audio_path)
         ]
 
-        proc = subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True)
+        proc = subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
+                              text=True, encoding="utf-8", errors="replace")
         if proc.returncode != 0:
             # Fallback simple notch
             fallback_cmd = [
                 "ffmpeg", "-y", "-i", str(input_audio_path),
+                "-vn",
                 "-af", "equalizer=f=1200:t=q:w=1.5:g=-20,equalizer=f=2400:t=q:w=2.0:g=-18",
                 *codec_args,
                 str(output_audio_path)
             ]
-            subprocess.run(fallback_cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            subprocess.run(fallback_cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=True)
 
         elapsed = max(0.001, time.time() - t0)
 
         # Calculate duration of output
         dur_cmd = ["ffprobe", "-v", "error", "-show_entries", "format=duration", "-of", "default=noprint_wrappers=1:nokey=1", str(output_audio_path)]
         try:
-            dur_res = subprocess.run(dur_cmd, capture_output=True, text=True)
+            dur_res = subprocess.run(dur_cmd, capture_output=True, text=True,
+                                     encoding="utf-8", errors="replace", check=True)
             duration = float(dur_res.stdout.strip())
         except Exception:
             duration = 1.0

@@ -44,7 +44,7 @@ document.addEventListener("DOMContentLoaded", () => {
 
   // Timeline & Segments
   const timelineTrack = document.getElementById("segments-timeline-track");
-  const playbackHeadMarker = document.getElementById("playback-head-marker");
+  let playbackHeadMarker = document.getElementById("playback-head-marker");
   const barCurrentTime = document.getElementById("bar-current-time");
   const barTotalTime = document.getElementById("bar-total-time");
   const barBufferInfo = document.getElementById("bar-buffer-info");
@@ -278,6 +278,7 @@ document.addEventListener("DOMContentLoaded", () => {
     segments = {};
     segmentsList.innerHTML = "";
     timelineTrack.innerHTML = '<div id="playback-head-marker" class="absolute top-0 bottom-0 w-1 bg-white z-10 shadow-glow" style="left: 0%;"></div>';
+    playbackHeadMarker = document.getElementById("playback-head-marker");
 
     telTtfp.textContent = "--";
     telBuffer.textContent = "+0.0s";
@@ -294,9 +295,9 @@ document.addEventListener("DOMContentLoaded", () => {
           body: JSON.stringify({
             file_path: window.currentLocalFilePath,
             initial_buffer_seconds: parseFloat(bufferSelect.value) || 10.0,
-            voice: voiceSelect.value || "Trúc Ly",
-            tts_engine: "vieneu",
-            asr_engine: "sensevoice"
+            voice: voiceSelect.value || "vi-VN-HoaiMyNeural",
+            tts_engine: document.body.dataset.ttsEngine,
+            asr_engine: document.body.dataset.asrEngine
           })
         });
       } else if (selectedFile) {
@@ -304,9 +305,9 @@ document.addEventListener("DOMContentLoaded", () => {
         formData.append("file", selectedFile);
         formData.append("initial_buffer_seconds", bufferSelect.value);
         formData.append("voice", voiceSelect.value);
-        formData.append("tts_engine", "vieneu");
-        formData.append("asr_engine", "sensevoice");
-        if (refAudioFile.files.length > 0) {
+        formData.append("tts_engine", document.body.dataset.ttsEngine);
+        formData.append("asr_engine", document.body.dataset.asrEngine);
+        if (refAudioFile?.files.length > 0) {
           formData.append("ref_audio", refAudioFile.files[0]);
         }
         res = await fetch("/api/streaming/start-upload", { method: "POST", body: formData });
@@ -318,8 +319,8 @@ document.addEventListener("DOMContentLoaded", () => {
             url: url,
             initial_buffer_seconds: parseFloat(bufferSelect.value),
             voice: voiceSelect.value,
-            tts_engine: "vieneu",
-            asr_engine: "sensevoice"
+            tts_engine: document.body.dataset.ttsEngine,
+            asr_engine: document.body.dataset.asrEngine
           })
         });
       }
@@ -397,10 +398,10 @@ document.addEventListener("DOMContentLoaded", () => {
           workerAsrBadge.textContent = `ASR: #${msg.id}`;
         } else if (msg.status === "TRANSLATING") {
           workerTransBadge.className = "px-2 py-0.5 rounded bg-amber-900/60 text-amber-300 font-bold animate-pulse";
-          workerTransBadge.textContent = `Gemini: #${msg.id}`;
+          workerTransBadge.textContent = `Dịch: #${msg.id}`;
         } else if (msg.status === "TTS") {
           workerTtsBadge.className = "px-2 py-0.5 rounded bg-violet-900/60 text-violet-300 font-bold animate-pulse";
-          workerTtsBadge.textContent = `VieNeu: #${msg.id}`;
+          workerTtsBadge.textContent = `TTS: #${msg.id}`;
         } else if (msg.status === "READY") {
           workerAsrBadge.className = "px-2 py-0.5 rounded bg-gray-800 text-gray-300";
           workerTransBadge.className = "px-2 py-0.5 rounded bg-gray-800 text-gray-300";
@@ -440,6 +441,12 @@ document.addEventListener("DOMContentLoaded", () => {
         if (exportProgressBar) exportProgressBar.style.width = `${msg.progress}%`;
         if (exportProgressPct) exportProgressPct.textContent = `${msg.progress}%`;
         if (exportStatusText) exportStatusText.innerHTML = `<i class="fa-solid fa-spinner fa-spin text-pink-400"></i> ${msg.stage}`;
+      }
+      else if (msg.type === "error") {
+        bufferingText.textContent = msg.message || msg.error || "Xử lý thất bại. Xem Diagnostics rồi thử lại.";
+        bufferingAlert.classList.remove("hidden");
+        resetWorkerControls();
+        updateTasksTable();
       }
       else if (msg.type === "finished") {
         resetWorkerControls();
@@ -908,15 +915,15 @@ document.addEventListener("DOMContentLoaded", () => {
     const payload = {
       llm_provider: settingsLlmProvider?.value || "gemini",
       gemini_key: settingsGeminiKey?.value.trim() || "",
-      gemini_model: settingsGeminiModel?.value || "gemini-2.0-flash",
+      gemini_model: settingsGeminiModel?.value || "gemini-3.8-flash",
       deepseek_key: settingsDeepseekKey?.value.trim() || "",
       suppression_mode: settingsSuppressionMode?.value || "AUTO",
       ducking_level: settingsDuckingLevel?.value || "-14",
       buffer_target: settingsBufferTarget?.value || "10"
     };
 
-    localStorage.setItem("gemini_key", payload.gemini_key);
-    localStorage.setItem("deepseek_key", payload.deepseek_key);
+    localStorage.removeItem("gemini_key");
+    localStorage.removeItem("deepseek_key");
 
     const origText = btnSaveSettings.innerHTML;
     btnSaveSettings.disabled = true;
@@ -1034,7 +1041,7 @@ document.addEventListener("DOMContentLoaded", () => {
     if (!lastExportedFileUrl) return;
     const defaultName = lastExportedFileUrl.split("/").pop() || "vietnamese_dub.mp4";
     if (window.desktopBridge && typeof window.desktopBridge.saveVideoAs === "function") {
-      const targetPath = window.desktopBridge.saveVideoAs(defaultName);
+      const targetPath = await new Promise(resolve => window.desktopBridge.saveVideoAs(defaultName, resolve));
       if (targetPath) {
         alert(`Đã lưu file thành công tại:\n${targetPath}`);
       }

@@ -46,7 +46,8 @@ class TimingBudgetAligner(AlignmentEngine):
             "-of", "default=noprint_wrappers=1:nokey=1",
             str(audio_path)
         ]
-        res = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        res = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                             text=True, encoding="utf-8", errors="replace", check=True)
         try:
             return float(res.stdout.strip())
         except Exception:

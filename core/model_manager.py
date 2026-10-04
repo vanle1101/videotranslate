@@ -1,108 +1,77 @@
+import os
 from pathlib import Path
 from typing import List, Dict, Any
 from config import settings
 
+
+def _nonempty_file(path: Path) -> bool:
+    return path.is_file() and path.stat().st_size > 0
+
+
+def _model_record(engine: str, name: str, path: Path, files: List[Path], device: str) -> Dict[str, Any]:
+    present = bool(files) and all(_nonempty_file(file) for file in files)
+    return {
+        "engine": engine,
+        "model_name": name,
+        "downloaded": present,
+        "size_mb": round(sum(file.stat().st_size for file in files if _nonempty_file(file)) / (1024 ** 2), 1),
+        "device": device,
+        "status": "AVAILABLE" if present else "NOT_DOWNLOADED",
+        "path": str(path),
+    }
+
+
 class ModelManager:
-    """Manages local model checkpoints, download statuses, and disk paths."""
+    """Reports checkpoint files present on this machine without downloading models."""
 
     @staticmethod
     def get_all_models() -> List[Dict[str, Any]]:
-        models = []
+        model_root = settings.WORKSPACE_DIR / "models"
+        device = str(settings.DEVICE).upper()
+        roformer = model_root / "audio_separator" / settings.ROFORMER_MODEL
+        sense_dir = model_root / "sensevoice_onnx"
 
-        # 1. BS-RoFormer (python-audio-separator)
-        roformer_dir = settings.BASE_DIR / "workspace" / "models" / "audio_separator"
-        roformer_file = roformer_dir / "model_bs_roformer_ep_317_sdr_12.9755.ckpt"
-        roformer_exists = roformer_file.exists() and roformer_file.stat().st_size > 100000000
-        models.append({
-            "engine": "python-audio-separator",
-            "model_name": "BS-RoFormer (Vocal/Instrumental)",
-            "downloaded": roformer_exists,
-            "size_mb": round(roformer_file.stat().st_size / (1024 * 1024), 1) if roformer_exists else 0,
-            "device": "CUDA (GTX 1050 Ti)",
-            "status": "AVAILABLE" if roformer_exists else "NOT_DOWNLOADED",
-            "path": str(roformer_file.resolve()) if roformer_exists else str(roformer_file)
-        })
+        # Respect the user's existing Hugging Face cache configuration.
+        cache_home = Path(os.getenv("XDG_CACHE_HOME", str(Path.home() / ".cache")))
+        hf_home = Path(os.getenv("HF_HOME", str(cache_home / "huggingface")))
+        hf_hub = Path(os.getenv("HF_HUB_CACHE", os.getenv("HUGGINGFACE_HUB_CACHE", str(hf_home / "hub"))))
+        vieneu_cache = hf_hub / "models--pnnbao-ump--VieNeu-TTS-v3-Turbo"
+        vieneu_files = [
+            file for file in (vieneu_cache / "snapshots").glob("**/*")
+            if file.suffix in {".onnx", ".safetensors", ".gguf", ".bin"} and _nonempty_file(file)
+        ]
 
-        # 2. SenseVoice (FunAudioLLM)
-        sense_dir = settings.BASE_DIR / "workspace" / "models" / "sensevoice_onnx"
-        sense_file = sense_dir / "model.int8.onnx"
-        sense_exists = sense_file.exists() and (sense_dir / "tokens.txt").exists()
-        models.append({
-            "engine": "FunAudioLLM/SenseVoice",
-            "model_name": "SenseVoiceSmall ONNX Int8",
-            "downloaded": sense_exists,
-            "size_mb": round(sense_file.stat().st_size / (1024 * 1024), 1) if sense_exists else 0,
-            "device": "CPU / ONNX (Auto)",
-            "status": "AVAILABLE" if sense_exists else "NOT_DOWNLOADED",
-            "path": str(sense_file.resolve()) if sense_exists else str(sense_file)
-        })
+        whisper_size = settings.WHISPER_MODEL_SIZE
+        whisper_dir = model_root / f"faster-whisper-{whisper_size}"
+        whisper_files = [whisper_dir / name for name in ("model.bin", "config.json", "tokenizer.json")]
 
-        # 3. VieNeu-TTS v3 Turbo
-        vieneu_cache = Path("C:/Users/phamc/.cache/huggingface/hub/models--pnnbao-ump--VieNeu-TTS-v3-Turbo")
-        vieneu_exists = vieneu_cache.exists()
-        models.append({
-            "engine": "VieNeu-TTS",
-            "model_name": "VieNeu-TTS v3 Turbo",
-            "downloaded": vieneu_exists,
-            "size_mb": 475.0 if vieneu_exists else 0,
-            "device": "CPU / ONNX Runtime",
-            "status": "AVAILABLE" if vieneu_exists else "NOT_DOWNLOADED",
-            "path": str(vieneu_cache.resolve()) if vieneu_exists else str(vieneu_cache)
-        })
-
-        # 4. Faster-Whisper Fallback
-        models.append({
-            "engine": "Faster-Whisper (Fallback)",
-            "model_name": "Whisper-small (CTranslate2)",
-            "downloaded": True,
-            "size_mb": 461.0,
-            "device": "CUDA / CPU",
-            "status": "AVAILABLE",
-            "path": "HuggingFace/Systran"
-        })
-
-        # 5. ProPainter / Video Subtitle Remover
-        vsr_path = settings.BASE_DIR / "engines" / "video-subtitle-remover"
-        models.append({
-            "engine": "YaoFANGUK/VSR + ProPainter",
-            "model_name": "ProPainter & Targeted Mask",
-            "downloaded": vsr_path.exists(),
-            "size_mb": 120.0 if vsr_path.exists() else 0,
-            "device": "CUDA / FFmpeg",
-            "status": "AVAILABLE" if vsr_path.exists() else "NOT_DOWNLOADED",
-            "path": str(vsr_path.resolve()) if vsr_path.exists() else str(vsr_path)
-        })
-
-        return models
+        vsr_dir = settings.BASE_DIR / "engines" / "video-subtitle-remover"
+        vsr_files = [file for file in vsr_dir.glob("**/ProPainter.pth") if _nonempty_file(file)]
+        return [
+            _model_record("python-audio-separator", "BS-RoFormer (Vocal/Instrumental)", roformer, [roformer], device),
+            _model_record("FunAudioLLM/SenseVoice", "SenseVoiceSmall ONNX Int8", sense_dir,
+                          [sense_dir / "model.int8.onnx", sense_dir / "tokens.txt"], "CPU / ONNX"),
+            _model_record("VieNeu-TTS", "VieNeu-TTS v3 Turbo", vieneu_cache, vieneu_files, "CPU / ONNX"),
+            _model_record("Faster-Whisper (Fallback)", f"Whisper-{whisper_size} (CTranslate2)",
+                          whisper_dir, whisper_files, device),
+            _model_record("YaoFANGUK/VSR + ProPainter", "ProPainter checkpoint", vsr_dir, vsr_files, device),
+        ]
 
     @staticmethod
     def verify_model(query: str) -> Dict[str, Any]:
-        models = ModelManager.get_all_models()
-        target = None
-        for m in models:
-            if query.lower() in m["engine"].lower() or query.lower() in m["model_name"].lower():
-                target = m
-                break
-        if not target:
+        query = query.strip().lower()
+        target = next((model for model in ModelManager.get_all_models()
+                       if query and (query in model["engine"].lower() or query in model["model_name"].lower())), None)
+        if target is None:
             return {"ok": False, "message": f"Không tìm thấy model khớp với '{query}'"}
-
-        path_str = target.get("path", "")
-        if not path_str or not Path(path_str).exists():
+        if not target["downloaded"]:
             return {
-                "ok": False,
-                "engine": target["engine"],
-                "model_name": target["model_name"],
+                "ok": False, "engine": target["engine"], "model_name": target["model_name"],
                 "status": "MISSING",
-                "message": f"Model {target['model_name']} chưa tồn tại tại: {path_str}"
+                "message": f"Chưa có đủ tệp model tại: {target['path']}",
             }
-
-        size_mb = target.get("size_mb", 0)
         return {
-            "ok": True,
-            "engine": target["engine"],
-            "model_name": target["model_name"],
-            "size_mb": size_mb,
-            "device": target["device"],
-            "status": "VERIFIED",
-            "message": f"Checkpoint {target['model_name']} ({size_mb} MB) đã được xác thực toàn vẹn trên {target['device']}!"
+            "ok": True, "engine": target["engine"], "model_name": target["model_name"],
+            "size_mb": target["size_mb"], "device": target["device"], "status": "FILES_PRESENT",
+            "message": f"Đã tìm thấy tệp {target['model_name']} ({target['size_mb']} MB). Chưa kiểm tra checksum hoặc chạy suy luận.",
         }

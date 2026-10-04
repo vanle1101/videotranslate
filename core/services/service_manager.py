@@ -28,33 +28,33 @@ def setup_logging():
     # App logger
     app_logger = logging.getLogger("app")
     app_logger.setLevel(logging.INFO)
-    app_handler = logging.FileHandler(LOG_DIR / "app.log", encoding="utf-8")
-    app_handler.setFormatter(logging.Formatter(log_format, date_format))
     if not app_logger.handlers:
+        app_handler = logging.FileHandler(LOG_DIR / "app.log", encoding="utf-8")
+        app_handler.setFormatter(logging.Formatter(log_format, date_format))
         app_logger.addHandler(app_handler)
 
     # AI logger
     ai_logger = logging.getLogger("ai")
     ai_logger.setLevel(logging.INFO)
-    ai_handler = logging.FileHandler(LOG_DIR / "ai.log", encoding="utf-8")
-    ai_handler.setFormatter(logging.Formatter(log_format, date_format))
     if not ai_logger.handlers:
+        ai_handler = logging.FileHandler(LOG_DIR / "ai.log", encoding="utf-8")
+        ai_handler.setFormatter(logging.Formatter(log_format, date_format))
         ai_logger.addHandler(ai_handler)
 
     # Pipeline logger
     pipe_logger = logging.getLogger("pipeline")
     pipe_logger.setLevel(logging.INFO)
-    pipe_handler = logging.FileHandler(LOG_DIR / "pipeline.log", encoding="utf-8")
-    pipe_handler.setFormatter(logging.Formatter(log_format, date_format))
     if not pipe_logger.handlers:
+        pipe_handler = logging.FileHandler(LOG_DIR / "pipeline.log", encoding="utf-8")
+        pipe_handler.setFormatter(logging.Formatter(log_format, date_format))
         pipe_logger.addHandler(pipe_handler)
 
     # Errors logger
     err_logger = logging.getLogger("errors")
     err_logger.setLevel(logging.ERROR)
-    err_handler = logging.FileHandler(LOG_DIR / "errors.log", encoding="utf-8")
-    err_handler.setFormatter(logging.Formatter(log_format, date_format))
     if not err_logger.handlers:
+        err_handler = logging.FileHandler(LOG_DIR / "errors.log", encoding="utf-8")
+        err_handler.setFormatter(logging.Formatter(log_format, date_format))
         err_logger.addHandler(err_handler)
 
 setup_logging()
@@ -84,6 +84,7 @@ class ServiceManager:
         self.child_processes: List[subprocess.Popen] = []
         self.backend_url: str = ""
         self.lock = threading.Lock()
+        self._prewarmed: Dict[str, Any] = {}
 
     @staticmethod
     def find_free_port() -> int:
@@ -127,7 +128,8 @@ class ServiceManager:
             log_level="warning",
             access_log=False,
             log_config=None,
-            loop="asyncio"
+            loop="asyncio",
+            timeout_graceful_shutdown=3,
         )
         self.uvicorn_server = uvicorn.Server(config)
 
@@ -143,11 +145,13 @@ class ServiceManager:
         self.server_thread.start()
 
         # Wait for health check response
-        start_time = time.time()
+        start_time = time.monotonic()
         health_ok = False
-        while time.time() - start_time < timeout:
+        while time.monotonic() - start_time < timeout:
+            if not self.server_thread.is_alive():
+                break
             try:
-                req = urllib.request.Request(f"{self.backend_url}/api/hardware", headers={"User-Agent": "DesktopStudio/1.0"})
+                req = urllib.request.Request(f"{self.backend_url}/api/health", headers={"User-Agent": "DesktopStudio/1.0"})
                 with urllib.request.urlopen(req, timeout=1.0) as resp:
                     if resp.status == 200:
                         health_ok = True
@@ -156,6 +160,7 @@ class ServiceManager:
                 time.sleep(0.2)
 
         if not health_ok:
+            self.shutdown_all()
             raise RuntimeError(f"Internal backend failed to initialize on {self.backend_url} within {timeout}s.")
 
         self.is_running = True
@@ -163,99 +168,91 @@ class ServiceManager:
         return self.port
 
     def prewarm_components(self, progress_callback: Optional[Callable[[int, str], None]] = None) -> Dict[str, Any]:
-        """
-        Sequentially initializes core AI models with splash screen telemetry:
-        0% -> 100%
-        """
+        """Check local prerequisites; load only selected models when explicitly enabled."""
         def update(pct: int, msg: str):
-            logger.info(f"[Pre-warm {pct}%] {msg}")
+            logger.info(f"[Startup {pct}%] {msg}")
             if progress_callback:
                 progress_callback(pct, msg)
 
-        status = {
-            "gpu": False,
-            "sensevoice": False,
-            "vieneu": False,
-            "gemini": False,
-            "audio": False
-        }
-
-        # 1. GPU & Hardware
-        update(15, "Checking GPU & CUDA acceleration...")
+        status = {"gpu": False, "sensevoice": False, "vieneu": False,
+                  "gemini": False, "audio": False, "ffmpeg": False,
+                  "ffprobe": False, "prewarm_enabled": bool(settings.PREWARM_MODELS)}
+        update(10, "Checking local hardware...")
         try:
             from core.hardware import detect_hardware
             hw = detect_hardware()
-            status["gpu"] = hw.get("cuda_available", False)
-            gpu_name = hw.get("gpu_name", "CPU")
-            update(25, f"Hardware Ready: {gpu_name}")
-        except Exception as e:
-            logging.getLogger("errors").warning(f"Hardware detection warning: {e}")
+            status["gpu"] = bool(hw.get("cuda_available"))
+            update(25, f"Hardware ready: {hw.get('gpu_name') or 'CPU'}; processing on {settings.DEVICE}")
+        except Exception as exc:
+            logger.warning(f"Hardware detection warning: {exc}")
 
-        # 2. SenseVoice ASR
-        update(35, "Pre-warming SenseVoice ASR engine...")
+        for executable in ("ffmpeg", "ffprobe"):
+            try:
+                result = subprocess.run(
+                    [executable, "-version"], stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL, timeout=3,
+                    creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+                )
+                status[executable] = result.returncode == 0
+            except (OSError, subprocess.TimeoutExpired):
+                pass
+        status["audio"] = status["ffmpeg"] and status["ffprobe"]
+        update(45, "FFmpeg ready" if status["audio"] else "FFmpeg / FFprobe missing or unavailable")
+
+        # Presence of a key is configuration only; startup makes no paid API call.
+        provider = settings.LLM_PROVIDER.lower()
+        key_setting = {"gemini": "GEMINI_API_KEY", "deepseek": "DEEPSEEK_API_KEY",
+                       "openai": "OPENAI_API_KEY"}.get(provider, "")
+        status["translation_configured"] = bool(getattr(settings, key_setting, "").strip()) if key_setting else False
+        if not settings.PREWARM_MODELS:
+            update(100, "Ready. Selected models will load when processing starts.")
+            return status
+
+        asr_choice = settings.ASR_ENGINE.lower()
+        tts_choice = settings.TTS_ENGINE.lower()
+        separator_choice = settings.SEPARATION_ENGINE.lower()
         try:
-            from core.engines.asr.sensevoice_engine import SenseVoiceEngine
-            asr = SenseVoiceEngine()
-            asr._ensure_loaded()
-            status["sensevoice"] = True
-            update(50, "SenseVoice ASR Ready")
-        except Exception as e:
-            logging.getLogger("errors").warning(f"SenseVoice pre-warm warning: {e}")
-            update(50, "SenseVoice Standby")
+            asr = None
+            if asr_choice == "sensevoice":
+                from core.engines.asr.sensevoice_engine import SenseVoiceEngine
+                asr = SenseVoiceEngine()
+            elif asr_choice in {"faster-whisper", "whisper"}:
+                from core.engines.asr.faster_whisper_engine import FasterWhisperFallbackEngine
+                asr = FasterWhisperFallbackEngine(model_size=settings.WHISPER_MODEL_SIZE)
+            if asr is not None:
+                update(55, f"Loading selected ASR: {asr_choice}...")
+                asr._ensure_loaded()
+                self._prewarmed["asr"] = asr
+                status["asr"] = True
+                status["sensevoice"] = asr_choice == "sensevoice"
+        except Exception as exc:
+            logger.warning(f"Selected ASR prewarm failed: {exc}")
+            status["asr"] = False
 
-        # 3. VieNeu-TTS
-        update(55, "Pre-warming VieNeu-TTS v3 Turbo engine...")
-        try:
-            from core.engines.tts.vieneu_engine import VieNeuEngine
-            tts = VieNeuEngine()
-            tts._ensure_loaded()
-            status["vieneu"] = True
-            update(70, "VieNeu-TTS v3 Turbo Ready")
-        except Exception as e:
-            logging.getLogger("errors").warning(f"VieNeu pre-warm warning: {e}")
-            update(70, "VieNeu-TTS Standby")
+        if tts_choice in {"vieneu", "vieneu-tts"}:
+            try:
+                update(75, "Loading selected VieNeu TTS...")
+                from core.engines.tts.vieneu_engine import VieNeuEngine
+                tts = VieNeuEngine()
+                tts._ensure_loaded()
+                self._prewarmed["tts"] = tts
+                status["vieneu"] = True
+            except Exception as exc:
+                logger.warning(f"Selected TTS prewarm failed: {exc}")
 
-        # 4. Gemini / LLM Provider
-        update(75, "Connecting Gemini Translation engine...")
-        try:
-            from core.engines.translation.semantic_translator import SemanticTranslator
-            trans = SemanticTranslator()
-            gemini_key = os.getenv("GEMINI_API_KEY", "").strip() or settings.GEMINI_API_KEY.strip()
-            if gemini_key:
-                t0 = time.time()
-                res = trans.translate_single_segment(text_zh="你好，欢迎来到这里。", duration=3.0)
-                lat = round((time.time() - t0) * 1000, 1)
-                status["gemini"] = True
-                status["gemini_latency_ms"] = lat
-                logging.getLogger("ai").info(f"Gemini Diagnostics: Provider=Google Gemini | Model={settings.GEMINI_MODEL} | Latency={lat}ms | Status=Success")
-                update(82, f"Gemini Connected ({settings.GEMINI_MODEL}, {lat}ms)")
-            else:
-                status["gemini"] = False
-                logging.getLogger("ai").info("Gemini Diagnostics: Provider=Google Gemini | Model=gemini-2.0-flash | Latency=N/A | Status=Standby (Set API Key in Settings)")
-                update(82, "Gemini Standby (Enter API Key in Settings)")
-        except Exception as e:
-            logging.getLogger("errors").warning(f"Gemini connection check warning: {e}")
-            update(82, "Translation Engine Ready (Offline Fallback)")
+        if separator_choice == "roformer":
+            try:
+                update(90, "Loading selected RoFormer separator...")
+                from core.engines.separator.roformer_engine import BSRoFormerSeparator
+                separator = BSRoFormerSeparator(model_name=settings.ROFORMER_MODEL)
+                separator._ensure_loaded()
+                self._prewarmed["separator"] = separator
+                status["separator"] = True
+            except Exception as exc:
+                logger.warning(f"Selected separator prewarm failed: {exc}")
+                status["separator"] = False
 
-        # 5. Audio Vocal Suppressor
-        update(85, "Configuring Realtime Vocal Suppressor...")
-        try:
-            from core.engines.separator.realtime_suppressor import RealtimeVocalSuppressor
-            _ = RealtimeVocalSuppressor()
-            status["audio"] = True
-            update(92, "Vocal Suppressor Ready")
-        except Exception as e:
-            logging.getLogger("errors").warning(f"Vocal suppressor warning: {e}")
-
-        # 6. Streaming Session & Cache
-        update(95, "Starting Streaming Engine & Cache...")
-        try:
-            cache_root = settings.BASE_DIR / "workspace" / "cache"
-            cache_root.mkdir(parents=True, exist_ok=True)
-            update(100, "Douyin2TikTok AI Studio Ready!")
-        except Exception:
-            pass
-
+        update(100, "Startup checks complete.")
         return status
 
     def shutdown_all(self):
@@ -268,13 +265,19 @@ class ServiceManager:
 
         # 1. Cancel and stop all streaming sessions
         try:
-            from core.streaming.pipeline import active_streaming_sessions
+            pipeline = sys.modules.get("core.streaming.pipeline")
+            active_streaming_sessions = getattr(pipeline, "active_streaming_sessions", {})
             for task_id, session in list(active_streaming_sessions.items()):
                 try:
-                    logger.info(f"Cancelling active streaming session: {task_id}")
-                    session.cancel()
-                except Exception:
-                    pass
+                    logger.info(f"Stopping active streaming session: {task_id}")
+                    worker = getattr(session, "worker_task", None)
+                    loop = worker.get_loop() if worker is not None else None
+                    if loop is not None and loop.is_running():
+                        loop.call_soon_threadsafe(session.stop)
+                    else:
+                        session.stop()
+                except Exception as exc:
+                    logger.warning(f"Could not stop streaming session {task_id}: {exc}")
         except Exception as e:
             logger.warning(f"Session cancellation error: {e}")
 
@@ -289,6 +292,7 @@ class ServiceManager:
                 except Exception:
                     try:
                         proc.kill()
+                        proc.wait(timeout=2.0)
                     except Exception:
                         pass
             self.child_processes.clear()
@@ -300,19 +304,29 @@ class ServiceManager:
             except Exception:
                 pass
 
-        # 4. Release GPU VRAM
+        # Wait until the server has released its listening socket.
+        if self.server_thread and self.server_thread is not threading.current_thread():
+            self.server_thread.join(timeout=5.0)
+            if self.server_thread.is_alive() and self.uvicorn_server:
+                self.uvicorn_server.force_exit = True
+                self.server_thread.join(timeout=2.0)
+
+        # Release only libraries already loaded by this application.
+        self._prewarmed.clear()
         try:
-            import torch
-            if torch.cuda.is_available():
+            torch = sys.modules.get("torch")
+            if torch is not None and torch.cuda.is_available():
                 torch.cuda.empty_cache()
                 logger.info("Released PyTorch CUDA VRAM cache.")
         except Exception:
             pass
 
-        # 5. Wait for server thread
         if self.server_thread and self.server_thread.is_alive():
-            self.server_thread.join(timeout=1.5)
-
-        logger.info("[+] ServiceManager: All services shutdown cleanly.")
+            logger.warning("Backend thread is still stopping after the shutdown timeout.")
+        else:
+            self.server_thread = None
+            self.uvicorn_server = None
+            self.port = None
+            logger.info("[+] ServiceManager: All services shutdown cleanly.")
 
 service_manager = ServiceManager()

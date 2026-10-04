@@ -1,7 +1,27 @@
-import os
 from pathlib import Path
 from typing import List, Dict, Any
 from config import settings
+
+
+def load_whisper_model(model_size: str, device: str = None):
+    """Load the configured CTranslate2 model without requiring PyTorch."""
+    from faster_whisper import WhisperModel
+
+    device = device or settings.DEVICE
+    compute_type = getattr(settings, "WHISPER_COMPUTE_TYPE", "int8")
+    threads = max(1, int(getattr(settings, "ASR_CPU_THREADS", 4)))
+    local_model = settings.BASE_DIR / "workspace" / "models" / f"faster-whisper-{model_size}"
+    model_source = str(local_model) if (local_model / "config.json").is_file() else model_size
+    kwargs = {"cpu_threads": threads, "num_workers": 1}
+    print(f"[*] Loading Faster-Whisper ({model_size}) on {device} ({compute_type})...")
+    try:
+        return WhisperModel(model_source, device=device, compute_type=compute_type, **kwargs)
+    except (RuntimeError, ValueError) as exc:
+        if device != "cuda":
+            raise
+        print(f"[!] CUDA unavailable ({exc}); using CPU int8.")
+        return WhisperModel(model_source, device="cpu", compute_type="int8", **kwargs)
+
 
 class ChineseASR:
     def __init__(self, model_size: str = None, device: str = None):
@@ -11,26 +31,7 @@ class ChineseASR:
 
     def _load_model(self):
         if self.model is None:
-            from faster_whisper import WhisperModel
-            import torch
-
-            # Verify if CUDA is really usable without OOM
-            use_device = self.device
-            compute_type = "float16"
-
-            if use_device == "cuda" and not torch.cuda.is_available():
-                use_device = "cpu"
-                compute_type = "int8"
-            elif use_device == "cuda":
-                # For GTX 1050 Ti (4GB), int8_float16 or float16 is very stable
-                compute_type = "int8_float16"
-
-            print(f"[*] Loading Faster-Whisper ({self.model_size}) on {use_device} ({compute_type})...")
-            try:
-                self.model = WhisperModel(self.model_size, device=use_device, compute_type=compute_type)
-            except Exception as e:
-                print(f"[!] Warning: CUDA initialization failed ({e}), falling back to CPU int8.")
-                self.model = WhisperModel(self.model_size, device="cpu", compute_type="int8")
+            self.model = load_whisper_model(self.model_size, self.device)
 
     def transcribe(self, audio_path: str) -> List[Dict[str, Any]]:
         """
