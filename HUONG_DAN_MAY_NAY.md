@@ -12,24 +12,34 @@ Môi trường `venv`, cấu hình `.env` và model Whisper Small đã được 
 
 - Nhận tiếng Trung: Faster-Whisper **Small**, CPU **int8**, **6 luồng**; model ở `workspace/models/faster-whisper-small`.
 - Giọng Việt: Edge-TTS Hoài My / Nam Minh, cần Internet.
-- Dịch: **OpenRouter Free**, model **inclusionai/ling-3.0-flash-sante:free**, dùng key đã lưu trong OpenCode trên máy. Không tải LLM dịch về RAM. Có thể chuyển OpenCode Zen, Gemini / DeepSeek hoặc Google / MyMemory ở tab Cài đặt.
+- Dịch trên máy này: **Gemini 2.5 Flash**, key lưu trong `.env` local. **OpenRouter Free** vẫn có sẵn bằng key OpenCode. Không tải LLM dịch về RAM. Có thể đổi nhà cung cấp trong Cài đặt.
 - Giảm giọng gốc: DSP trên CPU, không tải bộ tách giọng nặng. Hiệu quả tùy video; có thể còn giọng gốc hoặc ảnh hưởng nhạc nền.
 - Xuất MP4: H.264 + AAC, phụ đề ASS, tùy chọn làm mờ sub gốc; giữ kích thước và tỉ lệ video nguồn.
 - Không nạp model lúc mở giao diện. Lần xử lý video đầu tiên cần thời gian nạp model; tốc độ thực tế phụ thuộc video và tải máy, không đảm bảo realtime.
 
 Cấu hình dựa trên tổng RAM 16 GB, không dựa trên RAM trống tại thời điểm cài đặt. RTX 2050 được nhận diện, nhưng AI đang chạy CPU để hoạt động với driver hiện có mà không cài CUDA/PyTorch. Chỉ đổi `DEVICE=cuda` sau khi kiểm tra driver và các thư viện CUDA/CuDNN tương thích. VieNeu, SenseVoice, RoFormer và ProPainter là tùy chọn chưa cài; giao diện Models hiển thị tình trạng tệp thực tế.
 
-Gemini model có thể nhập bằng tên trong Cài đặt. Mặc định tùy chọn là `gemini-3.8-flash`, đối chiếu [lịch vòng đời model của Google](https://ai.google.dev/gemini-api/docs/deprecations); chưa kiểm thử API trả phí vì máy chưa cấu hình key cho dự án.
+Gemini được đưa lên đầu Cài đặt, model hiện chọn là `gemini-2.5-flash`. Khi thử ngày 04/10/2026, model này dịch thành công. Các bản 3.5–3.8 gặp quá tải; 3.6 có lúc trả lời ngắn được nhưng hai lần thử pipeline video trả lỗi 503. Bản 3.1 Pro preview báo quota miễn phí bằng 0. Đây là lựa chọn hoạt động tại thời điểm kiểm tra, không phải cam kết chất lượng hoặc hạn mức. Có thể nhập model khác, lưu rồi bấm kiểm tra kết nối. Lỗi API hoặc JSON chưa hoàn chỉnh sẽ được báo rõ, không âm thầm đổi dịch vụ. Key không gửi về giao diện hay đưa lên GitHub.
 
 ## Dùng key miễn phí có sẵn trong OpenCode
 
-Mặc định ứng dụng gọi **OpenRouter Free** bằng kết nối `OpenRouter-Free` có sẵn trong OpenCode. Đây là dịch vụ OpenRouter, không phải OpenCode Zen. Chỉ chấp nhận model có hậu tố `:free`; không tự đổi provider hoặc model trả phí khi lỗi. Lần thử API trên máy trả bản dịch thành công và báo chi phí 0. Hạn mức và khả dụng phụ thuộc dịch vụ: [tài liệu bản miễn phí](https://openrouter.ai/docs/guides/routing/model-variants/free).
+Máy mới chưa cấu hình chọn **OpenRouter Free** bằng kết nối `OpenRouter-Free` có sẵn trong OpenCode. Đây là dịch vụ OpenRouter, không phải OpenCode Zen. Chỉ chấp nhận model có hậu tố `:free`; không tự đổi provider hoặc model trả phí khi lỗi. Lần thử API trên máy trả bản dịch thành công và báo chi phí 0. Hạn mức và khả dụng phụ thuộc dịch vụ: [tài liệu bản miễn phí](https://openrouter.ai/docs/guides/routing/model-variants/free).
 
 Key được tự đọc từ `%USERPROFILE%\.local\share\opencode\auth.json` (hoặc đường dẫn `XDG_DATA_HOME` nếu có). Không cần chép key vào code hay nhập lại. Có thể đặt `OPENROUTER_API_KEY` trong `.env` local để ghi đè. Key không xuất hiện trong API Cài đặt, giao diện hoặc GitHub.
 
 Trong **Cài đặt**, chọn **OpenRouter Free**, lưu model rồi bấm **Kiểm tra OpenRouter Free**. Nếu chuyển máy, kết nối OpenRouter trong OpenCode hoặc đặt key vào `.env` local. Phần nhận giọng nói vẫn dùng Whisper Small trên CPU, còn tạo giọng Việt dùng Edge-TTS qua mạng.
 
 Tùy chọn **OpenCode Zen Free** dùng [CLI chính thức](https://opencode.ai/docs/cli/#run), key `opencode` hoặc `OPENCODE_API_KEY`, session riêng không có quyền chạy công cụ, không chia sẻ và tự dọn file tạm. Khi kiểm tra ngày 04/10/2026, Zen trả **403 FreeTierError** ngay cả qua CLI gốc 1.18.30; vấn đề tương tự đã được báo ở [upstream](https://github.com/anomalyco/opencode/issues/49756). Vì vậy Zen không được đặt làm mặc định. Không giả lập header hoặc lách chặn dịch vụ.
+
+## Muse qua tài khoản của bạn (thử nghiệm)
+
+Tích hợp dựa trên driver MIT của [Muse-Chat-MCP](https://github.com/duclm1x1/Muse-Chat-MCP), cố định commit `6c00e8cf1bf2fb6718740e0c20d3578fb4c47286`. Đây là thao tác giao diện web qua Chrome, không phải API chính thức và không tự cấp token. Khả năng truy cập, model và hạn mức do tài khoản Muse/Meta quyết định; chưa có căn cứ xác nhận quảng cáo “1 tỷ token”.
+
+1. Chạy `setup_muse.bat` một lần nếu chuyển máy. Cần Node.js 20+ và Chrome; chỉ thêm khoảng 13 MB Playwright, không tải trình duyệt mới. Máy này đã cài phần kết nối.
+2. Mở **Cài đặt → Muse (thử nghiệm) → Mở đăng nhập Muse**. Đăng nhập trên cửa sổ Chrome vừa mở, rồi bấm **Kiểm tra đăng nhập** và **Thử dịch Muse**.
+3. Chỉ khi kiểm tra thành công, chọn nhà cung cấp **Muse** và lưu. Nếu tài khoản chưa có quyền truy cập, tiếp tục dùng Gemini hoặc OpenRouter Free.
+
+Muse sử dụng hồ sơ Chrome riêng tại `workspace/muse-profile`, không lấy cookie hay key của trình duyệt cá nhân. Kết nối nội bộ chỉ nghe ở localhost và chỉ hỗ trợ đăng nhập/dịch; không mở chức năng gửi file hoặc đọc lịch sử chat. Đóng ứng dụng sẽ đóng trình duyệt do tích hợp mở. Runtime và hồ sơ đăng nhập không được đẩy GitHub. Driver phụ thuộc giao diện Muse nên có thể cần cập nhật khi trang thay đổi.
 
 ## Kiểm tra và xử lý lỗi
 
@@ -40,11 +50,11 @@ Bản PyAV được giới hạn dưới 19 vì Faster-Whisper 1.2.1 vẫn gọi
 Kiểm thử hồi quy không cần mạng/model:
 
 ```powershell
-venv\Scripts\python.exe -B -m pytest -p no:cacheprovider tests/test_local_runtime.py tests/test_windows_media.py tests/test_portable_pipeline.py tests/test_local_api.py tests/test_opencode_client.py tests/test_opencode_translation.py tests/test_opencode_api.py tests/test_openrouter_client.py tests/test_openrouter_api.py
+venv\Scripts\python.exe -B -m pytest -p no:cacheprovider tests/test_local_runtime.py tests/test_windows_media.py tests/test_portable_pipeline.py tests/test_local_api.py tests/test_opencode_client.py tests/test_opencode_translation.py tests/test_opencode_api.py tests/test_openrouter_client.py tests/test_openrouter_api.py tests/test_gemini_client.py tests/test_gemini_api.py tests/test_muse_service.py tests/test_muse_api.py tests/test_cloud_translation.py tests/test_edge_tts_retry.py
 ```
 
 Hai script kiểm tra riêng: `tests/smoke_desktop.py` kiểm tra QtWebEngine và thao tác chọn file; `tests/smoke_local_video.py` tạo câu nói tiếng Trung tổng hợp, nhận giọng thật, dịch, đọc tiếng Việt và xuất video. Script video cần Internet và model đã tải, tự dọn media thử.
 
-Kết quả tại máy này: 102 bài hồi quy đạt; thử desktop và các nút kiểm tra kết nối đạt; video tổng hợp 6,864 giây qua 3 đoạn thoại, dịch thật bằng OpenRouter Free, đọc tiếng Việt và xuất MP4 thành công. Dịch theo lô cũng đã kiểm tra với API thật. Bản dịch AI vẫn cần xem lại trước khi xuất bản. Chưa kiểm chứng trên video dài hoặc tài khoản tải video riêng của người dùng. `pip check` còn báo xung đột của các công cụ toàn cục có sẵn (aider-chat, patchright, selenium); các package toàn cục đó không được chỉnh sửa bởi lần cài này.
+Kết quả tại máy này: 148 bài hồi quy và 94 subtests đạt; thử desktop và các nút kiểm tra kết nối đạt; video tổng hợp 6,864 giây qua 3 đoạn thoại, đã chạy thật với OpenRouter Free ở lần trước và Gemini 2.5 Flash ở lần này, đọc tiếng Việt và xuất MP4 thành công. Gemini 2.5 Flash đã kiểm tra dịch một đoạn và theo lô bằng API thật, giữ nguyên ID/thời gian/metadata. Edge-TTS thử lại tối đa 3 lần nếu dịch vụ kết thúc mà không trả âm thanh. Bản dịch AI vẫn cần xem lại trước khi xuất bản. Chưa kiểm chứng trên video dài hoặc tài khoản tải video riêng của người dùng. `pip check` còn báo xung đột của các công cụ toàn cục có sẵn (aider-chat, patchright, selenium); các package toàn cục đó không được chỉnh sửa bởi lần cài này.
 
 `.env`, video, model và venv không được đẩy lên GitHub. Các bài audit cũ của dự án có yêu cầu model/mẫu video riêng và không thuộc bộ kiểm thử hồi quy trên.

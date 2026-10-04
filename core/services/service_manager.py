@@ -281,6 +281,14 @@ class ServiceManager:
         except Exception as e:
             logger.warning(f"Session cancellation error: {e}")
 
+        # Close only the browser bridge owned by this application.
+        muse_module = sys.modules.get("core.services.muse_service")
+        if muse_module is not None:
+            try:
+                muse_module.muse_service.shutdown()
+            except Exception:
+                logger.warning("Could not fully stop the Muse browser bridge.")
+
         # 2. Terminate any registered child processes (FFmpeg, downloaders)
         with self.lock:
             for proc in self.child_processes:

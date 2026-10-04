@@ -452,13 +452,49 @@
         <div>
           <label class="text-xs text-gray-300 block mb-1">Nhà cung cấp (LLM Provider):</label>
           <select id="settings-llm-provider" class="w-full bg-[#08090d] border border-gray-700 rounded-xl px-3 py-2 text-xs text-gray-100 focus:outline-none focus:border-pink-500">
-            <option value="openrouter-free" selected>OpenRouter Free (key từ OpenCode)</option>
-            <option value="opencode">OpenCode Zen Free (CLI)</option>
-            <option value="free">Google / MyMemory miễn phí</option>
-            <option value="gemini">Google Gemini (cần API key)</option>
+            <option value="gemini" {% if settings.LLM_PROVIDER == 'gemini' %}selected{% endif %}>Google Gemini (ưu tiên khi có key)</option>
+            <option value="openrouter-free" {% if settings.LLM_PROVIDER == 'openrouter-free' %}selected{% endif %}>OpenRouter Free (key từ OpenCode)</option>
             <option value="deepseek">DeepSeek AI (Văn phong kịch tính)</option>
             <option value="openai">OpenAI Compatible API</option>
+            <option value="free">Google / MyMemory miễn phí</option>
+            <option value="opencode">OpenCode Zen Free (CLI)</option>
+            <option value="muse">Muse (thử nghiệm, cần đăng nhập Meta)</option>
           </select>
+        </div>
+
+        <div>
+          <div class="flex items-center justify-between mb-1">
+            <label class="text-xs text-gray-300">Google Gemini API Key:</label>
+            <span class="text-[10px] text-gray-500">Lưu an toàn tại .env</span>
+          </div>
+          <div class="relative">
+            <input type="password" id="settings-gemini-key" placeholder="AIzaSy..." class="w-full bg-[#08090d] border border-gray-700 rounded-xl pl-3 pr-10 py-2 text-xs text-gray-100 focus:outline-none focus:border-pink-500 font-mono">
+            <button type="button" id="btn-toggle-gemini-key" class="absolute right-3 top-2.5 text-gray-500 hover:text-gray-300">
+              <i class="fa-regular fa-eye text-xs"></i>
+            </button>
+          </div>
+        </div>
+
+        <div>
+          <label class="text-xs text-gray-300 block mb-1">Gemini Model:</label>
+          <input id="settings-gemini-model" list="gemini-model-options" value="{{ settings.GEMINI_MODEL }}" placeholder="Tên model Gemini" class="w-full bg-[#08090d] border border-gray-700 rounded-xl px-3 py-2 text-xs text-gray-100 focus:outline-none focus:border-pink-500">
+          <datalist id="gemini-model-options">
+            <option value="gemini-2.5-flash">Ưu tiên trên máy này — đã kiểm tra dịch</option>
+            <option value="gemini-3.6-flash">Flash 3.6 — có thể thử khi hết quá tải</option>
+            <option value="gemini-3.8-flash">Flash mới nhất — có thể thử khi còn công suất</option>
+            <option value="gemini-3.7-flash">Flash thế hệ trước</option>
+            <option value="gemini-3.5-flash">Flash 3.5</option>
+            <option value="gemini-3.1-pro-preview">Pro — cần quota phù hợp</option>
+          </datalist>
+          <p class="text-[11px] text-gray-500 mt-2">Lưu cấu hình trước khi kiểm tra. Chất lượng, tốc độ và hạn mức phụ thuộc model và tài khoản.</p>
+        </div>
+
+        <!-- Gemini Test Connection Button & Result -->
+        <div class="pt-2 flex items-center justify-between">
+          <button id="btn-test-gemini" class="px-3 py-1.5 rounded-xl border border-pink-500/50 hover:bg-pink-600/20 text-pink-300 text-xs font-semibold flex items-center gap-1.5 transition">
+            <i class="fa-solid fa-plug-circle-check"></i> Kiểm tra kết nối Gemini
+          </button>
+          <span id="gemini-test-result" class="text-xs font-mono text-gray-400"></span>
         </div>
 
         <div class="rounded-xl border border-pink-500/30 p-3 space-y-2">
@@ -482,36 +518,21 @@
           <span id="opencode-test-result" role="status" class="block text-xs text-gray-400"></span>
         </details>
 
-        <div>
-          <div class="flex items-center justify-between mb-1">
-            <label class="text-xs text-gray-300">Google Gemini API Key:</label>
-            <span class="text-[10px] text-gray-500">Lưu an toàn tại .env</span>
-          </div>
-          <div class="relative">
-            <input type="password" id="settings-gemini-key" placeholder="AIzaSy..." class="w-full bg-[#08090d] border border-gray-700 rounded-xl pl-3 pr-10 py-2 text-xs text-gray-100 focus:outline-none focus:border-pink-500 font-mono">
-            <button type="button" id="btn-toggle-gemini-key" class="absolute right-3 top-2.5 text-gray-500 hover:text-gray-300">
-              <i class="fa-regular fa-eye text-xs"></i>
-            </button>
-          </div>
-        </div>
-
-        <div>
-          <label class="text-xs text-gray-300 block mb-1">Gemini Model:</label>
-          <input id="settings-gemini-model" value="{{ settings.GEMINI_MODEL }}" placeholder="Tên model Gemini" class="w-full bg-[#08090d] border border-gray-700 rounded-xl px-3 py-2 text-xs text-gray-100 focus:outline-none focus:border-pink-500">
-        </div>
-
-        <!-- Gemini Test Connection Button & Result -->
-        <div class="pt-2 flex items-center justify-between">
-          <button id="btn-test-gemini" class="px-3 py-1.5 rounded-xl border border-pink-500/50 hover:bg-pink-600/20 text-pink-300 text-xs font-semibold flex items-center gap-1.5 transition">
-            <i class="fa-solid fa-plug-circle-check"></i> Kiểm tra kết nối Gemini
-          </button>
-          <span id="gemini-test-result" class="text-xs font-mono text-gray-400"></span>
-        </div>
-
         <div class="border-t border-gray-800 pt-3">
           <label class="text-xs text-gray-300 block mb-1">DeepSeek API Key (Tùy chọn):</label>
           <input type="password" id="settings-deepseek-key" placeholder="sk-..." class="w-full bg-[#08090d] border border-gray-700 rounded-xl px-3 py-2 text-xs text-gray-100 focus:outline-none focus:border-pink-500 font-mono">
         </div>
+
+        <details class="rounded-xl border border-gray-700 p-3 space-y-3">
+          <summary class="text-xs text-gray-300 cursor-pointer">Muse qua tài khoản Meta (thử nghiệm)</summary>
+          <p class="text-xs text-gray-400">Dùng Muse-Chat-MCP qua Chrome riêng. Bạn tự đăng nhập Meta; tốc độ và hạn mức theo tài khoản Muse. Tên model không đảm bảo model thực tế của web.</p>
+          <p id="muse-status" role="status" class="text-xs text-gray-400">Đang kiểm tra cài đặt Muse…</p>
+          <div class="flex flex-wrap gap-2">
+            <button type="button" id="btn-muse-login" class="px-3 py-2 rounded-xl border border-pink-500/50 hover:bg-pink-600/20 text-pink-300 text-xs">Mở đăng nhập Muse</button>
+            <button type="button" id="btn-muse-status" class="px-3 py-2 rounded-xl border border-gray-700 hover:bg-gray-800 text-gray-300 text-xs">Kiểm tra đăng nhập</button>
+            <button type="button" id="btn-test-muse" class="px-3 py-2 rounded-xl border border-gray-700 hover:bg-gray-800 text-gray-300 text-xs">Thử dịch Muse</button>
+          </div>
+        </details>
       </div>
 
       <!-- Voice & Audio Settings -->

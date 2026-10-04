@@ -50,6 +50,8 @@ Giữ đúng ý nghĩa và hành động của câu gốc ở cả ba cấp đ�
 """
 
 class SemanticTranslator(TranslationEngine):
+    STRICT_PROVIDERS = frozenset({"opencode", "openrouter-free", "gemini", "muse"})
+
     def __init__(self, provider: Optional[str] = None):
         self.provider = provider or settings.LLM_PROVIDER
 
@@ -66,23 +68,38 @@ class SemanticTranslator(TranslationEngine):
         return getattr(settings, "OPENCODE_API_KEY", "") or os.getenv("OPENCODE_API_KEY")
 
     def _opencode_request(self, system_prompt: str, user_prompt: str) -> str:
-        """Use only the selected free AI provider, without cross-provider fallback."""
+        """Use only the selected provider, without cross-provider fallback.
+
+        Keep the historical method name for integrations that mock this boundary.
+        """
+        from core.engines.translation.gemini_client import GeminiClient, GeminiError
         from core.engines.translation.opencode_client import OpenCodeClientError, OpenCodeZenClient
         from core.engines.translation.openrouter_client import OpenRouterClientError, OpenRouterFreeClient
+        from core.services.muse_service import MuseError, muse_service
         try:
-            if self.provider == "openrouter-free":
+            if self.provider == "gemini":
+                client = GeminiClient()
+            elif self.provider == "muse":
+                client = muse_service
+            elif self.provider == "openrouter-free":
                 client = OpenRouterFreeClient(model=settings.OPENROUTER_MODEL, timeout=settings.OPENCODE_TIMEOUT)
-            else:
+            elif self.provider == "opencode":
                 client = OpenCodeZenClient(
                     api_key=self._opencode_key(),
                     model=getattr(settings, "OPENCODE_MODEL", "big-pickle"),
                     timeout=getattr(settings, "OPENCODE_TIMEOUT", 60),
                 )
+            else:
+                raise RuntimeError("Nhà cung cấp dịch không hỗ trợ chế độ JSON.")
             return client.translate(user_prompt, system=system_prompt)
-        except (OpenCodeClientError, OpenRouterClientError) as exc:
+        except (GeminiError, MuseError, OpenCodeClientError, OpenRouterClientError) as exc:
             raise RuntimeError(f"{exc} Hãy thử lại hoặc đổi cấu hình dịch.") from None
         except Exception:
             raise RuntimeError("API không dịch được. Hãy thử lại hoặc đổi cấu hình dịch.") from None
+
+    def _translation_error(self, message: str) -> RuntimeError:
+        label = {"gemini": "Gemini", "muse": "Muse", "opencode": "OpenCode", "openrouter-free": "OpenRouter"}.get(self.provider, "AI")
+        return RuntimeError(f"{label} {message} Hãy thử lại hoặc đổi cấu hình dịch.")
 
     @staticmethod
     def _json_response(raw_response: str) -> Any:
@@ -108,8 +125,8 @@ class SemanticTranslator(TranslationEngine):
     def _parse_opencode_results(self, raw_response: str, payload: List[Dict[str, Any]], single: bool = False) -> Dict[int, Dict[str, str]]:
         try:
             data = self._json_response(raw_response)
-        except Exception as exc:
-            raise RuntimeError(f"OpenCode trả về JSON không hợp lệ: {exc}. Hãy thử lại hoặc đổi cấu hình OpenCode.") from exc
+        except Exception:
+            raise self._translation_error("trả về JSON không hợp lệ.") from None
         if single:
             if isinstance(data, dict) and "id" not in data and any(k in data for k in ("literal_vi", "natural_vi", "final_vi")):
                 data = dict(data)
@@ -122,24 +139,24 @@ class SemanticTranslator(TranslationEngine):
         result: Dict[int, Dict[str, str]] = {}
         for item in items:
             if not isinstance(item, dict):
-                raise RuntimeError("OpenCode trả về mục bản dịch không hợp lệ. Hãy thử lại hoặc đổi cấu hình OpenCode.")
+                raise self._translation_error("trả về mục bản dịch không hợp lệ.")
             raw_id = item.get("id")
             if isinstance(raw_id, bool) or not (isinstance(raw_id, int) or isinstance(raw_id, str) and re.fullmatch(r"-?\d+", raw_id)):
-                raise RuntimeError("OpenCode trả về ID bản dịch không hợp lệ. Hãy thử lại hoặc đổi cấu hình OpenCode.")
+                raise self._translation_error("trả về ID bản dịch không hợp lệ.")
             item_id = int(raw_id)
             if item_id not in expected or item_id in result:
-                raise RuntimeError("OpenCode trả về ID bản dịch thừa hoặc trùng. Hãy thử lại hoặc đổi cấu hình OpenCode.")
+                raise self._translation_error("trả về ID bản dịch thừa hoặc trùng.")
             fields = ("literal_vi", "natural_vi", "final_vi")
             values = {field: item.get(field) for field in fields}
             if not all(self._nonempty_string(v) for v in values.values()):
-                raise RuntimeError("OpenCode trả về bản dịch thiếu nội dung. Hãy thử lại hoặc đổi cấu hình OpenCode.")
+                raise self._translation_error("trả về bản dịch thiếu nội dung.")
             source = expected.get(item_id, "").strip()
             if re.search(r"[\u3400-\u9fff]", source) and any(v.strip() == source for v in values.values()):
-                raise RuntimeError("OpenCode trả lại nguyên văn tiếng Trung. Hãy thử lại hoặc đổi cấu hình OpenCode.")
+                raise self._translation_error("trả lại nguyên văn tiếng Trung.")
             result[item_id] = {field: values[field].strip() for field in fields}
         if set(result) != set(expected):
             missing = sorted(set(expected) - set(result))
-            raise RuntimeError(f"OpenCode thiếu hoặc sai bản dịch cho segment {missing}. Hãy thử lại hoặc đổi cấu hình OpenCode.")
+            raise self._translation_error(f"thiếu hoặc sai bản dịch cho segment {missing}.")
         return result
 
     @property
@@ -159,6 +176,9 @@ class SemanticTranslator(TranslationEngine):
         elif self.provider == "openrouter-free":
             from core.engines.translation.openrouter_client import resolve_openrouter_key
             has_llm_key = bool(resolve_openrouter_key())
+        elif self.provider == "muse":
+            # Muse authenticates in its own browser; probing must not launch it.
+            has_llm_key = True
         return {
             "name": self.name,
             "provider": self.provider,
@@ -209,11 +229,12 @@ class SemanticTranslator(TranslationEngine):
         merged = []
         for seg in segments:
             seg_copy = dict(seg)
-            res = results_map.get(seg["id"], {})
+            lookup_id = int(seg["id"]) if self.provider in self.STRICT_PROVIDERS else seg["id"]
+            res = results_map.get(lookup_id, {})
             text_zh = seg.get("text_zh", seg.get("text", ""))
             seg_copy["text_zh"] = text_zh
-            if self.provider in {"opencode", "openrouter-free"} and not res:
-                raise RuntimeError("OpenCode thiếu bản dịch. Hãy thử lại hoặc đổi cấu hình OpenCode.")
+            if self.provider in self.STRICT_PROVIDERS and not res:
+                raise self._translation_error("thiếu bản dịch.")
             seg_copy["literal_vi"] = res.get("literal_vi", text_zh)
             seg_copy["natural_vi"] = res.get("natural_vi", text_zh)
             seg_copy["final_vi"] = res.get("final_vi", text_zh)
@@ -227,40 +248,22 @@ class SemanticTranslator(TranslationEngine):
         return merged
 
     def _extract_context_and_glossary(self, full_text: str) -> Dict[str, Any]:
-        if self.provider in {"opencode", "openrouter-free"}:
+        if self.provider in self.STRICT_PROVIDERS:
             raw = self._opencode_request(
                 VIDEOLINGO_SUMMARY_PROMPT,
                 f"Transcript video:\n{full_text}",
             )
             try:
                 data = self._json_response(raw)
-            except Exception as exc:
-                raise RuntimeError(f"OpenCode trả về JSON ngữ cảnh không hợp lệ: {exc}. Hãy thử lại hoặc đổi cấu hình OpenCode.") from exc
+            except Exception:
+                raise self._translation_error("trả về JSON ngữ cảnh không hợp lệ.") from None
             if not isinstance(data, dict) or not self._nonempty_string(data.get("theme")) or not self._nonempty_string(data.get("pronouns")) or not isinstance(data.get("terms", []), list):
-                raise RuntimeError("OpenCode trả về ngữ cảnh thiếu trường bắt buộc. Hãy thử lại hoặc đổi cấu hình OpenCode.")
+                raise self._translation_error("trả về ngữ cảnh thiếu trường bắt buộc.")
             return data
-        gemini_key, deepseek_key, openai_key = self._api_keys()
-
-        if gemini_key:
-            from google import genai
-            client = genai.Client(api_key=gemini_key)
-            try:
-                resp = client.models.generate_content(
-                    model=settings.GEMINI_MODEL,
-                    contents=[f"Transcript video:\n{full_text}"],
-                    config=dict(
-                        system_instruction=VIDEOLINGO_SUMMARY_PROMPT,
-                        response_mime_type="application/json"
-                    )
-                )
-                return json.loads(resp.text)
-            except Exception as e:
-                print(f"[!] Context extraction error: {e}")
-
         return {"theme": "Video ngắn Douyin đời thường", "terms": [], "pronouns": "mình - các bạn"}
 
     def _execute_3tier_translation(self, payload: List[Dict[str, Any]], context_info: Dict[str, Any]) -> Dict[int, Dict[str, str]]:
-        if self.provider in {"opencode", "openrouter-free"}:
+        if self.provider in self.STRICT_PROVIDERS:
             system_prompt = VIDEOLINGO_TRANSLATE_PROMPT.format(
                 theme=context_info.get("theme", "Đời thường"),
                 pronouns=context_info.get("pronouns", "mình - các bạn"),
@@ -271,7 +274,7 @@ class SemanticTranslator(TranslationEngine):
                 f"Danh sách các câu thoại cần chuyển ngữ:\n{json.dumps(payload, ensure_ascii=False, indent=2)}",
             )
             return self._parse_opencode_results(raw, payload)
-        gemini_key, deepseek_key, openai_key = self._api_keys()
+        _, deepseek_key, openai_key = self._api_keys()
 
         system_prompt = VIDEOLINGO_TRANSLATE_PROMPT.format(
             theme=context_info.get("theme", "Đời thường"),
@@ -282,22 +285,6 @@ class SemanticTranslator(TranslationEngine):
         user_content = f"Danh sách các câu thoại cần chuyển ngữ:\n{json.dumps(payload, ensure_ascii=False, indent=2)}"
 
         raw_response = ""
-        if gemini_key:
-            from google import genai
-            client = genai.Client(api_key=gemini_key)
-            try:
-                resp = client.models.generate_content(
-                    model=settings.GEMINI_MODEL,
-                    contents=[user_content],
-                    config=dict(
-                        system_instruction=system_prompt,
-                        response_mime_type="application/json"
-                    )
-                )
-                raw_response = resp.text
-            except Exception as e:
-                print(f"[!] Gemini 3-tier translation failed: {e}")
-
         if not raw_response and (deepseek_key or openai_key):
             from openai import OpenAI
             client = OpenAI(api_key=deepseek_key or openai_key, base_url="https://api.deepseek.com/v1" if deepseek_key else settings.OPENAI_BASE_URL)
@@ -393,7 +380,7 @@ class SemanticTranslator(TranslationEngine):
             return {"literal_vi": "", "natural_vi": "", "final_vi": ""}
 
         target_words = max(3, int(duration * 3.0))
-        if self.provider in {"opencode", "openrouter-free"}:
+        if self.provider in self.STRICT_PROVIDERS:
             ctx_text = ""
             if rolling_context:
                 ctx_text = "\n".join(f"- Trung: {c.get('zh', '')} -> Việt: {c.get('vi', '')}" for c in rolling_context[-5:])
@@ -411,9 +398,9 @@ Quy tắc bắt buộc:
             raw = self._opencode_request(sys_instruction, f"Dịch câu: {clean_zh}")
             parsed = self._parse_opencode_results(raw, [{"id": 0, "text_zh": clean_zh}], single=True)
             return parsed[0]
-        gemini_key, deepseek_key, openai_key = self._api_keys()
+        _, deepseek_key, openai_key = self._api_keys()
 
-        if gemini_key or deepseek_key or openai_key:
+        if deepseek_key or openai_key:
             ctx_text = ""
             if rolling_context:
                 ctx_lines = [f"- Trung: {c.get('zh', '')} -> Việt: {c.get('vi', '')}" for c in rolling_context[-5:]]
@@ -431,24 +418,6 @@ Quy tắc bắt buộc:
 5. Trả về JSON:
 {{"literal_vi": "...", "natural_vi": "...", "final_vi": "..."}}
 """
-            if gemini_key:
-                try:
-                    from google import genai
-                    client = genai.Client(api_key=gemini_key)
-                    resp = client.models.generate_content(
-                        model=settings.GEMINI_MODEL,
-                        contents=[f"Dịch câu: {clean_zh}"],
-                        config=dict(system_instruction=sys_instruction, response_mime_type="application/json")
-                    )
-                    data = json.loads(resp.text)
-                    return {
-                        "literal_vi": data.get("literal_vi", clean_zh),
-                        "natural_vi": data.get("natural_vi", clean_zh),
-                        "final_vi": data.get("final_vi", data.get("natural_vi", clean_zh))
-                    }
-                except Exception as e:
-                    print(f"[!] Gemini single translate error: {e}")
-
             if deepseek_key or openai_key:
                 try:
                     from openai import OpenAI

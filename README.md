@@ -4,6 +4,8 @@
 
 > **Dùng key có sẵn trong OpenCode:** mặc định **OpenRouter Free**, tự đọc key local, không cần tải LLM dịch. OpenCode Zen CLI vẫn có thể chọn nhưng hiện gặp lỗi 403 từ dịch vụ. Kiểm tra kết nối ở Cài đặt; key không gửi ra giao diện hay đẩy GitHub. Gemini, DeepSeek và Google/MyMemory vẫn có thể chọn riêng.
 
+> **Gemini và Muse:** Gemini đứng đầu Cài đặt, có kiểm tra model đã lưu và xử lý lỗi API rõ ràng. Muse là lựa chọn thử nghiệm qua Chrome; chạy `setup_muse.bat`, mở đăng nhập trong Cài đặt và dùng tài khoản của bạn. Tích hợp không tự cấp token; xem [hướng dẫn Muse](HUONG_DAN_MAY_NAY.md#muse-qua-tài-khoản-của-bạn-thử-nghiệm).
+
 <div align="center">
 
 ![Douyin2TikTok AI Studio Banner](docs/images/banner.png)

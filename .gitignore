@@ -2,6 +2,8 @@ venv/
 workspace/temp/
 workspace/cache/
 workspace/models/
+workspace/tools/
+workspace/muse-profile/
 workspace/inputs/*
 workspace/outputs/*
 workspace/logs/

@@ -88,7 +88,7 @@ class Settings(BaseSettings):
 
     # LLM Translation API Settings
     # OpenCode reuses its local login; no translation LLM is loaded into RAM.
-    LLM_PROVIDER: str = "openrouter-free" # also 'opencode', 'free', 'gemini', 'deepseek', 'openai'
+    LLM_PROVIDER: str = "openrouter-free" # also 'opencode', 'free', 'gemini', 'deepseek', 'openai', 'muse'
     OPENCODE_API_KEY: str = "" # Optional local override; otherwise read OpenCode auth.json.
     OPENCODE_MODEL: str = "big-pickle"
     OPENCODE_TIMEOUT: float = 60.0
@@ -100,7 +100,7 @@ class Settings(BaseSettings):
     OPENAI_BASE_URL: str = "https://api.openai.com/v1"
 
     # Default LLM Models
-    GEMINI_MODEL: str = "gemini-3.8-flash"
+    GEMINI_MODEL: str = "gemini-2.5-flash"
     DEEPSEEK_MODEL: str = "deepseek-chat"
 
     # Audio & Vocal Separation

@@ -53,8 +53,22 @@ class EdgeTTSFallbackEngine(TTSEngine):
             mp3_path = Path(temp_dir) / "speech.mp3"
 
             async def _run():
-                com = edge_tts.Communicate(text, chosen_voice, rate=rate_str)
-                await com.save(str(mp3_path))
+                # The service sometimes ends a valid request without audio. A
+                # Communicate stream is single-use, so retry with a new instance
+                # and discard any partial file before requesting the same voice.
+                for attempt in range(3):
+                    try:
+                        com = edge_tts.Communicate(text, chosen_voice, rate=rate_str)
+                        await com.save(str(mp3_path))
+                        return
+                    except edge_tts.exceptions.NoAudioReceived:
+                        mp3_path.unlink(missing_ok=True)
+                        if attempt == 2:
+                            raise RuntimeError(
+                                "Edge-TTS chưa trả về âm thanh sau 3 lần thử. "
+                                "Hãy thử lại hoặc chọn giọng đọc khác."
+                            ) from None
+                        await asyncio.sleep(0.5 * (attempt + 1))
 
             try:
                 asyncio.get_running_loop()

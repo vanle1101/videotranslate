@@ -118,17 +118,23 @@ def main():
         assert not config['geminiKey'] and not config['deepseekKey']
         javascript(window.web_view.page(), '''
             const settingsFetch = window.fetch;
-            window.fetch = async (url, options) => url === '/api/test-opencode' || url === '/api/test-openrouter'
+            window.fetch = async (url, options) => ['/api/test-opencode', '/api/test-openrouter', '/api/test-gemini', '/api/test-muse'].includes(url)
                 ? new Response(JSON.stringify({ok: true, model: 'big-pickle', latency_ms: 10}))
                 : settingsFetch(url, options);
             document.getElementById('btn-test-opencode').click();
             document.getElementById('btn-test-openrouter').click();
+            document.getElementById('btn-test-gemini').click();
+            document.getElementById('btn-test-muse').click();
         ''')
         wait(200)
         assert 'Kết nối OK' in javascript(window.web_view.page(),
             "document.getElementById('opencode-test-result').textContent")
         assert 'Kết nối OK' in javascript(window.web_view.page(),
             "document.getElementById('openrouter-test-result').textContent")
+        assert 'Kết nối OK' in javascript(window.web_view.page(),
+            "document.getElementById('gemini-test-result').textContent")
+        assert 'Muse đã trả lời' in javascript(window.web_view.page(),
+            "document.getElementById('muse-status').textContent")
         if len(sys.argv) > 1:
             window.grab().save(sys.argv[1])
         javascript(window.web_view.page(), "document.getElementById('tab-studio').click()")

@@ -875,6 +875,7 @@ document.addEventListener("DOMContentLoaded", () => {
   // 10. SETTINGS & API CONNECTION CHECKS
   // =========================================================
   async function loadSettingsForm() {
+    refreshMuseStatus();
     try {
       const res = await fetch("/api/settings");
       if (res.ok) {
@@ -915,6 +916,59 @@ document.addEventListener("DOMContentLoaded", () => {
     }
   }
 
+  const museStatus = document.getElementById("muse-status");
+  const museButtons = ["btn-muse-login", "btn-muse-status", "btn-test-muse"]
+    .map(id => document.getElementById(id)).filter(Boolean);
+
+  function showMuseStatus(state) {
+    if (!museStatus) return;
+    museStatus.textContent = !state.installed
+      ? "Chưa cài Muse. Chạy setup_muse.bat một lần rồi kiểm tra lại."
+      : !state.running
+        ? "Đã cài Muse. Bấm Mở đăng nhập Muse để kết nối tài khoản của bạn."
+        : state.logged_in && state.composer_ready
+          ? "Muse đã đăng nhập và sẵn sàng. Bạn có thể thử dịch."
+          : "Cửa sổ Muse đã mở. Hoàn tất đăng nhập hoặc yêu cầu truy cập trên trang, rồi kiểm tra lại.";
+  }
+
+  async function refreshMuseStatus() {
+    try {
+      const response = await fetch("/api/muse/status");
+      if (!response.ok) throw new Error("status");
+      const data = await response.json();
+      if (data.ok === false) throw new Error("status");
+      showMuseStatus(data);
+    } catch {
+      if (museStatus) museStatus.textContent = "Không thể kiểm tra Muse. Hãy thử lại.";
+    }
+  }
+
+  document.getElementById("btn-muse-status")?.addEventListener("click", refreshMuseStatus);
+  for (const [id, endpoint, waiting] of [
+    ["btn-muse-login", "/api/muse/login", "Đang mở cửa sổ Muse…"],
+    ["btn-test-muse", "/api/test-muse", "Đang thử dịch qua Muse…"]
+  ]) {
+    document.getElementById(id)?.addEventListener("click", async () => {
+      museButtons.forEach(button => { button.disabled = true; });
+      museStatus.textContent = waiting;
+      try {
+        const response = await fetch(endpoint, { method: "POST" });
+        const data = await response.json();
+        if (!response.ok || data.ok === false) {
+          museStatus.textContent = data.error || "Không thể kết nối Muse. Hãy thử lại.";
+        } else if (id === "btn-muse-login") {
+          showMuseStatus(data.status || data);
+        } else {
+          museStatus.textContent = `Muse đã trả lời (${data.latency_ms} ms). Bạn có thể chọn Muse và lưu cấu hình.`;
+        }
+      } catch {
+        museStatus.textContent = "Không thể kết nối với ứng dụng. Hãy thử lại.";
+      } finally {
+        museButtons.forEach(button => { button.disabled = false; });
+      }
+    });
+  }
+
   btnToggleGeminiKey?.addEventListener("click", () => {
     if (settingsGeminiKey.type === "password") {
       settingsGeminiKey.type = "text";
@@ -926,17 +980,20 @@ document.addEventListener("DOMContentLoaded", () => {
   });
 
   btnTestGemini?.addEventListener("click", async () => {
-    geminiTestResult.innerHTML = '<span class="text-amber-400"><i class="fa-solid fa-spinner fa-spin"></i> Đang test API...</span>';
+    btnTestGemini.disabled = true;
+    geminiTestResult.textContent = "Đang kiểm tra model đã lưu…";
     try {
       const res = await fetch("/api/test-gemini", { method: "POST" });
       const data = await res.json();
       if (data.ok) {
-        geminiTestResult.innerHTML = `<span class="text-emerald-400 font-bold"><i class="fa-solid fa-check"></i> Kết nối OK (${data.latency_ms}ms)</span>`;
+        geminiTestResult.textContent = `Kết nối OK: ${data.model} (${data.latency_ms} ms)`;
       } else {
-        geminiTestResult.innerHTML = `<span class="text-rose-400 font-bold"><i class="fa-solid fa-triangle-exclamation"></i> ${data.error || 'Lỗi kết nối'}</span>`;
+        geminiTestResult.textContent = data.error || "Lỗi kết nối Gemini";
       }
     } catch (e) {
-      geminiTestResult.innerHTML = `<span class="text-rose-400 font-bold">Lỗi: ${e.message}</span>`;
+      geminiTestResult.textContent = "Không thể kết nối với ứng dụng. Hãy thử lại.";
+    } finally {
+      btnTestGemini.disabled = false;
     }
   });
 
@@ -978,7 +1035,7 @@ document.addEventListener("DOMContentLoaded", () => {
       openrouter_model: settingsOpenRouterModel?.value.trim() || "inclusionai/ling-3.0-flash-sante:free",
       opencode_model: settingsOpenCodeModel?.value || "big-pickle",
       gemini_key: settingsGeminiKey?.value.trim() || undefined,
-      gemini_model: settingsGeminiModel?.value || "gemini-3.8-flash",
+      gemini_model: settingsGeminiModel?.value || "gemini-2.5-flash",
       deepseek_key: settingsDeepseekKey?.value.trim() || undefined,
       suppression_mode: settingsSuppressionMode?.value || "AUTO",
       ducking_level: settingsDuckingLevel?.value || "-14",

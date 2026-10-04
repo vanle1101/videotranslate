@@ -27,6 +27,7 @@ from core.streaming.pipeline import (
     active_streaming_sessions
 )
 from core.streaming.export import HQExporter
+from core.services.muse_service import muse_service
 
 app = FastAPI(title=f"{settings.APP_NAME} - Realtime Streaming Studio")
 
@@ -160,7 +161,7 @@ async def get_settings():
 @app.post("/api/config")
 async def update_settings(req: ConfigRequest):
     # Validate before changing any active settings or persisting the local file.
-    if req.llm_provider and req.llm_provider not in {"openrouter-free", "opencode", "free", "gemini", "deepseek", "openai"}:
+    if req.llm_provider and req.llm_provider not in {"openrouter-free", "opencode", "free", "gemini", "deepseek", "openai", "muse"}:
         raise HTTPException(status_code=422, detail="Nhà cung cấp dịch không hợp lệ")
     opencode_model = None
     if req.opencode_model is not None:
@@ -598,25 +599,51 @@ async def open_diagnostics_folder():
 async def test_gemini_connection():
     gemini_key = settings.GEMINI_API_KEY or os.getenv("GEMINI_API_KEY")
     if not gemini_key:
-        return {"ok": False, "error": "Chưa có GEMINI_API_KEY. Vui lòng cấu hình trong Cài đặt."}
-    try:
-        t0 = time.time()
+        return {"ok": False, "error_code": "missing_key",
+                "error": "Chưa có GEMINI_API_KEY. Vui lòng cấu hình trong Cài đặt."}
+    model = settings.GEMINI_MODEL
+
+    def ping():
         from google import genai
-        client = genai.Client(api_key=gemini_key)
-        resp = client.models.generate_content(
-            model=settings.GEMINI_MODEL,
-            contents=["Ping test: Trả về chữ OK."],
-            config=dict(temperature=0.1)
+        client = genai.Client(
+            api_key=gemini_key,
+            http_options={"timeout": 20000, "retry_options": {"attempts": 1}},
         )
-        latency_ms = round((time.time() - t0) * 1000, 1)
+        try:
+            client.models.generate_content(
+                model=model,
+                contents="Trả về chữ OK.",
+                config={"temperature": 0.1, "max_output_tokens": 128},
+            )
+        finally:
+            client.close()
+
+    try:
+        started = time.monotonic()
+        await asyncio.to_thread(ping)
         return {
             "ok": True,
-            "model": settings.GEMINI_MODEL,
-            "latency_ms": latency_ms,
-            "response": resp.text.strip()[:60]
+            "model": model,
+            "latency_ms": round((time.monotonic() - started) * 1000, 1),
         }
-    except Exception as e:
-        return {"ok": False, "error": str(e)}
+    except Exception as exc:
+        # SDK errors can include request data or credentials; return fixed messages only.
+        code = str(getattr(exc, "code", ""))
+        details = str(getattr(exc, "details", "")).upper()
+        if code in {"401", "403"} or (code == "400" and "API_KEY_INVALID" in details):
+            return {"ok": False, "error_code": "authentication",
+                    "error": "Gemini từ chối API key hoặc quyền truy cập. Kiểm tra key trong Google AI Studio và giới hạn của key."}
+        if code == "429":
+            return {"ok": False, "error_code": "quota",
+                    "error": "Gemini đã hết hạn mức hoặc đang giới hạn tốc độ. Kiểm tra quota trong Google AI Studio rồi thử lại."}
+        if code == "404":
+            return {"ok": False, "error_code": "model_unavailable",
+                    "error": "Model Gemini không tồn tại hoặc key chưa được dùng model này. Chọn model khác trong Cài đặt."}
+        if code == "503":
+            return {"ok": False, "error_code": "busy",
+                    "error": "Model Gemini đang quá tải hoặc tạm ngừng phục vụ. Đợi một lúc rồi thử lại, hoặc chọn model khác trong Cài đặt."}
+        return {"ok": False, "error_code": "connection_failed",
+                "error": "Chưa kết nối được Gemini. Kiểm tra mạng và model đã chọn rồi thử lại."}
 
 
 @app.post("/api/test-opencode")
@@ -645,6 +672,69 @@ async def test_openrouter_connection():
         return {"ok": False, "error": str(exc)}
     except Exception:
         return {"ok": False, "error": "Không thể kiểm tra OpenRouter Free lúc này. Vui lòng thử lại."}
+
+
+def _public_muse_status(state):
+    # Only expose lifecycle flags, never profile paths, browser text or credentials.
+    return {name: state.get(name) is True for name in
+            ("installed", "running", "logged_in", "composer_ready")}
+
+
+@app.get("/api/muse/status")
+async def muse_status():
+    try:
+        state = await asyncio.to_thread(muse_service.status)
+        return {"ok": True, **_public_muse_status(state)}
+    except Exception:
+        return {"ok": False, "error_code": "status_failed",
+                "error": "Chưa kiểm tra được Muse. Hãy kết nối lại rồi thử lại."}
+
+
+@app.post("/api/muse/login")
+async def muse_login():
+    try:
+        state = await asyncio.to_thread(muse_service.start_login)
+        return {"ok": True, **_public_muse_status(state)}
+    except Exception:
+        return {"ok": False, "error_code": "login_failed",
+                "error": "Chưa mở được Muse. Chạy setup_muse.bat, kiểm tra Chrome rồi thử kết nối lại."}
+
+
+@app.post("/api/muse/stop")
+async def muse_stop():
+    try:
+        await asyncio.to_thread(muse_service.stop)
+        state = await asyncio.to_thread(muse_service.status)
+        return {"ok": True, **_public_muse_status(state)}
+    except Exception:
+        return {"ok": False, "error_code": "stop_failed",
+                "error": "Chưa đóng được phiên Muse. Hãy đóng cửa sổ Muse rồi thử lại."}
+
+
+@app.post("/api/test-muse")
+async def test_muse_connection():
+    try:
+        state = await asyncio.to_thread(muse_service.status)
+        if not state.get("installed"):
+            return {"ok": False, "error_code": "not_installed",
+                    "error": "Chưa cài cầu nối Muse. Chạy setup_muse.bat trước."}
+        if not state.get("logged_in"):
+            return {"ok": False, "error_code": "login_required",
+                    "error": "Bấm Đăng nhập Muse và đăng nhập Meta trong cửa sổ Chrome trước."}
+        if not state.get("composer_ready"):
+            return {"ok": False, "error_code": "not_ready",
+                    "error": "Muse chưa sẵn sàng. Mở cửa sổ Muse, hoàn tất bước đang hiển thị rồi thử lại."}
+        started = time.monotonic()
+        reply = await asyncio.to_thread(muse_service.translate, "Reply with exactly OK.")
+        if not isinstance(reply, str) or reply.strip().rstrip(".").upper() != "OK":
+            return {"ok": False, "error_code": "unexpected_reply",
+                    "error": "Muse đã trả lời nhưng chưa đúng yêu cầu kiểm tra. Kiểm tra cửa sổ Muse rồi thử lại."}
+        # Browser access cannot attest which underlying model the Muse account uses.
+        return {"ok": True, "model": "muse-browser",
+                "latency_ms": round((time.monotonic() - started) * 1000)}
+    except Exception:
+        return {"ok": False, "error_code": "connection_failed",
+                "error": "Muse chưa hoàn tất kiểm tra. Kiểm tra đăng nhập hoặc yêu cầu xác nhận trong Chrome rồi thử lại."}
 
 
 @app.websocket("/ws/stream/{task_id}")
