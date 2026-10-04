@@ -17,6 +17,10 @@ from config import settings
 from core.downloader import VideoDownloader
 from core.hardware import detect_hardware
 from core.model_manager import ModelManager
+from core.engines.translation.opencode_client import (
+    OpenCodeZenClient, OpenCodeClientError, resolve_api_key, find_opencode_executable,
+)
+from core.engines.translation.openrouter_client import OpenRouterFreeClient, OpenRouterClientError, resolve_openrouter_key
 from core.streaming.pipeline import (
     create_streaming_session,
     get_streaming_session,
@@ -71,6 +75,8 @@ class ConfigRequest(BaseModel):
     deepseek_key: Optional[str] = None
     llm_provider: Optional[str] = None
     gemini_model: Optional[str] = None
+    opencode_model: Optional[str] = None
+    openrouter_model: Optional[str] = None
     suppression_mode: Optional[str] = None
     ducking_level: Optional[str] = None
     buffer_target: Optional[str] = None
@@ -135,10 +141,16 @@ async def get_settings():
         "edge_voice": settings.EDGE_VOICE,
         "device": settings.DEVICE,
         "whisper_model": settings.WHISPER_MODEL_SIZE,
-        "llm_provider": getattr(settings, "LLM_PROVIDER", "gemini"),
-        "gemini_key": getattr(settings, "GEMINI_API_KEY", "") or os.getenv("GEMINI_API_KEY", ""),
-        "gemini_model": getattr(settings, "GEMINI_MODEL", "gemini-2.0-flash"),
-        "deepseek_key": getattr(settings, "DEEPSEEK_API_KEY", "") or os.getenv("DEEPSEEK_API_KEY", ""),
+        "llm_provider": settings.LLM_PROVIDER,
+        "opencode_model": settings.OPENCODE_MODEL,
+        "opencode_configured": bool(resolve_api_key()),
+        "opencode_cli_available": bool(find_opencode_executable()),
+        "opencode_free_models": OpenCodeZenClient.free_models(),
+        "openrouter_configured": bool(resolve_openrouter_key()),
+        "openrouter_model": settings.OPENROUTER_MODEL,
+        "gemini_configured": bool(settings.GEMINI_API_KEY or os.getenv("GEMINI_API_KEY")),
+        "gemini_model": settings.GEMINI_MODEL,
+        "deepseek_configured": bool(settings.DEEPSEEK_API_KEY or os.getenv("DEEPSEEK_API_KEY")),
         "suppression_mode": getattr(settings, "SUPPRESSION_MODE", "AUTO"),
         "ducking_level": str(int(getattr(settings, "BGM_VOLUME_DUCKED_DB", -14))),
         "buffer_target": "10"
@@ -147,33 +159,52 @@ async def get_settings():
 @app.post("/api/settings")
 @app.post("/api/config")
 async def update_settings(req: ConfigRequest):
+    # Validate before changing any active settings or persisting the local file.
+    if req.llm_provider and req.llm_provider not in {"openrouter-free", "opencode", "free", "gemini", "deepseek", "openai"}:
+        raise HTTPException(status_code=422, detail="Nhà cung cấp dịch không hợp lệ")
+    opencode_model = None
+    if req.opencode_model is not None:
+        try:
+            opencode_model = OpenCodeZenClient(model=req.opencode_model).validate_model()
+        except OpenCodeClientError:
+            raise HTTPException(status_code=422, detail="Hãy chọn model OpenCode miễn phí trong danh sách") from None
+    for value in (req.gemini_key, req.deepseek_key, req.gemini_model):
+        if value is not None and ("\n" in value or "\r" in value):
+            raise HTTPException(status_code=422, detail="Cấu hình không được chứa ký tự xuống dòng")
     env_updates = {}
+    if req.openrouter_model is not None:
+        import re
+        if not re.fullmatch(r"[a-zA-Z0-9_.-]+/[a-zA-Z0-9_.-]+:free", req.openrouter_model):
+            raise HTTPException(status_code=422, detail="Model OpenRouter phải là bản :free")
+        env_updates["OPENROUTER_MODEL"] = req.openrouter_model
     if req.gemini_key is not None:
-        settings.GEMINI_API_KEY = req.gemini_key
-        os.environ["GEMINI_API_KEY"] = req.gemini_key
         env_updates["GEMINI_API_KEY"] = req.gemini_key
     if req.deepseek_key is not None:
-        settings.DEEPSEEK_API_KEY = req.deepseek_key
-        os.environ["DEEPSEEK_API_KEY"] = req.deepseek_key
         env_updates["DEEPSEEK_API_KEY"] = req.deepseek_key
     if req.llm_provider:
-        settings.LLM_PROVIDER = req.llm_provider
         env_updates["LLM_PROVIDER"] = req.llm_provider
     if req.gemini_model:
-        settings.GEMINI_MODEL = req.gemini_model
         env_updates["GEMINI_MODEL"] = req.gemini_model
+    if opencode_model:
+        env_updates["OPENCODE_MODEL"] = opencode_model
     if req.ducking_level:
         try:
-            settings.BGM_VOLUME_DUCKED_DB = float(req.ducking_level)
-            env_updates["BGM_VOLUME_DUCKED_DB"] = req.ducking_level
+            value = float(req.ducking_level)
+            if not -60 <= value <= 0:
+                raise ValueError
+            env_updates["BGM_VOLUME_DUCKED_DB"] = str(value)
         except ValueError:
-            pass
+            raise HTTPException(status_code=422, detail="Mức giảm BGM phải từ -60 đến 0 dB") from None
 
     if env_updates:
         try:
             update_env_file(env_updates)
-        except Exception as e:
-            print(f"[!] Warning updating .env: {e}")
+        except OSError:
+            raise HTTPException(status_code=500, detail="Không thể ghi cấu hình vào .env") from None
+        for name, value in env_updates.items():
+            setattr(settings, name, float(value) if name == "BGM_VOLUME_DUCKED_DB" else value)
+            if name in {"GEMINI_API_KEY", "DEEPSEEK_API_KEY"}:
+                os.environ[name] = value
 
     return {"status": "ok", "message": "Cấu hình đã được lưu an toàn vào .env và áp dụng tức thì!"}
 
@@ -586,6 +617,34 @@ async def test_gemini_connection():
         }
     except Exception as e:
         return {"ok": False, "error": str(e)}
+
+
+@app.post("/api/test-opencode")
+async def test_opencode_connection():
+    try:
+        client = OpenCodeZenClient(model=settings.OPENCODE_MODEL, timeout=settings.OPENCODE_TIMEOUT, max_retries=0)
+        started = time.monotonic()
+        await asyncio.to_thread(client.translate, "Reply with OK.", max_tokens=16)
+        return {"ok": True, "model": client.model,
+                "latency_ms": round((time.monotonic() - started) * 1000)}
+    except OpenCodeClientError as exc:
+        return {"ok": False, "error": str(exc)}
+    except Exception:
+        return {"ok": False, "error": "Không thể kiểm tra OpenCode lúc này. Vui lòng thử lại."}
+
+
+@app.post("/api/test-openrouter")
+async def test_openrouter_connection():
+    try:
+        client = OpenRouterFreeClient(model=settings.OPENROUTER_MODEL, timeout=settings.OPENCODE_TIMEOUT)
+        started = time.monotonic()
+        await asyncio.to_thread(client.translate, "Reply with OK.", max_tokens=1024)
+        return {"ok": True, "model": client.model,
+                "latency_ms": round((time.monotonic() - started) * 1000)}
+    except OpenRouterClientError as exc:
+        return {"ok": False, "error": str(exc)}
+    except Exception:
+        return {"ok": False, "error": "Không thể kiểm tra OpenRouter Free lúc này. Vui lòng thử lại."}
 
 
 @app.websocket("/ws/stream/{task_id}")

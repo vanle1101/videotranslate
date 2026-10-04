@@ -19,6 +19,20 @@ def main():
             failures.append(f'{name} missing from PATH')
         else:
             print(f'OK tool: {name}')
+    if settings.LLM_PROVIDER == 'openrouter-free':
+        from core.engines.translation.openrouter_client import resolve_openrouter_key
+        if not resolve_openrouter_key():
+            failures.append('OpenRouter key missing. Connect OpenRouter in OpenCode or set OPENROUTER_API_KEY.')
+        else:
+            print(f'OK translation: OpenRouter Free, {settings.OPENROUTER_MODEL}, local key detected')
+    if settings.LLM_PROVIDER == 'opencode':
+        from core.engines.translation.opencode_client import find_opencode_executable, resolve_api_key
+        if not find_opencode_executable():
+            failures.append('OpenCode CLI missing. Install OpenCode or choose another translation provider.')
+        elif not resolve_api_key():
+            failures.append('OpenCode key missing. Connect OpenCode Zen with /connect.')
+        else:
+            print(f'OK translation: OpenCode CLI, {settings.OPENCODE_MODEL}, local key detected')
     model = settings.WORKSPACE_DIR / 'models' / f'faster-whisper-{settings.WHISPER_MODEL_SIZE}'
     for name in ('model.bin', 'config.json', 'tokenizer.json'):
         if not (model / name).is_file():

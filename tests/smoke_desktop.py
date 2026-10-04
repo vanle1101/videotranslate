@@ -98,10 +98,41 @@ def main():
         wait(300)
         rows = javascript(window.web_view.page(), "document.querySelectorAll('#models-full-table-body tr').length")
         assert rows >= 1
-        javascript(window.web_view.page(), "document.getElementById('tab-studio').click()")
+        javascript(window.web_view.page(), "document.getElementById('tab-settings').click()")
+        wait(400)
+        config = json.loads(javascript(window.web_view.page(), '''JSON.stringify({
+            provider: document.getElementById('settings-llm-provider').value,
+            model: document.getElementById('settings-opencode-model').value,
+            freeModel: document.getElementById('settings-openrouter-model').value,
+            modelCount: document.getElementById('settings-opencode-model').options.length,
+            status: document.getElementById('opencode-auth-status').textContent,
+            geminiKey: document.getElementById('settings-gemini-key').value,
+            deepseekKey: document.getElementById('settings-deepseek-key').value
+        })'''))
+        from config import settings
+        assert config['provider'] == settings.LLM_PROVIDER
+        assert config['model'] == settings.OPENCODE_MODEL
+        assert config['freeModel'] == settings.OPENROUTER_MODEL
+        assert config['modelCount'] >= 1
+        assert config['status'] and 'Đang kiểm tra' not in config['status']
+        assert not config['geminiKey'] and not config['deepseekKey']
+        javascript(window.web_view.page(), '''
+            const settingsFetch = window.fetch;
+            window.fetch = async (url, options) => url === '/api/test-opencode' || url === '/api/test-openrouter'
+                ? new Response(JSON.stringify({ok: true, model: 'big-pickle', latency_ms: 10}))
+                : settingsFetch(url, options);
+            document.getElementById('btn-test-opencode').click();
+            document.getElementById('btn-test-openrouter').click();
+        ''')
         wait(200)
+        assert 'Kết nối OK' in javascript(window.web_view.page(),
+            "document.getElementById('opencode-test-result').textContent")
+        assert 'Kết nối OK' in javascript(window.web_view.page(),
+            "document.getElementById('openrouter-test-result').textContent")
         if len(sys.argv) > 1:
             window.grab().save(sys.argv[1])
+        javascript(window.web_view.page(), "document.getElementById('tab-studio').click()")
+        wait(200)
         print(json.dumps({'result': 'PASS', 'desktop': result, 'upload': upload['requests'][0]}, ensure_ascii=False))
     finally:
         if window:

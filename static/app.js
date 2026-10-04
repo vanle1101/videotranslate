@@ -72,6 +72,14 @@ document.addEventListener("DOMContentLoaded", () => {
   const settingsGeminiKey = document.getElementById("settings-gemini-key");
   const settingsDeepseekKey = document.getElementById("settings-deepseek-key");
   const settingsGeminiModel = document.getElementById("settings-gemini-model");
+  const settingsOpenCodeModel = document.getElementById("settings-opencode-model");
+  const openCodeAuthStatus = document.getElementById("opencode-auth-status");
+  const btnTestOpenCode = document.getElementById("btn-test-opencode");
+  const openCodeTestResult = document.getElementById("opencode-test-result");
+  const settingsOpenRouterModel = document.getElementById("settings-openrouter-model");
+  const openRouterAuthStatus = document.getElementById("openrouter-auth-status");
+  const btnTestOpenRouter = document.getElementById("btn-test-openrouter");
+  const openRouterTestResult = document.getElementById("openrouter-test-result");
   const settingsSuppressionMode = document.getElementById("settings-suppression-mode");
   const settingsDuckingLevel = document.getElementById("settings-ducking-level");
   const settingsBufferTarget = document.getElementById("settings-buffer-target");
@@ -864,7 +872,7 @@ document.addEventListener("DOMContentLoaded", () => {
   });
 
   // =========================================================
-  // 10. SETTINGS & GEMINI TEST CONNECTION
+  // 10. SETTINGS & API CONNECTION CHECKS
   // =========================================================
   async function loadSettingsForm() {
     try {
@@ -872,17 +880,38 @@ document.addEventListener("DOMContentLoaded", () => {
       if (res.ok) {
         const cfg = await res.json();
         if (settingsLlmProvider && cfg.llm_provider) settingsLlmProvider.value = cfg.llm_provider;
-        if (settingsGeminiKey && cfg.gemini_key) settingsGeminiKey.value = cfg.gemini_key;
+        if (settingsGeminiKey) {
+          settingsGeminiKey.value = "";
+          settingsGeminiKey.placeholder = cfg.gemini_configured ? "Đã có key — để trống để giữ nguyên" : "Nhập Gemini API key";
+        }
         if (settingsGeminiModel && cfg.gemini_model) settingsGeminiModel.value = cfg.gemini_model;
-        if (settingsDeepseekKey && cfg.deepseek_key) settingsDeepseekKey.value = cfg.deepseek_key;
+        if (settingsOpenRouterModel) settingsOpenRouterModel.value = cfg.openrouter_model;
+        if (openRouterAuthStatus) openRouterAuthStatus.textContent = cfg.openrouter_configured
+          ? "Đã nhận key OpenRouter Free từ máy. Không cần nhập lại."
+          : "Chưa có key OpenRouter. Kết nối OpenRouter trong OpenCode hoặc đặt OPENROUTER_API_KEY trong .env.";
+        if (settingsDeepseekKey) {
+          settingsDeepseekKey.value = "";
+          settingsDeepseekKey.placeholder = cfg.deepseek_configured ? "Đã có key — để trống để giữ nguyên" : "Nhập DeepSeek API key";
+        }
+        if (settingsOpenCodeModel) {
+          settingsOpenCodeModel.replaceChildren(...(cfg.opencode_free_models || []).map(model => new Option(model, model)));
+          settingsOpenCodeModel.value = cfg.opencode_model;
+        }
+        if (openCodeAuthStatus) {
+          openCodeAuthStatus.textContent = cfg.opencode_configured
+            ? (cfg.opencode_cli_available
+              ? "Đã nhận OpenCode và key trên máy. Không cần nhập lại."
+              : "Đã nhận key, nhưng chưa tìm thấy OpenCode CLI. Hãy cài OpenCode trước.")
+            : "Chưa tìm thấy key. Mở OpenCode → /connect → OpenCode Zen rồi tải lại tab Cài đặt.";
+        }
         if (settingsSuppressionMode && cfg.suppression_mode) settingsSuppressionMode.value = cfg.suppression_mode;
         if (settingsDuckingLevel && cfg.ducking_level) settingsDuckingLevel.value = cfg.ducking_level;
         if (settingsBufferTarget && cfg.buffer_target) settingsBufferTarget.value = cfg.buffer_target;
       }
     } catch (e) {
       console.warn("Could not load backend settings:", e);
-      if (settingsGeminiKey) settingsGeminiKey.value = localStorage.getItem("gemini_key") || "";
-      if (settingsDeepseekKey) settingsDeepseekKey.value = localStorage.getItem("deepseek_key") || "";
+      if (openCodeAuthStatus) openCodeAuthStatus.textContent = "Không thể tải cấu hình. Hãy mở lại tab Cài đặt.";
+      if (openRouterAuthStatus) openRouterAuthStatus.textContent = "Không thể tải cấu hình. Hãy mở lại tab Cài đặt.";
     }
   }
 
@@ -911,12 +940,46 @@ document.addEventListener("DOMContentLoaded", () => {
     }
   });
 
+  btnTestOpenCode?.addEventListener("click", async () => {
+    btnTestOpenCode.disabled = true;
+    openCodeTestResult.textContent = "Đang kiểm tra model đã lưu…";
+    try {
+      const res = await fetch("/api/test-opencode", { method: "POST" });
+      const data = await res.json();
+      openCodeTestResult.textContent = data.ok
+        ? `Kết nối OK: ${data.model} (${data.latency_ms} ms)`
+        : data.error || "Lỗi kết nối OpenCode";
+    } catch (e) {
+      openCodeTestResult.textContent = "Không thể kết nối với ứng dụng. Hãy thử lại.";
+    } finally {
+      btnTestOpenCode.disabled = false;
+    }
+  });
+
+  btnTestOpenRouter?.addEventListener("click", async () => {
+    btnTestOpenRouter.disabled = true;
+    openRouterTestResult.textContent = "Đang kiểm tra model đã lưu…";
+    try {
+      const res = await fetch("/api/test-openrouter", { method: "POST" });
+      const data = await res.json();
+      openRouterTestResult.textContent = data.ok
+        ? `Kết nối OK: ${data.model} (${data.latency_ms} ms)`
+        : data.error || "Lỗi kết nối OpenRouter Free";
+    } catch (e) {
+      openRouterTestResult.textContent = "Không thể kết nối với ứng dụng. Hãy thử lại.";
+    } finally {
+      btnTestOpenRouter.disabled = false;
+    }
+  });
+
   btnSaveSettings?.addEventListener("click", async () => {
     const payload = {
-      llm_provider: settingsLlmProvider?.value || "gemini",
-      gemini_key: settingsGeminiKey?.value.trim() || "",
+      llm_provider: settingsLlmProvider?.value || "openrouter-free",
+      openrouter_model: settingsOpenRouterModel?.value.trim() || "inclusionai/ling-3.0-flash-sante:free",
+      opencode_model: settingsOpenCodeModel?.value || "big-pickle",
+      gemini_key: settingsGeminiKey?.value.trim() || undefined,
       gemini_model: settingsGeminiModel?.value || "gemini-3.8-flash",
-      deepseek_key: settingsDeepseekKey?.value.trim() || "",
+      deepseek_key: settingsDeepseekKey?.value.trim() || undefined,
       suppression_mode: settingsSuppressionMode?.value || "AUTO",
       ducking_level: settingsDuckingLevel?.value || "-14",
       buffer_target: settingsBufferTarget?.value || "10"
@@ -936,6 +999,8 @@ document.addEventListener("DOMContentLoaded", () => {
         body: JSON.stringify(payload)
       });
       const data = await res.json();
+      if (!res.ok) throw new Error(data.detail || "Không thể lưu cấu hình");
+      await loadSettingsForm();
       btnSaveSettings.innerHTML = '<i class="fa-solid fa-check mr-1.5"></i> Đã lưu thành công!';
       setTimeout(() => {
         btnSaveSettings.innerHTML = origText;

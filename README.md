@@ -2,6 +2,8 @@
 
 > **Bản cấu hình Windows / RAM 16 GB:** xem [hướng dẫn cài đặt và vận hành](HUONG_DAN_MAY_NAY.md). Chạy `setup.bat` cho máy mới, `start.bat` để mở. Cấu hình mặc định hiện tại: Whisper Small CPU int8, Edge-TTS và DSP; các engine cao cấp trong phần giới thiệu bên dưới là tùy chọn cần cài riêng.
 
+> **Dùng key có sẵn trong OpenCode:** mặc định **OpenRouter Free**, tự đọc key local, không cần tải LLM dịch. OpenCode Zen CLI vẫn có thể chọn nhưng hiện gặp lỗi 403 từ dịch vụ. Kiểm tra kết nối ở Cài đặt; key không gửi ra giao diện hay đẩy GitHub. Gemini, DeepSeek và Google/MyMemory vẫn có thể chọn riêng.
+
 <div align="center">
 
 ![Douyin2TikTok AI Studio Banner](docs/images/banner.png)

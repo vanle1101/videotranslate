@@ -87,8 +87,13 @@ class Settings(BaseSettings):
     TEMP_DIR: Path = WORKSPACE_DIR / "temp"
 
     # LLM Translation API Settings
-    # Supports Gemini API, DeepSeek API, OpenAI API
-    LLM_PROVIDER: str = "free" # 'free', 'gemini', 'deepseek', 'openai'
+    # OpenCode reuses its local login; no translation LLM is loaded into RAM.
+    LLM_PROVIDER: str = "openrouter-free" # also 'opencode', 'free', 'gemini', 'deepseek', 'openai'
+    OPENCODE_API_KEY: str = "" # Optional local override; otherwise read OpenCode auth.json.
+    OPENCODE_MODEL: str = "big-pickle"
+    OPENCODE_TIMEOUT: float = 60.0
+    OPENROUTER_API_KEY: str = "" # Otherwise reuse OpenRouter-Free login from OpenCode.
+    OPENROUTER_MODEL: str = "inclusionai/ling-3.0-flash-sante:free"
     GEMINI_API_KEY: str = os.getenv("GEMINI_API_KEY", "")
     DEEPSEEK_API_KEY: str = os.getenv("DEEPSEEK_API_KEY", "")
     OPENAI_API_KEY: str = os.getenv("OPENAI_API_KEY", "")
