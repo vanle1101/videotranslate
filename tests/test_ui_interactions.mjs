@@ -7,7 +7,7 @@ const source = readFileSync(new URL('../static/app.js', import.meta.url), 'utf8'
 const template = readFileSync(new URL('../templates/index.html', import.meta.url), 'utf8');
 
 function studio() {
-  const elements = new Map(), audio = [], sockets = [], requests = [], alerts = [];
+  const elements = new Map(), audio = [], sockets = [], requests = [], alerts = [], copied = [];
   let ready;
   class Element {
     constructor(id = '') {
@@ -33,6 +33,7 @@ function studio() {
     replaceChildren(...children) { this.children = children; this.options = children; }
     add(option) { this.options.push(option); }
     setAttribute(name, value) { this[name] = value; }
+    removeAttribute(name) { delete this[name]; }
     async click() { await this.emit('click'); }
     focus() { document.activeElement = this; }
     load() { this.currentTime = 0; }
@@ -81,7 +82,8 @@ function studio() {
   vm.runInNewContext(source, {
     document, window, Audio, WebSocket, fetch, console, alert: value => alerts.push(value),
     Option: function(text, value) { this.text = text; this.value = value; },
-    URL: { createObjectURL: () => 'blob:video', revokeObjectURL() {} },
+    URL: Object.assign(class extends URL {}, { createObjectURL: () => 'blob:video', revokeObjectURL() {} }),
+    navigator: { clipboard: { writeText: async text => { copied.push(text); } } },
     localStorage: { removeItem() {} }, setTimeout() {}, setInterval() { return 1; }, clearInterval() {},
   });
   ready();
@@ -94,7 +96,7 @@ function studio() {
     sockets.at(-1).receive({ type: 'init', duration: 10, segments_count: 1, bgm_url: '/bgm.m4a',
       segments: [{ id: 0, start: 0, end: 10, duration: 10, status: 'READY', audio_url: '/dub.wav', final_vi: '<b>Xin chào</b>' }] });
   }
-  return { el, audio, sockets, requests, replies, alerts, window, flush, start };
+  return { el, audio, sockets, requests, replies, alerts, copied, window, flush, start };
 }
 
 test('saved buffer and arbitrary configured model are displayed and sent to backend', async () => {
@@ -183,4 +185,172 @@ test('stop clears deleted dubbing media before playback can resume', async () =>
   await video.play(); await video.emit('timeupdate');
   assert.equal(ui.audio.length, previousAudioCount);
   assert.equal(ui.el('segments-count-badge').textContent, '0 câu');
+});
+
+async function startUrl(ui) {
+  await ui.flush();
+  ui.el('video-url').value = 'https://v.douyin.com/_IAiSDH0bK8/';
+  await ui.el('video-url').emit('input');
+  ui.replies.set('/api/streaming/start-url', { task_id: 'download-fixture', video_url: null });
+  await ui.el('btn-start').click();
+  return ui.sockets.at(-1);
+}
+
+test('pasted share URL is recognized, clears a prior file and sends only the extracted URL', async () => {
+  const ui = studio(); await ui.flush();
+  ui.window.loadDroppedLocalVideo('D:/previous.mp4');
+  ui.el('video-url').value = '复制打开抖音 https://v.douyin.com/_IAiSDH0bK8/ 看视频';
+  await ui.el('video-url').emit('input');
+  assert.equal(ui.window.currentLocalFilePath, null);
+  assert.match(ui.el('video-url-status').textContent, /Đã nhận link Douyin/);
+  ui.replies.set('/api/streaming/start-url', { task_id: 'download-fixture', video_url: null });
+  await ui.el('btn-start').click();
+  const request = ui.requests.find(item => item.url === '/api/streaming/start-url');
+  assert.equal(JSON.parse(request.options.body).url, 'https://v.douyin.com/_IAiSDH0bK8/');
+  assert.equal(ui.requests.some(item => item.url === '/api/streaming/start-local-file'), false);
+});
+
+test('invalid URL is explained before any download request', async () => {
+  const ui = studio(); await ui.flush();
+  ui.el('video-url').value = 'not a video link';
+  await ui.el('video-url').emit('input');
+  await ui.el('btn-start').click();
+  assert.equal(ui.el('btn-start').disabled, true);
+  assert.equal(ui.el('video-url')['aria-invalid'], 'true');
+  assert.match(ui.el('video-url-status').textContent, /Chưa nhận được link hợp lệ/);
+  assert.equal(ui.requests.some(item => item.url.includes('/streaming/start')), false);
+});
+
+test('URL normalization matches supported bare domains, share punctuation and strips fragments', async () => {
+  for (const [input, expected] of [
+    ['v.douyin.com/example/', 'https://v.douyin.com/example/'],
+    ['www.youtube.com/watch?v=example', 'https://www.youtube.com/watch?v=example'],
+    ['youtu.be/example#play', 'https://youtu.be/example'],
+    ['复制（https://v.douyin.com/example/），打开抖音', 'https://v.douyin.com/example/'],
+    ['Watch https://example.com/video.mp4). next', 'https://example.com/video.mp4'],
+    ['Watch https://example.com/video.mp4» next', 'https://example.com/video.mp4'],
+  ]) {
+    const ui = studio(); await ui.flush();
+    ui.el('video-url').value = input;
+    await ui.el('video-url').emit('input');
+    assert.equal(ui.el('btn-start').disabled, false, input);
+    ui.replies.set('/api/streaming/start-url', { task_id: 'url-normalized', video_url: null });
+    await ui.el('btn-start').click();
+    const request = ui.requests.find(item => item.url === '/api/streaming/start-url');
+    assert.equal(JSON.parse(request.options.body).url, expected, input);
+  }
+});
+
+test('URL validation rejects credentials, invalid ports and unsupported bare domains', async () => {
+  for (const input of ['https://user:secret@v.douyin.com/example/', 'https://user@v.douyin.com/example/', 'https://v.douyin.com:99999/example/', 'example.com/video.mp4']) {
+    const ui = studio(); await ui.flush();
+    ui.el('video-url').value = input;
+    await ui.el('video-url').emit('input');
+    await ui.el('btn-start').click();
+    assert.equal(ui.el('btn-start').disabled, true, input);
+    assert.equal(ui.requests.some(item => item.url.includes('/streaming/start')), false, input);
+  }
+});
+
+test('pending URL task displays honest progress, controls and source-ready preview', async () => {
+  const ui = studio(), socket = await startUrl(ui);
+  assert.equal(ui.el('task-progress').classList.contains('hidden'), false);
+  assert.equal(ui.el('btn-pause-worker').classList.contains('hidden'), true);
+  assert.equal(ui.el('btn-stop-worker').classList.contains('hidden'), false);
+  assert.equal(ui.el('btn-export-hq').disabled, true);
+  assert.equal(ui.el('video-player').src, undefined);
+  socket.receive({ type: 'progress', phase: 'download', stage: 'Đang tải video', progress_pct: 42.4, status: 'RUNNING', can_pause: false });
+  assert.equal(ui.el('task-progress-value').textContent, '42%');
+  assert.equal(ui.el('task-progress-bar').style.width, '42.4%');
+  assert.equal(ui.el('task-progress-track')['aria-valuenow'], '42.4');
+  socket.receive({ type: 'progress', phase: 'prepare', stage: 'Đang tách âm thanh', progress_pct: null, status: 'RUNNING', can_pause: false });
+  assert.equal(ui.el('task-progress-value').textContent, 'Chưa có %');
+  assert.equal(ui.el('task-progress-track')['aria-valuenow'], undefined);
+  assert.equal(ui.el('buffering-text').textContent, 'Đang tách âm thanh');
+  socket.receive({ type: 'source_ready', video_url: '/api/video/download-fixture' });
+  assert.equal(ui.el('video-player').src, '/api/video/download-fixture');
+  assert.equal(ui.el('btn-export-hq').disabled, true);
+});
+
+test('stopping before task-id arrives cancels the returned task and never attaches its media', async () => {
+  const ui = studio(); await ui.flush();
+  let finish;
+  ui.el('video-url').value = 'https://v.douyin.com/example/';
+  ui.replies.set('/api/streaming/start-url', () => new Promise(resolve => { finish = resolve; }));
+  const starting = ui.el('btn-start').click();
+  await ui.flush();
+  await ui.window.studioStop();
+  assert.equal(ui.el('task-progress').dataset.status, 'CANCELLING');
+  assert.equal(ui.el('btn-stop-worker').disabled, true);
+  finish({ ok: true, json: async () => ({ task_id: 'late-task', video_url: '/late.mp4' }) });
+  await starting;
+  assert.equal(ui.requests.filter(item => item.url === '/api/tasks/late-task/stop').length, 1);
+  assert.equal(ui.sockets.length, 0);
+  assert.equal(ui.el('task-progress').dataset.status, 'STOPPED');
+  assert.equal(ui.el('btn-start').classList.contains('hidden'), false);
+});
+
+test('download failure remains visible without a popup or false completion', async () => {
+  const ui = studio(), socket = await startUrl(ui);
+  socket.receive({ type: 'error', message: 'Không tải được video: kết nối hết thời gian chờ.' });
+  socket.receive({ type: 'finished', status: 'failed' });
+  assert.equal(ui.el('task-progress').dataset.status, 'FAILED');
+  assert.match(ui.el('task-progress-stage').textContent, /kết nối hết thời gian chờ/);
+  assert.equal(ui.el('btn-export-hq').disabled, true);
+  assert.equal(ui.el('btn-start').classList.contains('hidden'), false);
+  assert.equal(ui.alerts.length, 0);
+});
+
+test('Tasks shows download phase without null percent; disconnected realtime shows real status', async () => {
+  const ui = studio(), socket = await startUrl(ui);
+  ui.replies.set('/api/tasks', { tasks: [{ task_id: 'download-fixture', task_type: 'Dịch video', status: 'RUNNING', phase: 'download', stage: 'Đang tải video', progress_pct: null, can_stop: true }] });
+  await ui.el('btn-refresh-tasks').click();
+  const row = ui.el('tasks-table-body').children[0];
+  assert.match(row.innerHTML, /Đang tải video/);
+  assert.match(row.innerHTML, /Chưa có số liệu %/);
+  assert.doesNotMatch(row.innerHTML, /null%/);
+  socket.onclose(); await ui.flush();
+  assert.equal(ui.el('task-connection-status').classList.contains('hidden'), false);
+  assert.match(ui.el('task-connection-status').textContent, /gián đoạn/);
+  assert.equal(ui.el('task-progress-stage').textContent, 'Đang tải video');
+});
+
+test('terminal Tasks with no measured progress show their stage without a progress bar', async () => {
+  const ui = studio(); await ui.flush();
+  for (const status of ['STOPPED', 'CANCELLED', 'FAILED', 'COMPLETED']) {
+    ui.replies.set('/api/tasks', { tasks: [{ task_id: 'terminal-fixture', task_type: 'Dịch video', status, stage: 'Kết thúc tác vụ', progress_pct: null }] });
+    await ui.el('btn-refresh-tasks').click();
+    const row = ui.el('tasks-table-body').children[0].innerHTML;
+    assert.match(row, /Kết thúc tác vụ/, status);
+    assert.doesNotMatch(row, /Chưa có số liệu|bg-gradient-to-r|null%/, status);
+  }
+});
+
+test('Diagnostics preserves log lines, safely highlights levels and copies exact raw text', async () => {
+  const ui = studio(); await ui.flush();
+  const raw = '2026-10-05 INFO first line\n2026-10-05 ERROR <script>unsafe</script>\n    traceback detail\n';
+  ui.replies.set('/api/diagnostics/logs?category=app&lines=150', { logs: raw });
+  await ui.el('btn-refresh-log').click();
+  assert.match(ui.el('log-console-output').innerHTML, /<\/span>\n<span/);
+  assert.match(ui.el('log-console-output').innerHTML, /log-line-error/);
+  assert.match(ui.el('log-console-output').innerHTML, /&lt;script&gt;/);
+  assert.match(ui.el('log-summary').textContent, /1 lỗi/);
+  await ui.el('btn-copy-log').click();
+  assert.equal(ui.copied[0], raw);
+  assert.match(ui.el('log-copy-status').textContent, /Đã sao chép/);
+  assert.equal(ui.alerts.length, 0);
+});
+
+test('Diagnostics uses native clipboard in desktop and reports a copying failure visibly', async () => {
+  const ui = studio(); await ui.flush();
+  ui.replies.set('/api/diagnostics/logs?category=app&lines=150', { logs: 'native\nlog' });
+  await ui.el('btn-refresh-log').click();
+  let nativeText;
+  ui.window.desktopBridge = { copyText(text, callback) { nativeText = text; callback(true); } };
+  await ui.el('btn-copy-log').click();
+  assert.equal(nativeText, 'native\nlog');
+  assert.equal(ui.copied.length, 0);
+  ui.window.desktopBridge.copyText = () => { throw new Error('clipboard denied'); };
+  await ui.el('btn-copy-log').click();
+  assert.match(ui.el('log-copy-status').textContent, /Không truy cập được clipboard/);
 });

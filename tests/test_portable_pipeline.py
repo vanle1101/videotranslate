@@ -209,7 +209,10 @@ class PortablePipelineTests(unittest.TestCase):
         self.assertIs(session.tts_engine, session.edge_tts)
         self.assertEqual(len(session.warnings), 2)
         self.assertFalse(session.is_running)
-        self.assertEqual([event for event, _ in events], ["error", "finished"])
+        self.assertEqual([event for event, _ in events], ["progress", "progress", "error", "finished"])
+        self.assertEqual(events[0][1]["phase"], "prepare")
+        self.assertIsNone(events[0][1]["progress_pct"])
+        self.assertEqual(events[1][1]["status"], "FAILED")
 
     @unittest.skipUnless(shutil.which("ffmpeg") and shutil.which("ffprobe"), "FFmpeg is required")
     def test_silent_unicode_input_is_not_a_speech_segment(self):
@@ -242,7 +245,8 @@ class PortablePipelineTests(unittest.TestCase):
     def test_streaming_keeps_all_asr_sentences_and_cleans_intermediates(self):
         audio = self.root / "hội thoại.wav"
         write_wave(audio, 2)
-        session = self.session()
+        events = []
+        session = self.session(event_callback=lambda event, data: events.append((event, data)))
         session.video_path = audio
         session.faster_whisper.transcribe = Mock(return_value=[{"text_zh": "第一句。"}, {"text_zh": "第二句。"}])
         session.translator.translate_single_segment = Mock(return_value={"final_vi": "Xin chào tất cả."})
@@ -265,6 +269,11 @@ class PortablePipelineTests(unittest.TestCase):
         self.assertIsNone(session.faster_whisper.model)
         self.assertEqual(session.suppression_stats["mode"], "DSP_MONO_ADAPTIVE_FORMANT")
         self.assertEqual(session.bgm_audio_path.suffix, ".ogg")
+        progress = [data for event, data in events if event == "progress"]
+        self.assertTrue({"prepare", "asr", "translate", "tts", "align", "complete"}.issubset({item["phase"] for item in progress}))
+        self.assertIsNone(progress[0]["progress_pct"])
+        self.assertEqual(progress[-1]["progress_pct"], 100)
+        self.assertEqual(progress[-1]["status"], "COMPLETED")
         probe = subprocess.run([
             "ffprobe", "-v", "error", "-show_streams", "-of", "json", str(session.bgm_audio_path),
         ], capture_output=True, check=True)

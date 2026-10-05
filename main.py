@@ -5,7 +5,7 @@ import uuid
 import time
 from pathlib import Path
 from urllib.parse import quote
-from typing import Dict, Any, Optional, List
+from typing import Dict, Any, Optional, List, Literal
 from fastapi import FastAPI, UploadFile, File, Form, WebSocket, WebSocketDisconnect, HTTPException
 from fastapi.responses import HTMLResponse, FileResponse, Response
 from fastapi.staticfiles import StaticFiles
@@ -254,16 +254,20 @@ async def list_tasks():
         pct = int((ready_cnt / tot_cnt) * 100) if tot_cnt > 0 else 0
 
         status_str = "STOPPED" if getattr(sess, "is_stopped", False) else ("FAILED" if sess.error else ("PAUSED" if sess.is_paused else ("RUNNING" if sess.is_running else "COMPLETED")))
+        progress = sess.get_progress() if hasattr(sess, "get_progress") else {
+            "progress_pct": pct, "status": status_str,
+            "stage": sess.error or f"Đã dịch {ready_cnt}/{tot_cnt} câu ({pct}%)",
+            "can_pause": status_str == "RUNNING",
+        }
+        status_str = progress["status"]
         tasks.append({
             "task_id": task_id,
             "task_type": "Realtime Dubbing",
             "status": status_str,
-            "progress_pct": pct,
-            "stage": sess.error or f"Đã dịch {ready_cnt}/{tot_cnt} câu ({pct}%)",
+            **progress,
             "duration": sess.total_duration,
             "elapsed_seconds": round(time.time() - sess.start_wall_time, 1) if sess.start_wall_time else 0,
             "video_url": "",  # A completed translation is not an exported dubbed video.
-            "can_pause": status_str == "RUNNING",
             "can_resume": status_str == "PAUSED",
             "can_stop": status_str in ["RUNNING", "PAUSED"]
         })
@@ -298,7 +302,11 @@ async def pause_task(task_id: str):
     if sess:
         if not sess.is_running or getattr(sess, "is_stopped", False):
             raise HTTPException(status_code=409, detail="Phiên dịch đã kết thúc")
+        if not getattr(sess, "initialized", True):
+            raise HTTPException(status_code=409, detail="Chưa thể tạm dừng ở bước tải và chuẩn bị video. Bạn có thể bấm Dừng.")
         sess.pause()
+        if hasattr(sess, "get_progress"):
+            await sess.emit("progress", sess.get_progress())
         return {"status": "ok", "task_id": task_id, "action": "paused"}
     raise HTTPException(status_code=404, detail="Task không tồn tại hoặc không thể tạm dừng")
 
@@ -309,6 +317,8 @@ async def resume_task(task_id: str):
         if not sess.is_running or getattr(sess, "is_stopped", False):
             raise HTTPException(status_code=409, detail="Phiên dịch đã kết thúc")
         sess.resume()
+        if hasattr(sess, "get_progress"):
+            await sess.emit("progress", sess.get_progress())
         return {"status": "ok", "task_id": task_id, "action": "resumed"}
     raise HTTPException(status_code=404, detail="Task không tồn tại hoặc không thể tiếp tục")
 
@@ -316,12 +326,20 @@ async def resume_task(task_id: str):
 async def stop_task(task_id: str):
     sess = get_streaming_session(task_id)
     if sess:
+        workers = [worker for worker in (getattr(sess, "start_task", None), getattr(sess, "worker_task", None))
+                   if worker is not None and not worker.done()]
+        progress = sess.get_progress() if hasattr(sess, "get_progress") else {}
         sess.stop()
+        # A Python download thread must acknowledge cancellation before this
+        # endpoint reports a completed stop or any owned files are removed.
+        if workers:
+            await asyncio.gather(*workers, return_exceptions=True)
         task_history.append({
             "task_id": task_id,
             "task_type": "Realtime Dubbing",
             "status": "STOPPED",
-            "progress_pct": 100,
+            "progress_pct": progress.get("progress_pct"),
+            "phase": "stopped",
             "stage": "Đã dừng bởi người dùng",
             "duration": sess.total_duration,
             "elapsed_seconds": round(time.time() - sess.start_wall_time, 1) if sess.start_wall_time else 0,
@@ -363,19 +381,17 @@ async def start_streaming_url(req: StreamUrlRequest):
     if not req.url:
         raise HTTPException(status_code=400, detail="Vui lòng cung cấp link video")
 
-    task_id = str(uuid.uuid4())[:8]
-
-    # Resolve / Download video
     try:
-        video_info = await asyncio.to_thread(downloader.download, req.url)
-        video_path = Path(video_info["file_path"])
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Không thể tải video: {e}")
+        url = downloader.normalize_url(req.url)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from None
+
+    task_id = str(uuid.uuid4())[:8]
 
     # Create session
     session = create_streaming_session(
         task_id=task_id,
-        video_path=video_path,
+        video_path=None,
         initial_buffer_seconds=req.initial_buffer_seconds or settings.INITIAL_BUFFER_SECONDS,
         voice=req.voice or settings.EDGE_VOICE,
         tts_engine_name=req.tts_engine or settings.TTS_ENGINE,
@@ -383,13 +399,21 @@ async def start_streaming_url(req: StreamUrlRequest):
         event_callback=lambda event_type, data: broadcast_session_event(task_id, event_type, data)
     )
 
-    asyncio.create_task(run_session(session))
+    async def start_source():
+        try:
+            await session.start_from_url(downloader, url)
+        except Exception:
+            # The session persists and broadcasts actionable startup errors.
+            pass
+
+    asyncio.create_task(start_source())
 
     return {
         "task_id": task_id,
-        "video_url": f"/api/inputs/{video_path.name}",
+        "video_url": None,
         "initial_buffer_seconds": session.initial_buffer_seconds,
-        "status": "started"
+        **session.get_progress(),
+        "status": "started",
     }
 
 @app.post("/api/streaming/start-upload")
@@ -639,19 +663,19 @@ async def get_compatible_preview(preview_id: str):
         raise HTTPException(status_code=404, detail="Bản xem trước chưa sẵn sàng") from None
 
 @app.get("/api/diagnostics/logs")
-async def get_diagnostics_logs(category: str = "app", lines: int = 100):
+async def get_diagnostics_logs(category: Literal["app", "ai", "errors", "pipeline"] = "app", lines: int = 100):
     log_file = settings.WORKSPACE_DIR / "logs" / f"{category}.log"
     if not log_file.exists():
         return {"category": category, "logs": "(Không có dữ liệu log)"}
     try:
         content = log_file.read_text(encoding="utf-8", errors="ignore")
-        log_lines = content.strip().splitlines()[-lines:]
+        log_lines = content.strip().splitlines()[-max(1, min(lines, 1000)):]
         return {"category": category, "logs": "\n".join(log_lines) if log_lines else "(Log rỗng)"}
     except Exception as e:
         return {"category": category, "logs": f"Lỗi đọc log: {e}"}
 
 @app.post("/api/diagnostics/logs/clear")
-async def clear_diagnostics_logs(category: Optional[str] = None):
+async def clear_diagnostics_logs(category: Optional[Literal["app", "ai", "errors", "pipeline"]] = None):
     log_dir = settings.WORKSPACE_DIR / "logs"
     if category:
         targets = [log_dir / f"{category}.log"]
@@ -840,6 +864,11 @@ async def websocket_stream(websocket: WebSocket, task_id: str):
 
     session = get_streaming_session(task_id)
     if session:
+        if hasattr(session, "get_progress"):
+            await websocket.send_json({"type": "progress", "task_id": task_id, **session.get_progress()})
+        if getattr(session, "source_video_url", None):
+            await websocket.send_json({"type": "source_ready", "task_id": task_id, "video_url": session.source_video_url})
+    if session and getattr(session, "initialized", True):
         # Send current state immediately upon connection
         await websocket.send_json({
             "type": "init",
@@ -858,10 +887,10 @@ async def websocket_stream(websocket: WebSocket, task_id: str):
             "task_id": task_id,
             **session.get_telemetry()
         })
-        if session.error:
-            await websocket.send_json({"type": "error", "message": session.error, "task_id": task_id})
-        elif session.first_play_emitted:
+        if not session.error and session.first_play_emitted:
             await websocket.send_json({"type": "ready_to_play", "task_id": task_id})
+    if session and session.error:
+        await websocket.send_json({"type": "error", "message": session.error, "task_id": task_id})
 
     try:
         while True:
@@ -878,11 +907,13 @@ async def websocket_stream(websocket: WebSocket, task_id: str):
             elif act == "seek":
                 await sess.seek(float(data.get("time", 0.0)))
             elif act == "pause":
-                sess.pause()
+                if sess.is_running and getattr(sess, "initialized", True):
+                    await pause_task(task_id)
             elif act == "resume":
-                sess.resume()
+                if sess.is_running:
+                    await resume_task(task_id)
             elif act == "stop":
-                sess.stop()
+                await stop_task(task_id)
     except WebSocketDisconnect:
         if task_id in stream_sockets and websocket in stream_sockets[task_id]:
             stream_sockets[task_id].remove(websocket)

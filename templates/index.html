@@ -212,8 +212,9 @@
           </h2>
 
           <div>
-            <input type="text" id="video-url" placeholder="Dán link Douyin hoặc link video trực tiếp..."
+            <input type="text" id="video-url" aria-label="Link video" aria-describedby="video-url-status" placeholder="Dán link Douyin hoặc link video trực tiếp..."
               class="w-full bg-[#08090d] border border-gray-700 focus:border-pink-500 rounded-xl px-3 py-2 text-xs text-gray-100 placeholder-gray-500 focus:outline-none transition">
+            <p id="video-url-status" role="status" class="hidden mt-2 text-[11px] text-gray-400"></p>
           </div>
 
           <div class="flex items-center justify-between text-[10px] text-gray-500">
@@ -265,6 +266,17 @@
 
           <!-- Execution Action Buttons -->
           <div class="pt-1 space-y-2">
+            <div id="task-progress" class="hidden task-progress" aria-label="Tiến độ xử lý video">
+              <div class="task-progress-heading" role="status" aria-live="polite">
+                <span id="task-progress-stage">Đang gửi yêu cầu…</span>
+                <span id="task-progress-value">Chưa có %</span>
+              </div>
+              <div id="task-progress-track" class="task-progress-track" role="progressbar" aria-label="Tiến độ bước hiện tại" aria-valuemin="0" aria-valuemax="100">
+                <div id="task-progress-bar" class="task-progress-bar"></div>
+              </div>
+              <p id="task-progress-detail" class="task-progress-detail">Phần trăm được tính riêng cho từng bước.</p>
+              <p id="task-connection-status" role="status" class="hidden task-connection-status"></p>
+            </div>
             <button id="btn-start" class="w-full py-3 px-4 rounded-xl bg-gradient-to-r from-pink-500 via-rose-500 to-violet-600 hover:opacity-95 text-white font-bold text-xs shadow-lg shadow-pink-500/25 flex items-center justify-center gap-2 transition active:scale-[0.99]">
               <i class="fa-solid fa-play"></i> BẮT ĐẦU DỊCH & PHÁT REALTIME
             </button>
@@ -282,7 +294,7 @@
             </div>
 
             <!-- HQ Export Button -->
-            <button id="btn-export-hq" class="w-full py-2.5 px-3 rounded-xl border border-violet-500/50 hover:bg-violet-600/20 text-violet-300 font-semibold text-xs flex items-center justify-center gap-2 transition">
+            <button id="btn-export-hq" disabled title="Hoàn tất các câu dịch trước khi xuất video" class="w-full py-2.5 px-3 rounded-xl border border-violet-500/50 hover:bg-violet-600/20 text-violet-300 font-semibold text-xs flex items-center justify-center gap-2 transition">
               <i class="fa-solid fa-film text-pink-400"></i> Xuất Video Hoàn Chỉnh (MP4)
             </button>
           </div>
@@ -425,8 +437,12 @@
       </div>
     </div>
 
+    <div class="flex flex-wrap items-center justify-between gap-2 text-xs text-gray-400">
+      <p id="log-summary" role="status">Chọn danh mục để xem nhật ký.</p>
+      <p id="log-copy-status" role="status" aria-live="polite"></p>
+    </div>
     <!-- Log Console Output -->
-    <div class="bg-[#07090e] border border-gray-800 rounded-2xl p-4 font-mono text-xs text-gray-300 h-[520px] overflow-y-auto leading-relaxed shadow-inner" id="log-console-output">
+    <div tabindex="0" aria-label="Nội dung nhật ký" class="bg-[#07090e] border border-gray-800 rounded-2xl p-4 font-mono text-xs text-gray-300 h-[520px] overflow-y-auto leading-relaxed shadow-inner" id="log-console-output">
       Đang tải log...
     </div>
   </div>

@@ -2,6 +2,7 @@ import asyncio
 import time
 import subprocess
 import functools
+import logging
 from pathlib import Path
 from typing import Dict, Any, Optional, List, Callable
 from config import settings
@@ -60,7 +61,7 @@ class StreamingPipelineSession:
     def __init__(
         self,
         task_id: str,
-        video_path: Path,
+        video_path: Optional[Path],
         initial_buffer_seconds: Optional[float] = None,
         voice: Optional[str] = None,
         tts_engine_name: Optional[str] = None,
@@ -70,6 +71,14 @@ class StreamingPipelineSession:
     ):
         self.task_id = task_id
         self.video_path = video_path
+        self.source_video_url: Optional[str] = None
+        self.initialized = False
+        self._download_info: Optional[Dict[str, Any]] = None
+        self.progress = {
+            "phase": "prepare" if video_path else "resolve",
+            "stage": "Đang chuẩn bị video..." if video_path else "Đang nhận diện link video...",
+            "progress_pct": None, "status": "RUNNING", "can_pause": False,
+        }
         self.initial_buffer_seconds = settings.INITIAL_BUFFER_SECONDS if initial_buffer_seconds is None else initial_buffer_seconds
         self.voice = voice or settings.EDGE_VOICE
         self.tts_engine_name = tts_engine_name or settings.TTS_ENGINE
@@ -131,19 +140,85 @@ class StreamingPipelineSession:
                 if asyncio.iscoroutine(res):
                     await res
 
+    def get_progress(self) -> Dict[str, Any]:
+        snapshot = dict(self.progress)
+        snapshot["can_pause"] = bool(self.initialized and self.is_running and not self.is_paused and not self.is_stopped and not self.error)
+        if self.is_stopped:
+            snapshot.update(status="STOPPED", phase="stopped", stage="Đã dừng bởi người dùng")
+        elif self.error:
+            snapshot.update(status="FAILED", phase="failed", stage=self.error)
+        elif self.is_paused and self.is_running:
+            snapshot["status"] = "PAUSED"
+        snapshot["can_resume"] = bool(self.initialized and self.is_running and snapshot["status"] == "PAUSED")
+        snapshot["can_stop"] = snapshot["status"] in {"RUNNING", "PAUSED"}
+        return snapshot
+
+    async def report_progress(self, phase: str, stage: str, progress_pct=None, **details):
+        self.progress = {
+            "phase": phase, "stage": stage, "progress_pct": progress_pct,
+            "status": "COMPLETED" if phase == "complete" else "RUNNING", **details,
+        }
+        logging.getLogger("pipeline").info("[%s] %s%s", self.task_id, stage,
+                                           "" if progress_pct is None else f" ({progress_pct:g}%)")
+        await self.emit("progress", self.get_progress())
+
+    async def _segment_progress(self, phase: str, stage: str):
+        count = sum(s.status in ("READY", "PLAYED") for s in self.segments.values())
+        total = len(self.segments)
+        await self.report_progress(
+            phase, f"{stage} · Đã hoàn tất {count}/{total} câu",
+            round(count * 100 / total, 1) if total else 100,
+            completed_segments=count, total_segments=total,
+        )
+
     async def start(self):
+        await self._start_guarded()
+
+    async def start_from_url(self, downloader, url: str):
+        await self._start_guarded(downloader, url)
+
+    async def _start_guarded(self, downloader=None, url=None):
         self.start_task = asyncio.current_task()
         try:
+            if self.is_stopped:
+                raise asyncio.CancelledError
+            self.is_running = True
+            self.start_wall_time = time.time()
+            if downloader is not None:
+                loop = asyncio.get_running_loop()
+
+                def publish_progress(data):
+                    if self.is_stopped or self.video_path is not None:
+                        return
+                    self.progress = {**data, "status": "RUNNING", "can_pause": False}
+                    asyncio.create_task(self.emit("progress", self.get_progress()))
+
+                def download_source():
+                    self._download_info = downloader.download(
+                        url, progress_callback=lambda data: loop.call_soon_threadsafe(publish_progress, dict(data)),
+                        cancel_check=lambda: self.is_stopped,
+                    )
+                    return self._download_info
+
+                await self.report_progress("resolve", "Đang nhận diện link video...")
+                info = await self._run_blocking(download_source)
+                self.video_path = Path(info["file_path"])
+                self.source_video_url = f"/api/inputs/{self.video_path.name}"
+                await self.emit("source_ready", {"video_url": self.source_video_url})
             await self._start()
         except asyncio.CancelledError:
+            self.is_stopped = True
             self.is_running = False
             self._release_runtime()
+            await self.emit("progress", self.get_progress())
             await self.emit("finished", self.get_telemetry())
             raise
         except Exception as exc:
             self.is_running = False
             self.error = str(exc)
+            logging.getLogger("errors").error("[%s] Không thể xử lý video: %s", self.task_id, self.error)
             self._release_runtime()
+            await self.emit("progress", self.get_progress())
             await self.emit("error", {"message": self.error})
             await self.emit("finished", self.get_telemetry())
             raise
@@ -155,7 +230,9 @@ class StreamingPipelineSession:
         if self.is_stopped:
             raise asyncio.CancelledError
         self.is_running = True
-        self.start_wall_time = time.time()
+        if not self.start_wall_time:
+            self.start_wall_time = time.time()
+        await self.report_progress("prepare", "Đang tách âm thanh từ video...")
         self.asr_engine = self.faster_whisper
         if self.asr_engine_name == "sensevoice":
             if self.sensevoice.is_available:
@@ -190,6 +267,7 @@ class StreamingPipelineSession:
         # 1.5 Extract suppressed BGM & SFX (Removes Chinese Speech by -26dB, preserves BGM & Foley)
         # The bundled QtWebEngine does not ship proprietary AAC decoding.
         self.bgm_audio_path = self.cache_dir / "bgm_suppressed.ogg"
+        await self.report_progress("prepare", "Đang xử lý nhạc nền và lọc thoại gốc...")
         self.suppression_stats = await self._run_blocking(
             self.vocal_suppressor.process_file,
             input_audio_path=self.video_path,
@@ -200,6 +278,7 @@ class StreamingPipelineSession:
         self.bgm_url = f"/api/streaming/bgm/{self.task_id}"
 
         # 2. Discover natural sentence segments
+        await self.report_progress("prepare", "Đang phân chia câu thoại...")
         raw_segs = await self._run_blocking(self.segmenter.segment_audio, self.raw_audio_16k)
         for s in raw_segs:
             item = SegmentItem(s["id"], s["start"], s["end"], s["duration"])
@@ -210,6 +289,7 @@ class StreamingPipelineSession:
             await self.queue.put((item.start, item.id))
 
         # 4. Emit initialization info to client
+        self.initialized = True
         await self.emit("init", {
             "duration": self.total_duration,
             "segments_count": len(self.segments),
@@ -225,6 +305,7 @@ class StreamingPipelineSession:
         })
 
         # 5. Launch background worker
+        await self._segment_progress("asr", "Đang chuẩn bị nhận diện lời nói")
         self.worker_task = asyncio.create_task(self._worker_loop())
         self.worker_task.add_done_callback(
             lambda task: self._release_runtime() if task.cancelled() else None
@@ -380,6 +461,16 @@ class StreamingPipelineSession:
                     directory.rmdir()
                 except OSError:
                     pass
+        if self.is_stopped and self._download_info and not self._download_info.get("is_local"):
+            # The downloader reports only uniquely named artifacts it created.
+            # Never glob a prefix or remove a local user input here.
+            prefix = self._download_info.get("owned_prefix")
+            if prefix:
+                prefix_path = Path(prefix).resolve()
+                for value in self._download_info.get("owned_paths", []):
+                    owned_path = Path(value).resolve()
+                    if owned_path.parent == prefix_path.parent and owned_path.name.startswith(prefix_path.name + "."):
+                        remove_generated(owned_path)
 
     async def _update_ready(self):
         self._recalculate_telemetry()
@@ -397,6 +488,7 @@ class StreamingPipelineSession:
 
     async def _process_segment(self, seg):
         seg.status = "ASR"
+        await self._segment_progress("asr", f"Đang nhận diện câu {seg.id + 1}")
         await self.emit("segment_update", seg.to_dict())
         slice_wav = self.cache_dir / f"slice_{seg.id}.wav"
         raw_tts_wav = self.cache_dir / f"tts_{seg.id}_raw.wav"
@@ -414,6 +506,7 @@ class StreamingPipelineSession:
             seg.emotion = asr_res[0].get("emotion", "<|NEUTRAL|>") if asr_res else "<|NEUTRAL|>"
             if seg.text_zh:
                 seg.status = "TRANSLATING"
+                await self._segment_progress("translate", f"Đang dịch câu {seg.id + 1}")
                 await self.emit("segment_update", seg.to_dict())
                 trans = await self._run_blocking(
                     self.translator.translate_single_segment,
@@ -429,12 +522,14 @@ class StreamingPipelineSession:
                 self.rolling_context = self.rolling_context[-10:]
 
                 seg.status = "TTS"
+                await self._segment_progress("tts", f"Đang tạo giọng đọc câu {seg.id + 1}")
                 await self.emit("segment_update", seg.to_dict())
                 await self._run_blocking(
                     self.tts_engine.synthesize, text=seg.final_vi,
                     output_path=raw_tts_wav, voice=self.voice, ref_audio=self.ref_audio,
                 )
                 seg.status = "ALIGNING"
+                await self._segment_progress("align", f"Đang khớp thời lượng câu {seg.id + 1}")
                 await self.emit("segment_update", seg.to_dict())
                 tts_dur = await self._run_blocking(self.aligner.get_audio_duration, raw_tts_wav)
                 if tts_dur <= 0:
@@ -455,6 +550,7 @@ class StreamingPipelineSession:
                 seg.audio_url = f"/api/streaming/audio/{self.task_id}/{seg.id}"
             seg.status = "READY"
             self.total_processed_duration += seg.duration
+            await self._segment_progress("translate", "Đang dịch và lồng tiếng")
             await self.emit("segment_update", seg.to_dict())
             await self._update_ready()
         finally:
@@ -476,6 +572,12 @@ class StreamingPipelineSession:
                         await self._process_segment(seg)
                 except Exception as exc:
                     self.error = str(exc)
+                    # SDK exception strings can contain prompts or credentials.
+                    # Keep a useful task/stage/type diagnostic without raw text.
+                    logging.getLogger("errors").error(
+                        "[%s] Lỗi câu %s ở bước %s (%s)", self.task_id, seg_id + 1,
+                        seg.status if seg else "UNKNOWN", type(exc).__name__,
+                    )
                     if seg:
                         seg.status = "FAILED"
                         seg.error = self.error
@@ -485,10 +587,15 @@ class StreamingPipelineSession:
                 finally:
                     self.queue.task_done()
         except asyncio.CancelledError:
+            self.is_stopped = True
             raise
         finally:
             self.is_running = False
             self._release_runtime()
+            if not self.is_stopped and not self.error:
+                await self.report_progress("complete", "Dịch và lồng tiếng hoàn tất", 100)
+            else:
+                await self.emit("progress", self.get_progress())
             await self.emit("finished", self.get_telemetry())
 
     def pause(self):
@@ -521,7 +628,7 @@ def get_streaming_session(task_id: str) -> Optional[StreamingPipelineSession]:
 
 def create_streaming_session(
     task_id: str,
-    video_path: Path,
+    video_path: Optional[Path],
     initial_buffer_seconds: Optional[float] = None,
     voice: Optional[str] = None,
     tts_engine_name: Optional[str] = None,

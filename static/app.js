@@ -21,6 +21,14 @@ document.addEventListener("DOMContentLoaded", () => {
   const btnResumeWorker = document.getElementById("btn-resume-worker");
   const btnStopWorker = document.getElementById("btn-stop-worker");
   const btnExportHQ = document.getElementById("btn-export-hq");
+  const videoUrlStatus = document.getElementById("video-url-status");
+  const taskProgress = document.getElementById("task-progress");
+  const taskProgressStage = document.getElementById("task-progress-stage");
+  const taskProgressValue = document.getElementById("task-progress-value");
+  const taskProgressTrack = document.getElementById("task-progress-track");
+  const taskProgressBar = document.getElementById("task-progress-bar");
+  const taskProgressDetail = document.getElementById("task-progress-detail");
+  const taskConnectionStatus = document.getElementById("task-connection-status");
 
   // Toggles & Volumes
   const toggleMaskChinese = document.getElementById("toggle-mask-chinese");
@@ -122,6 +130,9 @@ document.addEventListener("DOMContentLoaded", () => {
   let playWhenPreviewReady = false;
   let translationReady = false;
   let audioPermissionNeeded = false;
+  let pendingStart = null;
+  let currentProgress = null;
+  let streamDisconnected = false;
   const mediaPlayButton = document.createElement("button");
   mediaPlayButton.type = "button";
   mediaPlayButton.className = "hidden rounded-lg bg-pink-600 px-4 py-2 text-xs font-semibold text-white";
@@ -151,6 +162,68 @@ document.addEventListener("DOMContentLoaded", () => {
 
   function escapeHtml(value) {
     return String(value ?? "").replace(/[&<>"']/g, ch => ({"&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;"}[ch]));
+  }
+
+  function measuredProgress(value) {
+    return typeof value === "number" && Number.isFinite(value) ? Math.max(0, Math.min(100, value)) : null;
+  }
+
+  function updateExportAvailability() {
+    const items = Object.values(segments);
+    btnExportHQ.disabled = !currentTaskId || !items.length ||
+      items.some(segment => !["READY", "PLAYED"].includes(segment.status)) ||
+      ["FAILED", "STOPPED", "CANCELLED", "CANCELLING"].includes(currentProgress?.status);
+  }
+
+  function showTaskProgress(progress) {
+    currentProgress = { ...currentProgress, ...progress };
+    const status = currentProgress.status || "RUNNING";
+    const terminal = ["COMPLETED", "FAILED", "STOPPED", "CANCELLED"].includes(status);
+    const pct = measuredProgress(currentProgress.progress_pct);
+    taskProgress.classList.remove("hidden");
+    taskProgress.dataset.status = status;
+    taskProgressStage.textContent = `${status === "PAUSED" ? "Đã tạm dừng · " : ""}${currentProgress.stage || "Đang xử lý video…"}`;
+    bufferingAlert.dataset.state = status === "FAILED" ? "error" : status === "PAUSED" ? "paused" : "loading";
+    taskProgressValue.textContent = pct === null ? (terminal ? "" : "Chưa có %") : `${Math.round(pct)}%`;
+    taskProgressTrack.classList.toggle("hidden", terminal && pct === null);
+    taskProgressTrack.dataset.indeterminate = String(pct === null);
+    taskProgressTrack.setAttribute("aria-valuetext", `${taskProgressStage.textContent}${pct === null ? ": chưa có số liệu phần trăm" : `: ${Math.round(pct)}%`}`);
+    if (pct === null) taskProgressTrack.removeAttribute("aria-valuenow");
+    else taskProgressTrack.setAttribute("aria-valuenow", String(pct));
+    taskProgressBar.style.width = pct === null ? "100%" : `${pct}%`;
+    taskProgressDetail.textContent = terminal
+      ? (status === "FAILED" ? "Mở Diagnostics → Errors Log để xem chi tiết, hoặc thử lại nguồn video." : status === "COMPLETED" ? "Các câu dịch đã xử lý xong. Có thể xuất video." : "Tác vụ đã dừng.")
+      : currentProgress.phase === "download" ? (pct === null ? "Đang tải video; máy chủ chưa cung cấp tổng dung lượng." : "Tiến độ tải video nguồn. Bước xử lý câu thoại sẽ có tiến độ riêng.")
+      : pct !== null ? "Tiến độ xử lý câu thoại: số câu hoàn tất / tổng số câu."
+      : "Bước này chưa có số liệu phần trăm. Trạng thái sẽ cập nhật khi có kết quả.";
+    btnPauseWorker.classList.toggle("hidden", !currentProgress.can_pause || terminal);
+    btnResumeWorker.classList.toggle("hidden", !currentProgress.can_resume || terminal);
+    btnStopWorker.classList.toggle("hidden", terminal || currentProgress.can_stop === false);
+    btnStopWorker.disabled = status === "CANCELLING";
+    if (!terminal && !translationReady && !previewPending) bufferingText.textContent = taskProgressStage.textContent;
+    updateExportAvailability();
+    if (terminal) {
+      resetWorkerControls();
+      taskConnectionStatus.classList.add("hidden");
+    }
+  }
+
+  function describeVideoUrl() {
+    const input = videoUrlInput.value.trim();
+    const match = input.match(/https?:\/\/[^\s<>"'，。！？、；（）【】]+/i);
+    const bareDomain = /^(?:www\.)?(?:v\.)?(?:douyin\.com|tiktok\.com|youtu\.be|youtube\.com|bilibili\.com)\//i.test(input);
+    const candidate = (match?.[0] || (bareDomain ? `https://${input.split(/\s/)[0]}` : "")).replace(/[.,;!?)\\\]}»”’]+$/, "");
+    let parsed;
+    try { if (candidate) parsed = new URL(candidate); } catch (_) {}
+    const valid = !!parsed?.hostname && !parsed.username && !parsed.password && ["http:", "https:"].includes(parsed.protocol);
+    videoUrlStatus.classList.toggle("hidden", !input);
+    videoUrlInput.setAttribute("aria-invalid", String(!!input && !valid));
+    videoUrlStatus.textContent = !input ? "" : valid
+      ? `${/(^|\.)douyin\.com$/i.test(parsed.hostname) ? "Đã nhận link Douyin" : `Đã nhận link từ ${parsed.hostname}`} — bấm Bắt đầu để tải và dịch.`
+      : "Chưa nhận được link hợp lệ. Dán đường dẫn bắt đầu bằng https:// hoặc nội dung chia sẻ có link.";
+    btnStart.disabled = !!input && !valid;
+    if (valid) parsed.hash = "";
+    return valid ? parsed.href : null;
   }
 
   function stopPreviewAudio() {
@@ -194,6 +267,7 @@ document.addEventListener("DOMContentLoaded", () => {
     previewPending = false;
     videoPlayer.pause();
     bufferingText.textContent = message;
+    bufferingAlert.dataset.state = "error";
     bufferingAlert.classList.remove("hidden");
   }
 
@@ -204,6 +278,7 @@ document.addEventListener("DOMContentLoaded", () => {
     }
     previewFallbackTried = true;
     previewPending = true;
+    bufferingAlert.dataset.state = "loading";
     const generation = previewGeneration;
     const resumeTime = videoPlayer.currentTime || 0;
     const shouldPlay = !videoPlayer.paused || translationReady;
@@ -256,6 +331,10 @@ document.addEventListener("DOMContentLoaded", () => {
   });
 
   function selectPreviewSource(source) {
+    taskProgress.classList.add("hidden");
+    currentProgress = null;
+    taskConnectionStatus.classList.add("hidden");
+    describeVideoUrl();
     segments = {};
     translationReady = false;
     totalVideoDuration = 0;
@@ -268,6 +347,7 @@ document.addEventListener("DOMContentLoaded", () => {
     renderSegmentsDrawer();
     renderTimelineSlices();
     setPreviewSource(source);
+    updateExportAvailability();
   }
 
   function setSelectValue(select, value, label = value) {
@@ -369,11 +449,22 @@ document.addEventListener("DOMContentLoaded", () => {
   });
   fileInput.addEventListener("click", event => event.stopPropagation());
   videoUrlInput.addEventListener("input", () => {
+    describeVideoUrl();
     if (!videoUrlInput.value.trim()) return;
     selectedFile = null;
     window.currentLocalFilePath = null;
     fileInput.value = "";
     fileNameDisplay.textContent = "Chọn file từ máy (Native Dialog)";
+    if (!currentTaskId && !pendingStart) {
+      stopPreviewAudio();
+      previewGeneration++;
+      previewPending = false;
+      previewDescriptor = null;
+      videoPlayer.removeAttribute("src");
+      videoPlayer.load();
+      playerPlaceholder.classList.remove("hidden");
+      bufferingAlert.classList.add("hidden");
+    }
   });
 
   fileInput.addEventListener("change", (e) => {
@@ -462,7 +553,9 @@ document.addEventListener("DOMContentLoaded", () => {
   // 5. START TRANSLATE & PLAY
   // =========================================================
   btnStart.addEventListener("click", async () => {
-    const url = videoUrlInput.value.trim();
+    if (pendingStart || btnStart.classList.contains("hidden")) return;
+    const url = describeVideoUrl();
+    if (videoUrlInput.value.trim() && !url) return;
     if (!url && !selectedFile && !window.currentLocalFilePath) {
       alert("Vui lòng dán link Douyin hoặc chọn video từ máy!");
       return;
@@ -476,16 +569,25 @@ document.addEventListener("DOMContentLoaded", () => {
     if (currentWs) currentWs.close();
     currentWs = null;
     currentTaskId = null;
+    const request = { cancelled: false };
+    pendingStart = request;
+    currentProgress = null;
+    streamDisconnected = false;
+    taskConnectionStatus.classList.add("hidden");
     totalVideoDuration = 0;
     translationReady = false;
+    previewGeneration++;
+    previewPending = false;
+    previewResumeTime = null;
     lastExportedFileUrl = "";
     btnStart.classList.add("hidden");
     videoUrlInput.disabled = true;
     fileInput.disabled = true;
     dropZone.setAttribute("aria-disabled", "true");
-    btnPauseWorker.classList.remove("hidden");
+    btnPauseWorker.classList.add("hidden");
     btnResumeWorker.classList.add("hidden");
     btnStopWorker.classList.remove("hidden");
+    btnStopWorker.disabled = false;
 
     segments = {};
     segmentsList.innerHTML = "";
@@ -495,11 +597,11 @@ document.addEventListener("DOMContentLoaded", () => {
     telTtfp.textContent = "--";
     telBuffer.textContent = "+0.0s";
     bufferingAlert.classList.remove("hidden");
-    bufferingText.textContent = "Đang nạp video và bóc tách câu thoại...";
+    showTaskProgress({ phase: "request", stage: "Đang gửi yêu cầu…", progress_pct: null, status: "RUNNING", can_pause: false });
 
     try {
       let res;
-      if (window.currentLocalFilePath) {
+      if (!url && window.currentLocalFilePath) {
         // Fast local file start without HTTP upload
         res = await fetch("/api/streaming/start-local-file", {
           method: "POST",
@@ -512,7 +614,7 @@ document.addEventListener("DOMContentLoaded", () => {
             asr_engine: document.body.dataset.asrEngine
           })
         });
-      } else if (selectedFile) {
+      } else if (!url && selectedFile) {
         const formData = new FormData();
         formData.append("file", selectedFile);
         formData.append("initial_buffer_seconds", bufferSelect.value);
@@ -543,19 +645,35 @@ document.addEventListener("DOMContentLoaded", () => {
       }
 
       const data = await res.json();
+      if (!data.task_id) throw new Error("Ứng dụng chưa trả mã tác vụ. Hãy mở Diagnostics để kiểm tra.");
+      if (request.cancelled) {
+        const stopResponse = await fetch(`/api/tasks/${encodeURIComponent(data.task_id)}/stop`, { method: "POST" });
+        if (!stopResponse.ok) throw new Error("Không thể dừng yêu cầu vừa tạo. Mở Tác vụ để dừng lại.");
+        showTaskProgress({ phase: "stopped", status: "STOPPED", stage: "Đã hủy yêu cầu", progress_pct: null });
+        bufferingAlert.classList.add("hidden");
+        updateTasksTable();
+        return;
+      }
       currentTaskId = data.task_id;
 
-      setPreviewSource(data.video_url, { task_id: currentTaskId });
+      if (data.video_url) setPreviewSource(data.video_url, { task_id: currentTaskId });
+      else {
+        previewGeneration++;
+        previewDescriptor = { task_id: currentTaskId };
+        videoPlayer.removeAttribute("src");
+        videoPlayer.load();
+      }
       videoPlayer.volume = parseFloat(volBgmSlider.value);
-      playerPlaceholder.classList.add("hidden");
+      showTaskProgress(data.progress || { phase: url ? "resolve" : "prepare", stage: url ? "Đang kiểm tra và lấy video từ link…" : "Đang chuẩn bị video…", progress_pct: null, status: "RUNNING", can_pause: false });
 
       setupStreamingWebSocket(currentTaskId);
       updateTasksTable();
 
     } catch (e) {
-      alert("Lỗi: " + e.message);
-      resetWorkerControls();
-      bufferingAlert.classList.add("hidden");
+      showTaskProgress({ phase: "failed", status: "FAILED", stage: e.message, progress_pct: null });
+      showMediaError(e.message);
+    } finally {
+      if (pendingStart === request) pendingStart = null;
     }
   });
 
@@ -569,11 +687,31 @@ document.addEventListener("DOMContentLoaded", () => {
     currentWs = new WebSocket(`${proto}//${window.location.host}/ws/stream/${taskId}`);
 
     const socket = currentWs;
+    socket.onopen = () => {
+      if (socket !== currentWs) return;
+      streamDisconnected = false;
+      taskConnectionStatus.classList.add("hidden");
+    };
+    const reportDisconnect = () => {
+      if (socket !== currentWs || ["COMPLETED", "FAILED", "STOPPED", "CANCELLED"].includes(currentProgress?.status)) return;
+      streamDisconnected = true;
+      taskConnectionStatus.textContent = "Mất kết nối realtime. Đang kiểm tra trạng thái tác vụ qua máy chủ…";
+      taskConnectionStatus.classList.remove("hidden");
+      updateTasksTable();
+    };
+    socket.onclose = reportDisconnect;
+    socket.onerror = reportDisconnect;
     currentWs.onmessage = (event) => {
       if (socket !== currentWs) return;
       const msg = JSON.parse(event.data);
 
-      if (msg.type === "init") {
+      if (msg.type === "progress") {
+        showTaskProgress(msg);
+      }
+      else if (msg.type === "source_ready") {
+        if (msg.video_url) setPreviewSource(msg.video_url, { task_id: taskId });
+      }
+      else if (msg.type === "init") {
         totalVideoDuration = msg.duration;
         barTotalTime.textContent = formatTime(totalVideoDuration);
         segmentsCountBadge.textContent = `${msg.segments_count} câu`;
@@ -600,11 +738,16 @@ document.addEventListener("DOMContentLoaded", () => {
         });
         renderTimelineSlices();
         renderSegmentsDrawer();
+        if (!currentProgress?.can_pause && currentProgress?.status === "RUNNING") {
+          showTaskProgress({ phase: "processing", stage: "Đang xử lý câu thoại…", can_pause: true, can_stop: true });
+        }
+        updateExportAvailability();
       }
       else if (msg.type === "segment_update") {
         segments[msg.id] = msg;
         updateSegmentSlice(msg);
         updateSegmentDrawerItem(msg);
+        updateExportAvailability();
         if (isBufferingUnderrun && ["READY", "PLAYED"].includes(msg.status) &&
             videoPlayer.currentTime >= msg.start && videoPlayer.currentTime < msg.end) {
           isBufferingUnderrun = false;
@@ -674,11 +817,16 @@ document.addEventListener("DOMContentLoaded", () => {
         videoPlayer.pause();
         bufferingText.textContent = msg.message || msg.error || "Xử lý thất bại. Xem Diagnostics rồi thử lại.";
         bufferingAlert.classList.remove("hidden");
-        resetWorkerControls();
+        showTaskProgress({ phase: "failed", status: "FAILED", stage: bufferingText.textContent, progress_pct: null });
         updateTasksTable();
       }
       else if (msg.type === "finished") {
-        resetWorkerControls();
+        const failed = msg.status === "failed" || currentProgress?.status === "FAILED";
+        const stopped = ["cancelled", "stopped"].includes(msg.status);
+        showTaskProgress({ status: failed ? "FAILED" : stopped ? "STOPPED" : "COMPLETED",
+          phase: failed ? "failed" : stopped ? "stopped" : "complete",
+          stage: failed ? (currentProgress?.stage || msg.message || "Xử lý video thất bại") : stopped ? "Đã dừng tác vụ" : "Hoàn tất xử lý câu thoại",
+          progress_pct: failed || stopped ? null : 100 });
         updateTasksTable();
       }
     };
@@ -871,6 +1019,8 @@ document.addEventListener("DOMContentLoaded", () => {
     btnPauseWorker.classList.add("hidden");
     btnResumeWorker.classList.add("hidden");
     btnStopWorker.classList.add("hidden");
+    btnStopWorker.disabled = false;
+    updateExportAvailability();
   }
 
   async function controlTask(id, action) {
@@ -893,6 +1043,7 @@ document.addEventListener("DOMContentLoaded", () => {
           renderTimelineSlices();
           renderSegmentsDrawer();
           segmentsCountBadge.textContent = "0 câu";
+          showTaskProgress({ phase: "stopped", status: "STOPPED", stage: "Đã dừng tác vụ", progress_pct: null });
           resetWorkerControls();
           bufferingAlert.classList.add("hidden");
           if (currentWs) {
@@ -901,7 +1052,9 @@ document.addEventListener("DOMContentLoaded", () => {
           }
           currentWs = null;
           currentTaskId = null;
+          updateExportAvailability();
         } else {
+          showTaskProgress({ status: action === "pause" ? "PAUSED" : "RUNNING", can_pause: action === "resume", can_resume: action === "pause" });
           btnPauseWorker.classList.toggle("hidden", action === "pause");
           btnResumeWorker.classList.toggle("hidden", action === "resume");
         }
@@ -913,7 +1066,14 @@ document.addEventListener("DOMContentLoaded", () => {
   }
   window.studioPause = () => controlTask(currentTaskId, "pause");
   window.studioResume = () => controlTask(currentTaskId, "resume");
-  window.studioStop = () => controlTask(currentTaskId, "stop");
+  window.studioStop = () => {
+    if (!currentTaskId && pendingStart) {
+      pendingStart.cancelled = true;
+      showTaskProgress({ phase: "request", status: "CANCELLING", stage: "Đang hủy yêu cầu…", progress_pct: null, can_pause: false });
+      return;
+    }
+    return controlTask(currentTaskId, "stop");
+  };
   btnPauseWorker.addEventListener("click", window.studioPause);
   btnResumeWorker.addEventListener("click", window.studioResume);
   btnStopWorker.addEventListener("click", window.studioStop);
@@ -931,11 +1091,21 @@ document.addEventListener("DOMContentLoaded", () => {
 
     try {
       const res = await fetch("/api/tasks");
+      if (!res.ok) throw new Error("Không đọc được danh sách tác vụ");
       const data = await res.json();
       const tasks = data.tasks || [];
 
+      const activeTask = tasks.find(task => task.task_id === currentTaskId);
+      if (streamDisconnected && activeTask) {
+        showTaskProgress(activeTask);
+        if (!["COMPLETED", "FAILED", "STOPPED", "CANCELLED"].includes(activeTask.status)) {
+          taskConnectionStatus.textContent = "Kết nối realtime bị gián đoạn. Tiến độ đang được cập nhật mỗi 2 giây; cần chạy lại phiên để tiếp tục phát realtime.";
+          taskConnectionStatus.classList.remove("hidden");
+        }
+      }
+
       if (tasks.length === 0) {
-        tbody.innerHTML = `<tr><td colspan="6" class="p-8 text-center text-gray-500 font-sans">Không có tác vụ nào đang hoạt động.</td></tr>`;
+        tbody.innerHTML = `<tr><td colspan="6" class="p-8 text-center text-gray-500 font-sans">${pendingStart ? "Đang gửi yêu cầu tạo tác vụ…" : currentTaskId && !["COMPLETED", "FAILED", "STOPPED", "CANCELLED"].includes(currentProgress?.status) ? "Chưa nhận được trạng thái tác vụ từ máy chủ. Đang kiểm tra lại…" : "Không có tác vụ nào đang hoạt động."}</td></tr>`;
         return;
       }
 
@@ -943,6 +1113,9 @@ document.addEventListener("DOMContentLoaded", () => {
       tasks.forEach(t => {
         const tr = document.createElement("tr");
         tr.className = "hover:bg-gray-800/40 transition";
+        const pct = measuredProgress(t.progress_pct);
+        const terminalWithoutProgress = pct === null && ["COMPLETED", "FAILED", "STOPPED", "CANCELLED"].includes(t.status);
+        const progressLabel = pct === null ? "Chưa có số liệu %" : `${Math.round(pct)}%`;
 
         let statusBadge = "";
         if (t.status === "RUNNING") {
@@ -976,10 +1149,10 @@ document.addEventListener("DOMContentLoaded", () => {
           <td class="p-3.5 text-pink-400 font-semibold">${t.task_type}</td>
           <td class="p-3.5">
             <div class="flex items-center gap-2">
-              <div class="w-24 bg-gray-800 h-2 rounded-full overflow-hidden">
-                <div class="bg-gradient-to-r from-pink-500 to-violet-500 h-full transition-all duration-300" style="width: ${t.progress_pct}%"></div>
-              </div>
-              <span class="text-[10px] text-gray-300 font-sans">${t.progress_pct}% (${escapeHtml(t.stage || '')})</span>
+              ${terminalWithoutProgress ? "" : `<div class="w-24 bg-gray-800 h-2 rounded-full overflow-hidden">
+                <div class="bg-gradient-to-r from-pink-500 to-violet-500 h-full transition-all duration-300" style="width: ${pct === null ? 100 : pct}%; opacity: ${pct === null ? 0.3 : 1}"></div>
+              </div>`}
+              <span class="text-[10px] text-gray-300 font-sans">${terminalWithoutProgress ? "" : `${progressLabel} · `}${escapeHtml(t.stage || '')}</span>
             </div>
           </td>
           <td class="p-3.5 text-gray-300">${formatTime(t.duration)}</td>
@@ -990,11 +1163,16 @@ document.addEventListener("DOMContentLoaded", () => {
       });
     } catch (e) {
       console.error("Error loading tasks:", e);
+      tbody.innerHTML = '<tr><td colspan="6" class="p-6 text-center text-rose-300">Không thể tải danh sách tác vụ. Bấm Làm mới để thử lại.</td></tr>';
+      if (currentTaskId) {
+        taskConnectionStatus.textContent = "Không kết nối được máy chủ. Tiến độ hiển thị là trạng thái cuối đã nhận.";
+        taskConnectionStatus.classList.remove("hidden");
+      }
     }
   }
   document.getElementById("btn-refresh-tasks")?.addEventListener("click", updateTasksTable);
   setInterval(() => {
-    if (!document.getElementById("view-tasks").classList.contains("hidden")) updateTasksTable();
+    if (!document.getElementById("view-tasks").classList.contains("hidden") || streamDisconnected) updateTasksTable();
   }, 2000);
 
   // =========================================================
@@ -1014,8 +1192,8 @@ document.addEventListener("DOMContentLoaded", () => {
       const data = await res.json();
       if (data.ok) {
         btnElement.className = "px-2.5 py-1 rounded bg-emerald-950 text-emerald-300 border border-emerald-800 text-[11px] font-semibold";
-        btnElement.innerHTML = '<i class="fa-solid fa-circle-check mr-1"></i> Đã xác thực';
-        alert(`[Xác Thực Checkpoint Toàn Vẹn]\nModel: ${data.model_name}\nDung lượng: ${data.size_mb} MB\nThiết bị: ${data.device}\nTrạng thái: ${data.status}\n\n${data.message}`);
+          btnElement.innerHTML = '<i class="fa-solid fa-circle-check mr-1"></i> Đã có tệp';
+        alert(`[Kiểm Tra Tệp Checkpoint]\nModel: ${data.model_name}\nDung lượng: ${data.size_mb} MB\nThiết bị: ${data.device}\nTrạng thái: ${data.status}\n\n${data.message}`);
       } else {
         btnElement.className = "px-2.5 py-1 rounded bg-rose-950 text-rose-300 border border-rose-800 text-[11px] font-semibold";
         btnElement.innerHTML = '<i class="fa-solid fa-circle-xmark mr-1"></i> Chưa có file';
@@ -1041,8 +1219,10 @@ document.addEventListener("DOMContentLoaded", () => {
       data.models.forEach(m => {
         const tr = document.createElement("tr");
         tr.className = "hover:bg-gray-800/40 transition";
-        const badge = m.downloaded
-          ? `<span class="bg-emerald-950 text-emerald-400 border border-emerald-800 px-2.5 py-1 rounded text-[10px] font-bold"><i class="fa-solid fa-circle-check mr-1"></i> SẴN SÀNG</span>`
+        const badge = m.status === "RUNTIME_MISSING"
+          ? `<span class="bg-amber-950 text-amber-400 border border-amber-800 px-2.5 py-1 rounded text-[10px] font-bold">ĐÃ TẢI · THIẾU RUNTIME</span>`
+          : m.downloaded
+          ? `<span class="bg-emerald-950 text-emerald-400 border border-emerald-800 px-2.5 py-1 rounded text-[10px] font-bold"><i class="fa-solid fa-circle-check mr-1"></i> ĐÃ TẢI</span>`
           : `<span class="bg-amber-950 text-amber-400 border border-amber-800 px-2.5 py-1 rounded text-[10px] font-bold">CHƯA TẢI</span>`;
 
         const safeName = m.model_name.replace(/'/g, "\\'");
@@ -1051,10 +1231,10 @@ document.addEventListener("DOMContentLoaded", () => {
           <td class="p-3.5 font-mono text-[11px] text-pink-300">${m.model_name}</td>
           <td class="p-3.5 font-mono text-gray-400">${m.size_mb} MB</td>
           <td class="p-3.5 font-mono text-cyan-400">${m.device}</td>
-          <td class="p-3.5">${badge}</td>
+          <td class="p-3.5">${badge}<p class="mt-2 text-[10px] text-gray-400 max-w-xs">${escapeHtml(m.runtime_note || "Kiểm tra tệp không thay thế kiểm thử chạy mô hình.")}</p></td>
           <td class="p-3.5 text-right">
             <button class="px-2.5 py-1 rounded bg-gray-800 hover:bg-gray-700 text-[11px] text-gray-200 border border-gray-700 transition" onclick="window.verifyModel('${safeName}', this)">
-              <i class="fa-solid fa-shield-halved mr-1"></i> Verify Checkpoint
+              <i class="fa-solid fa-shield-halved mr-1"></i> Kiểm tra tệp
             </button>
           </td>
         `;
@@ -1072,19 +1252,40 @@ document.addEventListener("DOMContentLoaded", () => {
   let currentLogCategory = "app";
   const logConsole = document.getElementById("log-console-output");
   const chkAutoScroll = document.getElementById("chk-auto-scroll-log");
+  const logSummary = document.getElementById("log-summary");
+  const logCopyStatus = document.getElementById("log-copy-status");
+  let rawLogText = "";
+  let logLoadSequence = 0;
 
   async function loadDiagnosticsLog(cat) {
     currentLogCategory = cat;
     if (!logConsole) return;
+    const sequence = ++logLoadSequence;
+    rawLogText = "";
+    logSummary.textContent = `Đang tải log ${cat}…`;
+    logCopyStatus.textContent = "";
     try {
       const res = await fetch(`/api/diagnostics/logs?category=${cat}&lines=150`);
+      if (!res.ok) throw new Error("Máy chủ chưa trả nhật ký");
       const data = await res.json();
-      logConsole.textContent = data.logs || "(Nhật ký rỗng)";
+      if (sequence !== logLoadSequence) return;
+      rawLogText = String(data.logs || "");
+      const lines = rawLogText.split(/\r?\n/);
+      logConsole.innerHTML = rawLogText ? lines.map(line => {
+        const level = /\b(ERROR|CRITICAL|Exception|Traceback)\b/.test(line) ? "log-line-error" : /\bWARNING\b/.test(line) ? "log-line-warning" : "";
+        return `<span class="${level}">${escapeHtml(line)}</span>`;
+      }).join("\n") : "(Nhật ký rỗng)";
+      const errors = lines.filter(line => /\b(ERROR|CRITICAL)\b/.test(line)).length;
+      const warnings = lines.filter(line => /\bWARNING\b/.test(line)).length;
+      logSummary.textContent = `${cat} · ${rawLogText ? lines.filter(Boolean).length : 0} dòng gần nhất · ${errors} lỗi · ${warnings} cảnh báo`;
       if (chkAutoScroll && chkAutoScroll.checked) {
         logConsole.scrollTop = logConsole.scrollHeight;
       }
     } catch (e) {
+      if (sequence !== logLoadSequence) return;
+      rawLogText = "";
       logConsole.textContent = `Lỗi đọc log: ${e.message}`;
+      logSummary.textContent = "Không tải được nhật ký. Bấm làm mới để thử lại.";
     }
   }
 
@@ -1100,11 +1301,27 @@ document.addEventListener("DOMContentLoaded", () => {
 
   document.getElementById("btn-refresh-log")?.addEventListener("click", () => loadDiagnosticsLog(currentLogCategory));
 
-  document.getElementById("btn-copy-log")?.addEventListener("click", () => {
-    if (!logConsole) return;
-    navigator.clipboard.writeText(logConsole.textContent).then(() => {
-      alert("Đã sao chép nội dung log vào Clipboard!");
-    });
+  document.getElementById("btn-copy-log")?.addEventListener("click", async () => {
+    if (!rawLogText) {
+      logCopyStatus.textContent = "Chưa có nội dung log để sao chép.";
+      return;
+    }
+    const copy = rawLogText;
+    const category = currentLogCategory;
+    try {
+      let copied = false;
+      if (typeof window.desktopBridge?.copyText === "function") {
+        copied = await new Promise(resolve => window.desktopBridge.copyText(copy, result => resolve(result === true)));
+      }
+      if (!copied) {
+        if (!navigator.clipboard?.writeText) throw new Error("Clipboard không sẵn sàng");
+        await navigator.clipboard.writeText(copy);
+      }
+      logCopyStatus.textContent = `Đã sao chép log ${category}.`;
+    } catch (_) {
+      logCopyStatus.textContent = "Không truy cập được clipboard. Chọn nội dung trong khung nhật ký rồi nhấn Ctrl+C.";
+      logConsole.focus();
+    }
   });
 
   document.getElementById("btn-open-log-folder")?.addEventListener("click", () => {
@@ -1333,6 +1550,7 @@ document.addEventListener("DOMContentLoaded", () => {
   // 11. HQ EXPORT & NATIVE SAVE
   // =========================================================
   btnExportHQ.addEventListener("click", () => {
+    if (btnExportHQ.disabled) return;
     if (!currentTaskId) {
       alert("Chưa có session video nào đang chạy!");
       return;
@@ -1374,7 +1592,7 @@ document.addEventListener("DOMContentLoaded", () => {
   });
 
   btnConfirmExport.addEventListener("click", async () => {
-    if (!currentTaskId || exportingTaskId) return;
+    if (!currentTaskId || exportingTaskId || btnExportHQ.disabled) return;
     const taskId = currentTaskId;
     exportingTaskId = taskId;
     exportCancelled = false;

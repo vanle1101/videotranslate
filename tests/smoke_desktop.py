@@ -153,6 +153,98 @@ def check_bgm_playback(page, folder, task_id):
         shutil.rmtree(cache)
 
 
+def check_progress_and_logs(page):
+    """Use the real DOM and Qt renderer with deterministic download events."""
+    javascript(page, '''
+        window.__progressFetch = window.fetch;
+        window.__progressSocket = window.WebSocket;
+        window.__logFixture = '2026-10-05 INFO First line\\n2026-10-05 ERROR Download timed out\\n    second detail line\\n';
+        window.__progressTask = {task_id: 'qt-progress-fixture', task_type: 'Dịch video', phase: 'download',
+            stage: 'Đang tải video', progress_pct: null, status: 'RUNNING', can_pause: false, can_stop: true};
+        window.fetch = async (url, options) => {
+            if (url === '/api/streaming/start-url') return new Response(JSON.stringify({task_id: 'qt-progress-fixture', video_url: null}));
+            if (url === '/api/tasks') return new Response(JSON.stringify({tasks: [window.__progressTask]}));
+            if (url === '/api/tasks/qt-progress-fixture/stop') return new Response(JSON.stringify({status: 'ok'}));
+            if (url.startsWith('/api/diagnostics/logs?')) return new Response(JSON.stringify({logs: window.__logFixture}));
+            return window.__progressFetch(url, options);
+        };
+        window.WebSocket = class {
+            static OPEN = 1;
+            constructor() { this.readyState = 1; window.__downloadSocket = this; }
+            send() {}
+            close() { this.readyState = 3; }
+        };
+        const urlInput = document.getElementById('video-url');
+        urlInput.value = '复制 https://v.douyin.com/qt-fixture/ 看视频';
+        urlInput.dispatchEvent(new Event('input', {bubbles: true}));
+        document.getElementById('btn-start').click();
+    ''')
+    wait(200)
+    javascript(page, '''window.__downloadSocket.onmessage({data: JSON.stringify({type: 'progress',
+        ...window.__progressTask, progress_pct: 42.4})});''')
+    measured = json.loads(javascript(page, '''JSON.stringify({
+        percent: document.getElementById('task-progress-value').textContent,
+        aria: document.getElementById('task-progress-track').getAttribute('aria-valuenow'),
+        recognized: document.getElementById('video-url-status').textContent,
+        pauseHidden: document.getElementById('btn-pause-worker').classList.contains('hidden'),
+        exportDisabled: document.getElementById('btn-export-hq').disabled
+    })'''))
+    assert measured['percent'] == '42%' and measured['aria'] == '42.4', measured
+    assert 'Đã nhận link Douyin' in measured['recognized'], measured
+    assert measured['pauseHidden'] and measured['exportDisabled'], measured
+    javascript(page, '''
+        window.__downloadSocket.onmessage({data: JSON.stringify({type: 'progress', ...window.__progressTask})});
+        document.getElementById('tab-tasks').click();
+    ''')
+    wait(150)
+    tasks = javascript(page, "document.getElementById('tasks-table-body').textContent")
+    assert 'Đang tải video' in tasks and 'Chưa có số liệu %' in tasks and 'null%' not in tasks, tasks
+    assert javascript(page, "document.getElementById('task-progress-track').hasAttribute('aria-valuenow')") is False
+    javascript(page, "document.getElementById('tab-diagnostics').click()")
+    wait(150)
+    logs = json.loads(javascript(page, '''JSON.stringify((() => {
+        const log = document.getElementById('log-console-output');
+        const spans = [...log.querySelectorAll('span')];
+        return {whiteSpace: getComputedStyle(log).whiteSpace, rawMatches: log.textContent === window.__logFixture,
+            separateLines: spans[1].getBoundingClientRect().top > spans[0].getBoundingClientRect().top,
+            errors: log.querySelectorAll('.log-line-error').length,
+            copyPresent: !document.getElementById('btn-copy-log').disabled};
+    })())'''))
+    assert logs['whiteSpace'] == 'pre-wrap' and logs['rawMatches'] and logs['separateLines'], logs
+    assert logs['errors'] == 1 and logs['copyPresent'], logs
+    from PySide6.QtCore import QMimeData
+    clipboard = QApplication.clipboard()
+    previous_clipboard = QMimeData()
+    previous_mime = clipboard.mimeData()
+    if previous_mime is not None:
+        for mime_type in previous_mime.formats():
+            previous_clipboard.setData(mime_type, previous_mime.data(mime_type))
+    try:
+        javascript(page, "document.getElementById('btn-copy-log').click()")
+        wait(250)
+        assert clipboard.text() == javascript(page, "window.__logFixture")
+        assert 'Đã sao chép' in javascript(page, "document.getElementById('log-copy-status').textContent")
+    finally:
+        if previous_clipboard.formats():
+            clipboard.setMimeData(previous_clipboard)
+        else:
+            clipboard.clear()
+    javascript(page, '''
+        document.getElementById('tab-studio').click();
+        window.studioStop();
+    ''')
+    wait(150)
+    javascript(page, '''
+        window.fetch = window.__progressFetch;
+        window.WebSocket = window.__progressSocket;
+        document.getElementById('video-url').value = '';
+        document.getElementById('video-url').dispatchEvent(new Event('input', {bubbles: true}));
+    ''')
+    return {'download_percent': measured['percent'], 'unknown_progress': True, 'task_visible': True,
+            'logs_preserve_lines': logs['separateLines'], 'logs_safe_copy': logs['rawMatches'],
+            'native_clipboard': True}
+
+
 def main():
     app = QApplication.instance() or QApplication(sys.argv)
     app.setQuitOnLastWindowClosed(False)
@@ -236,10 +328,13 @@ def main():
         ''')
         wait(300)
         upload = json.loads(javascript(window.web_view.page(),
-                                      'JSON.stringify({requests: window.__smokeRequests, alerts: window.__smokeAlerts})'))
+                                      '''JSON.stringify({requests: window.__smokeRequests, alerts: window.__smokeAlerts,
+                                          error: document.getElementById('task-progress-stage').textContent,
+                                          status: document.getElementById('task-progress').dataset.status})'''))
         assert len(upload['requests']) == 1, upload
         assert upload['requests'][0]['tts'] == 'edge-tts', upload
-        assert upload['alerts'] == ['Lỗi: SMOKE_EXPECTED'], upload
+        assert not upload['alerts'] and upload['error'] == 'SMOKE_EXPECTED' and upload['status'] == 'FAILED', upload
+        progress_logs = check_progress_and_logs(window.web_view.page())
         layout = check_minimum_layout(window)
         playback = check_media_playback(window.web_view.page(), media_folder.name)
         bgm = check_bgm_playback(window.web_view.page(), media_folder.name, Path(media_folder.name).name)
@@ -290,7 +385,8 @@ def main():
         javascript(window.web_view.page(), "document.getElementById('tab-studio').click()")
         wait(200)
         print(json.dumps({'result': 'PASS', 'desktop': result, 'upload': upload['requests'][0],
-                          'playback': playback, 'bgm': bgm, 'layout_1024': layout}, ensure_ascii=False))
+                          'playback': playback, 'bgm': bgm, 'layout_1024': layout,
+                          'progress_and_logs': progress_logs}, ensure_ascii=False))
     finally:
         if window:
             window.web_view.stop()

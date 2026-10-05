@@ -15,7 +15,6 @@ class VieNeuEngine(TTSEngine):
         self.model = None
         self._preset_voices = None
         self.cache_dir = settings.TEMP_DIR / "vieneu_cache"
-        self.cache_dir.mkdir(parents=True, exist_ok=True)
 
     @property
     def name(self) -> str:
@@ -23,28 +22,30 @@ class VieNeuEngine(TTSEngine):
 
     @property
     def is_available(self) -> bool:
-        try:
-            import vieneu
-            return True
-        except ImportError:
-            return False
+        from core.model_manager import ModelManager
+        record = next(item for item in ModelManager.get_all_models() if item["engine"] == "VieNeu-TTS")
+        return record["runtime_available"]
 
     def _ensure_loaded(self):
         if self.model is None:
             print("[*] Initializing VieNeu-TTS v3 Turbo...")
             from vieneu import Vieneu
-            self.model = Vieneu()
+            # These are the CPU/ONNX checkpoints shown in Models. Do not let
+            # installing Torch silently switch the SDK to another model/backend.
+            self.model = Vieneu(device="cpu", backend="onnx", threads=4)
             try:
                 self._preset_voices = self.model.list_preset_voices()
             except Exception:
                 self._preset_voices = []
 
     def get_info(self) -> Dict[str, Any]:
+        from core.model_manager import ModelManager
+        record = next(item for item in ModelManager.get_all_models() if item["engine"] == "VieNeu-TTS")
         return {
             "name": self.name,
             "version": "v3-Turbo",
             "is_available": self.is_available,
-            "model_path": "C:/Users/phamc/.cache/huggingface/hub/models--pnnbao-ump--VieNeu-TTS-v3-Turbo",
+            "model_path": record["path"],
             "supports_cloning": True,
             "sample_rate": 48000
         }
@@ -67,6 +68,7 @@ class VieNeuEngine(TTSEngine):
         Uses caching to avoid redundant inferences.
         """
         self._ensure_loaded()
+        self.cache_dir.mkdir(parents=True, exist_ok=True)
         clean_text = text.strip()
         if not clean_text:
             return output_path

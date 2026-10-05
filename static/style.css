@@ -39,7 +39,26 @@
 html { scroll-padding-top: 100px; }
 #export-modal > div { max-height: calc(100vh - 2rem); overflow-y: auto; }
 #buffering-text { max-width: 90%; text-align: center; overflow-wrap: anywhere; }
+#buffering-alert:is([data-state="error"], [data-state="paused"]) > .fa-spinner { display: none; }
 #segments-list p { overflow-wrap: anywhere; }
+button:disabled { opacity: 0.45; cursor: not-allowed; }
+#video-url-status, .task-progress { overflow-wrap: anywhere; }
+.task-progress { padding: 0.75rem; border: 1px solid #374151; border-radius: 0.75rem; background: #0b0e16; }
+.task-progress-heading { display: flex; flex-wrap: wrap; align-items: baseline; justify-content: space-between; gap: 0.3rem 0.75rem; font-size: 12px; color: #e5e7eb; }
+#task-progress-stage { flex: 1 1 150px; }
+#task-progress-value { flex-shrink: 0; color: #f9a8d4; font-variant-numeric: tabular-nums; }
+.task-progress-track { height: 6px; margin-top: 10px; overflow: hidden; border-radius: 6px; background: #253044; }
+.task-progress-bar { height: 100%; width: 0; border-radius: inherit; background: linear-gradient(90deg, #ec4899, #8b5cf6); transition: width 0.2s; }
+.task-progress-track[data-indeterminate="true"] .task-progress-bar { width: 100%; opacity: 0.3; }
+.task-progress-detail, .task-connection-status { margin-top: 8px; font-size: 11px; line-height: 1.6; color: #9ca3af; }
+.task-connection-status { color: #fcd34d; }
+.task-progress[data-status="FAILED"] { border-color: #9f1239; }
+.task-progress[data-status="FAILED"] #task-progress-stage { color: #fda4af; }
+#log-console-output { white-space: pre-wrap; overflow-wrap: anywhere; line-height: 1.8; tab-size: 4; }
+.log-line-error { color: #fda4af; }
+.log-line-warning { color: #fcd34d; }
+#view-diagnostics > div:first-child, #view-diagnostics > div:nth-child(2) { flex-wrap: wrap; gap: 0.75rem; }
+#view-diagnostics > div:first-child > div:last-child { flex-wrap: wrap; }
 @media (max-width: 1280px) {
   header, header > div:first-child { flex-wrap: wrap; gap: 0.75rem; }
   header nav { flex-wrap: wrap; }

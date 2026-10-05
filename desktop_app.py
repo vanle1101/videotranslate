@@ -151,6 +151,19 @@ class DesktopBridge(QObject):
         except Exception as e:
             logger.error(f"Cannot open logs folder: {e}")
 
+    @Slot(str, result=bool)
+    def copyText(self, text: str) -> bool:
+        """Copy plain diagnostic text through Qt when web clipboard is unavailable."""
+        try:
+            clipboard = QApplication.clipboard()
+            if clipboard is None:
+                return False
+            clipboard.setText(text)
+            return clipboard.text() == text
+        except Exception:
+            logger.warning("Could not copy diagnostic text to clipboard.")
+            return False
+
 # -------------------------------------------------------------
 # STARTUP PRE-WARM WORKER THREAD
 # -------------------------------------------------------------
