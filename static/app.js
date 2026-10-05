@@ -225,8 +225,8 @@ document.addEventListener("DOMContentLoaded", () => {
   function describeSelectedVoice() {
     const voice = selectedCatalogVoice();
     if (voice) {
-      const count = voiceCatalog.filter(item => item.available).length;
-      voiceSource.textContent = `${voice.source} · ${voice.offline ? "Chạy trên máy" : "Cần Internet"} · ${count} giọng có sẵn${voice.description ? ` — ${voice.description}` : ""}`;
+      const count = voiceCatalog.filter(item => item.available && item.source === voice.source).length;
+      voiceSource.textContent = `${voice.source} · ${voice.offline ? "Chạy trên máy" : "Cần Internet"} · ${count} giọng trong nguồn${voice.description ? ` — ${voice.description}` : ""}`;
     }
     updateVoiceControls();
   }

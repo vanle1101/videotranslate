@@ -126,7 +126,7 @@ test('voice catalog groups sources, restores an available voice and labels local
   assert.equal(ui.el('voice-select').value, 'vieneu:Trúc Ly');
   assert.deepEqual(ui.el('voice-select').children.map(group => group.label), ['Microsoft Edge', 'VieNeu · Hugging Face']);
   assert.equal(ui.el('voice-select').children[1].children[1].disabled, true);
-  assert.match(ui.el('voice-source').textContent, /Hugging Face · Chạy trên máy · 2 giọng có sẵn — Nữ miền Bắc/);
+  assert.match(ui.el('voice-source').textContent, /Hugging Face · Chạy trên máy · 2 giọng trong nguồn — Nữ miền Bắc/);
   assert.equal(ui.el('btn-preview-voice').disabled, false);
   assert.equal(ui.el('voice-preview-audio').playCount, 0);
   assert.equal(ui.requests.filter(req => req.url === '/api/voices/preview').length, 0);
