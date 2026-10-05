@@ -68,7 +68,7 @@ Có thể dán nguyên đoạn chia sẻ Douyin vào ô **Video nguồn**, gồm
 
 ### Chọn và nghe thử giọng
 
-Danh sách **Giọng lồng tiếng** nhóm các giọng theo nguồn, ghi rõ cần Internet hay chạy tại máy và nhớ lựa chọn của bạn. Bấm **Nghe thử** để nghe cùng một câu mẫu trước khi dịch. Đổi giọng hoặc bắt đầu video sẽ dừng mẫu đang phát; mẫu hết hạn có thể tạo lại. Mẫu nghe thử chỉ được giữ tạm, tối đa tám mẫu trong bộ nhớ và hết hạn sau năm phút.
+Danh sách **Giọng lồng tiếng** luôn hiện theo từng dòng và nhóm theo nguồn, ghi rõ cần Internet hay chạy tại máy. Dùng ô tìm kiếm theo tên, vùng miền hoặc nguồn; có thể gõ không dấu. Bấm **Nghe thử** ở bất kỳ dòng nào để nghe cùng một câu mẫu, rồi bấm **Chọn** ở giọng muốn dùng. Nghe thử không thay đổi giọng đang chọn; nút **Dừng mẫu** dừng mẫu đang phát. Ứng dụng nhớ lựa chọn của bạn. Chọn giọng hoặc bắt đầu video sẽ dừng mẫu đang phát; mẫu hết hạn có thể tạo lại. Mẫu nghe thử chỉ được giữ tạm, tối đa tám mẫu trong bộ nhớ và hết hạn sau năm phút.
 
 - **Microsoft Edge**: Hoài My và Nam Minh, cần Internet. Đây là hai giọng tiếng Việt thực tế trong danh sách dịch vụ, không phải toàn bộ giọng đa ngôn ngữ của Edge.
 - **[VieNeu-TTS v3 Turbo](https://huggingface.co/pnnbao-ump/VieNeu-TTS-v3-Turbo)**: 25 preset từ SDK 3.8.3 đã cài, gồm Trúc Ly, Mai Anh, Hải Đăng và các giọng vùng miền/phong cách khác. Tên và mô tả lấy từ preset của nhà phát triển; alias không được tính thành giọng mới. Runtime CPU ONNX dùng tối đa bốn luồng và chia sẻ một model giữa nghe thử và dịch video. Model/preset Apache-2.0.

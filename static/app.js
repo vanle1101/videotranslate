@@ -16,8 +16,11 @@ document.addEventListener("DOMContentLoaded", () => {
   const bufferSelect = document.getElementById("buffer-select");
   const voiceSelect = document.getElementById("voice-select");
   const voiceSource = document.getElementById("voice-source");
-  const btnPreviewVoice = document.getElementById("btn-preview-voice");
-  const voicePreviewLabel = document.getElementById("voice-preview-label");
+  const voiceList = document.getElementById("voice-list");
+  const voiceSearch = document.getElementById("voice-search");
+  const voiceCount = document.getElementById("voice-count");
+  const voiceEmpty = document.getElementById("voice-empty");
+  const voiceCatalogStatus = document.getElementById("voice-catalog-status");
   const voicePreviewAudio = document.getElementById("voice-preview-audio");
   const voicePreviewStatus = document.getElementById("voice-preview-status");
   const refAudioFile = document.getElementById("ref-audio-file");
@@ -152,6 +155,10 @@ document.addEventListener("DOMContentLoaded", () => {
   let voicePreviewGeneration = 0;
   let voicePreviewId = null;
   let voicePreviewBusy = false;
+  let previewedVoiceId = null;
+  let voiceCatalogLoaded = false;
+  const voiceRows = new Map();
+  const voiceGroups = [];
   const voicePreferenceKey = "studio.voice-id";
   const mediaPlayButton = document.createElement("button");
   mediaPlayButton.type = "button";
@@ -190,7 +197,7 @@ document.addEventListener("DOMContentLoaded", () => {
 
   function selectedVoicePayload() {
     const voice = selectedCatalogVoice();
-    return voice ? { voice_id: voice.id } : {
+    return voice && voiceCatalogLoaded ? { voice_id: voice.id } : {
       voice: voiceSelect.value || "vi-VN-HoaiMyNeural",
       tts_engine: document.body.dataset.ttsEngine
     };
@@ -199,9 +206,20 @@ document.addEventListener("DOMContentLoaded", () => {
   function updateVoiceControls() {
     const sessionBusy = btnStart.classList.contains("hidden");
     voiceSelect.disabled = sessionBusy;
-    btnPreviewVoice.disabled = voicePreviewBusy || sessionBusy || !selectedCatalogVoice();
-    btnPreviewVoice.setAttribute("aria-busy", String(voicePreviewBusy));
-    voicePreviewLabel.textContent = voicePreviewBusy ? "Đang tạo mẫu…" : "Nghe thử";
+    for (const [id, { voice, row, choose, preview }] of voiceRows) {
+      const selected = id === voiceSelect.value;
+      const previewing = id === previewedVoiceId;
+      row.dataset.selected = String(selected);
+      row.dataset.previewing = String(previewing);
+      choose.disabled = sessionBusy || !voice.available;
+      choose.textContent = selected ? "Đã chọn" : "Chọn";
+      choose.setAttribute("aria-pressed", String(selected));
+      preview.disabled = sessionBusy || voicePreviewBusy || !voice.available || !voiceCatalogLoaded;
+      preview.setAttribute("aria-busy", String(previewing && voicePreviewBusy));
+      const playing = previewing && !voicePreviewAudio.paused && !voicePreviewAudio.ended;
+      preview.textContent = previewing && voicePreviewBusy ? "Đang tạo…" : playing ? "Dừng mẫu" : "Nghe thử";
+      preview.setAttribute("aria-label", `${playing ? "Dừng mẫu" : "Nghe thử"} giọng ${voice.name}`);
+    }
   }
 
   function deleteVoicePreview(id) {
@@ -210,7 +228,9 @@ document.addEventListener("DOMContentLoaded", () => {
 
   function stopVoicePreview() {
     voicePreviewGeneration++;
-    voicePreviewBusy = false;
+    // Soft cancellation cannot stop inference; wait for its response before
+    // enabling another request, then delete the superseded sample.
+    previewedVoiceId = null;
     voicePreviewAudio.pause();
     voicePreviewAudio.removeAttribute("src");
     voicePreviewAudio.load();
@@ -225,10 +245,85 @@ document.addEventListener("DOMContentLoaded", () => {
   function describeSelectedVoice() {
     const voice = selectedCatalogVoice();
     if (voice) {
-      const count = voiceCatalog.filter(item => item.available && item.source === voice.source).length;
-      voiceSource.textContent = `${voice.source} · ${voice.offline ? "Chạy trên máy" : "Cần Internet"} · ${count} giọng trong nguồn${voice.description ? ` — ${voice.description}` : ""}`;
+      voiceSource.textContent = `Đang chọn: ${voice.name} · ${voice.source} · ${voice.offline ? "Chạy trên máy" : "Cần Internet"}`;
     }
     updateVoiceControls();
+  }
+
+  function searchableVoice(text) {
+    return String(text).normalize("NFD").replace(/[\u0300-\u036f]/g, "").replace(/đ/g, "d").replace(/Đ/g, "D").toLowerCase();
+  }
+
+  function filterVoices() {
+    const terms = searchableVoice(voiceSearch.value).trim().split(/\s+/).filter(Boolean);
+    let visible = 0;
+    for (const { voice, row } of voiceRows.values()) {
+      const text = searchableVoice(`${voice.name} ${voice.description || ""} ${voice.source}`);
+      row.hidden = !terms.every(term => text.includes(term));
+      if (!row.hidden) visible++;
+    }
+    for (const { element, ids } of voiceGroups) element.hidden = ids.every(id => voiceRows.get(id).row.hidden);
+    voiceCount.textContent = terms.length ? `${visible} / ${voiceCatalog.length} giọng` : `${voiceCatalog.length} giọng`;
+    voiceEmpty.classList.toggle("hidden", visible > 0);
+  }
+
+  function renderVoiceList() {
+    voiceRows.clear();
+    voiceGroups.length = 0;
+    voiceList.replaceChildren();
+    const groups = new Map();
+    for (const voice of voiceCatalog) {
+      if (!groups.has(voice.source)) {
+        const group = document.createElement("section");
+        group.className = "voice-group";
+        group.dataset.source = voice.source;
+        const heading = document.createElement("h4");
+        heading.className = "voice-group-title";
+        heading.textContent = voice.source;
+        group.appendChild(heading);
+        const record = { element: group, ids: [] };
+        groups.set(voice.source, record);
+        voiceGroups.push(record);
+        voiceList.appendChild(group);
+      }
+      const row = document.createElement("div");
+      row.className = "voice-row";
+      row.dataset.voiceId = voice.id;
+      const details = document.createElement("div");
+      const name = document.createElement("p");
+      name.className = "voice-name";
+      name.textContent = voice.name;
+      const description = document.createElement("p");
+      description.className = "voice-description";
+      description.textContent = `${voice.description || "Tiếng Việt"} · ${voice.offline ? "Chạy trên máy" : "Cần Internet"}${voice.available ? "" : " · Chưa sẵn sàng"}`;
+      details.appendChild(name);
+      details.appendChild(description);
+      row.appendChild(details);
+      const actions = document.createElement("div");
+      actions.className = "voice-row-actions";
+      const preview = document.createElement("button");
+      preview.type = "button";
+      preview.className = "voice-preview-button";
+      preview.addEventListener("click", () => previewVoice(voice));
+      const choose = document.createElement("button");
+      choose.type = "button";
+      choose.className = "voice-choose-button";
+      choose.setAttribute("aria-label", `Chọn giọng ${voice.name}`);
+      choose.addEventListener("click", () => {
+        if (!voice.available || btnStart.classList.contains("hidden")) return;
+        voiceSelect.value = voice.id;
+        selectVoice();
+      });
+      actions.appendChild(preview);
+      actions.appendChild(choose);
+      row.appendChild(actions);
+      const group = groups.get(voice.source);
+      group.ids.push(voice.id);
+      group.element.appendChild(row);
+      voiceRows.set(voice.id, { voice, row, choose, preview });
+    }
+    filterVoices();
+    describeSelectedVoice();
   }
 
   async function loadVoiceCatalog() {
@@ -241,6 +336,7 @@ document.addEventListener("DOMContentLoaded", () => {
       ) : [];
       if (!response.ok || !voices.some(voice => voice.available)) throw new Error("catalog unavailable");
       voiceCatalog = voices;
+      voiceCatalogLoaded = true;
       let savedId;
       try { savedId = localStorage.getItem(voicePreferenceKey); } catch (_) {}
       const available = id => voices.some(voice => voice.id === id && voice.available);
@@ -248,40 +344,42 @@ document.addEventListener("DOMContentLoaded", () => {
         voice.engine === document.body.dataset.ttsEngine);
       const selectedId = available(savedId) ? savedId : available(data.default_voice_id)
         ? data.default_voice_id : legacy?.id || voices.find(voice => voice.available).id;
-      const groups = new Map();
-      for (const voice of voices) {
-        if (!groups.has(voice.source)) {
-          const group = document.createElement("optgroup");
-          group.label = voice.source;
-          groups.set(voice.source, group);
-        }
-        const option = new Option(`${voice.name}${voice.available ? "" : " — Chưa sẵn sàng"}`, voice.id);
-        option.disabled = !voice.available;
-        groups.get(voice.source).appendChild(option);
-      }
-      voiceSelect.replaceChildren(...groups.values());
       voiceSelect.value = selectedId;
-      describeSelectedVoice();
+      renderVoiceList();
     } catch (_) {
-      voiceSource.textContent = "Chưa tải được danh sách mở rộng. Bạn vẫn có thể dùng các giọng hiện tại.";
-      updateVoiceControls();
+      voiceCatalogLoaded = false;
+      const edge = ["edge", "edge-tts"].includes(document.body.dataset.ttsEngine);
+      voiceCatalog = (edge ? [
+        ["vi-VN-HoaiMyNeural", "Hoài My", "Nữ"], ["vi-VN-NamMinhNeural", "Nam Minh", "Nam"]
+      ] : [["Trúc Ly", "Trúc Ly", "Nữ"], ["Thiện Minh", "Thiện Minh", "Nam"]]).map(([id, name, description]) => ({
+        id, name, description, source: edge ? "Microsoft Edge" : "VieNeu", available: true, offline: !edge
+      }));
+      voiceSelect.value = voiceCatalog.some(voice => voice.id === initialVoice) ? initialVoice : voiceCatalog[0].id;
+      voiceCatalogStatus.textContent = "Chưa tải được danh sách mở rộng. Vẫn dùng được các giọng hiện tại; mở lại Studio để nghe thử.";
+      renderVoiceList();
     }
   }
 
-  voiceSelect.addEventListener("change", () => {
+  function selectVoice() {
     stopVoicePreview();
     describeSelectedVoice();
     const voice = selectedCatalogVoice();
-    if (voice) { try { localStorage.setItem(voicePreferenceKey, voice.id); } catch (_) {} }
-  });
+    if (voice && voiceCatalogLoaded) { try { localStorage.setItem(voicePreferenceKey, voice.id); } catch (_) {} }
+  }
+  voiceSelect.addEventListener("change", selectVoice);
+  voiceSearch.addEventListener("input", filterVoices);
 
-  btnPreviewVoice.addEventListener("click", async () => {
-    const voice = selectedCatalogVoice();
-    if (!voice || voicePreviewBusy || btnStart.classList.contains("hidden")) return;
+  async function previewVoice(voice) {
+    if (!voice.available || !voiceCatalogLoaded || voicePreviewBusy || btnStart.classList.contains("hidden")) return;
+    if (previewedVoiceId === voice.id && !voicePreviewAudio.paused && !voicePreviewAudio.ended) {
+      stopVoicePreview();
+      return;
+    }
     stopVoicePreview();
     videoPlayer.pause();
     const generation = voicePreviewGeneration;
     voicePreviewBusy = true;
+    previewedVoiceId = voice.id;
     voicePreviewStatus.textContent = `Đang tạo mẫu giọng ${voice.name}…`;
     updateVoiceControls();
     try {
@@ -296,8 +394,9 @@ document.addEventListener("DOMContentLoaded", () => {
       const audioUrl = new URL(data.audio_url, origin);
       if (!data.preview_id || !data.audio_url || audioUrl.origin !== origin) throw new Error("Đường dẫn mẫu giọng không hợp lệ.");
       voicePreviewAudio.src = audioUrl.href;
+      voicePreviewAudio.setAttribute("aria-label", `Mẫu giọng ${voice.name}`);
       voicePreviewAudio.classList.remove("hidden");
-      voicePreviewStatus.textContent = `Mẫu giọng ${voice.name}. Có thể đổi giọng rồi nghe thử tiếp.`;
+      voicePreviewStatus.textContent = `Đang nghe mẫu: ${voice.name}. Bấm Chọn ở dòng giọng bạn muốn dùng.`;
       try { await voicePreviewAudio.play(); }
       catch (_) {
         if (generation === voicePreviewGeneration) voicePreviewStatus.textContent = "Mẫu giọng đã sẵn sàng. Bấm nút phát trên thanh âm thanh để nghe.";
@@ -310,11 +409,14 @@ document.addEventListener("DOMContentLoaded", () => {
         voicePreviewStatus.dataset.error = "true";
       }
     } finally {
-      if (generation === voicePreviewGeneration) { voicePreviewBusy = false; updateVoiceControls(); }
+      voicePreviewBusy = false;
+      updateVoiceControls();
     }
-  });
+  }
+  for (const event of ["play", "pause", "ended"]) voicePreviewAudio.addEventListener(event, updateVoiceControls);
   voicePreviewAudio.addEventListener("error", () => {
     if (!voicePreviewId) return;
+    stopVoicePreview();
     voicePreviewStatus.textContent = "Không phát được mẫu giọng. Bấm Nghe thử để tạo lại.";
     voicePreviewStatus.dataset.error = "true";
   });
@@ -746,7 +848,7 @@ document.addEventListener("DOMContentLoaded", () => {
     if (voiceCatalog.length && !selectedCatalogVoice()) {
       voicePreviewStatus.textContent = "Hãy chọn một giọng đang có sẵn trước khi bắt đầu.";
       voicePreviewStatus.dataset.error = "true";
-      voiceSelect.focus();
+      voiceList.focus();
       return;
     }
     stopVoicePreview();

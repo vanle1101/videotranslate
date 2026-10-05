@@ -240,7 +240,7 @@
           </h2>
 
           <!-- Buffer Ahead Setting -->
-          <div class="grid grid-cols-2 gap-3">
+          <div>
             <div>
               <label class="text-[11px] text-gray-400 block mb-1">Đệm trước phát (Initial Buffer):</label>
               <select id="buffer-select" class="w-full bg-[#08090d] border border-gray-700 rounded-xl px-3 py-1.5 text-xs text-gray-200 focus:outline-none focus:border-pink-500">
@@ -251,24 +251,23 @@
               </select>
             </div>
 
-            <div>
-              <label for="voice-select" class="text-[11px] text-gray-400 block mb-1">Giọng lồng tiếng:</label>
-              <select id="voice-select" aria-describedby="voice-source" class="w-full bg-[#08090d] border border-gray-700 rounded-xl px-3 py-1.5 text-xs text-gray-200 focus:outline-none focus:border-pink-500">
-                {% if settings.TTS_ENGINE in ['edge', 'edge-tts'] %}
-                <option value="vi-VN-HoaiMyNeural" {% if settings.EDGE_VOICE == 'vi-VN-HoaiMyNeural' %}selected{% endif %}>Hoài My (Nữ)</option>
-                <option value="vi-VN-NamMinhNeural" {% if settings.EDGE_VOICE == 'vi-VN-NamMinhNeural' %}selected{% endif %}>Nam Minh (Nam)</option>
-                {% else %}
-                <option value="Trúc Ly" selected>Trúc Ly (Nữ)</option>
-                <option value="Thiện Minh">Thiện Minh (Nam)</option>
-                {% endif %}
-              </select>
-            </div>
           </div>
 
+          <section class="voice-picker" aria-labelledby="voice-list-title">
+            <div class="voice-list-heading">
+              <h3 id="voice-list-title">Giọng lồng tiếng</h3>
+              <span id="voice-count" class="voice-count" role="status" aria-live="polite"></span>
+            </div>
+            <p id="voice-source" class="voice-source" aria-live="polite">Đang tải danh sách giọng…</p>
+            <input type="hidden" id="voice-select" value="{{ settings.EDGE_VOICE if settings.TTS_ENGINE in ['edge', 'edge-tts'] else 'Trúc Ly' }}">
+            <label for="voice-search" class="voice-search-label">Tìm theo tên, vùng miền hoặc nguồn</label>
+            <input id="voice-search" type="search" placeholder="Ví dụ: Trúc Ly, miền Nam, Piper…" autocomplete="off" class="voice-search" aria-controls="voice-list">
+            <div id="voice-list" class="voice-list" role="group" aria-labelledby="voice-list-title" tabindex="0"></div>
+            <p id="voice-empty" class="hidden voice-source">Không tìm thấy giọng phù hợp. Thử tên hoặc nguồn khác.</p>
+            <p id="voice-catalog-status" class="voice-source" role="status"></p>
+          </section>
           <div class="voice-preview-panel">
-            <p id="voice-source" class="voice-source">Đang tải danh sách giọng…</p>
             <div class="voice-preview-controls">
-              <button type="button" id="btn-preview-voice" disabled class="voice-preview-button"><i class="fa-solid fa-volume-high" aria-hidden="true"></i> <span id="voice-preview-label">Nghe thử</span></button>
               <audio id="voice-preview-audio" class="hidden" controls preload="none" aria-label="Mẫu giọng lồng tiếng"></audio>
             </div>
             <p id="voice-preview-status" class="voice-preview-status" role="status" aria-live="polite" aria-atomic="true"></p>

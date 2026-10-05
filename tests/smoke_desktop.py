@@ -304,21 +304,27 @@ def check_voice_catalog_and_preview(page, folder):
         catalog = json.loads(javascript(page, '''JSON.stringify((() => {
             const select = document.getElementById('voice-select');
             return {api: window.__voiceSmokeCatalog, selected: select.value,
-                options: [...select.options].map(option => ({id: option.value, name: option.textContent, disabled: option.disabled})),
-                groups: [...select.querySelectorAll('optgroup')].map(group => group.label),
-                previewDisabled: document.getElementById('btn-preview-voice').disabled};
+                inputType: select.type,
+                rows: [...document.querySelectorAll('#voice-list .voice-row')].map(row => ({
+                    id: row.dataset.voiceId, text: row.textContent,
+                    disabled: row.querySelector('.voice-choose-button').disabled,
+                    previewDisabled: row.querySelector('.voice-preview-button').disabled,
+                    previewLabel: row.querySelector('.voice-preview-button').getAttribute('aria-label')})),
+                groups: [...document.querySelectorAll('#voice-list .voice-group')].map(group => group.dataset.source)};
         })())'''))
-        if catalog['api'] and len(catalog['options']) == len(catalog['api']['voices']):
+        if catalog['api'] and len(catalog['rows']) == len(catalog['api']['voices']):
             break
         wait(100)
     voices = catalog['api']['voices']
     assert len(voices) >= 27, catalog
-    assert [option['id'] for option in catalog['options']] == [voice['id'] for voice in voices], catalog
+    assert catalog['inputType'] == 'hidden', catalog
+    assert [row['id'] for row in catalog['rows']] == [voice['id'] for voice in voices], catalog
     assert set(catalog['groups']) == {voice['source'] for voice in voices}, catalog
-    assert all(option['name'].startswith(voice['name']) and option['disabled'] == (not voice['available'])
-               for option, voice in zip(catalog['options'], voices)), catalog
+    assert all(voice['name'] in row['text'] and row['disabled'] == (not voice['available'])
+               and row['previewDisabled'] == (not voice['available']) and voice['name'] in row['previewLabel']
+               for row, voice in zip(catalog['rows'], voices)), catalog
     selected = next(voice for voice in voices if voice['id'] == catalog['selected'])
-    assert selected['available'] and not catalog['previewDisabled'], catalog
+    assert selected['available'], catalog
     local_voice = next(voice for voice in voices if voice['id'] == 'vieneu:Trúc Ly' and voice['available'])
     javascript(page, '''
         window.__voiceSmokeSelected = document.getElementById('voice-select').value;
@@ -337,9 +343,9 @@ def check_voice_catalog_and_preview(page, folder):
             }
             return response;
         };
-        const selectedVoice = document.getElementById('voice-select');
-        selectedVoice.value = 'vieneu:Trúc Ly';
-        selectedVoice.dispatchEvent(new Event('change', {bubbles: true}));
+        window.__voiceSmokeRow = id => [...document.querySelectorAll('#voice-list .voice-row')]
+            .find(row => row.dataset.voiceId === id);
+        window.__voiceSmokeRow('vieneu:Trúc Ly').querySelector('.voice-choose-button').click();
     ''')
     synth_calls = []
     try:
@@ -359,6 +365,18 @@ def check_voice_catalog_and_preview(page, folder):
         assert len(requests) == 1 and requests[0]['voice_id'] == local_voice['id'], requests
         assert 'voice' not in requests[0] and 'tts_engine' not in requests[0], requests
 
+        javascript(page, '''
+            window.__voiceSmokeRow('edge:vi-VN-HoaiMyNeural').querySelector('.voice-choose-button').click();
+            const search = document.getElementById('voice-search');
+            search.value = 'truc ly';
+            search.dispatchEvent(new Event('input', {bubbles: true}));
+        ''')
+        visible_rows = json.loads(javascript(page, '''JSON.stringify(
+            [...document.querySelectorAll('#voice-list .voice-row')]
+                .filter(row => row.getClientRects().length && getComputedStyle(row).display !== 'none')
+                .map(row => row.dataset.voiceId))'''))
+        assert visible_rows == ['vieneu:Trúc Ly'], visible_rows
+
         def synthesize_fixture(text, output, voice=None, **kwargs):
             synth_calls.append(voice)
             rate = 16000
@@ -374,7 +392,7 @@ def check_voice_catalog_and_preview(page, folder):
         with patch('core.voice_preview.VieNeuEngine.synthesize', side_effect=synthesize_fixture):
             javascript(page, '''
                 document.getElementById('voice-preview-audio').muted = true;
-                document.getElementById('btn-preview-voice').click();
+                window.__voiceSmokeRow('vieneu:Trúc Ly').querySelector('.voice-preview-button').click();
             ''')
             for _ in range(100):
                 preview = json.loads(javascript(page, '''JSON.stringify((() => {
@@ -390,10 +408,9 @@ def check_voice_catalog_and_preview(page, folder):
         assert preview['id'] and preview['visible'] and not preview['error'], preview
         assert not preview['paused'] and preview['time'] >= 0.2, preview
         assert f"/api/voices/preview/{preview['id']}/audio" in preview['source'], preview
+        assert javascript(page, "document.getElementById('voice-select').value") == 'edge:vi-VN-HoaiMyNeural'
         javascript(page, '''
-            const select = document.getElementById('voice-select');
-            select.value = 'edge:vi-VN-HoaiMyNeural';
-            select.dispatchEvent(new Event('change', {bubbles: true}));
+            window.__voiceSmokeRow('vieneu:Trúc Ly').querySelector('.voice-choose-button').click();
         ''')
         wait(100)
         javascript(page, '''
@@ -411,12 +428,14 @@ def check_voice_catalog_and_preview(page, folder):
         assert javascript(page, "document.getElementById('voice-preview-audio').paused") is True
         return {'catalog_count': len(voices), 'source_groups': len(catalog['groups']),
                 'local_voice_id': requests[0]['voice_id'], 'preview_http_audio': True,
-                'preview_played_seconds': round(preview['time'], 3), 'preview_deleted_on_change': True}
+                'preview_played_seconds': round(preview['time'], 3), 'preview_deleted_on_change': True,
+                'row_preview_keeps_selection': True, 'accent_insensitive_search': True}
     finally:
         javascript(page, '''
-            const select = document.getElementById('voice-select');
-            select.value = window.__voiceSmokeSelected;
-            select.dispatchEvent(new Event('change', {bubbles: true}));
+            const search = document.getElementById('voice-search');
+            search.value = '';
+            search.dispatchEvent(new Event('input', {bubbles: true}));
+            window.__voiceSmokeRow(window.__voiceSmokeSelected).querySelector('.voice-choose-button').click();
             if (window.__voiceSmokePreference === null) localStorage.removeItem('studio.voice-id');
             else localStorage.setItem('studio.voice-id', window.__voiceSmokePreference);
             window.fetch = window.__voiceSmokeFetch;

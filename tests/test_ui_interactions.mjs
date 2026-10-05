@@ -14,7 +14,7 @@ function studio(cookieReply = { configured: false, count: 0, message: '' }, voic
       this.id = id; this.events = {}; this.children = []; this.style = {}; this.dataset = {};
       this.value = ''; this.files = []; this.checked = true;
       this.paused = true; this.currentTime = 0; this.playbackRate = 1; this.ended = false;
-      this.playCount = 0; this.classes = new Set();
+      this.playCount = 0; this.classes = new Set(); this.hidden = false; this.disabled = false;
       this.classList = {
         add: (...names) => names.forEach(name => this.classes.add(name)),
         remove: (...names) => names.forEach(name => this.classes.delete(name)),
@@ -29,10 +29,17 @@ function studio(cookieReply = { configured: false, count: 0, message: '' }, voic
       for (const match of value.matchAll(/id="([^"]+)"/g)) elements.set(match[1], new Element(match[1]));
     }
     get innerHTML() { return this.html || ''; }
-    appendChild(child) { this.children.push(child); if (child.id) elements.set(child.id, child); }
-    replaceChildren(...children) { this.children = children; this.options = children; }
+    get className() { return [...this.classes].join(' '); }
+    set className(value) { this.classes = new Set(value.split(/\s+/).filter(Boolean)); }
+    appendChild(child) { child.parentElement = this; this.children.push(child); if (child.id) elements.set(child.id, child); return child; }
+    append(...children) { children.forEach(child => this.appendChild(child)); }
+    replaceChildren(...children) { this.children = []; children.forEach(child => this.appendChild(child)); this.options = this.children; }
     add(option) { this.options.push(option); }
-    setAttribute(name, value) { this[name] = value; }
+    setAttribute(name, value) {
+      if (name.startsWith('data-')) this.dataset[name.slice(5).replace(/-([a-z])/g, (_, char) => char.toUpperCase())] = String(value);
+      else this[name === 'class' ? 'className' : name] = String(value);
+    }
+    getAttribute(name) { return this[name]; }
     removeAttribute(name) { delete this[name]; }
     async click() { await this.emit('click'); }
     focus() { document.activeElement = this; }
@@ -40,7 +47,26 @@ function studio(cookieReply = { configured: false, count: 0, message: '' }, voic
     pause() { this.paused = true; this.emit('pause'); }
     async play() { this.paused = false; this.playCount++; await this.emit('play'); }
     getBoundingClientRect() { return { left: 0, width: 100 }; }
-    querySelectorAll() { return []; }
+    matches(selector) {
+      const attribute = selector.match(/\[([\w-]+)(?:="([^"]*)")?\]/);
+      const simple = selector.replace(/\[[^\]]+\]/g, '');
+      if (simple.startsWith('.') && !this.classes.has(simple.slice(1))) return false;
+      if (simple.startsWith('#') && this.id !== simple.slice(1)) return false;
+      if (simple && !/^[.#]/.test(simple) && this.tagName !== simple.toUpperCase()) return false;
+      if (attribute) {
+        const key = attribute[1].slice(5).replace(/-([a-z])/g, (_, char) => char.toUpperCase());
+        const value = attribute[1].startsWith('data-') ? this.dataset[key] : this[attribute[1]];
+        if (value === undefined || (attribute[2] !== undefined && value !== attribute[2])) return false;
+      }
+      return true;
+    }
+    querySelectorAll(selector) {
+      const descendants = this.children.flatMap(child => [child, ...child.querySelectorAll('*')]);
+      return selector === '*' ? descendants : descendants.filter(child => selector.split(',').some(part => child.matches(part.trim())));
+    }
+    querySelector(selector) { return this.querySelectorAll(selector)[0] || null; }
+    closest(selector) { return this.matches(selector) ? this : this.parentElement?.closest(selector) || null; }
+    scrollIntoView() {}
     getClientRects() { return [1]; }
     remove() {}
   }
@@ -54,7 +80,7 @@ function studio(cookieReply = { configured: false, count: 0, message: '' }, voic
   for (const [id, value] of Object.entries({ 'vol-dub': '1', 'vol-bgm': '0.3', 'buffer-select': '10', 'voice-select': 'vi-VN-HoaiMyNeural' })) el(id).value = value;
   const document = {
     getElementById: el,
-    createElement: () => new Element(), querySelectorAll: () => [],
+    createElement: tag => { const element = new Element(); element.tagName = tag.toUpperCase(); return element; }, querySelectorAll: () => [],
     addEventListener: (_, callback) => { ready = callback; },
     body: new Element(), activeElement: null,
   };
@@ -108,7 +134,10 @@ function studio(cookieReply = { configured: false, count: 0, message: '' }, voic
     sockets.at(-1).receive({ type: 'init', duration: 10, segments_count: 1, bgm_url: '/bgm.m4a',
       segments: [{ id: 0, start: 0, end: 10, duration: 10, status: 'READY', audio_url: '/dub.wav', final_vi: '<b>Xin chào</b>' }] });
   }
-  return { el, audio, sockets, requests, replies, alerts, copied, window, flush, start, saved };
+  const row = id => el('voice-list').querySelectorAll('.voice-row').find(item => item.dataset.voiceId === id);
+  const choose = id => row(id).querySelector('.voice-choose-button').click();
+  const preview = id => row(id).querySelector('.voice-preview-button').click();
+  return { el, row, choose, preview, audio, sockets, requests, replies, alerts, copied, window, flush, start, saved };
 }
 
 const voiceCatalog = {
@@ -120,19 +149,26 @@ const voiceCatalog = {
   ],
 };
 
-test('voice catalog groups sources, restores an available voice and labels local runtime', async () => {
+test('voice catalog renders a list with source groups, restores selection and offers per-row listening', async () => {
   const ui = studio(undefined, { catalog: voiceCatalog, saved: { 'studio.voice-id': 'vieneu:Trúc Ly' } });
   await ui.flush();
+  assert.equal(ui.el('voice-select').tagName, 'INPUT');
+  assert.doesNotMatch(template, /<select[^>]+id="voice-select"/);
   assert.equal(ui.el('voice-select').value, 'vieneu:Trúc Ly');
-  assert.deepEqual(ui.el('voice-select').children.map(group => group.label), ['Microsoft Edge', 'VieNeu · Hugging Face']);
-  assert.equal(ui.el('voice-select').children[1].children[1].disabled, true);
-  assert.match(ui.el('voice-source').textContent, /Hugging Face · Chạy trên máy · 1 giọng trong nguồn — Nữ miền Bắc/);
-  assert.equal(ui.el('btn-preview-voice').disabled, false);
+  assert.deepEqual(ui.el('voice-list').querySelectorAll('.voice-group').map(group => group.dataset.source), ['Microsoft Edge', 'VieNeu · Hugging Face']);
+  assert.equal(ui.el('voice-list').querySelectorAll('.voice-row').length, voiceCatalog.voices.length);
+  assert.equal(ui.row('vieneu:Unavailable').querySelector('.voice-choose-button').disabled, true);
+  assert.equal(ui.row('vieneu:Unavailable').querySelector('.voice-preview-button').disabled, true);
+  assert.match(ui.el('voice-source').textContent, /Trúc Ly · VieNeu · Hugging Face · Chạy trên máy/);
+  assert.match(ui.row('vieneu:Trúc Ly').querySelector('.voice-description').textContent, /Nữ miền Bắc/);
+  assert.equal(ui.row('vieneu:Trúc Ly').querySelector('.voice-choose-button').getAttribute('aria-pressed'), 'true');
+  assert.equal(ui.row('vieneu:Trúc Ly').querySelector('.voice-preview-button').disabled, false);
   assert.equal(ui.el('voice-preview-audio').playCount, 0);
   assert.equal(ui.requests.filter(req => req.url === '/api/voices/preview').length, 0);
-  ui.el('voice-select').value = 'edge:vi-VN-HoaiMyNeural';
-  await ui.el('voice-select').emit('change');
+  await ui.choose('edge:vi-VN-HoaiMyNeural');
   assert.equal(ui.saved.get('studio.voice-id'), 'edge:vi-VN-HoaiMyNeural');
+  assert.equal(ui.row('edge:vi-VN-HoaiMyNeural').querySelector('.voice-choose-button').getAttribute('aria-pressed'), 'true');
+  assert.equal(ui.row('vieneu:Trúc Ly').querySelector('.voice-choose-button').getAttribute('aria-pressed'), 'false');
   assert.match(ui.el('voice-source').textContent, /Microsoft Edge · Cần Internet/);
 });
 
@@ -141,15 +177,34 @@ test('missing or unavailable saved voice falls back to the catalog default', asy
     const ui = studio(undefined, { catalog: voiceCatalog, saved: { 'studio.voice-id': savedId } });
     await ui.flush();
     assert.equal(ui.el('voice-select').value, voiceCatalog.default_voice_id);
-    assert.equal(ui.el('btn-preview-voice').disabled, false);
+    assert.equal(ui.row(voiceCatalog.default_voice_id).querySelector('.voice-preview-button').disabled, false);
   }
+});
+
+test('voice search matches accents, descriptions and sources without altering selection', async () => {
+  const ui = studio(undefined, { catalog: voiceCatalog }); await ui.flush();
+  const shown = () => ui.el('voice-list').querySelectorAll('.voice-row')
+    .filter(row => !row.hidden && !row.classList.contains('hidden') && row.style.display !== 'none')
+    .map(row => row.dataset.voiceId);
+  for (const query of ['truc ly', 'NỮ MIỀN BẮC']) {
+    ui.el('voice-search').value = query;
+    await ui.el('voice-search').emit('input');
+    assert.deepEqual(shown(), ['vieneu:Trúc Ly']);
+    assert.equal(ui.el('voice-select').value, voiceCatalog.default_voice_id);
+  }
+  ui.el('voice-search').value = 'hugging face'; await ui.el('voice-search').emit('input');
+  assert.deepEqual(shown(), ['vieneu:Trúc Ly', 'vieneu:Unavailable']);
+  ui.el('voice-search').value = 'no-matching-voice'; await ui.el('voice-search').emit('input');
+  assert.deepEqual(shown(), []);
+  ui.el('voice-search').value = ''; await ui.el('voice-search').emit('input');
+  assert.equal(shown().length, voiceCatalog.voices.length);
+  assert.equal(ui.requests.filter(req => req.url === '/api/voices/preview').length, 0);
 });
 
 test('selected catalog voice id is sent on URL, local and upload starts without conflicting legacy engine', async () => {
   for (const path of ['url', 'local-file', 'upload']) {
     const ui = studio(undefined, { catalog: voiceCatalog }); await ui.flush();
-    ui.el('voice-select').value = 'vieneu:Trúc Ly';
-    await ui.el('voice-select').emit('change');
+    await ui.choose('vieneu:Trúc Ly');
     if (path === 'url') {
       ui.el('video-url').value = 'https://v.douyin.com/example/';
       await ui.el('video-url').emit('input');
@@ -167,15 +222,19 @@ test('selected catalog voice id is sent on URL, local and upload starts without 
     assert.equal(body.voice, undefined);
     assert.equal(body.tts_engine, undefined);
     assert.equal(ui.el('voice-select').disabled, true);
-    assert.equal(ui.el('btn-preview-voice').disabled, true);
+    for (const row of ui.el('voice-list').querySelectorAll('.voice-row')) {
+      assert.equal(row.querySelector('.voice-preview-button').disabled, true);
+      assert.equal(row.querySelector('.voice-choose-button').disabled, true);
+    }
   }
 });
 
 test('failed voice catalog retains legacy Edge selection and its working start payload', async () => {
   const ui = studio(); await ui.flush();
   assert.equal(ui.el('voice-select').value, 'vi-VN-HoaiMyNeural');
-  assert.match(ui.el('voice-source').textContent, /vẫn có thể dùng các giọng hiện tại/);
-  assert.equal(ui.el('btn-preview-voice').disabled, true);
+  assert.match(ui.el('voice-catalog-status').textContent, /Chưa tải được danh sách mở rộng/);
+  assert.equal(ui.el('voice-list').querySelectorAll('.voice-row').length, 2);
+  assert.equal(ui.el('voice-list').querySelectorAll('.voice-preview-button').some(button => !button.disabled), false);
   await ui.start();
   const body = JSON.parse(ui.requests.find(req => req.url === '/api/streaming/start-local-file').options.body);
   assert.equal(body.voice, 'vi-VN-HoaiMyNeural');
@@ -192,18 +251,20 @@ test('unavailable catalog selection cannot fall through to a mismatched legacy e
   assert.equal(ui.requests.some(req => req.url.includes('/streaming/start')), false);
 });
 
-test('voice preview requires explicit click, prevents duplicates and ignores a late result after selection changes', async () => {
+test('row preview auditions an unselected voice, prevents duplicates and ignores a late result after choosing', async () => {
   const ui = studio(undefined, { catalog: voiceCatalog }); await ui.flush();
   let finish;
   ui.replies.set('/api/voices/preview', () => new Promise(resolve => { finish = resolve; }));
-  const pending = ui.el('btn-preview-voice').click(); await ui.flush();
-  assert.equal(ui.el('btn-preview-voice').disabled, true);
-  assert.match(ui.el('voice-preview-label').textContent, /Đang tạo mẫu/);
-  await ui.el('btn-preview-voice').click();
+  const pending = ui.preview('vieneu:Trúc Ly'); await ui.flush();
+  assert.equal(ui.row('vieneu:Trúc Ly').querySelector('.voice-preview-button').disabled, true);
+  assert.match(ui.el('voice-preview-status').textContent, /Đang tạo mẫu.*Trúc Ly/);
+  assert.equal(ui.el('voice-select').value, voiceCatalog.default_voice_id);
+  assert.notEqual(ui.saved.get('studio.voice-id'), 'vieneu:Trúc Ly');
+  await ui.preview('vieneu:Trúc Ly');
   assert.equal(ui.requests.filter(req => req.url === '/api/voices/preview').length, 1);
   const body = JSON.parse(ui.requests.find(req => req.url === '/api/voices/preview').options.body);
-  assert.deepEqual(body, { voice_id: 'edge:vi-VN-HoaiMyNeural' });
-  ui.el('voice-select').value = 'vieneu:Trúc Ly'; await ui.el('voice-select').emit('change');
+  assert.deepEqual(body, { voice_id: 'vieneu:Trúc Ly' });
+  await ui.choose('vieneu:Trúc Ly');
   finish({ ok: true, json: async () => ({ preview_id: 'late', audio_url: '/api/voices/preview/late/audio' }) });
   await pending;
   assert.equal(ui.el('voice-preview-audio').playCount, 0);
@@ -215,17 +276,62 @@ test('voice preview requires explicit click, prevents duplicates and ignores a l
 test('successful voice preview uses controls, reports playback errors and releases its file on pagehide', async () => {
   const ui = studio(undefined, { catalog: voiceCatalog }); await ui.flush();
   ui.replies.set('/api/voices/preview', { preview_id: 'preview-1', audio_url: '/api/voices/preview/preview-1/audio' });
-  await ui.el('btn-preview-voice').click();
+  await ui.preview('vieneu:Trúc Ly');
   assert.equal(ui.el('voice-preview-audio').src, 'http://localhost/api/voices/preview/preview-1/audio');
   assert.equal(ui.el('voice-preview-audio').playCount, 1);
   assert.equal(ui.el('voice-preview-audio').classList.contains('hidden'), false);
-  assert.match(ui.el('voice-preview-status').textContent, /Mẫu giọng Hoài My/);
+  assert.match(ui.el('voice-preview-status').textContent, /Đang nghe mẫu: Trúc Ly/);
+  assert.match(ui.el('voice-preview-audio').getAttribute('aria-label'), /Trúc Ly/);
+  assert.equal(ui.el('voice-select').value, voiceCatalog.default_voice_id);
+  assert.notEqual(ui.saved.get('studio.voice-id'), 'vieneu:Trúc Ly');
   await ui.el('voice-preview-audio').emit('error');
   assert.match(ui.el('voice-preview-status').textContent, /Không phát được mẫu giọng/);
+  assert.equal(ui.row('vieneu:Trúc Ly').querySelector('.voice-preview-button').textContent, 'Nghe thử');
+  assert.equal(ui.row('vieneu:Trúc Ly').dataset.previewing, 'false');
+  assert.equal(ui.el('voice-preview-audio').paused, true);
+  assert.equal(ui.el('voice-preview-audio').src, undefined);
+  assert.ok(ui.requests.some(req => req.url === '/api/voices/preview/preview-1' && req.options.method === 'DELETE'));
+  ui.replies.set('/api/voices/preview', { preview_id: 'preview-retry', audio_url: '/api/voices/preview/preview-retry/audio' });
+  await ui.preview('vieneu:Trúc Ly');
+  assert.equal(ui.requests.filter(req => req.url === '/api/voices/preview' && req.options.method === 'POST').length, 2);
+  assert.equal(ui.el('voice-preview-audio').src, 'http://localhost/api/voices/preview/preview-retry/audio');
+  assert.equal(ui.el('voice-preview-audio').playCount, 2);
+  assert.equal(ui.el('voice-select').value, voiceCatalog.default_voice_id);
   await ui.window.emit('pagehide');
   assert.equal(ui.el('voice-preview-audio').paused, true);
   assert.equal(ui.el('voice-preview-audio').src, undefined);
-  assert.ok(ui.requests.some(req => req.url === '/api/voices/preview/preview-1' && req.options.method === 'DELETE' && req.options.keepalive));
+  assert.ok(ui.requests.some(req => req.url === '/api/voices/preview/preview-retry' && req.options.method === 'DELETE' && req.options.keepalive));
+});
+
+test('same-row preview button stops audio and choosing another row keeps sample controls synchronized', async () => {
+  const ui = studio(undefined, { catalog: voiceCatalog }); await ui.flush();
+  ui.replies.set('/api/voices/preview', { preview_id: 'sample-toggle', audio_url: '/api/voices/preview/sample-toggle/audio' });
+  await ui.preview('vieneu:Trúc Ly');
+  assert.match(ui.row('vieneu:Trúc Ly').querySelector('.voice-preview-button').textContent, /Dừng mẫu/);
+  assert.equal(ui.row('vieneu:Trúc Ly').dataset.previewing, 'true');
+  await ui.preview('vieneu:Trúc Ly');
+  assert.equal(ui.el('voice-preview-audio').paused, true);
+  assert.equal(ui.el('voice-preview-audio').src, undefined);
+  assert.equal(ui.row('vieneu:Trúc Ly').dataset.previewing, 'false');
+  assert.match(ui.row('vieneu:Trúc Ly').querySelector('.voice-preview-button').textContent, /Nghe thử/);
+  assert.equal(ui.requests.filter(req => req.url === '/api/voices/preview').length, 1);
+  assert.ok(ui.requests.some(req => req.url === '/api/voices/preview/sample-toggle' && req.options.method === 'DELETE'));
+  assert.equal(ui.el('voice-select').value, voiceCatalog.default_voice_id);
+});
+
+test('cancelled preview cannot queue a second synthesis until the original reply settles', async () => {
+  const ui = studio(undefined, { catalog: voiceCatalog }); await ui.flush();
+  let finish;
+  ui.replies.set('/api/voices/preview', () => new Promise(resolve => { finish = resolve; }));
+  const pending = ui.preview('vieneu:Trúc Ly'); await ui.flush();
+  await ui.choose('vieneu:Trúc Ly');
+  await ui.preview('edge:vi-VN-HoaiMyNeural');
+  assert.equal(ui.requests.filter(req => req.url === '/api/voices/preview').length, 1);
+  assert.equal(ui.row('edge:vi-VN-HoaiMyNeural').querySelector('.voice-preview-button').disabled, true);
+  finish({ ok: true, json: async () => ({ preview_id: 'cancelled', audio_url: '/api/voices/preview/cancelled/audio' }) });
+  await pending;
+  assert.equal(ui.row('edge:vi-VN-HoaiMyNeural').querySelector('.voice-preview-button').disabled, false);
+  assert.equal(ui.el('voice-preview-audio').playCount, 0);
 });
 
 test('starting a task cancels a pending voice preview without attaching its late audio', async () => {
@@ -233,7 +339,7 @@ test('starting a task cancels a pending voice preview without attaching its late
   let finish;
   ui.window.loadDroppedLocalVideo('D:/clip.mp4');
   ui.replies.set('/api/voices/preview', () => new Promise(resolve => { finish = resolve; }));
-  const preview = ui.el('btn-preview-voice').click(); await ui.flush();
+  const preview = ui.preview('vieneu:Trúc Ly'); await ui.flush();
   ui.replies.set('/api/streaming/start-local-file', { task_id: 'start-while-preview', video_url: null });
   await ui.el('btn-start').click();
   finish({ ok: true, json: async () => ({ preview_id: 'obsolete', audio_url: '/api/voices/preview/obsolete/audio' }) });
@@ -249,9 +355,9 @@ test('voice preview reports server errors locally and rejects external audio URL
   ]) {
     const ui = studio(undefined, { catalog: voiceCatalog }); await ui.flush();
     ui.replies.set('/api/voices/preview', reply);
-    await ui.el('btn-preview-voice').click();
+    await ui.preview('vieneu:Trúc Ly');
     assert.equal(ui.el('voice-preview-status').dataset.error, 'true');
-    assert.equal(ui.el('btn-preview-voice').disabled, false);
+    assert.equal(ui.row('vieneu:Trúc Ly').querySelector('.voice-preview-button').disabled, false);
     assert.equal(ui.el('voice-preview-audio').playCount, 0);
     assert.equal(ui.alerts.length, 0);
   }
