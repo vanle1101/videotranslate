@@ -93,7 +93,7 @@ class ModelManager:
                           whisper_dir, whisper_files, device, ("faster_whisper",)),
             _model_record("YaoFANGUK/VSR + ProPainter", "ProPainter + RAFT + Flow Completion", vsr_dir,
                           vsr_files, device,
-                          runtime_note="Đã tải checkpoint; ứng dụng chưa tích hợp suy luận ProPainter. Che phụ đề hiện dùng bộ lọc blur."),
+                          runtime_note="Ứng dụng chưa tích hợp suy luận ProPainter. Che phụ đề hiện dùng bộ lọc blur."),
         ]
 
     @staticmethod
