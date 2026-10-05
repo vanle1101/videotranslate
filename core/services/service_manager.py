@@ -297,6 +297,10 @@ class ServiceManager:
             except Exception:
                 logger.warning("Could not fully stop the compatible video preview worker.")
 
+        voice_preview_module = sys.modules.get("core.voice_preview")
+        if voice_preview_module is not None:
+            voice_preview_module.voice_preview_manager.shutdown()
+
         # Close only the browser bridge owned by this application.
         muse_module = sys.modules.get("core.services.muse_service")
         if muse_module is not None:

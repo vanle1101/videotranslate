@@ -13,6 +13,7 @@ from core.engines.asr.faster_whisper_engine import FasterWhisperFallbackEngine
 from core.engines.translation.semantic_translator import SemanticTranslator
 from core.engines.tts.vieneu_engine import VieNeuEngine
 from core.engines.tts.edge_fallback import EdgeTTSFallbackEngine
+from core.voice_catalog import resolve_voice
 from core.engines.alignment.timing_aligner import TimingBudgetAligner
 from core.engines.separator.realtime_suppressor import RealtimeVocalSuppressor
 
@@ -80,8 +81,7 @@ class StreamingPipelineSession:
             "progress_pct": None, "status": "RUNNING", "can_pause": False,
         }
         self.initial_buffer_seconds = settings.INITIAL_BUFFER_SECONDS if initial_buffer_seconds is None else initial_buffer_seconds
-        self.voice = voice or settings.EDGE_VOICE
-        self.tts_engine_name = tts_engine_name or settings.TTS_ENGINE
+        self.tts_engine_name, self.voice = resolve_voice(voice, tts_engine_name)
         self.asr_engine_name = asr_engine_name or settings.ASR_ENGINE
         self.ref_audio = ref_audio
         self.event_callback = event_callback
@@ -247,7 +247,12 @@ class StreamingPipelineSession:
             if self.vieneu.is_available:
                 self.tts_engine = self.vieneu
             else:
-                self.warnings.append("VieNeu chưa được cài; sử dụng giọng Edge-TTS.")
+                raise ValueError("Giọng VieNeu đã chọn chưa sẵn sàng. Hãy cài model và runtime VieNeu.")
+        elif self.tts_engine_name == "piper-tts":
+            from core.engines.tts.piper_engine import PiperEngine
+            self.tts_engine = PiperEngine()
+            if not self.tts_engine.is_available:
+                raise ValueError("Giọng Piper đã chọn chưa sẵn sàng. Hãy cài model và runtime Piper.")
         elif self.tts_engine_name != "edge-tts":
             raise ValueError(f"TTS engine không được hỗ trợ: {self.tts_engine_name}")
 
@@ -435,8 +440,8 @@ class StreamingPipelineSession:
         # Whisper/SenseVoice in RAM for every video processed in this app.
         self.faster_whisper.model = None
         self.sensevoice.recognizer = None
-        if self.vieneu is not None:
-            self.vieneu.model = None
+        # VieNeu/Piper share one locked CPU model across previews and sessions.
+        # Dropping it here would interrupt another session or reload it per sample.
         def remove_generated(path):
             try:
                 path.unlink(missing_ok=True)

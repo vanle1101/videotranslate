@@ -195,19 +195,20 @@ class PortablePipelineTests(unittest.TestCase):
         self.assertIn("error", [event for event, _ in events])
         self.assertEqual(events[-1][1]["status"], "failed")
 
-    def test_missing_optional_models_fall_back_and_start_failure_is_visible(self):
+    def test_missing_selected_voice_stops_and_start_failure_is_visible(self):
         events = []
         session = self.session(
             asr_engine_name="sensevoice", tts_engine_name="vieneu",
             event_callback=lambda event, data: events.append((event, data)),
         )
         with patch("core.streaming.pipeline.VieNeuEngine", return_value=Mock(is_available=False)), \
-                patch.object(session, "_run_ffmpeg", new=AsyncMock(side_effect=RuntimeError("input missing"))):
-            with self.assertRaisesRegex(RuntimeError, "input missing"):
+                patch.object(session, "_run_ffmpeg", new=AsyncMock()) as extract:
+            with self.assertRaisesRegex(ValueError, "VieNeu.*chưa sẵn sàng"):
                 asyncio.run(session.start())
+            extract.assert_not_called()
         self.assertIs(session.asr_engine, session.faster_whisper)
         self.assertIs(session.tts_engine, session.edge_tts)
-        self.assertEqual(len(session.warnings), 2)
+        self.assertEqual(len(session.warnings), 1)
         self.assertFalse(session.is_running)
         self.assertEqual([event for event, _ in events], ["progress", "progress", "error", "finished"])
         self.assertEqual(events[0][1]["phase"], "prepare")

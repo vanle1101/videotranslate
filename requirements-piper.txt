@@ -1,0 +1,6 @@
+# Optional local Vietnamese voices. Model acquisition: python download_piper.py --download
+# piper-tts runtime: GPL-3.0-or-later; Cake model weights: MIT.
+piper-tts==1.8.0
+pathvalidate==3.3.1
+onnxruntime>=1,<2
+sea-g2p==0.10.0

@@ -32,6 +32,8 @@ from core.streaming.pipeline import (
 )
 from core.streaming.export import HQExporter
 from core.media_preview import preview_manager
+from core.voice_catalog import list_voices, resolve_voice
+from core.voice_preview import select_voice, voice_preview_manager, VoicePreviewBusy
 from core.services.muse_service import ERRORS as MUSE_ERRORS, MuseError, muse_service
 
 app = FastAPI(title=f"{settings.APP_NAME} - Realtime Streaming Studio")
@@ -65,6 +67,7 @@ class StreamUrlRequest(BaseModel):
     url: str
     initial_buffer_seconds: Optional[float] = Field(default=None, gt=0, le=120)
     voice: Optional[str] = None
+    voice_id: Optional[str] = None
     tts_engine: Optional[str] = None
     asr_engine: Optional[str] = None
 
@@ -125,6 +128,56 @@ async def get_hardware():
 @app.get("/api/models")
 async def get_models():
     return {"models": ModelManager.get_all_models()}
+
+
+@app.get("/api/voices")
+async def get_voices():
+    voices = await asyncio.to_thread(list_voices)
+    try:
+        default_engine, default_voice = resolve_voice()
+        default_id = next((item["id"] for item in voices
+                           if resolve_voice(item["id"]) == (default_engine, default_voice)), None)
+    except ValueError:
+        default_id = None
+    return {"voices": voices, "default_voice_id": default_id}
+
+
+class VoicePreviewRequest(BaseModel):
+    voice_id: str = Field(min_length=1, max_length=160)
+
+
+def validated_voice(voice_id=None, engine=None, legacy_voice=None):
+    try:
+        return select_voice(voice_id, engine, legacy_voice)
+    except ValueError as error:
+        raise HTTPException(status_code=422, detail=str(error)) from None
+
+
+@app.post("/api/voices/preview")
+async def create_voice_preview(req: VoicePreviewRequest):
+    try:
+        return await asyncio.to_thread(voice_preview_manager.create, req.voice_id)
+    except ValueError as error:
+        raise HTTPException(status_code=422, detail=str(error)) from None
+    except VoicePreviewBusy as error:
+        raise HTTPException(status_code=409, detail=str(error)) from None
+    except Exception:
+        raise HTTPException(status_code=503, detail="Không tạo được mẫu giọng. Với giọng Edge, hãy kiểm tra mạng và thử lại.") from None
+
+
+@app.get("/api/voices/preview/{preview_id}/audio")
+async def get_voice_preview_audio(preview_id: str):
+    try:
+        return Response(voice_preview_manager.audio(preview_id), media_type="audio/wav",
+                        headers={"Cache-Control": "no-store"})
+    except KeyError:
+        raise HTTPException(status_code=404, detail="Mẫu giọng đã hết hạn. Hãy bấm Nghe thử lại.") from None
+
+
+@app.delete("/api/voices/preview/{preview_id}")
+async def delete_voice_preview(preview_id: str):
+    voice_preview_manager.delete(preview_id)
+    return {"status": "ok"}
 
 class ModelVerifyRequest(BaseModel):
     query: str
@@ -434,6 +487,7 @@ async def start_streaming_url(req: StreamUrlRequest):
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from None
 
+    engine, voice = validated_voice(req.voice_id, req.tts_engine, req.voice)
     task_id = str(uuid.uuid4())[:8]
 
     # Create session
@@ -441,8 +495,8 @@ async def start_streaming_url(req: StreamUrlRequest):
         task_id=task_id,
         video_path=None,
         initial_buffer_seconds=req.initial_buffer_seconds or settings.INITIAL_BUFFER_SECONDS,
-        voice=req.voice or settings.EDGE_VOICE,
-        tts_engine_name=req.tts_engine or settings.TTS_ENGINE,
+        voice=voice,
+        tts_engine_name=engine,
         asr_engine_name=req.asr_engine or settings.ASR_ENGINE,
         event_callback=lambda event_type, data: broadcast_session_event(task_id, event_type, data)
     )
@@ -468,11 +522,15 @@ async def start_streaming_url(req: StreamUrlRequest):
 async def start_streaming_upload(
     file: UploadFile = File(...),
     initial_buffer_seconds: Optional[float] = Form(None, gt=0, le=120),
-    voice: str = Form(settings.EDGE_VOICE),
-    tts_engine: str = Form(settings.TTS_ENGINE),
+    voice: Optional[str] = Form(None),
+    voice_id: Optional[str] = Form(None),
+    tts_engine: Optional[str] = Form(None),
     asr_engine: str = Form(settings.ASR_ENGINE),
     ref_audio: Optional[UploadFile] = File(None)
 ):
+    tts_engine, voice = validated_voice(voice_id, tts_engine, voice)
+    if ref_audio and ref_audio.filename and tts_engine != "vieneu-tts":
+        raise HTTPException(status_code=422, detail="Mẫu giọng riêng chỉ được hỗ trợ khi chọn VieNeu.")
     task_id = str(uuid.uuid4())[:8]
     ext = Path(file.filename).suffix or ".mp4"
     saved_path = settings.INPUT_DIR / f"upload_{task_id}{ext}"
@@ -632,6 +690,7 @@ class StreamLocalFileRequest(BaseModel):
     file_path: str
     initial_buffer_seconds: Optional[float] = Field(default=None, gt=0, le=120)
     voice: Optional[str] = None
+    voice_id: Optional[str] = None
     tts_engine: Optional[str] = None
     asr_engine: Optional[str] = None
 
@@ -648,13 +707,14 @@ async def start_streaming_local_file(req: StreamLocalFileRequest):
     if not p.is_file():
         raise HTTPException(status_code=404, detail=f"File không tồn tại: {req.file_path}")
 
+    engine, voice = validated_voice(req.voice_id, req.tts_engine, req.voice)
     task_id = str(uuid.uuid4())[:8]
     session = create_streaming_session(
         task_id=task_id,
         video_path=p,
         initial_buffer_seconds=req.initial_buffer_seconds or settings.INITIAL_BUFFER_SECONDS,
-        voice=req.voice or settings.EDGE_VOICE,
-        tts_engine_name=req.tts_engine or settings.TTS_ENGINE,
+        voice=voice,
+        tts_engine_name=engine,
         asr_engine_name=req.asr_engine or settings.ASR_ENGINE,
         event_callback=lambda event_type, data: broadcast_session_event(task_id, event_type, data)
     )

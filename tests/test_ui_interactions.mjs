@@ -6,7 +6,7 @@ import assert from 'node:assert/strict';
 const source = readFileSync(new URL('../static/app.js', import.meta.url), 'utf8');
 const template = readFileSync(new URL('../templates/index.html', import.meta.url), 'utf8');
 
-function studio(cookieReply = { configured: false, count: 0, message: '' }) {
+function studio(cookieReply = { configured: false, count: 0, message: '' }, voiceConfig = {}) {
   const elements = new Map(), audio = [], sockets = [], requests = [], alerts = [], copied = [];
   let ready;
   class Element {
@@ -72,8 +72,14 @@ function studio(cookieReply = { configured: false, count: 0, message: '' }) {
     ['/api/settings', { buffer_target: '15', ducking_level: '-18', opencode_free_models: [], gemini_model: 'gemini-fixture' }],
     ['/api/muse/status', {}],
     ['/api/douyin/cookies', cookieReply],
+    ['/api/voices', voiceConfig.catalog || {}],
   ]);
-  const window = { location: { protocol: 'http:', host: 'localhost' } };
+  const windowEvents = {}, saved = new Map(Object.entries(voiceConfig.saved || {}));
+  const window = {
+    location: { protocol: 'http:', host: 'localhost' },
+    addEventListener(name, callback) { (windowEvents[name] ||= []).push(callback); },
+    async emit(name) { for (const callback of windowEvents[name] || []) await callback(); },
+  };
   const fetch = async (url, options = {}) => {
     requests.push({ url, options });
     const reply = replies.get(url) || {};
@@ -89,7 +95,8 @@ function studio(cookieReply = { configured: false, count: 0, message: '' }) {
     },
     URL: Object.assign(class extends URL {}, { createObjectURL: () => 'blob:video', revokeObjectURL() {} }),
     navigator: { clipboard: { writeText: async text => { copied.push(text); } } },
-    localStorage: { removeItem() {} }, setTimeout() {}, setInterval() { return 1; }, clearInterval() {},
+    localStorage: { removeItem(key) { saved.delete(key); }, getItem(key) { return saved.get(key); }, setItem(key, value) { saved.set(key, value); } },
+    setTimeout() {}, setInterval() { return 1; }, clearInterval() {},
   });
   ready();
   const flush = () => new Promise(resolve => setImmediate(resolve));
@@ -101,8 +108,154 @@ function studio(cookieReply = { configured: false, count: 0, message: '' }) {
     sockets.at(-1).receive({ type: 'init', duration: 10, segments_count: 1, bgm_url: '/bgm.m4a',
       segments: [{ id: 0, start: 0, end: 10, duration: 10, status: 'READY', audio_url: '/dub.wav', final_vi: '<b>Xin chào</b>' }] });
   }
-  return { el, audio, sockets, requests, replies, alerts, copied, window, flush, start };
+  return { el, audio, sockets, requests, replies, alerts, copied, window, flush, start, saved };
 }
+
+const voiceCatalog = {
+  default_voice_id: 'edge:vi-VN-HoaiMyNeural',
+  voices: [
+    { id: 'edge:vi-VN-HoaiMyNeural', name: 'Hoài My (Nữ)', engine: 'edge-tts', source: 'Microsoft Edge', language: 'vi-VN', available: true, offline: false },
+    { id: 'vieneu:Trúc Ly', name: 'Trúc Ly', engine: 'vieneu-tts', source: 'VieNeu · Hugging Face', language: 'vi-VN', description: 'Nữ miền Bắc', available: true, offline: true },
+    { id: 'vieneu:Unavailable', name: 'Giọng chưa tải', engine: 'vieneu-tts', source: 'VieNeu · Hugging Face', language: 'vi-VN', available: false, offline: true },
+  ],
+};
+
+test('voice catalog groups sources, restores an available voice and labels local runtime', async () => {
+  const ui = studio(undefined, { catalog: voiceCatalog, saved: { 'studio.voice-id': 'vieneu:Trúc Ly' } });
+  await ui.flush();
+  assert.equal(ui.el('voice-select').value, 'vieneu:Trúc Ly');
+  assert.deepEqual(ui.el('voice-select').children.map(group => group.label), ['Microsoft Edge', 'VieNeu · Hugging Face']);
+  assert.equal(ui.el('voice-select').children[1].children[1].disabled, true);
+  assert.match(ui.el('voice-source').textContent, /Hugging Face · Chạy trên máy · 2 giọng có sẵn — Nữ miền Bắc/);
+  assert.equal(ui.el('btn-preview-voice').disabled, false);
+  assert.equal(ui.el('voice-preview-audio').playCount, 0);
+  assert.equal(ui.requests.filter(req => req.url === '/api/voices/preview').length, 0);
+  ui.el('voice-select').value = 'edge:vi-VN-HoaiMyNeural';
+  await ui.el('voice-select').emit('change');
+  assert.equal(ui.saved.get('studio.voice-id'), 'edge:vi-VN-HoaiMyNeural');
+  assert.match(ui.el('voice-source').textContent, /Microsoft Edge · Cần Internet/);
+});
+
+test('missing or unavailable saved voice falls back to the catalog default', async () => {
+  for (const savedId of ['removed:voice', 'vieneu:Unavailable']) {
+    const ui = studio(undefined, { catalog: voiceCatalog, saved: { 'studio.voice-id': savedId } });
+    await ui.flush();
+    assert.equal(ui.el('voice-select').value, voiceCatalog.default_voice_id);
+    assert.equal(ui.el('btn-preview-voice').disabled, false);
+  }
+});
+
+test('selected catalog voice id is sent on URL, local and upload starts without conflicting legacy engine', async () => {
+  for (const path of ['url', 'local-file', 'upload']) {
+    const ui = studio(undefined, { catalog: voiceCatalog }); await ui.flush();
+    ui.el('voice-select').value = 'vieneu:Trúc Ly';
+    await ui.el('voice-select').emit('change');
+    if (path === 'url') {
+      ui.el('video-url').value = 'https://v.douyin.com/example/';
+      await ui.el('video-url').emit('input');
+    } else if (path === 'local-file') ui.window.loadDroppedLocalVideo('D:/clip.mp4');
+    else {
+      ui.el('video-file').files = [{ name: 'clip.mp4', size: 100 }];
+      await ui.el('video-file').emit('change');
+    }
+    const endpoint = `/api/streaming/start-${path}`;
+    ui.replies.set(endpoint, { task_id: 'catalog-fixture', video_url: null });
+    await ui.el('btn-start').click();
+    const request = ui.requests.find(req => req.url === endpoint);
+    const body = path === 'upload' ? Object.fromEntries(request.options.body.parts.map(part => [part.name, part.value])) : JSON.parse(request.options.body);
+    assert.equal(body.voice_id, 'vieneu:Trúc Ly');
+    assert.equal(body.voice, undefined);
+    assert.equal(body.tts_engine, undefined);
+    assert.equal(ui.el('voice-select').disabled, true);
+    assert.equal(ui.el('btn-preview-voice').disabled, true);
+  }
+});
+
+test('failed voice catalog retains legacy Edge selection and its working start payload', async () => {
+  const ui = studio(); await ui.flush();
+  assert.equal(ui.el('voice-select').value, 'vi-VN-HoaiMyNeural');
+  assert.match(ui.el('voice-source').textContent, /vẫn có thể dùng các giọng hiện tại/);
+  assert.equal(ui.el('btn-preview-voice').disabled, true);
+  await ui.start();
+  const body = JSON.parse(ui.requests.find(req => req.url === '/api/streaming/start-local-file').options.body);
+  assert.equal(body.voice, 'vi-VN-HoaiMyNeural');
+  assert.equal(body.tts_engine, 'edge-tts');
+  assert.equal(body.voice_id, undefined);
+});
+
+test('unavailable catalog selection cannot fall through to a mismatched legacy engine', async () => {
+  const ui = studio(undefined, { catalog: voiceCatalog }); await ui.flush();
+  ui.window.loadDroppedLocalVideo('D:/clip.mp4');
+  ui.el('voice-select').value = 'vieneu:Unavailable';
+  await ui.el('btn-start').click();
+  assert.match(ui.el('voice-preview-status').textContent, /chọn một giọng đang có sẵn/);
+  assert.equal(ui.requests.some(req => req.url.includes('/streaming/start')), false);
+});
+
+test('voice preview requires explicit click, prevents duplicates and ignores a late result after selection changes', async () => {
+  const ui = studio(undefined, { catalog: voiceCatalog }); await ui.flush();
+  let finish;
+  ui.replies.set('/api/voices/preview', () => new Promise(resolve => { finish = resolve; }));
+  const pending = ui.el('btn-preview-voice').click(); await ui.flush();
+  assert.equal(ui.el('btn-preview-voice').disabled, true);
+  assert.match(ui.el('voice-preview-label').textContent, /Đang tạo mẫu/);
+  await ui.el('btn-preview-voice').click();
+  assert.equal(ui.requests.filter(req => req.url === '/api/voices/preview').length, 1);
+  const body = JSON.parse(ui.requests.find(req => req.url === '/api/voices/preview').options.body);
+  assert.deepEqual(body, { voice_id: 'edge:vi-VN-HoaiMyNeural' });
+  ui.el('voice-select').value = 'vieneu:Trúc Ly'; await ui.el('voice-select').emit('change');
+  finish({ ok: true, json: async () => ({ preview_id: 'late', audio_url: '/api/voices/preview/late/audio' }) });
+  await pending;
+  assert.equal(ui.el('voice-preview-audio').playCount, 0);
+  assert.equal(ui.el('voice-preview-audio').src, undefined);
+  assert.ok(ui.requests.some(req => req.url === '/api/voices/preview/late' && req.options.method === 'DELETE'));
+  assert.equal(ui.el('voice-preview-status').textContent, '');
+});
+
+test('successful voice preview uses controls, reports playback errors and releases its file on pagehide', async () => {
+  const ui = studio(undefined, { catalog: voiceCatalog }); await ui.flush();
+  ui.replies.set('/api/voices/preview', { preview_id: 'preview-1', audio_url: '/api/voices/preview/preview-1/audio' });
+  await ui.el('btn-preview-voice').click();
+  assert.equal(ui.el('voice-preview-audio').src, 'http://localhost/api/voices/preview/preview-1/audio');
+  assert.equal(ui.el('voice-preview-audio').playCount, 1);
+  assert.equal(ui.el('voice-preview-audio').classList.contains('hidden'), false);
+  assert.match(ui.el('voice-preview-status').textContent, /Mẫu giọng Hoài My/);
+  await ui.el('voice-preview-audio').emit('error');
+  assert.match(ui.el('voice-preview-status').textContent, /Không phát được mẫu giọng/);
+  await ui.window.emit('pagehide');
+  assert.equal(ui.el('voice-preview-audio').paused, true);
+  assert.equal(ui.el('voice-preview-audio').src, undefined);
+  assert.ok(ui.requests.some(req => req.url === '/api/voices/preview/preview-1' && req.options.method === 'DELETE' && req.options.keepalive));
+});
+
+test('starting a task cancels a pending voice preview without attaching its late audio', async () => {
+  const ui = studio(undefined, { catalog: voiceCatalog }); await ui.flush();
+  let finish;
+  ui.window.loadDroppedLocalVideo('D:/clip.mp4');
+  ui.replies.set('/api/voices/preview', () => new Promise(resolve => { finish = resolve; }));
+  const preview = ui.el('btn-preview-voice').click(); await ui.flush();
+  ui.replies.set('/api/streaming/start-local-file', { task_id: 'start-while-preview', video_url: null });
+  await ui.el('btn-start').click();
+  finish({ ok: true, json: async () => ({ preview_id: 'obsolete', audio_url: '/api/voices/preview/obsolete/audio' }) });
+  await preview;
+  assert.equal(ui.el('voice-preview-audio').playCount, 0);
+  assert.ok(ui.requests.some(req => req.url === '/api/voices/preview/obsolete' && req.options.method === 'DELETE'));
+});
+
+test('voice preview reports server errors locally and rejects external audio URLs', async () => {
+  for (const reply of [
+    { failure: true, detail: 'Giọng này chưa sẵn sàng trên máy.' },
+    { preview_id: 'external', audio_url: 'https://unrelated.example/voice.wav' },
+  ]) {
+    const ui = studio(undefined, { catalog: voiceCatalog }); await ui.flush();
+    ui.replies.set('/api/voices/preview', reply);
+    await ui.el('btn-preview-voice').click();
+    assert.equal(ui.el('voice-preview-status').dataset.error, 'true');
+    assert.equal(ui.el('btn-preview-voice').disabled, false);
+    assert.equal(ui.el('voice-preview-audio').playCount, 0);
+    assert.equal(ui.alerts.length, 0);
+  }
+});
 
 test('Douyin cookie status is local-only and import never claims the session is authenticated', async () => {
   const ui = studio({ configured: true, count: 3, message: 'server status' });
@@ -340,6 +493,44 @@ test('pasted share URL is recognized, clears a prior file and sends only the ext
   const request = ui.requests.find(item => item.url === '/api/streaming/start-url');
   assert.equal(JSON.parse(request.options.body).url, 'https://v.douyin.com/_IAiSDH0bK8/');
   assert.equal(ui.requests.some(item => item.url === '/api/streaming/start-local-file'), false);
+});
+
+test('paste instantly replaces a whole share message with its clean link and never starts a task', async () => {
+  const target = 'https://v.douyin.com/_lAiSDH0bK8/';
+  for (const pasted of [
+    `3.53 复制打开抖音，看看【斩漫的作品】《千金垂爱》 # ai动漫 ${target} Rxf:/ 01/17 J@V.Lw :1pm`,
+    String.raw`3.53 复制打开抖音 [**https://v.douyin.com/\_lAiSDH0bK8/**](https://v.douyin.com/_lAiSDH0bK8/) Rxf:/ 01/17 J@V.Lw :1pm`,
+  ]) {
+    const ui = studio(); await ui.flush();
+    ui.window.loadDroppedLocalVideo('D:/previous.mp4');
+    let prevented = false;
+    await ui.el('video-url').emit('paste', {
+      clipboardData: { getData: type => type === 'text/plain' ? pasted : '' },
+      preventDefault() { prevented = true; },
+    });
+    assert.equal(prevented, true);
+    assert.equal(ui.el('video-url').value, target);
+    assert.equal(ui.window.currentLocalFilePath, null);
+    assert.equal(ui.el('btn-start').disabled, false);
+    assert.equal(ui.el('video-url')['aria-invalid'], 'false');
+    assert.ok(ui.el('video-url-status').textContent.includes(target));
+    assert.equal(ui.requests.some(req => req.url.includes('/streaming/start')), false);
+    ui.window.loadDroppedLocalVideo('D:/replacement.mp4');
+    assert.equal(ui.el('video-url').value, '');
+    assert.equal(ui.window.currentLocalFilePath, 'D:/replacement.mp4');
+  }
+});
+
+test('non-link paste keeps native text editing and never discards the existing source', async () => {
+  const ui = studio(); await ui.flush();
+  ui.window.loadDroppedLocalVideo('D:/previous.mp4');
+  let prevented = false;
+  await ui.el('video-url').emit('paste', {
+    clipboardData: { getData: () => 'just a title' }, preventDefault() { prevented = true; },
+  });
+  assert.equal(prevented, false);
+  assert.equal(ui.window.currentLocalFilePath, 'D:/previous.mp4');
+  assert.equal(ui.el('video-url').value, '');
 });
 
 test('whole Douyin share text including copied Markdown sends exactly its video link', async () => {

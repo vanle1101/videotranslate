@@ -12,6 +12,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from PySide6.QtCore import QEventLoop, QTimer
 from PySide6.QtWidgets import QApplication
+from PySide6.QtWebEngineCore import QWebEnginePage
 from desktop_app import StudioMainWindow, StudioSplashScreen
 from core.services.service_manager import service_manager
 from core.engines.separator.realtime_suppressor import RealtimeVocalSuppressor
@@ -179,11 +180,40 @@ def check_progress_and_logs(page):
             send() {}
             close() { this.readyState = 3; }
         };
-        const urlInput = document.getElementById('video-url');
-        urlInput.value = window.__shareTextFixture;
-        urlInput.dispatchEvent(new Event('input', {bubbles: true}));
-        document.getElementById('btn-start').click();
     ''')
+    # Trigger the native Qt Paste action so the actual ClipboardEvent, not an
+    # input-event approximation, exercises immediate normalization.
+    from PySide6.QtCore import QMimeData
+    clipboard = QApplication.clipboard()
+    saved_clipboard = QMimeData()
+    current_mime = clipboard.mimeData()
+    if current_mime is not None:
+        for mime_type in current_mime.formats():
+            saved_clipboard.setData(mime_type, current_mime.data(mime_type))
+    try:
+        clipboard.setText(share_text)
+        javascript(page, '''
+            const urlInput = document.getElementById('video-url');
+            urlInput.value = '';
+            urlInput.focus();
+        ''')
+        page.triggerAction(QWebEnginePage.WebAction.Paste)
+        wait(100)
+        pasted = json.loads(javascript(page, '''JSON.stringify({
+            value: document.getElementById('video-url').value,
+            recognized: document.getElementById('video-url-status').textContent,
+            invalid: document.getElementById('video-url').getAttribute('aria-invalid'),
+            started: !!window.__submittedShareUrl
+        })'''))
+        assert pasted['value'] == 'https://v.douyin.com/_lAiSDH0bK8/', pasted
+        assert pasted['value'] in pasted['recognized'], pasted
+        assert pasted['invalid'] == 'false' and not pasted['started'], pasted
+    finally:
+        if saved_clipboard.formats():
+            clipboard.setMimeData(saved_clipboard)
+        else:
+            clipboard.clear()
+    javascript(page, "document.getElementById('btn-start').click()")
     wait(200)
     javascript(page, '''window.__downloadSocket.onmessage({data: JSON.stringify({type: 'progress',
         ...window.__progressTask, progress_pct: 42.4})});''')
@@ -249,9 +279,148 @@ def check_progress_and_logs(page):
         document.getElementById('video-url').value = '';
         document.getElementById('video-url').dispatchEvent(new Event('input', {bubbles: true}));
     ''')
-    return {'download_percent': measured['percent'], 'whole_share_text': True, 'unknown_progress': True, 'task_visible': True,
+    return {'download_percent': measured['percent'], 'whole_share_text': True, 'native_paste_canonical_url': True,
+            'unknown_progress': True, 'task_visible': True,
             'logs_preserve_lines': logs['separateLines'], 'logs_safe_copy': logs['rawMatches'],
             'native_clipboard': True}
+
+
+def check_voice_catalog_and_preview(page, folder):
+    """Use the real catalog, HTTP preview route and Qt audio decoding.
+
+    Synthesis alone is replaced by a deterministic tiny WAV; no paid service,
+    network voice provider or model initialization is required by this smoke.
+    """
+    from unittest.mock import patch
+    import math
+    import struct
+    import wave
+
+    javascript(page, '''
+        window.__voiceSmokeCatalog = null;
+        fetch('/api/voices').then(response => response.json()).then(data => window.__voiceSmokeCatalog = data);
+    ''')
+    for _ in range(100):
+        catalog = json.loads(javascript(page, '''JSON.stringify((() => {
+            const select = document.getElementById('voice-select');
+            return {api: window.__voiceSmokeCatalog, selected: select.value,
+                options: [...select.options].map(option => ({id: option.value, name: option.textContent, disabled: option.disabled})),
+                groups: [...select.querySelectorAll('optgroup')].map(group => group.label),
+                previewDisabled: document.getElementById('btn-preview-voice').disabled};
+        })())'''))
+        if catalog['api'] and len(catalog['options']) == len(catalog['api']['voices']):
+            break
+        wait(100)
+    voices = catalog['api']['voices']
+    assert len(voices) >= 27, catalog
+    assert [option['id'] for option in catalog['options']] == [voice['id'] for voice in voices], catalog
+    assert set(catalog['groups']) == {voice['source'] for voice in voices}, catalog
+    assert all(option['name'].startswith(voice['name']) and option['disabled'] == (not voice['available'])
+               for option, voice in zip(catalog['options'], voices)), catalog
+    selected = next(voice for voice in voices if voice['id'] == catalog['selected'])
+    assert selected['available'] and not catalog['previewDisabled'], catalog
+    local_voice = next(voice for voice in voices if voice['id'] == 'vieneu:Trúc Ly' and voice['available'])
+    javascript(page, '''
+        window.__voiceSmokeSelected = document.getElementById('voice-select').value;
+        window.__voiceSmokePreference = localStorage.getItem('studio.voice-id');
+        window.__voiceSmokeFetch = window.fetch;
+        window.__voiceSmokeRequests = [];
+        window.__voiceSmokePreviewId = null;
+        window.fetch = async (url, options = {}) => {
+            if (url === '/api/streaming/start-local-file') {
+                window.__voiceSmokeRequests.push(JSON.parse(options.body));
+                return new Response(JSON.stringify({detail: 'VOICE_SMOKE_EXPECTED'}), {status: 400});
+            }
+            const response = await window.__voiceSmokeFetch(url, options);
+            if (url === '/api/voices/preview' && options.method === 'POST' && response.ok) {
+                window.__voiceSmokePreviewId = (await response.clone().json()).preview_id;
+            }
+            return response;
+        };
+        const selectedVoice = document.getElementById('voice-select');
+        selectedVoice.value = 'vieneu:Trúc Ly';
+        selectedVoice.dispatchEvent(new Event('change', {bubbles: true}));
+    ''')
+    synth_calls = []
+    try:
+        source = javascript(page, "document.getElementById('voice-source').textContent")
+        assert local_voice['source'] in source and 'Chạy trên máy' in source, source
+        # Backend startup is intercepted; the real handler must dispatch the
+        # selected catalog ID without the configured Edge engine overriding it.
+        source_video = Path(folder) / 'voice-fixture.mp4'
+        subprocess.run(['ffmpeg', '-hide_banner', '-loglevel', 'error', '-nostdin', '-y',
+                        '-f', 'lavfi', '-i', 'color=c=black:s=32x32:r=1:d=1',
+                        '-c:v', 'libx264', '-pix_fmt', 'yuv420p', str(source_video)],
+                       check=True, capture_output=True, timeout=20)
+        javascript(page, f'window.loadDroppedLocalVideo({json.dumps(str(source_video))});')
+        javascript(page, "document.getElementById('btn-start').click()")
+        wait(200)
+        requests = json.loads(javascript(page, 'JSON.stringify(window.__voiceSmokeRequests)'))
+        assert len(requests) == 1 and requests[0]['voice_id'] == local_voice['id'], requests
+        assert 'voice' not in requests[0] and 'tts_engine' not in requests[0], requests
+
+        def synthesize_fixture(text, output, voice=None, **kwargs):
+            synth_calls.append(voice)
+            rate = 16000
+            frames = b''.join(struct.pack('<h', int(3000 * math.sin(2 * math.pi * 440 * i / rate)))
+                              for i in range(rate * 2))
+            with wave.open(str(output), 'wb') as sample:
+                sample.setnchannels(1)
+                sample.setsampwidth(2)
+                sample.setframerate(rate)
+                sample.writeframes(frames)
+            return output
+
+        with patch('core.voice_preview.VieNeuEngine.synthesize', side_effect=synthesize_fixture):
+            javascript(page, '''
+                document.getElementById('voice-preview-audio').muted = true;
+                document.getElementById('btn-preview-voice').click();
+            ''')
+            for _ in range(100):
+                preview = json.loads(javascript(page, '''JSON.stringify((() => {
+                    const audio = document.getElementById('voice-preview-audio');
+                    return {id: window.__voiceSmokePreviewId, time: audio.currentTime, paused: audio.paused,
+                        readyState: audio.readyState, source: audio.currentSrc, visible: !audio.classList.contains('hidden'),
+                        error: audio.error?.message || null, status: document.getElementById('voice-preview-status').textContent};
+                })())'''))
+                if preview['error'] or preview['time'] >= 0.2:
+                    break
+                wait(100)
+        assert synth_calls == ['Trúc Ly'], synth_calls
+        assert preview['id'] and preview['visible'] and not preview['error'], preview
+        assert not preview['paused'] and preview['time'] >= 0.2, preview
+        assert f"/api/voices/preview/{preview['id']}/audio" in preview['source'], preview
+        javascript(page, '''
+            const select = document.getElementById('voice-select');
+            select.value = 'edge:vi-VN-HoaiMyNeural';
+            select.dispatchEvent(new Event('change', {bubbles: true}));
+        ''')
+        wait(100)
+        javascript(page, '''
+            window.__voiceSmokeDeletedStatus = null;
+            fetch('/api/voices/preview/' + window.__voiceSmokePreviewId + '/audio')
+                .then(response => window.__voiceSmokeDeletedStatus = response.status)
+                .catch(error => window.__voiceSmokeDeletedStatus = String(error));
+        ''')
+        for _ in range(30):
+            deleted_status = json.loads(javascript(page, 'JSON.stringify({value: window.__voiceSmokeDeletedStatus})'))['value']
+            if deleted_status is not None:
+                break
+            wait(100)
+        assert deleted_status == 404, deleted_status
+        assert javascript(page, "document.getElementById('voice-preview-audio').paused") is True
+        return {'catalog_count': len(voices), 'source_groups': len(catalog['groups']),
+                'local_voice_id': requests[0]['voice_id'], 'preview_http_audio': True,
+                'preview_played_seconds': round(preview['time'], 3), 'preview_deleted_on_change': True}
+    finally:
+        javascript(page, '''
+            const select = document.getElementById('voice-select');
+            select.value = window.__voiceSmokeSelected;
+            select.dispatchEvent(new Event('change', {bubbles: true}));
+            if (window.__voiceSmokePreference === null) localStorage.removeItem('studio.voice-id');
+            else localStorage.setItem('studio.voice-id', window.__voiceSmokePreference);
+            window.fetch = window.__voiceSmokeFetch;
+        ''')
 
 
 def main():
@@ -274,6 +443,7 @@ def main():
             wait(200)
         assert loaded and loaded[-1], 'Desktop page did not load'
         wait(500)
+        voice_smoke = check_voice_catalog_and_preview(window.web_view.page(), media_folder.name)
         result = json.loads(javascript(window.web_view.page(), '''JSON.stringify({
             asr: document.body.dataset.asrEngine,
             tts: document.body.dataset.ttsEngine,
@@ -283,7 +453,7 @@ def main():
         })'''))
         assert result['asr'] == 'faster-whisper', result
         assert result['tts'] == 'edge-tts', result
-        assert result['voice'].startswith('vi-VN-'), result
+        assert result['voice'].startswith(('edge:', 'vieneu:', 'piper:')), result
         assert result['bridge'], 'Native file picker bridge unavailable'
 
         # Check actual input/select behavior against public backend settings.
@@ -322,7 +492,8 @@ def main():
                     window.__smokeRequests.push({
                         tts: options.body.get('tts_engine'),
                         asr: options.body.get('asr_engine'),
-                        voice: options.body.get('voice')
+                        voice: options.body.get('voice'),
+                        voice_id: options.body.get('voice_id')
                     });
                     return new Response(JSON.stringify({detail: 'SMOKE_EXPECTED'}), {status: 400});
                 }
@@ -341,7 +512,8 @@ def main():
                                           error: document.getElementById('task-progress-stage').textContent,
                                           status: document.getElementById('task-progress').dataset.status})'''))
         assert len(upload['requests']) == 1, upload
-        assert upload['requests'][0]['tts'] == 'edge-tts', upload
+        assert upload['requests'][0]['tts'] is None and upload['requests'][0]['voice'] is None, upload
+        assert upload['requests'][0]['voice_id'] == result['voice'], upload
         assert not upload['alerts'] and upload['error'] == 'SMOKE_EXPECTED' and upload['status'] == 'FAILED', upload
         progress_logs = check_progress_and_logs(window.web_view.page())
         layout = check_minimum_layout(window)
@@ -395,7 +567,7 @@ def main():
         wait(200)
         print(json.dumps({'result': 'PASS', 'desktop': result, 'upload': upload['requests'][0],
                           'playback': playback, 'bgm': bgm, 'layout_1024': layout,
-                          'progress_and_logs': progress_logs}, ensure_ascii=False))
+                          'progress_and_logs': progress_logs, 'voices': voice_smoke}, ensure_ascii=False))
     finally:
         if window:
             window.web_view.stop()

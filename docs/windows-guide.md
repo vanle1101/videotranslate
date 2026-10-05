@@ -64,7 +64,17 @@ Chạy `venv\Scripts\python.exe -B check_runtime.py` để kiểm tra cài đặ
 
 Ô link tự trích URL từ nội dung Chia sẻ; các domain video được hỗ trợ có thể bỏ `https://`. Dán link mới bỏ lựa chọn file cũ. Bấm Bắt đầu tạo tác vụ ngay, rồi lần lượt hiện kết nối, tải, chuẩn bị, nhận giọng, dịch và tạo giọng. Phần trăm tải dựa trên số byte khi máy chủ cung cấp tổng dung lượng; phần trăm xử lý dựa trên số câu hoàn tất. Các bước chưa đo được hiện “Chưa có %”. Dừng hoạt động cả khi còn đang kết nối; Tạm dừng chỉ khả dụng sau khi chuẩn bị xong. Playlist bị từ chối trước khi tải các video.
 
-Có thể dán nguyên đoạn chia sẻ Douyin vào ô **Video nguồn**, gồm tiêu đề tiếng Trung, hashtag, mã chia sẻ và nhiều dòng. Giao diện giữ nguyên đoạn để sửa, hiển thị link đã nhận ngay bên dưới và chỉ gửi URL đó khi bấm **Bắt đầu**. Link có định dạng Markdown sao chép từ chat như `[**link**](link)` cũng được nhận; dấu gạch dưới trong link không bị đổi. Dán nội dung chỉ nhận diện link, chưa khởi động tải hoặc dịch.
+Có thể dán nguyên đoạn chia sẻ Douyin vào ô **Video nguồn**, gồm tiêu đề tiếng Trung, hashtag, mã chia sẻ và nhiều dòng. Ngay khi dán, giao diện tự thay đoạn chia sẻ bằng URL sạch và hiện thông báo đã nhận link. Nội dung tự gõ vẫn giữ nguyên để sửa. Link có định dạng Markdown sao chép từ chat như `[**link**](link)` cũng được nhận; dấu gạch dưới trong link không bị đổi. Dán nội dung chỉ nhận diện link; bấm **Bắt đầu** mới tải và dịch.
+
+### Chọn và nghe thử giọng
+
+Danh sách **Giọng lồng tiếng** nhóm các giọng theo nguồn, ghi rõ cần Internet hay chạy tại máy và nhớ lựa chọn của bạn. Bấm **Nghe thử** để nghe cùng một câu mẫu trước khi dịch. Đổi giọng hoặc bắt đầu video sẽ dừng mẫu đang phát; mẫu hết hạn có thể tạo lại. Mẫu nghe thử chỉ được giữ tạm, tối đa tám mẫu trong bộ nhớ và hết hạn sau năm phút.
+
+- **Microsoft Edge**: Hoài My và Nam Minh, cần Internet. Đây là hai giọng tiếng Việt thực tế trong danh sách dịch vụ, không phải toàn bộ giọng đa ngôn ngữ của Edge.
+- **[VieNeu-TTS v3 Turbo](https://huggingface.co/pnnbao-ump/VieNeu-TTS-v3-Turbo)**: 25 preset từ SDK 3.8.3 đã cài, gồm Trúc Ly, Mai Anh, Hải Đăng và các giọng vùng miền/phong cách khác. Tên và mô tả lấy từ preset của nhà phát triển; alias không được tính thành giọng mới. Runtime CPU ONNX dùng tối đa bốn luồng và chia sẻ một model giữa nghe thử và dịch video. Model/preset Apache-2.0.
+- **[Piper Cake](piper-voices.md)**: năm giọng từ model tiếng Việt của Cake by VPBank, chạy trên CPU. Xem hướng dẫn riêng để cài tùy chọn và nguồn/giấy phép.
+
+Các đường nhập link, chọn file trên máy và tải file lên đều dùng đúng giọng đã chọn. Giọng thiếu model/runtime sẽ bị vô hiệu hóa hoặc báo lỗi rõ ràng; ứng dụng không tự đổi sang giọng khác. Chất lượng và cách phát âm khác nhau theo giọng, nên nghe thử và kiểm tra bản dịch trước khi xuất.
 
 ### Phiên Douyin từ Chrome
 

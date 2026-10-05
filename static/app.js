@@ -15,6 +15,11 @@ document.addEventListener("DOMContentLoaded", () => {
   const fileNameDisplay = document.getElementById("file-name-display");
   const bufferSelect = document.getElementById("buffer-select");
   const voiceSelect = document.getElementById("voice-select");
+  const voiceSource = document.getElementById("voice-source");
+  const btnPreviewVoice = document.getElementById("btn-preview-voice");
+  const voicePreviewLabel = document.getElementById("voice-preview-label");
+  const voicePreviewAudio = document.getElementById("voice-preview-audio");
+  const voicePreviewStatus = document.getElementById("voice-preview-status");
   const refAudioFile = document.getElementById("ref-audio-file");
   const btnStart = document.getElementById("btn-start");
   const btnPauseWorker = document.getElementById("btn-pause-worker");
@@ -143,6 +148,11 @@ document.addEventListener("DOMContentLoaded", () => {
   let pendingStart = null;
   let currentProgress = null;
   let streamDisconnected = false;
+  let voiceCatalog = [];
+  let voicePreviewGeneration = 0;
+  let voicePreviewId = null;
+  let voicePreviewBusy = false;
+  const voicePreferenceKey = "studio.voice-id";
   const mediaPlayButton = document.createElement("button");
   mediaPlayButton.type = "button";
   mediaPlayButton.className = "hidden rounded-lg bg-pink-600 px-4 py-2 text-xs font-semibold text-white";
@@ -173,6 +183,143 @@ document.addEventListener("DOMContentLoaded", () => {
   function escapeHtml(value) {
     return String(value ?? "").replace(/[&<>"']/g, ch => ({"&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;"}[ch]));
   }
+
+  function selectedCatalogVoice() {
+    return voiceCatalog.find(voice => voice.id === voiceSelect.value && voice.available);
+  }
+
+  function selectedVoicePayload() {
+    const voice = selectedCatalogVoice();
+    return voice ? { voice_id: voice.id } : {
+      voice: voiceSelect.value || "vi-VN-HoaiMyNeural",
+      tts_engine: document.body.dataset.ttsEngine
+    };
+  }
+
+  function updateVoiceControls() {
+    const sessionBusy = btnStart.classList.contains("hidden");
+    voiceSelect.disabled = sessionBusy;
+    btnPreviewVoice.disabled = voicePreviewBusy || sessionBusy || !selectedCatalogVoice();
+    btnPreviewVoice.setAttribute("aria-busy", String(voicePreviewBusy));
+    voicePreviewLabel.textContent = voicePreviewBusy ? "Đang tạo mẫu…" : "Nghe thử";
+  }
+
+  function deleteVoicePreview(id) {
+    if (id) fetch(`/api/voices/preview/${encodeURIComponent(id)}`, { method: "DELETE", keepalive: true }).catch(() => {});
+  }
+
+  function stopVoicePreview() {
+    voicePreviewGeneration++;
+    voicePreviewBusy = false;
+    voicePreviewAudio.pause();
+    voicePreviewAudio.removeAttribute("src");
+    voicePreviewAudio.load();
+    voicePreviewAudio.classList.add("hidden");
+    deleteVoicePreview(voicePreviewId);
+    voicePreviewId = null;
+    voicePreviewStatus.textContent = "";
+    voicePreviewStatus.dataset.error = "false";
+    updateVoiceControls();
+  }
+
+  function describeSelectedVoice() {
+    const voice = selectedCatalogVoice();
+    if (voice) {
+      const count = voiceCatalog.filter(item => item.available).length;
+      voiceSource.textContent = `${voice.source} · ${voice.offline ? "Chạy trên máy" : "Cần Internet"} · ${count} giọng có sẵn${voice.description ? ` — ${voice.description}` : ""}`;
+    }
+    updateVoiceControls();
+  }
+
+  async function loadVoiceCatalog() {
+    const initialVoice = voiceSelect.value;
+    try {
+      const response = await fetch("/api/voices");
+      const data = await response.json();
+      const voices = Array.isArray(data.voices) ? data.voices.filter(voice =>
+        typeof voice.id === "string" && typeof voice.name === "string" && typeof voice.source === "string"
+      ) : [];
+      if (!response.ok || !voices.some(voice => voice.available)) throw new Error("catalog unavailable");
+      voiceCatalog = voices;
+      let savedId;
+      try { savedId = localStorage.getItem(voicePreferenceKey); } catch (_) {}
+      const available = id => voices.some(voice => voice.id === id && voice.available);
+      const legacy = voices.find(voice => voice.available && voice.id.endsWith(`:${initialVoice}`) &&
+        voice.engine === document.body.dataset.ttsEngine);
+      const selectedId = available(savedId) ? savedId : available(data.default_voice_id)
+        ? data.default_voice_id : legacy?.id || voices.find(voice => voice.available).id;
+      const groups = new Map();
+      for (const voice of voices) {
+        if (!groups.has(voice.source)) {
+          const group = document.createElement("optgroup");
+          group.label = voice.source;
+          groups.set(voice.source, group);
+        }
+        const option = new Option(`${voice.name}${voice.available ? "" : " — Chưa sẵn sàng"}`, voice.id);
+        option.disabled = !voice.available;
+        groups.get(voice.source).appendChild(option);
+      }
+      voiceSelect.replaceChildren(...groups.values());
+      voiceSelect.value = selectedId;
+      describeSelectedVoice();
+    } catch (_) {
+      voiceSource.textContent = "Chưa tải được danh sách mở rộng. Bạn vẫn có thể dùng các giọng hiện tại.";
+      updateVoiceControls();
+    }
+  }
+
+  voiceSelect.addEventListener("change", () => {
+    stopVoicePreview();
+    describeSelectedVoice();
+    const voice = selectedCatalogVoice();
+    if (voice) { try { localStorage.setItem(voicePreferenceKey, voice.id); } catch (_) {} }
+  });
+
+  btnPreviewVoice.addEventListener("click", async () => {
+    const voice = selectedCatalogVoice();
+    if (!voice || voicePreviewBusy || btnStart.classList.contains("hidden")) return;
+    stopVoicePreview();
+    videoPlayer.pause();
+    const generation = voicePreviewGeneration;
+    voicePreviewBusy = true;
+    voicePreviewStatus.textContent = `Đang tạo mẫu giọng ${voice.name}…`;
+    updateVoiceControls();
+    try {
+      const response = await fetch("/api/voices/preview", {
+        method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ voice_id: voice.id })
+      });
+      const data = await response.json();
+      if (generation !== voicePreviewGeneration) { deleteVoicePreview(data.preview_id); return; }
+      if (!response.ok) throw new Error(typeof data.detail === "string" ? data.detail : "Không tạo được mẫu giọng. Hãy thử lại.");
+      voicePreviewId = data.preview_id;
+      const origin = `${window.location.protocol}//${window.location.host}`;
+      const audioUrl = new URL(data.audio_url, origin);
+      if (!data.preview_id || !data.audio_url || audioUrl.origin !== origin) throw new Error("Đường dẫn mẫu giọng không hợp lệ.");
+      voicePreviewAudio.src = audioUrl.href;
+      voicePreviewAudio.classList.remove("hidden");
+      voicePreviewStatus.textContent = `Mẫu giọng ${voice.name}. Có thể đổi giọng rồi nghe thử tiếp.`;
+      try { await voicePreviewAudio.play(); }
+      catch (_) {
+        if (generation === voicePreviewGeneration) voicePreviewStatus.textContent = "Mẫu giọng đã sẵn sàng. Bấm nút phát trên thanh âm thanh để nghe.";
+      }
+    } catch (error) {
+      if (generation === voicePreviewGeneration) {
+        deleteVoicePreview(voicePreviewId);
+        voicePreviewId = null;
+        voicePreviewStatus.textContent = error instanceof TypeError ? "Không kết nối được dịch vụ giọng đọc. Hãy thử lại." : error.message;
+        voicePreviewStatus.dataset.error = "true";
+      }
+    } finally {
+      if (generation === voicePreviewGeneration) { voicePreviewBusy = false; updateVoiceControls(); }
+    }
+  });
+  voicePreviewAudio.addEventListener("error", () => {
+    if (!voicePreviewId) return;
+    voicePreviewStatus.textContent = "Không phát được mẫu giọng. Bấm Nghe thử để tạo lại.";
+    voicePreviewStatus.dataset.error = "true";
+  });
+  window.addEventListener?.("pagehide", stopVoicePreview);
+  loadVoiceCatalog();
 
   function measuredProgress(value) {
     return typeof value === "number" && Number.isFinite(value) ? Math.max(0, Math.min(100, value)) : null;
@@ -348,6 +495,7 @@ document.addEventListener("DOMContentLoaded", () => {
   });
 
   function selectPreviewSource(source) {
+    stopVoicePreview();
     taskProgress.classList.add("hidden");
     currentProgress = null;
     taskConnectionStatus.classList.add("hidden");
@@ -465,7 +613,7 @@ document.addEventListener("DOMContentLoaded", () => {
     }
   });
   fileInput.addEventListener("click", event => event.stopPropagation());
-  videoUrlInput.addEventListener("input", () => {
+  function handleSourceTextChange() {
     describeVideoUrl();
     if (!videoUrlInput.value.trim()) return;
     selectedFile = null;
@@ -482,6 +630,19 @@ document.addEventListener("DOMContentLoaded", () => {
       playerPlaceholder.classList.remove("hidden");
       bufferingAlert.classList.add("hidden");
     }
+  }
+  videoUrlInput.addEventListener("input", handleSourceTextChange);
+  videoUrlInput.addEventListener("paste", event => {
+    if (videoUrlInput.disabled) return;
+    const pasted = event.clipboardData?.getData("text/plain");
+    if (!pasted) return;
+    const previous = videoUrlInput.value;
+    videoUrlInput.value = pasted;
+    const cleanUrl = describeVideoUrl();
+    if (!cleanUrl) { videoUrlInput.value = previous; describeVideoUrl(); return; }
+    event.preventDefault();
+    videoUrlInput.value = cleanUrl;
+    handleSourceTextChange();
   });
 
   fileInput.addEventListener("change", (e) => {
@@ -582,6 +743,14 @@ document.addEventListener("DOMContentLoaded", () => {
       alert("Hãy chờ xuất video hoặc hủy tác vụ xuất trước khi bắt đầu phiên mới.");
       return;
     }
+    if (voiceCatalog.length && !selectedCatalogVoice()) {
+      voicePreviewStatus.textContent = "Hãy chọn một giọng đang có sẵn trước khi bắt đầu.";
+      voicePreviewStatus.dataset.error = "true";
+      voiceSelect.focus();
+      return;
+    }
+    stopVoicePreview();
+    const voicePayload = selectedVoicePayload();
     stopPreviewAudio();
     if (currentWs) currentWs.close();
     currentWs = null;
@@ -598,6 +767,7 @@ document.addEventListener("DOMContentLoaded", () => {
     previewResumeTime = null;
     lastExportedFileUrl = "";
     btnStart.classList.add("hidden");
+    updateVoiceControls();
     videoUrlInput.disabled = true;
     fileInput.disabled = true;
     dropZone.setAttribute("aria-disabled", "true");
@@ -626,8 +796,7 @@ document.addEventListener("DOMContentLoaded", () => {
           body: JSON.stringify({
             file_path: window.currentLocalFilePath,
             initial_buffer_seconds: parseFloat(bufferSelect.value) || 10.0,
-            voice: voiceSelect.value || "vi-VN-HoaiMyNeural",
-            tts_engine: document.body.dataset.ttsEngine,
+            ...voicePayload,
             asr_engine: document.body.dataset.asrEngine
           })
         });
@@ -635,8 +804,7 @@ document.addEventListener("DOMContentLoaded", () => {
         const formData = new FormData();
         formData.append("file", selectedFile);
         formData.append("initial_buffer_seconds", bufferSelect.value);
-        formData.append("voice", voiceSelect.value);
-        formData.append("tts_engine", document.body.dataset.ttsEngine);
+        for (const [name, value] of Object.entries(voicePayload)) formData.append(name, value);
         formData.append("asr_engine", document.body.dataset.asrEngine);
         if (refAudioFile?.files.length > 0) {
           formData.append("ref_audio", refAudioFile.files[0]);
@@ -649,8 +817,7 @@ document.addEventListener("DOMContentLoaded", () => {
           body: JSON.stringify({
             url: url,
             initial_buffer_seconds: parseFloat(bufferSelect.value),
-            voice: voiceSelect.value,
-            tts_engine: document.body.dataset.ttsEngine,
+            ...voicePayload,
             asr_engine: document.body.dataset.asrEngine
           })
         });
@@ -1033,6 +1200,7 @@ document.addEventListener("DOMContentLoaded", () => {
     fileInput.disabled = false;
     dropZone.setAttribute("aria-disabled", "false");
     btnStart.classList.remove("hidden");
+    updateVoiceControls();
     btnPauseWorker.classList.add("hidden");
     btnResumeWorker.classList.add("hidden");
     btnStopWorker.classList.add("hidden");
