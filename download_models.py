@@ -7,6 +7,7 @@ This does not change the active pipeline engines or install Python packages.
 from __future__ import annotations
 
 import argparse
+from concurrent.futures import ThreadPoolExecutor
 import hashlib
 import json
 from pathlib import Path
@@ -36,6 +37,99 @@ CODEC_FILES = [
     "moss_audio_tokenizer_decode_step.onnx", "codec_browser_onnx_meta.json",
     "moss_audio_tokenizer_encode.onnx", "moss_audio_tokenizer_encode.data",
 ]
+_RANGE_CHUNK_SIZE = 1024 * 1024
+_RANGE_WORKERS = 4
+
+
+class RangeUnsupportedError(RuntimeError):
+    pass
+
+
+def _fetch_range(url, start, end, total):
+    """Fetch at most one MiB; never accept an ignored or mismatched Range."""
+    expected = end - start + 1
+    for attempt in range(3):
+        try:
+            with requests.get(url, headers={"Range": f"bytes={start}-{end}",
+                                            "Accept-Encoding": "identity"},
+                              stream=True, timeout=(15, 25)) as response:
+                response.raise_for_status()
+                if response.status_code == 200:
+                    raise RangeUnsupportedError("The server ignored the Range header")
+                if (response.status_code != 206
+                        or response.headers.get("Content-Range") != f"bytes {start}-{end}/{total}"):
+                    raise RuntimeError("Unexpected HTTP status or Content-Range; keeping downloaded prefix")
+                data = bytearray()
+                for chunk in response.iter_content(64 * 1024):
+                    data.extend(chunk)
+                    if len(data) > expected:
+                        raise RuntimeError("Range response exceeds requested byte count")
+                if len(data) != expected:
+                    raise requests.ConnectionError("Truncated Range response")
+                return data
+        except requests.RequestException:
+            if attempt == 2:
+                raise
+            time.sleep(0.5 * (attempt + 1))
+
+
+def _download_from_zero(item, partial):
+    """Fallback for servers without Range; callers must have no existing bytes."""
+    if partial.exists() and partial.stat().st_size:
+        raise RangeUnsupportedError("Cannot resume safely: server does not support Range")
+    with requests.get(item["url"], stream=True, timeout=(15, 25)) as response:
+        response.raise_for_status()
+        if response.status_code != 200:
+            raise RuntimeError("Expected a complete HTTP 200 response")
+        count, last_report = 0, time.monotonic()
+        with partial.open("wb") as stream:
+            for chunk in response.iter_content(1024 * 1024):
+                if not chunk:
+                    continue
+                if count + len(chunk) > item["size"]:
+                    raise RuntimeError(f"Unexpected download size: {item['name']}")
+                stream.write(chunk)
+                stream.flush()
+                count += len(chunk)
+                if time.monotonic() - last_report >= 10:
+                    print(f"{item['name']}: {count / item['size']:.0%}", flush=True)
+                    last_report = time.monotonic()
+
+
+def _download_ranges(item, partial):
+    offset = partial.stat().st_size if partial.exists() else 0
+    if offset > item["size"]:
+        raise RuntimeError("Partial file exceeds upstream size; preserving it for inspection")
+    if offset:
+        print(f"RESUMING {item['name']} at {offset} bytes ({offset / item['size']:.0%})", flush=True)
+    # Submit one bounded batch at a time: at most four MiB of response buffers.
+    # Append only complete, validated chunks in order, so interruption leaves a
+    # contiguous prefix that is safe to resume without sparse files or copies.
+    with ThreadPoolExecutor(max_workers=_RANGE_WORKERS) as pool, partial.open("ab") as stream:
+        last_report = time.monotonic()
+        while offset < item["size"]:
+            ranges = [(start, min(start + _RANGE_CHUNK_SIZE, item["size"]) - 1)
+                      for start in range(offset, min(offset + _RANGE_WORKERS * _RANGE_CHUNK_SIZE,
+                                                     item["size"]), _RANGE_CHUNK_SIZE)]
+            pending = [pool.submit(_fetch_range, item["url"], start, end, item["size"])
+                       for start, end in ranges]
+            try:
+                for index, future in enumerate(pending):
+                    data = future.result()
+                    stream.write(data)
+                    stream.flush()
+                    offset += len(data)
+                    # Release each completed buffer before submitting another batch.
+                    pending[index] = None
+                    del data, future
+                    if time.monotonic() - last_report >= 10:
+                        print(f"{item['name']}: {offset / item['size']:.0%}", flush=True)
+                        last_report = time.monotonic()
+            except BaseException:
+                for future in pending:
+                    if future is not None:
+                        future.cancel()
+                raise
 
 
 def _json(url):
@@ -116,26 +210,14 @@ def download(item):
     path.parent.mkdir(parents=True, exist_ok=True)
     partial = path.with_suffix(path.suffix + ".download")
     try:
-        with requests.get(item["url"], stream=True, timeout=(30, 90)) as response:
-            response.raise_for_status()
-            count, last_report = 0, time.monotonic()
-            with partial.open("wb") as stream:
-                for chunk in response.iter_content(1024 * 1024):
-                    if not chunk:
-                        continue
-                    count += len(chunk)
-                    if count > item["size"]:
-                        raise RuntimeError(f"Unexpected download size: {item['name']}")
-                    stream.write(chunk)
-                    if time.monotonic() - last_report >= 10:
-                        print(f"{item['name']}: {count / item['size']:.0%}", flush=True)
-                        last_report = time.monotonic()
-        if not validate(partial, item):
-            raise RuntimeError(f"Size/checksum mismatch: {item['name']}")
-        partial.replace(path)
-        return path
-    finally:
-        partial.unlink(missing_ok=True)
+        _download_ranges(item, partial)
+    except RangeUnsupportedError:
+        # Starting from zero is safe; overwriting an existing partial is not.
+        _download_from_zero(item, partial)
+    if not validate(partial, item):
+        raise RuntimeError(f"Size/checksum mismatch: {item['name']}; preserving partial file")
+    partial.replace(path)
+    return path
 
 
 def main():
