@@ -44,6 +44,12 @@ class VideoDownloader:
     @staticmethod
     def normalize_url(text: str) -> str:
         text = str(text or "").strip()
+        # Rich-text chat copies may include a formatted URL label and a separate
+        # Markdown target. Use the target, keeping nearby share text separate.
+        text = re.sub(r"\[[^\]\r\n]*\]\(\s*(https?://[^\s<>()]+)\s*\)",
+                      lambda match: " " + match.group(1) + " ", text, flags=re.I)
+        text = re.sub(r"(^|[\s(\[<{])(\*\*|__|`)(https?://[^\s<>]+?)\2",
+                      lambda match: match.group(1) + match.group(3) + " ", text, flags=re.I)
         match = re.search(r"https?://[^\s<>\"'，。！？、；（）【】]+", text, re.I)
         if match:
             candidate = match.group(0).rstrip(".,;!?)\\]}»”’")
@@ -51,6 +57,7 @@ class VideoDownloader:
             candidate = "https://" + text.split()[0].rstrip(".,;!?)\\]}»”’")
         else:
             raise ValueError("Không tìm thấy link video hợp lệ. Dán link bắt đầu bằng https:// hoặc toàn bộ nội dung Chia sẻ có link.")
+        candidate = candidate.replace("\\_", "_")
         try:
             parsed = urlsplit(candidate)
             if parsed.scheme.lower() not in {"http", "https"} or not parsed.hostname or parsed.username or parsed.password:

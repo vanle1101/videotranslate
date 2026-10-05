@@ -31,7 +31,7 @@
   background-color: #1a1e29;
 }
 
-:is(button, a, input, select, [tabindex]):focus-visible {
+:is(button, a, input, textarea, select, [tabindex]):focus-visible {
   outline: 2px solid #f472b6;
   outline-offset: 3px;
 }
@@ -43,6 +43,7 @@ html { scroll-padding-top: 100px; }
 #segments-list p { overflow-wrap: anywhere; }
 button:disabled { opacity: 0.45; cursor: not-allowed; }
 #video-url-status, .task-progress { overflow-wrap: anywhere; }
+#video-url { display: block; resize: vertical; min-height: 5rem; max-height: 14rem; line-height: 1.6; }
 .task-progress { padding: 0.75rem; border: 1px solid #374151; border-radius: 0.75rem; background: #0b0e16; }
 .task-progress-heading { display: flex; flex-wrap: wrap; align-items: baseline; justify-content: space-between; gap: 0.3rem 0.75rem; font-size: 12px; color: #e5e7eb; }
 #task-progress-stage { flex: 1 1 150px; }

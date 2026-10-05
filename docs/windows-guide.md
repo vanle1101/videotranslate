@@ -64,6 +64,8 @@ Chạy `venv\Scripts\python.exe -B check_runtime.py` để kiểm tra cài đặ
 
 Ô link tự trích URL từ nội dung Chia sẻ; các domain video được hỗ trợ có thể bỏ `https://`. Dán link mới bỏ lựa chọn file cũ. Bấm Bắt đầu tạo tác vụ ngay, rồi lần lượt hiện kết nối, tải, chuẩn bị, nhận giọng, dịch và tạo giọng. Phần trăm tải dựa trên số byte khi máy chủ cung cấp tổng dung lượng; phần trăm xử lý dựa trên số câu hoàn tất. Các bước chưa đo được hiện “Chưa có %”. Dừng hoạt động cả khi còn đang kết nối; Tạm dừng chỉ khả dụng sau khi chuẩn bị xong. Playlist bị từ chối trước khi tải các video.
 
+Có thể dán nguyên đoạn chia sẻ Douyin vào ô **Video nguồn**, gồm tiêu đề tiếng Trung, hashtag, mã chia sẻ và nhiều dòng. Giao diện giữ nguyên đoạn để sửa, hiển thị link đã nhận ngay bên dưới và chỉ gửi URL đó khi bấm **Bắt đầu**. Link có định dạng Markdown sao chép từ chat như `[**link**](link)` cũng được nhận; dấu gạch dưới trong link không bị đổi. Dán nội dung chỉ nhận diện link, chưa khởi động tải hoặc dịch.
+
 ### Phiên Douyin từ Chrome
 
 Đăng nhập trong Chrome không tự chia sẻ phiên với Studio. Khi kết nối mạng đã hoạt động nhưng bộ tải báo 403 hoặc cần cookie mới, vào **Cài đặt → Tải video Douyin** và nhập tệp cookie định dạng **Netscape `.txt`** (tối đa 1 MiB). Nếu đang dùng tiện ích xuất cookie trong Chrome, chỉ xuất trang Douyin đang đăng nhập; chọn tệp trực tiếp trong Studio, không gửi nội dung cookie vào chat. Sau khi nhập, quay lại Studio và thử tải link. Nhập tệp thành công chỉ xác nhận đã lưu cookie hợp lệ về định dạng/thời hạn, không xác nhận Douyin cho phép tải hoặc tài khoản đã xác thực.

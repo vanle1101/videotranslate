@@ -18,14 +18,29 @@ from core.download_worker import progress_payload, single_video_downloader
 @pytest.mark.parametrize('text,expected', [
     ('https://v.douyin.com/_lAiSDH0bK8/', 'https://v.douyin.com/_lAiSDH0bK8/'),
     ('3.14 复制打开抖音 https://v.douyin.com/_lAiSDH0bK8/。 分享', 'https://v.douyin.com/_lAiSDH0bK8/'),
+    (r'3.53 复制打开抖音，看看【斩漫的作品】《千金垂爱》被千金拉着结婚了 # ai动漫 # a... [**https://v.douyin.com/\_lAiSDH0bK8/**](https://v.douyin.com/_lAiSDH0bK8/) Rxf:/ 01/17 J@V.Lw :1pm', 'https://v.douyin.com/_lAiSDH0bK8/'),
+    ('3.53 复制打开抖音，看看【斩漫的作品】《千金垂爱》被千金拉着结婚了 # ai动漫 # a... https://v.douyin.com/_lAiSDH0bK8/ Rxf:/ 01/17 J@V.Lw :1pm', 'https://v.douyin.com/_lAiSDH0bK8/'),
+    ('复制打开抖音\nhttps://v.douyin.com/_lAiSDH0bK8/\nRxf:/ 01/17', 'https://v.douyin.com/_lAiSDH0bK8/'),
+    ('[https://example.com/label](https://v.douyin.com/_lAiSDH0bK8/)分享', 'https://v.douyin.com/_lAiSDH0bK8/'),
+    (r'**https://v.douyin.com/\_lAiSDH0bK8/**', 'https://v.douyin.com/_lAiSDH0bK8/'),
+    ('__https://v.douyin.com/_lAiSDH0bK8/__', 'https://v.douyin.com/_lAiSDH0bK8/'),
+    ('链接 `https://v.douyin.com/_lAiSDH0bK8/` 分享', 'https://v.douyin.com/_lAiSDH0bK8/'),
+    ('<https://v.douyin.com/_lAiSDH0bK8/>', 'https://v.douyin.com/_lAiSDH0bK8/'),
     ('v.douyin.com/example/', 'https://v.douyin.com/example/'),
     ('https://example.com/clip.mp4?token=abc#anchor', 'https://example.com/clip.mp4?token=abc'),
+    ('https://example.com/clip.mp4?token=A%2FB%2Bz%3D&expires=123&name=a_b*', 'https://example.com/clip.mp4?token=A%2FB%2Bz%3D&expires=123&name=a_b*'),
+    ('https://example.com/clip.mp4?token=**https://nested.example/path**', 'https://example.com/clip.mp4?token=**https://nested.example/path**'),
 ])
 def test_share_text_url_normalization(text, expected):
     assert VideoDownloader.normalize_url(text) == expected
 
 
-@pytest.mark.parametrize('text', ['', 'text with no URL', 'file:///C:/user.mp4', 'https://user:password@example.com/clip'])
+@pytest.mark.parametrize('text', [
+    '', 'text with no URL', 'file:///C:/user.mp4',
+    'https://user:password@example.com/clip',
+    '[https://v.douyin.com/example/](https://user:password@example.com/clip)',
+    'https://example.com:99999/clip', 'https://example.com:invalid/clip',
+])
 def test_invalid_urls_are_rejected(text):
     with pytest.raises(ValueError):
         VideoDownloader.normalize_url(text)

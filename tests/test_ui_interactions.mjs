@@ -342,6 +342,48 @@ test('pasted share URL is recognized, clears a prior file and sends only the ext
   assert.equal(ui.requests.some(item => item.url === '/api/streaming/start-local-file'), false);
 });
 
+test('whole Douyin share text including copied Markdown sends exactly its video link', async () => {
+  const target = 'https://v.douyin.com/_lAiSDH0bK8/';
+  const samples = [
+    `3.53 复制打开抖音，看看【斩漫的作品】《千金垂爱》被千金拉着结婚了 # ai动漫 # a... ${target} Rxf:/ 01/17 J@V.Lw :1pm`,
+    String.raw`3.53 复制打开抖音，看看【斩漫的作品】《千金垂爱》被千金拉着结婚了 # ai动漫 # a... [**https://v.douyin.com/\_lAiSDH0bK8/**](https://v.douyin.com/_lAiSDH0bK8/) Rxf:/ 01/17 J@V.Lw :1pm`,
+    `复制打开抖音\n${target}\nRxf:/ 01/17 J@V.Lw :1pm`,
+    `复制[https://example.com/wrong](${target})后打开`,
+    `**${target}**`, `\`${target}\``, `__${target}__`,
+    String.raw`https://v.douyin.com/\_lAiSDH0bK8/`,
+  ];
+  for (const input of samples) {
+    const ui = studio(); await ui.flush();
+    assert.equal(ui.el('video-url').tagName, 'TEXTAREA');
+    ui.el('video-url').value = input;
+    await ui.el('video-url').emit('input');
+    assert.equal(ui.el('btn-start').disabled, false, input);
+    assert.equal(ui.el('video-url').value, input, 'Keep original share text editable');
+    assert.match(ui.el('video-url-status').textContent, /Đã nhận link Douyin: https:\/\/v\.douyin\.com\/_lAiSDH0bK8\//);
+    assert.equal(ui.requests.some(req => req.url.includes('/streaming/start')), false, 'Pasting must not start a download');
+    ui.replies.set('/api/streaming/start-url', { task_id: 'share-text-fixture', video_url: null });
+    await ui.el('btn-start').click();
+    const request = ui.requests.find(req => req.url === '/api/streaming/start-url');
+    assert.equal(JSON.parse(request.options.body).url, target, input);
+  }
+});
+
+test('share text preserves signed URL query and rejects credentials in Markdown target', async () => {
+  const target = 'https://example.com/video.mp4?token=a%2Fb%2Bz&part=*&nested=**https://nested/**';
+  const ui = studio(); await ui.flush();
+  ui.el('video-url').value = `Watch ${target}`;
+  await ui.el('video-url').emit('input');
+  assert.doesNotMatch(ui.el('video-url-status').textContent, /token=|nested=/);
+  ui.replies.set('/api/streaming/start-url', { task_id: 'query-fixture', video_url: null });
+  await ui.el('btn-start').click();
+  assert.equal(JSON.parse(ui.requests.find(req => req.url === '/api/streaming/start-url').options.body).url, target);
+  const invalid = studio(); await invalid.flush();
+  invalid.el('video-url').value = '[https://v.douyin.com/valid/](https://user:secret@v.douyin.com/private/)';
+  await invalid.el('video-url').emit('input');
+  assert.equal(invalid.el('btn-start').disabled, true);
+  assert.doesNotMatch(invalid.el('video-url-status').textContent, /secret/);
+});
+
 test('invalid URL is explained before any download request', async () => {
   const ui = studio(); await ui.flush();
   ui.el('video-url').value = 'not a video link';

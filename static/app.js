@@ -220,16 +220,23 @@ document.addEventListener("DOMContentLoaded", () => {
 
   function describeVideoUrl() {
     const input = videoUrlInput.value.trim();
-    const match = input.match(/https?:\/\/[^\s<>"'，。！？、；（）【】]+/i);
-    const bareDomain = /^(?:www\.)?(?:v\.)?(?:douyin\.com|tiktok\.com|youtu\.be|youtube\.com|bilibili\.com)\//i.test(input);
-    const candidate = (match?.[0] || (bareDomain ? `https://${input.split(/\s/)[0]}` : "")).replace(/[.,;!?)\\\]}»”’]+$/, "");
+    // A copied Markdown label may itself contain a URL; use its actual target.
+    // Keep query strings intact and only remove formatting around whole links.
+    const shareText = input
+      .replace(/\[[^\]\r\n]*\]\(\s*(https?:\/\/[^\s<>()]+)\s*\)/gi, (_, target) => ` ${target} `)
+      .replace(/(^|[\s(\[<{])(\*\*|__|`)(https?:\/\/[^\s<>]+?)\2/gi, (_, prefix, marker, target) => `${prefix}${target} `)
+      .trim();
+    const match = shareText.match(/https?:\/\/[^\s<>"'，。！？、；（）【】]+/i);
+    const bareDomain = /^(?:www\.)?(?:v\.)?(?:douyin\.com|tiktok\.com|youtu\.be|youtube\.com|bilibili\.com)\//i.test(shareText);
+    const candidate = (match?.[0] || (bareDomain ? `https://${shareText.split(/\s/)[0]}` : ""))
+      .replace(/[.,;!?)\\\]}»”’]+$/, "").replace(/\\_/g, "_");
     let parsed;
     try { if (candidate) parsed = new URL(candidate); } catch (_) {}
     const valid = !!parsed?.hostname && !parsed.username && !parsed.password && ["http:", "https:"].includes(parsed.protocol);
     videoUrlStatus.classList.toggle("hidden", !input);
     videoUrlInput.setAttribute("aria-invalid", String(!!input && !valid));
     videoUrlStatus.textContent = !input ? "" : valid
-      ? `${/(^|\.)douyin\.com$/i.test(parsed.hostname) ? "Đã nhận link Douyin" : `Đã nhận link từ ${parsed.hostname}`} — bấm Bắt đầu để tải và dịch.`
+      ? `${/(^|\.)(?:douyin|iesdouyin)\.com$/i.test(parsed.hostname) ? "Đã nhận link Douyin" : `Đã nhận link từ ${parsed.hostname}`}: ${parsed.origin}${parsed.pathname} — bấm Bắt đầu để tải và dịch.`
       : "Chưa nhận được link hợp lệ. Dán đường dẫn bắt đầu bằng https:// hoặc nội dung chia sẻ có link.";
     btnStart.disabled = !!input && !valid;
     if (valid) parsed.hash = "";

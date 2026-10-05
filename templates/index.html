@@ -212,9 +212,10 @@
           </h2>
 
           <div>
-            <input type="text" id="video-url" aria-label="Link video" aria-describedby="video-url-status" placeholder="Dán link Douyin hoặc link video trực tiếp..."
-              class="w-full bg-[#08090d] border border-gray-700 focus:border-pink-500 rounded-xl px-3 py-2 text-xs text-gray-100 placeholder-gray-500 focus:outline-none transition">
-            <p id="video-url-status" role="status" class="hidden mt-2 text-[11px] text-gray-400"></p>
+            <textarea id="video-url" rows="3" spellcheck="false" aria-label="Link video hoặc nội dung chia sẻ" aria-describedby="video-url-help video-url-status" placeholder="Dán toàn bộ nội dung chia sẻ Douyin hoặc link video vào đây…"
+              class="w-full bg-[#08090d] border border-gray-700 focus:border-pink-500 rounded-xl px-3 py-2 text-xs text-gray-100 placeholder-gray-500 focus:outline-none transition"></textarea>
+            <p id="video-url-help" class="mt-1 text-[11px] text-gray-400">Ứng dụng tự lấy link trong đoạn bạn dán. Không cần xóa chữ, hashtag hay mã chia sẻ.</p>
+            <p id="video-url-status" role="status" aria-live="polite" class="hidden mt-2 text-[11px] text-gray-400"></p>
           </div>
 
           <div class="flex items-center justify-between text-[10px] text-gray-500">

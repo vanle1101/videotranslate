@@ -155,6 +155,8 @@ def check_bgm_playback(page, folder, task_id):
 
 def check_progress_and_logs(page):
     """Use the real DOM and Qt renderer with deterministic download events."""
+    share_text = r'3.53 复制打开抖音，看看【斩漫的作品】《千金垂爱》被千金拉着结婚了 # ai动漫 # a... [**https://v.douyin.com/\_lAiSDH0bK8/**](https://v.douyin.com/_lAiSDH0bK8/) Rxf:/ 01/17 J@V.Lw :1pm'
+    javascript(page, 'window.__shareTextFixture = ' + json.dumps(share_text) + ';')
     javascript(page, '''
         window.__progressFetch = window.fetch;
         window.__progressSocket = window.WebSocket;
@@ -162,7 +164,10 @@ def check_progress_and_logs(page):
         window.__progressTask = {task_id: 'qt-progress-fixture', task_type: 'Dịch video', phase: 'download',
             stage: 'Đang tải video', progress_pct: null, status: 'RUNNING', can_pause: false, can_stop: true};
         window.fetch = async (url, options) => {
-            if (url === '/api/streaming/start-url') return new Response(JSON.stringify({task_id: 'qt-progress-fixture', video_url: null}));
+            if (url === '/api/streaming/start-url') {
+                window.__submittedShareUrl = JSON.parse(options.body).url;
+                return new Response(JSON.stringify({task_id: 'qt-progress-fixture', video_url: null}));
+            }
             if (url === '/api/tasks') return new Response(JSON.stringify({tasks: [window.__progressTask]}));
             if (url === '/api/tasks/qt-progress-fixture/stop') return new Response(JSON.stringify({status: 'ok'}));
             if (url.startsWith('/api/diagnostics/logs?')) return new Response(JSON.stringify({logs: window.__logFixture}));
@@ -175,7 +180,7 @@ def check_progress_and_logs(page):
             close() { this.readyState = 3; }
         };
         const urlInput = document.getElementById('video-url');
-        urlInput.value = '复制 https://v.douyin.com/qt-fixture/ 看视频';
+        urlInput.value = window.__shareTextFixture;
         urlInput.dispatchEvent(new Event('input', {bubbles: true}));
         document.getElementById('btn-start').click();
     ''')
@@ -186,11 +191,15 @@ def check_progress_and_logs(page):
         percent: document.getElementById('task-progress-value').textContent,
         aria: document.getElementById('task-progress-track').getAttribute('aria-valuenow'),
         recognized: document.getElementById('video-url-status').textContent,
+        sourceType: document.getElementById('video-url').tagName,
+        extractedUrl: window.__submittedShareUrl,
         pauseHidden: document.getElementById('btn-pause-worker').classList.contains('hidden'),
         exportDisabled: document.getElementById('btn-export-hq').disabled
     })'''))
     assert measured['percent'] == '42%' and measured['aria'] == '42.4', measured
     assert 'Đã nhận link Douyin' in measured['recognized'], measured
+    assert measured['sourceType'] == 'TEXTAREA', measured
+    assert measured['extractedUrl'] == 'https://v.douyin.com/_lAiSDH0bK8/', measured
     assert measured['pauseHidden'] and measured['exportDisabled'], measured
     javascript(page, '''
         window.__downloadSocket.onmessage({data: JSON.stringify({type: 'progress', ...window.__progressTask})});
@@ -240,7 +249,7 @@ def check_progress_and_logs(page):
         document.getElementById('video-url').value = '';
         document.getElementById('video-url').dispatchEvent(new Event('input', {bubbles: true}));
     ''')
-    return {'download_percent': measured['percent'], 'unknown_progress': True, 'task_visible': True,
+    return {'download_percent': measured['percent'], 'whole_share_text': True, 'unknown_progress': True, 'task_visible': True,
             'logs_preserve_lines': logs['separateLines'], 'logs_safe_copy': logs['rawMatches'],
             'native_clipboard': True}
 
