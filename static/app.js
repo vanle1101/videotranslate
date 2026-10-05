@@ -1,6 +1,7 @@
 document.addEventListener("DOMContentLoaded", () => {
   // Elements
   const videoPlayer = document.getElementById("video-player");
+  const playerContainer = document.getElementById("player-container");
   const playerPlaceholder = document.getElementById("player-placeholder");
   const subtitleOverlay = document.getElementById("subtitle-overlay");
   const subtitleText = document.getElementById("subtitle-text");
@@ -66,6 +67,8 @@ document.addEventListener("DOMContentLoaded", () => {
   const barBufferInfo = document.getElementById("bar-buffer-info");
   const segmentsList = document.getElementById("segments-list");
   const segmentsCountBadge = document.getElementById("segments-count-badge");
+  const transcriptFollow = document.getElementById("transcript-follow");
+  const transcriptStatus = document.getElementById("transcript-status");
 
   // Hardware Pill
   const hardwarePill = document.getElementById("hardware-pill");
@@ -129,6 +132,11 @@ document.addEventListener("DOMContentLoaded", () => {
   window.currentLocalFilePath = null;
   let totalVideoDuration = 0;
   let segments = {}; // segId -> segment data
+  const transcriptRows = new Map();
+  const transcriptDrafts = new Set();
+  let activeTranscriptId = null;
+  let transcriptTaskId = null;
+  let pendingTranscriptSaves = 0;
   let activeAudio = null;
   let activePlayingSegId = null;
   let bgmAudio = null;
@@ -430,8 +438,41 @@ document.addEventListener("DOMContentLoaded", () => {
   function updateExportAvailability() {
     const items = Object.values(segments);
     btnExportHQ.disabled = !currentTaskId || !items.length ||
+      transcriptDrafts.size > 0 || pendingTranscriptSaves > 0 ||
       items.some(segment => !["READY", "PLAYED"].includes(segment.status)) ||
       ["FAILED", "STOPPED", "CANCELLED", "CANCELLING"].includes(currentProgress?.status);
+  }
+
+  function resetWorkerBadges() {
+    for (const [badge, label] of [[workerAsrBadge, "ASR"], [workerTransBadge, "Dịch"], [workerTtsBadge, "TTS"]]) {
+      badge.className = "px-2 py-0.5 rounded bg-gray-800 text-gray-300";
+      badge.textContent = `${label}: Idle`;
+    }
+  }
+
+  function clearStoppedSession() {
+    stopPreviewAudio();
+    segments = {};
+    translationReady = false;
+    playWhenPreviewReady = false;
+    previewGeneration++;
+    previewPending = false;
+    previewResumeTime = null;
+    subtitleText.textContent = "";
+    subtitleOverlay.classList.add("opacity-0");
+    const socket = currentWs;
+    currentWs = null;
+    currentTaskId = null;
+    if (socket) socket.close();
+    streamDisconnected = false;
+    renderTimelineSlices();
+    renderSegmentsDrawer();
+    telBuffer.textContent = "+0.0s";
+    telBuffer.className = "px-2 py-0.5 rounded text-[11px] font-bold bg-gray-800 text-gray-300";
+    barBufferInfo.textContent = "Buffer: 0.0s";
+    bufferingText.textContent = "";
+    bufferingAlert.classList.add("hidden");
+    bufferingAlert.dataset.state = "stopped";
   }
 
   function showTaskProgress(progress) {
@@ -462,6 +503,17 @@ document.addEventListener("DOMContentLoaded", () => {
     if (!terminal && !translationReady && !previewPending) bufferingText.textContent = taskProgressStage.textContent;
     updateExportAvailability();
     if (terminal) {
+      resetWorkerBadges();
+      if (["STOPPED", "CANCELLED"].includes(status)) clearStoppedSession();
+      else if (status === "FAILED") {
+        videoPlayer.pause();
+        isBufferingUnderrun = false;
+        bufferingText.textContent = taskProgressStage.textContent;
+        bufferingAlert.classList.remove("hidden");
+      } else if (!previewPending) {
+        isBufferingUnderrun = false;
+        bufferingAlert.classList.add("hidden");
+      }
       resetWorkerControls();
       taskConnectionStatus.classList.add("hidden");
     }
@@ -585,7 +637,15 @@ document.addEventListener("DOMContentLoaded", () => {
     else showMediaError("Không tải được video. Hãy kiểm tra đường dẫn hoặc chọn lại file.");
   });
   videoPlayer.addEventListener("loadedmetadata", () => {
+    if (videoPlayer.videoWidth > 0 && videoPlayer.videoHeight > 0) {
+      playerContainer.style.aspectRatio = `${videoPlayer.videoWidth} / ${videoPlayer.videoHeight}`;
+      playerContainer.style.setProperty("--source-ratio", String(videoPlayer.videoWidth / videoPlayer.videoHeight));
+    }
     if (previewResumeTime !== null) videoPlayer.currentTime = Math.min(previewResumeTime, videoPlayer.duration || 0);
+  });
+  videoPlayer.addEventListener("emptied", () => {
+    playerContainer.style.aspectRatio = "9 / 16";
+    playerContainer.style.setProperty("--source-ratio", "0.5625");
   });
   videoPlayer.addEventListener("canplay", () => {
     if (previewResumeTime === null) return;
@@ -721,7 +781,7 @@ document.addEventListener("DOMContentLoaded", () => {
     selectedFile = null;
     window.currentLocalFilePath = null;
     fileInput.value = "";
-    fileNameDisplay.textContent = "Chọn file từ máy (Native Dialog)";
+    fileNameDisplay.textContent = "Chọn video từ máy";
     if (!currentTaskId && !pendingStart) {
       stopPreviewAudio();
       previewGeneration++;
@@ -879,7 +939,7 @@ document.addEventListener("DOMContentLoaded", () => {
     btnStopWorker.disabled = false;
 
     segments = {};
-    segmentsList.innerHTML = "";
+    renderSegmentsDrawer();
     timelineTrack.innerHTML = '<div id="playback-head-marker" class="absolute top-0 bottom-0 w-1 bg-white z-10 shadow-glow" style="left: 0%;"></div>';
     playbackHeadMarker = document.getElementById("playback-head-marker");
 
@@ -1030,10 +1090,7 @@ document.addEventListener("DOMContentLoaded", () => {
         updateExportAvailability();
       }
       else if (msg.type === "segment_update") {
-        segments[msg.id] = msg;
-        updateSegmentSlice(msg);
-        updateSegmentDrawerItem(msg);
-        updateExportAvailability();
+        applySegmentUpdate(msg);
         if (isBufferingUnderrun && ["READY", "PLAYED"].includes(msg.status) &&
             videoPlayer.currentTime >= msg.start && videoPlayer.currentTime < msg.end) {
           isBufferingUnderrun = false;
@@ -1107,11 +1164,12 @@ document.addEventListener("DOMContentLoaded", () => {
         updateTasksTable();
       }
       else if (msg.type === "finished") {
-        const failed = msg.status === "failed" || currentProgress?.status === "FAILED";
-        const stopped = ["cancelled", "stopped"].includes(msg.status);
+        const finishedStatus = String(msg.status || "").toUpperCase();
+        const failed = finishedStatus === "FAILED" || currentProgress?.status === "FAILED";
+        const stopped = ["CANCELLED", "STOPPED"].includes(finishedStatus);
         showTaskProgress({ status: failed ? "FAILED" : stopped ? "STOPPED" : "COMPLETED",
           phase: failed ? "failed" : stopped ? "stopped" : "complete",
-          stage: failed ? (currentProgress?.stage || msg.message || "Xử lý video thất bại") : stopped ? "Đã dừng tác vụ" : "Hoàn tất xử lý câu thoại",
+          stage: failed ? (currentProgress?.status === "FAILED" ? currentProgress.stage : msg.message || "Xử lý video thất bại") : stopped ? "Đã dừng tác vụ" : "Hoàn tất xử lý câu thoại",
           progress_pct: failed || stopped ? null : 100 });
         updateTasksTable();
       }
@@ -1148,6 +1206,8 @@ document.addEventListener("DOMContentLoaded", () => {
         break;
       }
     }
+
+    highlightTranscript(matchedSeg?.id ?? null);
 
     if (matchedSeg) {
       subtitleText.textContent = matchedSeg.final_vi || matchedSeg.natural_vi || matchedSeg.literal_vi || "";
@@ -1231,51 +1291,214 @@ document.addEventListener("DOMContentLoaded", () => {
     }
   }
 
-  // Segments Drawer
-  function renderSegmentsDrawer() {
-    segmentsList.innerHTML = "";
-    for (const id in segments) {
-      const s = segments[id];
-      const row = document.createElement("div");
-      row.id = `seg-row-${s.id}`;
-      row.className = "p-2 rounded-xl bg-gray-900/60 border border-gray-800/80 flex items-start justify-between gap-2 text-[11px]";
-      row.innerHTML = `
-        <div class="space-y-0.5 flex-1 min-w-0">
-          <div class="flex items-center gap-2 text-gray-400 font-mono text-[10px]">
-            <span>#${s.id}</span>
-            <span>[${formatTime(s.start)} - ${formatTime(s.end)}]</span>
-            <span id="seg-badge-${s.id}" class="px-1.5 py-0.2 rounded text-[9px] bg-gray-800 text-gray-300">${s.status}</span>
-          </div>
-          <p class="text-gray-300 font-sans text-xs truncate" id="seg-zh-${s.id}">${escapeHtml(s.text_zh || "...")}</p>
-          <p class="text-pink-300 font-sans text-xs font-semibold" id="seg-vi-${s.id}">${escapeHtml(s.final_vi || s.natural_vi || "")}</p>
-        </div>
-      `;
-      segmentsList.appendChild(row);
-    }
+  // Transcript rows retain their editors while background segment updates arrive.
+  function segmentTranslation(segment) {
+    return segment.final_vi || segment.natural_vi || segment.literal_vi || "";
   }
 
-  function updateSegmentDrawerItem(seg) {
-    let row = document.getElementById(`seg-row-${seg.id}`);
-    if (!row) {
-      renderSegmentsDrawer();
-      row = document.getElementById(`seg-row-${seg.id}`);
-      if (!row) return;
-    }
-    const badge = document.getElementById(`seg-badge-${seg.id}`);
-    const zh = document.getElementById(`seg-zh-${seg.id}`);
-    const vi = document.getElementById(`seg-vi-${seg.id}`);
+  function segmentStatusLabel(status) {
+    return { WAITING: "Đang chờ", ASR: "Nhận dạng", TRANSLATING: "Đang dịch", TTS: "Tạo giọng",
+      READY: "Sẵn sàng", PLAYED: "Sẵn sàng", FAILED: "Có lỗi" }[status] || "Đang xử lý";
+  }
 
-    if (badge) {
-      badge.textContent = seg.status;
-      if (seg.status === "READY") {
-        badge.className = "px-1.5 py-0.2 rounded text-[9px] bg-emerald-950 text-emerald-400 border border-emerald-800";
-      } else if (seg.status === "ASR" || seg.status === "TRANSLATING" || seg.status === "TTS") {
-        badge.className = "px-1.5 py-0.2 rounded text-[9px] bg-amber-950 text-amber-400 border border-amber-800 animate-pulse";
+  function seekTranscript(segment) {
+    if (!segment || !currentTaskId) return;
+    videoPlayer.currentTime = Math.max(0, Math.min(totalVideoDuration || segment.end, segment.start));
+    if (bgmAudio) bgmAudio.currentTime = videoPlayer.currentTime;
+    syncPlayback();
+  }
+
+  function highlightTranscript(id, force = false) {
+    if (!force && activeTranscriptId === id) return;
+    if (activeTranscriptId !== null) transcriptRows.get(activeTranscriptId)?.row.setAttribute("data-active", "false");
+    activeTranscriptId = id;
+    const item = transcriptRows.get(id);
+    if (!item) return;
+    item.row.setAttribute("data-active", "true");
+    const editing = [...transcriptRows.values()].some(row => !row.editor.hidden);
+    if (transcriptFollow?.checked && !editing) {
+      // Only scroll the list, so playback never pulls the entire page away from controls.
+      const top = item.row.offsetTop - segmentsList.offsetTop;
+      if (top < segmentsList.scrollTop || top + item.row.offsetHeight > segmentsList.scrollTop + segmentsList.clientHeight) {
+        segmentsList.scrollTop = Math.max(0, top - segmentsList.clientHeight / 3);
       }
     }
-    if (zh && seg.text_zh) zh.textContent = seg.text_zh;
-    if (vi && (seg.final_vi || seg.natural_vi)) vi.textContent = seg.final_vi || seg.natural_vi;
   }
+
+  function applySegmentUpdate(segment) {
+    const previous = segments[segment.id];
+    if (previous?.revision > (segment.revision || 0)) return;
+    if (activePlayingSegId === segment.id && previous?.audio_url !== segment.audio_url) {
+      activeAudio?.pause();
+      activeAudio = null;
+      activePlayingSegId = null;
+    }
+    segments[segment.id] = segment;
+    updateSegmentSlice(segment);
+    updateSegmentDrawerItem(segment);
+    updateExportAvailability();
+    syncPlayback();
+  }
+
+  function startTranscriptEdit(id, event) {
+    const segment = segments[id], item = transcriptRows.get(id);
+    if (!item || !["READY", "PLAYED"].includes(segment?.status)) return;
+    let caretOffset = 0;
+    // The text button has one text node: preserve the word the user clicked when opening its editor.
+    if (event && Number.isFinite(event.clientX) && Number.isFinite(event.clientY)) {
+      const caret = document.caretPositionFromPoint?.(event.clientX, event.clientY);
+      const range = !caret && document.caretRangeFromPoint?.(event.clientX, event.clientY);
+      if (caret?.offsetNode === item.translation.firstChild) caretOffset = caret.offset;
+      else if (range?.startContainer === item.translation.firstChild) caretOffset = range.startOffset;
+    }
+    videoPlayer.pause();
+    seekTranscript(segment);
+    if (item.editor.hidden) item.input.value = segmentTranslation(segment);
+    item.editor.hidden = false;
+    item.translation.hidden = true;
+    item.row.dataset.editing = "true";
+    item.input.focus();
+    item.input.setSelectionRange?.(caretOffset, caretOffset);
+  }
+
+  function closeTranscriptEdit(id, restoreFocus = true) {
+    const item = transcriptRows.get(id);
+    if (!item || item.saving) return;
+    item.editor.hidden = true;
+    item.translation.hidden = false;
+    item.row.dataset.editing = "false";
+    item.message.textContent = "";
+    item.message.dataset.error = "false";
+    transcriptDrafts.delete(id);
+    updateExportAvailability();
+    if (restoreFocus) item.translation.focus();
+  }
+
+  async function saveTranscriptEdit(id) {
+    const item = transcriptRows.get(id), segment = segments[id];
+    if (!item || item.saving || !segment || !currentTaskId) return;
+    const text = item.input.value.trim();
+    if (!text || text.length > 2000) {
+      item.message.textContent = !text ? "Nhập bản dịch trước khi lưu." : "Mỗi câu tối đa 2.000 ký tự.";
+      item.message.dataset.error = "true";
+      item.input.focus();
+      return;
+    }
+    if (text === segmentTranslation(segment)) { closeTranscriptEdit(id); return; }
+    const taskId = currentTaskId;
+    item.saving = true;
+    item.save.disabled = item.cancel.disabled = item.input.disabled = true;
+    pendingTranscriptSaves++;
+    updateExportAvailability();
+    item.message.dataset.error = "false";
+    item.message.textContent = "Đang tạo lại giọng đọc và đồng bộ với câu…";
+    try {
+      const response = await fetch(`/api/streaming/${encodeURIComponent(taskId)}/segments/${encodeURIComponent(id)}`, {
+        method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ final_vi: text }),
+      });
+      const data = await response.json();
+      if (!response.ok) throw new Error(typeof data.detail === "string" ? data.detail : "Không lưu được câu. Giữ bản sửa và thử lại.");
+      if (!data.segment || data.segment.id !== id) throw new Error("Máy chủ chưa xác nhận câu đã lưu. Hãy thử lại.");
+      if (taskId !== currentTaskId || transcriptRows.get(id) !== item) return;
+      applySegmentUpdate(data.segment);
+      item.saving = false;
+      closeTranscriptEdit(id);
+      transcriptStatus.textContent = `Đã lưu câu #${id + 1}. Phụ đề và giọng đọc đã cập nhật, mốc thời gian giữ nguyên.`;
+    } catch (error) {
+      if (taskId !== currentTaskId || transcriptRows.get(id) !== item) return;
+      item.message.textContent = error.message || "Không lưu được câu. Bản sửa vẫn được giữ để thử lại.";
+      item.message.dataset.error = "true";
+    } finally {
+      item.saving = false;
+      item.save.disabled = item.cancel.disabled = item.input.disabled = false;
+      pendingTranscriptSaves--;
+      updateExportAvailability();
+    }
+  }
+
+  function createTranscriptRow(segment) {
+    const element = (tag, className, text) => {
+      const node = document.createElement(tag); node.className = className;
+      if (text !== undefined) node.textContent = text;
+      return node;
+    };
+    const row = element("article", "transcript-row"); row.id = `seg-row-${segment.id}`;
+    row.dataset.segmentId = String(segment.id);
+    const heading = element("div", "transcript-row-heading");
+    const time = element("button", "transcript-time", `#${segment.id + 1} · ${formatTime(segment.start)} – ${formatTime(segment.end)}`);
+    time.type = "button";
+    time.setAttribute("aria-label", `Tua đến câu ${segment.id + 1}, ${formatTime(segment.start)}`);
+    time.addEventListener("click", () => seekTranscript(segments[segment.id]));
+    const badge = element("span", "transcript-state"); badge.id = `seg-badge-${segment.id}`;
+    heading.append(time, badge);
+    const original = element("button", "transcript-original"); original.type = "button"; original.id = `seg-zh-${segment.id}`;
+    original.title = "Tua đến câu này";
+    original.addEventListener("click", () => seekTranscript(segments[segment.id]));
+    const translation = element("button", "transcript-translation"); translation.type = "button"; translation.id = `seg-vi-${segment.id}`;
+    translation.title = "Bấm vào chữ cần sửa";
+    translation.addEventListener("click", event => startTranscriptEdit(segment.id, event));
+    const editor = element("div", "transcript-editor"); editor.hidden = true;
+    const label = element("label", "", "Sửa bản dịch tiếng Việt"); label.setAttribute("for", `seg-input-${segment.id}`);
+    const input = element("textarea", ""); input.id = `seg-input-${segment.id}`; input.rows = 3; input.maxLength = 2000;
+    input.addEventListener("input", () => {
+      if (input.value.trim() !== segmentTranslation(segments[segment.id])) transcriptDrafts.add(segment.id);
+      else transcriptDrafts.delete(segment.id);
+      updateExportAvailability();
+    });
+    input.addEventListener("keydown", event => {
+      if ((event.ctrlKey || event.metaKey) && event.key === "Enter") { event.preventDefault(); saveTranscriptEdit(segment.id); }
+      if (event.key === "Escape") { event.preventDefault(); closeTranscriptEdit(segment.id); }
+    });
+    const actions = element("div", "transcript-editor-actions");
+    const save = element("button", "", "Lưu và tạo lại giọng"); save.type = "button";
+    save.addEventListener("click", () => saveTranscriptEdit(segment.id));
+    const cancel = element("button", "", "Hủy sửa"); cancel.type = "button";
+    cancel.addEventListener("click", () => closeTranscriptEdit(segment.id));
+    actions.append(save, cancel);
+    const message = element("p", "transcript-edit-message"); message.setAttribute("role", "status");
+    editor.append(label, input, actions, message);
+    row.append(heading, element("p", "transcript-label", "GỐC"), original, element("p", "transcript-label", "TIẾNG VIỆT · BẤM ĐỂ SỬA"), translation, editor);
+    transcriptRows.set(segment.id, { row, badge, original, translation, editor, input, save, cancel, message, saving: false });
+    segmentsList.appendChild(row);
+    updateSegmentDrawerItem(segment);
+  }
+
+  function renderSegmentsDrawer() {
+    segmentsList.innerHTML = "";
+    const sorted = Object.values(segments).sort((a, b) => a.start - b.start);
+    if (transcriptTaskId !== currentTaskId || !sorted.length) {
+      transcriptRows.clear();
+      transcriptDrafts.clear();
+      activeTranscriptId = null;
+      transcriptTaskId = currentTaskId;
+    }
+    segmentsCountBadge.textContent = `${sorted.length} câu`;
+    if (!sorted.length) {
+      segmentsList.innerHTML = '<div class="transcript-empty"><i class="fa-regular fa-file-lines" aria-hidden="true"></i><p>Câu thoại sẽ xuất hiện tại đây</p><span>Nạp video và bắt đầu dịch để xem, sửa và nghe lại cạnh khung hình.</span></div>';
+      transcriptStatus.textContent = "Bản sửa sẽ cập nhật phụ đề và tạo lại giọng đọc, giữ nguyên mốc thời gian.";
+      return;
+    }
+    sorted.forEach(segment => {
+      const existing = transcriptRows.get(segment.id);
+      if (existing) { segmentsList.appendChild(existing.row); updateSegmentDrawerItem(segment); }
+      else createTranscriptRow(segment);
+    });
+    highlightTranscript(activeTranscriptId, true);
+  }
+
+  function updateSegmentDrawerItem(segment) {
+    if (!transcriptRows.has(segment.id)) { createTranscriptRow(segment); return; }
+    const item = transcriptRows.get(segment.id);
+    item.badge.textContent = segmentStatusLabel(segment.status);
+    item.badge.dataset.ready = String(["READY", "PLAYED"].includes(segment.status));
+    item.original.textContent = segment.text_zh || "Đang nhận dạng lời thoại…";
+    item.translation.textContent = segmentTranslation(segment) || "Bản dịch sẽ xuất hiện sau khi xử lý.";
+    item.translation.disabled = !["READY", "PLAYED"].includes(segment.status);
+    // Never replace text in an open editor: another worker update must not erase a draft.
+    if (item.editor.hidden) item.input.value = segmentTranslation(segment);
+  }
+
+  transcriptFollow?.addEventListener("change", () => highlightTranscript(activeTranscriptId, true));
 
   // Seeking on timeline
   timelineTrack.addEventListener("click", async (e) => {
@@ -1318,28 +1541,7 @@ document.addEventListener("DOMContentLoaded", () => {
       if (!response.ok) throw new Error(data.detail || "Không thể điều khiển tác vụ");
       if (id === currentTaskId) {
         if (action === "stop") {
-          stopPreviewAudio();
-          segments = {};
-          translationReady = false;
-          playWhenPreviewReady = false;
-          previewGeneration++;
-          previewPending = false;
-          previewResumeTime = null;
-          subtitleText.textContent = "";
-          subtitleOverlay.classList.add("opacity-0");
-          renderTimelineSlices();
-          renderSegmentsDrawer();
-          segmentsCountBadge.textContent = "0 câu";
           showTaskProgress({ phase: "stopped", status: "STOPPED", stage: "Đã dừng tác vụ", progress_pct: null });
-          resetWorkerControls();
-          bufferingAlert.classList.add("hidden");
-          if (currentWs) {
-            currentWs.onmessage = null;
-            currentWs.close();
-          }
-          currentWs = null;
-          currentTaskId = null;
-          updateExportAvailability();
         } else {
           showTaskProgress({ status: action === "pause" ? "PAUSED" : "RUNNING", can_pause: action === "resume", can_resume: action === "pause" });
           btnPauseWorker.classList.toggle("hidden", action === "pause");
@@ -1383,7 +1585,7 @@ document.addEventListener("DOMContentLoaded", () => {
       const tasks = data.tasks || [];
 
       const activeTask = tasks.find(task => task.task_id === currentTaskId);
-      if (streamDisconnected && activeTask) {
+      if (activeTask && (streamDisconnected || (activeTask.status !== currentProgress?.status && ["COMPLETED", "FAILED", "STOPPED", "CANCELLED"].includes(activeTask.status)))) {
         showTaskProgress(activeTask);
         if (!["COMPLETED", "FAILED", "STOPPED", "CANCELLED"].includes(activeTask.status)) {
           taskConnectionStatus.textContent = "Kết nối realtime bị gián đoạn. Tiến độ đang được cập nhật mỗi 2 giây; cần chạy lại phiên để tiếp tục phát realtime.";

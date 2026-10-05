@@ -106,16 +106,16 @@
 
     <!-- Main Grid: Player Centric Layout -->
     <p id="pipeline-warning" role="status" class="hidden max-w-7xl mx-auto px-6 pt-3 text-xs text-amber-300"></p>
-    <main class="max-w-7xl mx-auto p-6 grid grid-cols-1 lg:grid-cols-12 gap-6">
+    <main class="studio-workspace">
       
       <!-- Center Left: Large Video Player (7 Cols) -->
-      <div class="lg:col-span-7 space-y-4">
+      <div class="studio-preview">
         
         <!-- Video Player Card -->
-        <div class="bg-[#12151f] border border-gray-800 rounded-2xl p-4 shadow-2xl space-y-3 relative">
-          <div class="flex items-center justify-between pb-2 border-b border-gray-800 text-xs text-gray-300">
+        <div class="studio-player-card bg-[#12151f] border border-gray-800 rounded-2xl p-4 shadow-2xl space-y-3 relative">
+          <div class="studio-player-heading flex items-center justify-between pb-2 border-b border-gray-800 text-xs text-gray-300">
             <span class="font-bold flex items-center gap-2">
-              <i class="fa-solid fa-tv text-pink-500"></i> MÀN HÌNH PHÁT REALTIME (9:16)
+              <i class="fa-solid fa-tv text-pink-500"></i> XEM TRƯỚC VIDEO
             </span>
             <div class="flex items-center gap-3">
               <label class="flex items-center gap-1.5 cursor-pointer text-[11px] text-gray-400 hover:text-gray-200">
@@ -130,7 +130,8 @@
           </div>
 
           <!-- Player Viewport with Dynamic Subtitle Overlay -->
-          <div id="player-container" class="aspect-[9/16] max-h-[530px] mx-auto bg-black rounded-xl overflow-hidden relative flex items-center justify-center border border-gray-800 shadow-inner group">
+          <div class="studio-video-stage">
+          <div id="player-container" class="mx-auto bg-black rounded-xl overflow-hidden relative flex items-center justify-center border border-gray-800 shadow-inner group">
             
             <video id="video-player" playsinline controls class="w-full h-full object-contain"></video>
 
@@ -156,6 +157,8 @@
               <p class="text-sm text-gray-300 font-medium">Chưa có video được nạp</p>
               <p class="text-xs text-gray-500 mt-1">Dán link Douyin hoặc kéo thả video từ Windows Explorer vào đây</p>
             </div>
+          </div>
+
           </div>
 
           <!-- Segment Buffer Progress Bar -->
@@ -202,8 +205,30 @@
 
       </div>
 
+      <section class="transcript-panel" aria-labelledby="transcript-heading">
+        <div class="transcript-heading">
+          <div>
+            <h2 id="transcript-heading">Transcript</h2>
+            <p>Bấm vào câu để tua video. Bấm bản dịch để sửa từng chữ.</p>
+          </div>
+          <span id="segments-count-badge" class="transcript-count">0 câu</span>
+        </div>
+        <div class="transcript-toolbar">
+          <label class="transcript-follow"><input id="transcript-follow" type="checkbox" checked> Theo vị trí phát</label>
+          <span class="transcript-time-note">Mốc thời gian theo câu</span>
+        </div>
+        <div id="segments-list" class="transcript-list" aria-label="Câu thoại gốc và bản dịch" tabindex="0">
+          <div class="transcript-empty">
+            <i class="fa-regular fa-file-lines" aria-hidden="true"></i>
+            <p>Câu thoại sẽ xuất hiện tại đây</p>
+            <span>Nạp video và bắt đầu dịch để xem, sửa và nghe lại cạnh khung hình.</span>
+          </div>
+        </div>
+        <p id="transcript-status" class="transcript-status" role="status" aria-live="polite">Bản sửa sẽ cập nhật phụ đề và tạo lại giọng đọc, giữ nguyên mốc thời gian.</p>
+      </section>
+
       <!-- Center Right: Input & Realtime Controls (5 Cols) -->
-      <div class="lg:col-span-5 space-y-4">
+      <aside class="studio-controls" aria-label="Nguồn video và cấu hình">
         
         <!-- Input Card -->
         <div class="bg-[#12151f] border border-gray-800 rounded-2xl p-4 shadow-xl space-y-3">
@@ -212,7 +237,7 @@
           </h2>
 
           <div>
-            <textarea id="video-url" rows="3" spellcheck="false" aria-label="Link video hoặc nội dung chia sẻ" aria-describedby="video-url-help video-url-status" placeholder="Dán toàn bộ nội dung chia sẻ Douyin hoặc link video vào đây…"
+            <textarea id="video-url" rows="2" spellcheck="false" aria-label="Link video hoặc nội dung chia sẻ" aria-describedby="video-url-help video-url-status" placeholder="Dán toàn bộ nội dung chia sẻ Douyin hoặc link video vào đây…"
               class="w-full bg-[#08090d] border border-gray-700 focus:border-pink-500 rounded-xl px-3 py-2 text-xs text-gray-100 placeholder-gray-500 focus:outline-none transition"></textarea>
             <p id="video-url-help" class="mt-1 text-[11px] text-gray-400">Ứng dụng tự lấy link trong đoạn bạn dán. Không cần xóa chữ, hashtag hay mã chia sẻ.</p>
             <p id="video-url-status" role="status" aria-live="polite" class="hidden mt-2 text-[11px] text-gray-400"></p>
@@ -228,7 +253,7 @@
           <div id="drop-zone" role="button" tabindex="0" aria-label="Chọn video từ máy" class="border-2 border-dashed border-gray-700 hover:border-pink-500/80 rounded-xl p-3 text-center cursor-pointer transition bg-[#08090d]/60 group">
             <input type="file" id="video-file" accept="video/*" class="hidden">
             <i class="fa-solid fa-folder-open text-2xl text-pink-400 group-hover:scale-110 transition duration-200 mb-1"></i>
-            <p class="text-xs text-gray-200 font-semibold" id="file-name-display">Chọn file từ máy (Native Dialog)</p>
+            <p class="text-xs text-gray-200 font-semibold" id="file-name-display">Chọn video từ máy</p>
             <p class="text-[10px] text-gray-400 mt-0.5">Hỗ trợ: MP4, MOV, WebM, MKV (Kéo thả trực tiếp từ Explorer)</p>
           </div>
         </div>
@@ -236,42 +261,8 @@
         <!-- Realtime Engine Configuration Card -->
         <div class="bg-[#12151f] border border-gray-800 rounded-2xl p-4 shadow-xl space-y-3">
           <h2 class="text-xs font-bold text-gray-200 uppercase tracking-wider flex items-center gap-2">
-            <i class="fa-solid fa-sliders text-pink-400"></i> 2. Cấu Hình Realtime
+            <i class="fa-solid fa-sliders text-pink-400"></i> 2. Dịch và lồng tiếng
           </h2>
-
-          <!-- Buffer Ahead Setting -->
-          <div>
-            <div>
-              <label class="text-[11px] text-gray-400 block mb-1">Đệm trước phát (Initial Buffer):</label>
-              <select id="buffer-select" class="w-full bg-[#08090d] border border-gray-700 rounded-xl px-3 py-1.5 text-xs text-gray-200 focus:outline-none focus:border-pink-500">
-                <option value="5">5 giây (Nhanh nhất)</option>
-                <option value="10" selected>10 giây (Khuyên dùng)</option>
-                <option value="15">15 giây (Ổn định)</option>
-                <option value="30">30 giây (An toàn)</option>
-              </select>
-            </div>
-
-          </div>
-
-          <section class="voice-picker" aria-labelledby="voice-list-title">
-            <div class="voice-list-heading">
-              <h3 id="voice-list-title">Giọng lồng tiếng</h3>
-              <span id="voice-count" class="voice-count" role="status" aria-live="polite"></span>
-            </div>
-            <p id="voice-source" class="voice-source" aria-live="polite">Đang tải danh sách giọng…</p>
-            <input type="hidden" id="voice-select" value="{{ settings.EDGE_VOICE if settings.TTS_ENGINE in ['edge', 'edge-tts'] else 'Trúc Ly' }}">
-            <label for="voice-search" class="voice-search-label">Tìm theo tên, vùng miền hoặc nguồn</label>
-            <input id="voice-search" type="search" placeholder="Ví dụ: Trúc Ly, miền Nam, Piper…" autocomplete="off" class="voice-search" aria-controls="voice-list">
-            <div id="voice-list" class="voice-list" role="group" aria-labelledby="voice-list-title" tabindex="0"></div>
-            <p id="voice-empty" class="hidden voice-source">Không tìm thấy giọng phù hợp. Thử tên hoặc nguồn khác.</p>
-            <p id="voice-catalog-status" class="voice-source" role="status"></p>
-          </section>
-          <div class="voice-preview-panel">
-            <div class="voice-preview-controls">
-              <audio id="voice-preview-audio" class="hidden" controls preload="none" aria-label="Mẫu giọng lồng tiếng"></audio>
-            </div>
-            <p id="voice-preview-status" class="voice-preview-status" role="status" aria-live="polite" aria-atomic="true"></p>
-          </div>
 
           <!-- Execution Action Buttons -->
           <div class="pt-1 space-y-2">
@@ -307,25 +298,45 @@
               <i class="fa-solid fa-film text-pink-400"></i> Xuất Video Hoàn Chỉnh (MP4)
             </button>
           </div>
-        </div>
 
-        <!-- Live Segments Drawer -->
-        <div class="bg-[#12151f] border border-gray-800 rounded-2xl p-4 shadow-xl space-y-2.5">
-          <div class="flex items-center justify-between pb-1.5 border-b border-gray-800">
-            <h3 class="text-xs font-bold text-gray-200 uppercase tracking-wider flex items-center gap-1.5">
-              <i class="fa-solid fa-list-check text-pink-400"></i> Danh Sách Câu Thoại Realtime
-            </h3>
-            <span id="segments-count-badge" class="text-[10px] font-mono text-gray-400 bg-gray-900 px-2 py-0.5 rounded">0 câu</span>
-          </div>
-
-          <div id="segments-list" class="space-y-2 max-h-[260px] overflow-y-auto pr-1 font-mono text-xs">
-            <div class="text-center py-8 text-gray-500 text-xs">
-              Chưa có câu thoại nào. Bấm Bắt đầu để nạp video.
+          <!-- Buffer Ahead Setting -->
+          <div>
+            <div>
+              <label class="text-[11px] text-gray-400 block mb-1">Đệm trước phát (Initial Buffer):</label>
+              <select id="buffer-select" class="w-full bg-[#08090d] border border-gray-700 rounded-xl px-3 py-1.5 text-xs text-gray-200 focus:outline-none focus:border-pink-500">
+                <option value="5">5 giây (Nhanh nhất)</option>
+                <option value="10" selected>10 giây (Khuyên dùng)</option>
+                <option value="15">15 giây (Ổn định)</option>
+                <option value="30">30 giây (An toàn)</option>
+              </select>
             </div>
+
           </div>
+
+          <section class="voice-picker" aria-labelledby="voice-list-title">
+            <div class="voice-list-heading">
+              <h3 id="voice-list-title">Giọng lồng tiếng</h3>
+              <span id="voice-count" class="voice-count" role="status" aria-live="polite"></span>
+            </div>
+            <p id="voice-source" class="voice-source" aria-live="polite">Đang tải danh sách giọng…</p>
+            <input type="hidden" id="voice-select" value="{{ settings.EDGE_VOICE if settings.TTS_ENGINE in ['edge', 'edge-tts'] else 'Trúc Ly' }}">
+            <label for="voice-search" class="voice-search-label">Tìm theo tên, vùng miền hoặc nguồn</label>
+            <input id="voice-search" type="search" placeholder="Ví dụ: Trúc Ly, miền Nam, Piper…" autocomplete="off" class="voice-search" aria-controls="voice-list">
+            <div id="voice-list" class="voice-list" role="group" aria-labelledby="voice-list-title" tabindex="0"></div>
+            <p id="voice-empty" class="hidden voice-source">Không tìm thấy giọng phù hợp. Thử tên hoặc nguồn khác.</p>
+            <p id="voice-catalog-status" class="voice-source" role="status"></p>
+          </section>
+          <div class="voice-preview-panel">
+            <div class="voice-preview-controls">
+              <audio id="voice-preview-audio" class="hidden" controls preload="none" aria-label="Mẫu giọng lồng tiếng"></audio>
+            </div>
+            <p id="voice-preview-status" class="voice-preview-status" role="status" aria-live="polite" aria-atomic="true"></p>
+          </div>
+
+
         </div>
 
-      </div>
+      </aside>
     </main>
   </div>
 
@@ -469,15 +480,22 @@
 
     <section id="douyin-cookies-panel" aria-labelledby="douyin-cookies-heading" class="bg-[#12151f] border border-gray-800 rounded-2xl p-5 shadow-xl space-y-3">
       <h3 id="douyin-cookies-heading" class="text-sm font-bold text-cyan-300">Tải video Douyin</h3>
-      <p id="douyin-cookies-help" class="text-xs text-gray-400 leading-relaxed">Phiên đăng nhập Chrome không tự chuyển sang Studio. Chọn tệp Netscape cookies <span class="font-mono">.txt</span> chỉ xuất từ Douyin sau khi đăng nhập (tối đa 1 MiB). Bản sao được lưu trên máy và chỉ dùng để tải video Douyin.</p>
-      <p id="douyin-cookies-state" class="text-xs text-gray-300">Chưa kiểm tra cookie đã nhập.</p>
-      <div class="flex flex-wrap items-center gap-2">
-        <input id="douyin-cookies-file" type="file" accept=".txt,text/plain" aria-label="Chọn tệp cookie Douyin" aria-describedby="douyin-cookies-help" class="hidden">
-        <button id="btn-import-douyin-cookies" type="button" class="px-3 py-2 rounded-xl border border-cyan-500/50 hover:bg-cyan-600/20 text-cyan-300 text-xs font-semibold transition disabled:opacity-50 disabled:cursor-not-allowed">Nhập cookie từ tệp…</button>
-        <button id="btn-refresh-douyin-cookies" type="button" class="px-3 py-2 rounded-xl border border-gray-700 hover:bg-gray-800 text-gray-300 text-xs font-semibold transition disabled:opacity-50 disabled:cursor-not-allowed">Kiểm tra trạng thái</button>
-        <button id="btn-delete-douyin-cookies" type="button" disabled class="px-3 py-2 rounded-xl border border-gray-700 hover:bg-rose-900/20 text-rose-300 text-xs font-semibold transition disabled:opacity-50 disabled:cursor-not-allowed">Xóa cookie đã nhập</button>
-      </div>
-      <p id="douyin-cookies-status" role="status" aria-live="polite" aria-atomic="true" class="text-xs text-gray-400 leading-relaxed">Nhập cookie chưa xác nhận tải được video; cần chạy lại link Douyin để kiểm tra.</p>
+      <p class="text-xs text-gray-300 leading-relaxed">Dán toàn bộ nội dung chia sẻ vào ô <strong>Video nguồn</strong>, rồi bấm <strong>Bắt đầu</strong>. Studio thử tải video công khai miễn phí, không cần API key hoặc mở Chrome.</p>
+      <p class="text-xs text-gray-400 leading-relaxed">Khả năng tải phụ thuộc video và kết nối. Nếu cách tải công khai không dùng được, Studio thử cách tải dự phòng và cookie đã nhập nếu có.</p>
+      <details class="rounded-xl border border-gray-800 bg-[#08090d]/50">
+        <summary class="cursor-pointer rounded-xl px-3 py-3 text-xs font-semibold text-gray-300 hover:text-white focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-cyan-400">Nâng cao: cookie cho video cần đăng nhập</summary>
+        <div class="px-3 pb-3 space-y-3">
+          <p id="douyin-cookies-help" class="text-xs text-gray-400 leading-relaxed">Chỉ cần thử cách này khi bộ tải yêu cầu phiên đăng nhập. Phiên Chrome không tự chuyển sang Studio. Chọn tệp Netscape cookies <span class="font-mono">.txt</span> chỉ xuất từ Douyin sau khi đăng nhập (tối đa 1 MiB). Bản sao được lưu trên máy và chỉ dùng để tải video Douyin.</p>
+          <p id="douyin-cookies-state" class="text-xs text-gray-300">Chưa kiểm tra cookie đã nhập.</p>
+          <div class="flex flex-wrap items-center gap-2">
+            <input id="douyin-cookies-file" type="file" accept=".txt,text/plain" aria-label="Chọn tệp cookie Douyin" aria-describedby="douyin-cookies-help" class="hidden">
+            <button id="btn-import-douyin-cookies" type="button" class="px-3 py-2 rounded-xl border border-cyan-500/50 hover:bg-cyan-600/20 text-cyan-300 text-xs font-semibold transition disabled:opacity-50 disabled:cursor-not-allowed">Nhập cookie từ tệp…</button>
+            <button id="btn-refresh-douyin-cookies" type="button" class="px-3 py-2 rounded-xl border border-gray-700 hover:bg-gray-800 text-gray-300 text-xs font-semibold transition disabled:opacity-50 disabled:cursor-not-allowed">Kiểm tra trạng thái</button>
+            <button id="btn-delete-douyin-cookies" type="button" disabled class="px-3 py-2 rounded-xl border border-gray-700 hover:bg-rose-900/20 text-rose-300 text-xs font-semibold transition disabled:opacity-50 disabled:cursor-not-allowed">Xóa cookie đã nhập</button>
+          </div>
+          <p id="douyin-cookies-status" role="status" aria-live="polite" aria-atomic="true" class="text-xs text-gray-400 leading-relaxed">Nhập cookie chưa xác nhận tải được video; cần chạy lại link Douyin để kiểm tra.</p>
+        </div>
+      </details>
     </section>
 
     <div class="grid grid-cols-1 md:grid-cols-2 gap-6">

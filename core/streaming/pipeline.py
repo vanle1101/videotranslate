@@ -3,6 +3,8 @@ import time
 import subprocess
 import functools
 import logging
+import math
+import uuid
 from pathlib import Path
 from typing import Dict, Any, Optional, List, Callable
 from config import settings
@@ -16,6 +18,10 @@ from core.engines.tts.edge_fallback import EdgeTTSFallbackEngine
 from core.voice_catalog import resolve_voice
 from core.engines.alignment.timing_aligner import TimingBudgetAligner
 from core.engines.separator.realtime_suppressor import RealtimeVocalSuppressor
+
+class SegmentEditConflict(RuntimeError):
+    """Editing would conflict with the current session state."""
+
 
 class SegmentItem:
     def __init__(self, seg_id: int, start: float, end: float, duration: float):
@@ -34,6 +40,7 @@ class SegmentItem:
         self.audio_path: Optional[str] = None
         self.audio_url: Optional[str] = None
         self.error: Optional[str] = None
+        self.revision = 0
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -51,7 +58,8 @@ class SegmentItem:
             "tts_duration": self.tts_duration,
             "speed_ratio": self.speed_ratio,
             "audio_url": self.audio_url,
-            "error": self.error
+            "error": self.error,
+            "revision": self.revision,
         }
 
 class StreamingPipelineSession:
@@ -129,6 +137,76 @@ class StreamingPipelineSession:
         self.worker_task: Optional[asyncio.Task] = None
         self.start_task: Optional[asyncio.Task] = None
         self.rolling_context: List[Dict[str, str]] = []
+        self.edit_tasks: set[asyncio.Task] = set()
+        self._tts_lock = asyncio.Lock()
+
+    @property
+    def is_editing(self):
+        return bool(self.edit_tasks)
+
+    async def edit_segment(self, segment_id: int, text: str):
+        """Publish text and fitted audio together only after synthesis succeeds."""
+        if not isinstance(text, str) or not text.strip() or len(text) > 2000 or "\x00" in text:
+            raise ValueError("Nội dung tiếng Việt phải có từ 1 đến 2.000 ký tự và không chứa ký tự NUL.")
+        seg = self.segments.get(segment_id)
+        if seg is None:
+            raise KeyError(segment_id)
+        if self.is_stopped or seg.status not in ("READY", "PLAYED"):
+            raise SegmentEditConflict("Hãy chờ câu này dịch và tạo giọng xong trước khi sửa.")
+        if self.is_editing:
+            raise SegmentEditConflict("Đang tạo lại giọng cho một câu. Hãy chờ lưu xong rồi sửa tiếp.")
+        if not all(math.isfinite(value) for value in (seg.start, seg.end, seg.duration)) or seg.duration <= 0:
+            raise ValueError("Thời lượng câu thoại không hợp lệ.")
+        text = text.strip()
+        if text == seg.final_vi:
+            return seg.to_dict()
+        task = asyncio.current_task()
+        self.edit_tasks.add(task)
+        stem = f"edit_{seg.id}_{uuid.uuid4().hex}"
+        raw_path = self.cache_dir / f"{stem}_raw.wav"
+        fitted_path = self.segments_dir / f"{stem}.wav"
+        try:
+            async with self._tts_lock:
+                await self._run_blocking(self.tts_engine.synthesize, text=text,
+                                         output_path=raw_path, voice=self.voice, ref_audio=self.ref_audio)
+            tts_duration = await self._run_blocking(self.aligner.get_audio_duration, raw_path)
+            if not math.isfinite(tts_duration) or tts_duration <= 0:
+                raise RuntimeError("Không đọc được âm thanh từ TTS.")
+            ratio = max(self.aligner.min_speed, tts_duration / seg.duration)
+            ratio = await self._run_blocking(self.aligner.apply_atempo, raw_path, fitted_path,
+                                             ratio, fit_duration=seg.duration)
+            if not math.isfinite(ratio) or ratio <= 0 or not fitted_path.is_file() or not fitted_path.stat().st_size:
+                raise RuntimeError("Không tạo được giọng đọc hợp lệ.")
+            if self.is_stopped:
+                raise asyncio.CancelledError
+            final_path = self.segments_dir / f"seg_{seg.id}.wav"
+            # No await between atomic file replacement and metadata publication.
+            fitted_path.replace(final_path)
+            old_text = seg.final_vi
+            seg.final_vi = text
+            seg.tts_duration = tts_duration
+            seg.speed_ratio = round(ratio, 2)
+            seg.audio_path = str(final_path.resolve())
+            seg.revision += 1
+            seg.audio_url = f"/api/streaming/audio/{self.task_id}/{seg.id}?rev={seg.revision}"
+            for context in self.rolling_context:
+                if context.get("zh") == seg.text_zh and context.get("vi") == old_text:
+                    context["vi"] = text
+            snapshot = seg.to_dict()
+            try:
+                await self.emit("segment_update", snapshot)
+            except Exception:
+                logging.getLogger("errors").warning("[%s] Không gửi được cập nhật câu %s", self.task_id, seg.id)
+            return snapshot
+        finally:
+            for path in (raw_path, fitted_path):
+                try:
+                    path.unlink(missing_ok=True)
+                except OSError:
+                    pass
+            self.edit_tasks.discard(task)
+            if self.is_stopped or not self.is_running:
+                self._release_runtime()
 
     async def emit(self, event_type: str, data: Dict[str, Any]):
         if self.event_callback:
@@ -436,6 +514,16 @@ class StreamingPipelineSession:
         return result
 
     def _release_runtime(self):
+        if self.edit_tasks:
+            return
+        if self.is_stopped:
+            try:
+                current = asyncio.current_task()
+            except RuntimeError:
+                current = None
+            if any(task is not None and task is not current and not task.done()
+                   for task in (self.start_task, self.worker_task)):
+                return
         # Finished sessions retain media for replay/export, not another copy of
         # Whisper/SenseVoice in RAM for every video processed in this app.
         self.faster_whisper.model = None
@@ -529,10 +617,11 @@ class StreamingPipelineSession:
                 seg.status = "TTS"
                 await self._segment_progress("tts", f"Đang tạo giọng đọc câu {seg.id + 1}")
                 await self.emit("segment_update", seg.to_dict())
-                await self._run_blocking(
-                    self.tts_engine.synthesize, text=seg.final_vi,
-                    output_path=raw_tts_wav, voice=self.voice, ref_audio=self.ref_audio,
-                )
+                async with self._tts_lock:
+                    await self._run_blocking(
+                        self.tts_engine.synthesize, text=seg.final_vi,
+                        output_path=raw_tts_wav, voice=self.voice, ref_audio=self.ref_audio,
+                    )
                 seg.status = "ALIGNING"
                 await self._segment_progress("align", f"Đang khớp thời lượng câu {seg.id + 1}")
                 await self.emit("segment_update", seg.to_dict())
@@ -612,6 +701,17 @@ class StreamingPipelineSession:
         self.pause_event.set()
 
     def stop(self):
+        # Desktop shutdown may call from another thread after normal processing
+        # has completed, while a transcript edit still owns the backend loop.
+        owner = next(iter(self.edit_tasks), None)
+        if owner is not None:
+            try:
+                current_loop = asyncio.get_running_loop()
+            except RuntimeError:
+                current_loop = None
+            if owner.get_loop().is_running() and owner.get_loop() is not current_loop:
+                owner.get_loop().call_soon_threadsafe(self.stop)
+                return
         if self.is_stopped:
             return
         self.is_stopped = True
@@ -621,6 +721,9 @@ class StreamingPipelineSession:
             self.start_task.cancel()
         if self.worker_task and not self.worker_task.done():
             self.worker_task.cancel()
+        for task in tuple(self.edit_tasks):
+            if not task.done():
+                task.cancel()
         if not self.start_task and (not self.worker_task or self.worker_task.done()):
             self._release_runtime()
         active_streaming_sessions.pop(self.task_id, None)

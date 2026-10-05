@@ -1,12 +1,16 @@
 """Real local HTTP download/cancellation; no platform credentials or Internet."""
 import functools
 import http.server
+import io
+import json
+import queue
 import socket
 import subprocess
 import tempfile
 import threading
 import time
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -52,6 +56,63 @@ def test_progress_never_invents_percent_from_estimate():
     assert progress_payload({'status': 'finished'})['phase'] == 'prepare'
     message = friendly_download_error('HTTPSConnection at 0x000: connect timeout=20', 'www.douyin.com')
     assert 'Không kết nối được www.douyin.com' in message and '0x000' not in message
+
+
+@pytest.mark.parametrize('host', ['douyin.com', 'v.douyin.com', 'www.iesdouyin.com'])
+def test_douyin_login_error_explains_studio_session_without_echoing_secrets(host):
+    message = friendly_download_error('403 fresh cookies: sessionid=private-session; api_key=private-key', host)
+    assert 'Đăng nhập Chrome không tự chuyển phiên sang Studio' in message
+    assert 'Cài đặt' in message and 'tệp video trên máy' in message
+    assert 'private-session' not in message and 'private-key' not in message
+
+
+@pytest.mark.parametrize('host', ['www.tiktok.com', 'douyin.com.example.com', 'notdouyin.com'])
+def test_other_hosts_do_not_suggest_douyin_session_settings(host):
+    message = friendly_download_error('403 sessionid=private-session', host)
+    assert 'cookie đã nhập' not in message and 'Douyin' not in message
+    assert 'private-session' not in message
+
+
+@pytest.mark.parametrize('changed_field', ['stage', 'source', None])
+def test_resolution_fallback_resets_idle_timeout_but_repeated_heartbeat_does_not(tmp_path, monkeypatch, changed_field):
+    from core import downloader as module
+
+    clock = SimpleNamespace(now=0)
+    initial = {'kind': 'progress', 'phase': 'resolve', 'stage': 'Đang lấy video', 'source': 'api'}
+    fallback = dict(initial)
+    if changed_field:
+        fallback[changed_field] = 'direct'
+
+    class TimedQueue(queue.Queue):
+        def __init__(self):
+            super().__init__()
+            self.times = iter([0, 50, 100, 100])
+
+        def get(self, *args, **kwargs):
+            event = super().get(*args, **kwargs)
+            clock.now = next(self.times, 100)
+            return event
+
+    def start_worker(arguments, **kwargs):
+        output = Path(arguments[-1] + '.mp4')
+        output.write_bytes(b'completed fixture')
+        # The fallback begins 50 seconds after API resolution; a heartbeat at
+        # 100 seconds must not make either route look more active than it is.
+        events = [initial, fallback, fallback,
+                  {'kind': 'result', 'result': {'file_path': str(output)}}]
+        return SimpleNamespace(stdout=io.StringIO('\n'.join(json.dumps(event) for event in events)), poll=lambda: 0)
+
+    monkeypatch.setattr(module, 'queue', SimpleNamespace(Queue=TimedQueue, Empty=queue.Empty))
+    monkeypatch.setattr(module, 'time', SimpleNamespace(monotonic=lambda: clock.now))
+    monkeypatch.setattr(module.subprocess, 'Popen', start_worker)
+    downloader = VideoDownloader(tmp_path)
+    if changed_field:
+        result = downloader.download('https://v.douyin.com/test/')
+        assert Path(result['file_path']).read_bytes() == b'completed fixture'
+    else:
+        with pytest.raises(VideoDownloadError, match='Không kết nối được'):
+            downloader.download('https://v.douyin.com/test/')
+        assert not list(tmp_path.iterdir())
 
 
 @pytest.mark.parametrize('playlist_type', ['playlist', 'multi_video'])

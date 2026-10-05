@@ -23,6 +23,8 @@ from core.streaming.pipeline import SegmentItem, StreamingPipelineSession
 from core.streaming.segmenter import AudioSegmenter
 from core.streaming.export import HQExporter
 from core.media_process import run_media
+from core.subtitle import SubtitleGenerator
+from core.video_composer import _escape_filter_filename
 
 
 def write_wave(path, duration=1, silent=False):
@@ -50,6 +52,63 @@ class PortablePipelineTests(unittest.TestCase):
 
     def session(self, **kwargs):
         return StreamingPipelineSession("regression", self.root / "video.mp4", **kwargs)
+
+    def test_ass_user_lines_and_literal_commands_stay_in_one_event(self):
+        path = self.root / "edited.ass"
+        SubtitleGenerator().generate_ass([
+            {"start": 0, "end": 3, "vi_text": "Xin chào\r\nMọi người\rNhé"},
+            {"start": 3, "end": 6, "vi_text": r"{\alpha&HFF&}A\NB"},
+        ], path)
+        rows = path.read_text(encoding="utf-8").splitlines()
+        dialogue = [row for row in rows if row.startswith("Dialogue:")]
+        self.assertEqual(len(dialogue), 2)
+        self.assertTrue(dialogue[0].endswith(r"Xin chào\NMọi người\NNhé"))
+        self.assertTrue(dialogue[1].endswith("\\{\\\u2060alpha&HFF&\\}A\\\u2060NB"))
+        self.assertFalse(any(row == "Mọi người" for row in rows))
+
+    def test_ass_wraps_long_sentence_without_changing_words(self):
+        text = "Một câu dài vẫn giữ đầy đủ tất cả từ đã sửa."
+        path = self.root / "wrapped.ass"
+        SubtitleGenerator().generate_ass([{"start": 0, "end": 4, "vi_text": text}], path)
+        dialogue = next(row for row in path.read_text(encoding="utf-8").splitlines()
+                        if row.startswith("Dialogue:"))
+        rendered_text = dialogue.split(",", 9)[-1]
+        self.assertEqual(rendered_text.replace(r"\N", " "), text)
+        self.assertEqual(rendered_text.count(r"\N"), 1)
+
+    def test_libass_renders_both_edited_lines_and_treats_override_text_literally(self):
+        if not shutil.which("ffmpeg"):
+            self.skipTest("FFmpeg with libass is required for subtitle rendering")
+
+        def render(text, name):
+            path = self.root / name
+            SubtitleGenerator().generate_ass([{"start": 0, "end": 1, "vi_text": text}], path)
+            result = subprocess.run([
+                "ffmpeg", "-hide_banner", "-loglevel", "error", "-nostdin",
+                "-f", "lavfi", "-i", "color=c=black:s=360x640:d=0.1",
+                "-vf", f"ass=filename={_escape_filter_filename(path)}",
+                "-frames:v", "1", "-pix_fmt", "gray", "-f", "rawvideo", "pipe:1",
+            ], capture_output=True, timeout=20, creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+            if b"No such filter" in result.stderr:
+                self.skipTest("This FFmpeg build does not include libass")
+            self.assertEqual(result.returncode, 0, result.stderr.decode(errors="replace"))
+            self.assertEqual(len(result.stdout), 360 * 640)
+            lit_rows = [row for row in range(640)
+                        if any(value > 100 for value in result.stdout[row * 360:(row + 1) * 360])]
+            bands = sum(index == 0 or row > lit_rows[index - 1] + 1
+                        for index, row in enumerate(lit_rows))
+            return result.stdout, bands
+
+        one, one_bands = render("Xin chao", "one.ass")
+        two, two_bands = render("Xin chao\nMoi nguoi", "two.ass")
+        self.assertEqual(one_bands, 1)
+        self.assertEqual(two_bands, 2, "The second edited line must survive ASS export")
+        self.assertNotEqual(one, two)
+        visible, bands = render(r"{\alpha&HFF&}HI", "literal.ass")
+        self.assertTrue(any(pixel > 100 for pixel in visible), "Literal user braces must not hide subtitle text")
+        self.assertEqual(bands, 1)
+        _, literal_bands = render(r"A\NB", "slash.ass")
+        self.assertEqual(literal_bands, 1, "A literal backslash-N must not create a line break")
 
     def test_defaults_come_from_machine_settings(self):
         session = self.session()

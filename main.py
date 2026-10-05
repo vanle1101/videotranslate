@@ -28,7 +28,8 @@ from core.engines.translation.openrouter_client import OpenRouterFreeClient, Ope
 from core.streaming.pipeline import (
     create_streaming_session,
     get_streaming_session,
-    active_streaming_sessions
+    active_streaming_sessions,
+    SegmentEditConflict,
 )
 from core.streaming.export import HQExporter
 from core.media_preview import preview_manager
@@ -78,6 +79,9 @@ class SeekRequest(BaseModel):
 class ExportHQRequest(BaseModel):
     task_id: str
     mask_chinese: Optional[bool] = True
+
+class SegmentEditRequest(BaseModel):
+    final_vi: str = Field(min_length=1, max_length=2000, strict=True)
 
 class ConfigRequest(BaseModel):
     gemini_key: Optional[str] = None
@@ -429,6 +433,7 @@ async def stop_task(task_id: str):
     if sess:
         workers = [worker for worker in (getattr(sess, "start_task", None), getattr(sess, "worker_task", None))
                    if worker is not None and not worker.done()]
+        workers.extend(task for task in getattr(sess, "edit_tasks", ()) if not task.done())
         progress = sess.get_progress() if hasattr(sess, "get_progress") else {}
         sess.stop()
         # A Python download thread must acknowledge cancellation before this
@@ -572,7 +577,28 @@ async def get_segment_audio(task_id: str, seg_id: int):
     wav_path = settings.BASE_DIR / "workspace" / "cache" / task_id / "segments" / f"seg_{seg_id}.wav"
     if not wav_path.exists():
         raise HTTPException(status_code=404, detail="Segment audio not found or not yet synthesized")
-    return FileResponse(wav_path, media_type="audio/wav")
+    return FileResponse(wav_path, media_type="audio/wav", headers={"Cache-Control": "no-store"})
+
+@app.patch("/api/streaming/{task_id}/segments/{segment_id}")
+async def edit_streaming_segment(task_id: str, segment_id: int, req: SegmentEditRequest):
+    if not 0 <= segment_id <= 2147483647:
+        raise HTTPException(status_code=422, detail="Mã câu thoại không hợp lệ.")
+    session = get_streaming_session(task_id)
+    if not session:
+        raise HTTPException(status_code=404, detail="Phiên dịch không còn tồn tại.")
+    if active_export_tasks.get(f"export_{task_id}", {}).get("status") in {"RUNNING", "CANCELLING"}:
+        raise HTTPException(status_code=409, detail="Video đang được xuất. Hãy chờ xuất xong trước khi sửa lời thoại.")
+    try:
+        segment = await session.edit_segment(segment_id, req.final_vi)
+    except KeyError:
+        raise HTTPException(status_code=404, detail="Không tìm thấy câu thoại.") from None
+    except SegmentEditConflict as error:
+        raise HTTPException(status_code=409, detail=str(error)) from None
+    except ValueError:
+        raise HTTPException(status_code=422, detail="Nội dung hoặc thời lượng câu thoại không hợp lệ. Nhập từ 1 đến 2.000 ký tự.") from None
+    except Exception:
+        raise HTTPException(status_code=503, detail="Chưa tạo lại được giọng đọc. Nội dung và âm thanh cũ vẫn được giữ; hãy thử lại.") from None
+    return {"segment": segment}
 
 @app.get("/api/streaming/bgm/{task_id}")
 async def get_streaming_bgm(task_id: str):
@@ -595,6 +621,8 @@ async def export_hq(req: ExportHQRequest):
     if not session:
         raise HTTPException(status_code=404, detail="Session not found")
 
+    if getattr(session, "is_editing", False):
+        raise HTTPException(status_code=409, detail="Đang lưu lời thoại và tạo lại giọng đọc. Hãy chờ lưu xong trước khi xuất.")
     if session.is_running or session.error or any(
         s.status not in ("READY", "PLAYED") for s in session.segments.values()
     ):

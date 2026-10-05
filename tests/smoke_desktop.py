@@ -442,6 +442,117 @@ def check_voice_catalog_and_preview(page, folder):
         ''')
 
 
+def check_transcript_editor(window, screenshot_path=None):
+    """Exercise actual Qt DOM caret placement, drafts, revision save and wide layouts."""
+    page = window.web_view.page()
+    javascript(page, """
+        window.__transcriptFetch = window.fetch;
+        window.__transcriptSocket = window.WebSocket;
+        window.__transcriptErrors = [];
+        window.__transcriptErrorHandler = event => window.__transcriptErrors.push({message:event.message, file:event.filename, line:event.lineno, stack:event.error?.stack});
+        window.addEventListener('error', window.__transcriptErrorHandler);
+        window.__transcriptSegment = {id: 0, start: 0, end: 10, duration: 10,
+            status: 'READY', text_zh: '字幕测试', final_vi: 'Bấm vào chữ cần sửa trong câu này.', audio_url: null, revision: 0};
+        window.fetch = async (url, options) => {
+            if (url === '/api/streaming/start-url') return new Response(JSON.stringify({task_id: 'qt-transcript'}));
+            if (url === '/api/tasks') return new Response(JSON.stringify({tasks: []}));
+            if (url === '/api/tasks/qt-transcript/stop') return new Response(JSON.stringify({status: 'ok'}));
+            if (url === '/api/streaming/qt-transcript/segments/0') {
+                window.__transcriptSegment = {...window.__transcriptSegment, ...JSON.parse(options.body), revision: 1};
+                return new Response(JSON.stringify({segment: window.__transcriptSegment}));
+            }
+            return window.__transcriptFetch(url, options);
+        };
+        window.WebSocket = class {
+            static OPEN = 1;
+            constructor() {this.readyState = 1; window.__transcriptWs = this;}
+            send() {}
+            close() {this.readyState = 3;}
+        };
+        document.getElementById('video-url').value = 'https://www.douyin.com/video/7688769264395767049';
+        document.getElementById('btn-start').click();
+    """)
+    wait(200)
+    javascript(page, """
+        window.__transcriptWs.onmessage({data: JSON.stringify({type: 'init', duration: 10,
+            segments_count: 1, segments: [window.__transcriptSegment]})});
+        document.getElementById('buffering-alert').classList.add('hidden');
+    """)
+    geometry = {}
+    try:
+        for width, height in ((1920, 1080), (1024, 640)):
+            window.resize(width, height)
+            wait(300)
+            measure = json.loads(javascript(page, """JSON.stringify((() => {
+                const r = selector => {
+                    const b = document.querySelector(selector).getBoundingClientRect();
+                    return {x:b.x,y:b.y,w:b.width,h:b.height,right:b.right};
+                };
+                return {width:innerWidth,scrollWidth:document.documentElement.scrollWidth,
+                    preview:r('.studio-preview'),transcript:r('.transcript-panel'),player:r('#player-container'),
+                    playerStyle:document.getElementById('player-container').getAttribute('style'),
+                    aspect:getComputedStyle(document.getElementById('player-container')).aspectRatio,
+                    sourceRatio:document.getElementById('video-player').videoWidth / document.getElementById('video-player').videoHeight || 9/16,
+                    stage:r('.studio-video-stage')};
+            })())"""))
+            assert measure['scrollWidth'] <= measure['width'] + 1, measure
+            assert abs(measure['preview']['y'] - measure['transcript']['y']) <= 1, measure
+            assert measure['transcript']['x'] >= measure['preview']['right'], measure
+            assert abs(measure['player']['w'] / measure['player']['h'] - measure['sourceRatio']) < 0.02, measure
+            geometry[str(width)] = measure
+        window.resize(1920,1080)
+        wait(200)
+        javascript(page, """
+            const button = document.getElementById('seg-vi-0');
+            const range = document.createRange();
+            range.setStart(button.firstChild, 8); range.setEnd(button.firstChild, 9);
+            const bounds = range.getBoundingClientRect();
+            button.dispatchEvent(new MouseEvent('click', {bubbles: true,
+                clientX: bounds.left + 1, clientY: bounds.top + bounds.height / 2}));
+        """)
+        state = json.loads(javascript(page, """JSON.stringify({
+            hidden:document.querySelector('.transcript-editor').hidden,
+            display:getComputedStyle(document.querySelector('.transcript-editor')).display,
+            textHidden:document.getElementById('seg-vi-0').hidden,
+            caret:document.getElementById('seg-input-0').selectionStart,
+            errors:window.__transcriptErrors})"""))
+        assert not state['hidden'] and state['display'] != 'none', state
+        assert state['textHidden'] and 7 <= state['caret'] <= 10, state
+        assert not state['errors'], state
+        if screenshot_path:
+            wait(200)
+            window.grab().save(str(screenshot_path))
+        javascript(page, """(() => {
+            const input = document.getElementById('seg-input-0');
+            input.value = 'Đã sửa trực tiếp cạnh video.';
+            input.dispatchEvent(new Event('input', {bubbles: true}));
+            document.querySelector('.transcript-editor-actions button').click();
+        })()""")
+        wait(200)
+        saved = json.loads(javascript(page, """JSON.stringify({
+            hidden:document.querySelector('.transcript-editor').hidden,
+            text:document.getElementById('seg-vi-0').textContent,
+            subtitle:document.getElementById('subtitle-text').textContent,
+            exportDisabled:document.getElementById('btn-export-hq').disabled,
+            message:document.querySelector('.transcript-edit-message').textContent,
+            saveDisabled:document.querySelector('.transcript-editor-actions button').disabled,
+            input:document.getElementById('seg-input-0').value,
+            errors:window.__transcriptErrors})"""))
+        assert saved['hidden'] and saved['text'] == saved['subtitle'] == 'Đã sửa trực tiếp cạnh video.', saved
+        assert not saved['exportDisabled'] and not saved['errors'], saved
+        return {'caret_edit':True, 'server_save':True, 'subtitle_sync':True, 'layouts':geometry}
+    finally:
+        javascript(page, 'window.studioStop();')
+        wait(200)
+        javascript(page, """
+            window.fetch = window.__transcriptFetch;
+            window.WebSocket = window.__transcriptSocket;
+            window.removeEventListener('error', window.__transcriptErrorHandler);
+            document.getElementById('video-url').value = '';
+            document.getElementById('video-url').dispatchEvent(new Event('input', {bubbles: true}));
+        """)
+
+
 def main():
     app = QApplication.instance() or QApplication(sys.argv)
     app.setQuitOnLastWindowClosed(False)
@@ -535,6 +646,7 @@ def main():
         assert upload['requests'][0]['voice_id'] == result['voice'], upload
         assert not upload['alerts'] and upload['error'] == 'SMOKE_EXPECTED' and upload['status'] == 'FAILED', upload
         progress_logs = check_progress_and_logs(window.web_view.page())
+        transcript_smoke = check_transcript_editor(window)
         layout = check_minimum_layout(window)
         playback = check_media_playback(window.web_view.page(), media_folder.name)
         bgm = check_bgm_playback(window.web_view.page(), media_folder.name, Path(media_folder.name).name)
@@ -586,7 +698,7 @@ def main():
         wait(200)
         print(json.dumps({'result': 'PASS', 'desktop': result, 'upload': upload['requests'][0],
                           'playback': playback, 'bgm': bgm, 'layout_1024': layout,
-                          'progress_and_logs': progress_logs, 'voices': voice_smoke}, ensure_ascii=False))
+                          'progress_and_logs': progress_logs, 'voices': voice_smoke, 'transcript': transcript_smoke}, ensure_ascii=False))
     finally:
         if window:
             window.web_view.stop()

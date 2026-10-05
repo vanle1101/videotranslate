@@ -12,6 +12,7 @@ function studio(cookieReply = { configured: false, count: 0, message: '' }, voic
   class Element {
     constructor(id = '') {
       this.id = id; this.events = {}; this.children = []; this.style = {}; this.dataset = {};
+      this.style.setProperty = (name, value) => { this.style[name] = value; };
       this.value = ''; this.files = []; this.checked = true;
       this.paused = true; this.currentTime = 0; this.playbackRate = 1; this.ended = false;
       this.playCount = 0; this.classes = new Set(); this.hidden = false; this.disabled = false;
@@ -43,6 +44,7 @@ function studio(cookieReply = { configured: false, count: 0, message: '' }, voic
     removeAttribute(name) { delete this[name]; }
     async click() { await this.emit('click'); }
     focus() { document.activeElement = this; }
+    setSelectionRange(start, end) { this.selectionStart = start; this.selectionEnd = end; }
     load() { this.currentTime = 0; }
     pause() { this.paused = true; this.emit('pause'); }
     async play() { this.paused = false; this.playCount++; await this.emit('play'); }
@@ -521,7 +523,8 @@ test('timeline uses current marker after init and replays READY colors', async (
   ui.el('video-player').currentTime = 5; await ui.el('video-player').emit('timeupdate');
   assert.equal(ui.el('playback-head-marker').style.left, '50%');
   assert.match(ui.el('slice-seg-0').className, /emerald/);
-  assert.match(ui.el('seg-row-0').innerHTML, /&lt;b&gt;Xin chào/);
+  assert.equal(ui.el('seg-vi-0').textContent, '<b>Xin chào</b>');
+  assert.equal(ui.el('seg-vi-0').innerHTML, '');
 });
 
 test('playback waits for an untranslated segment and resumes when its audio is ready', async () => {
@@ -824,4 +827,148 @@ test('Diagnostics uses native clipboard in desktop and reports a copying failure
   ui.window.desktopBridge.copyText = () => { throw new Error('clipboard denied'); };
   await ui.el('btn-copy-log').click();
   assert.match(ui.el('log-copy-status').textContent, /Không truy cập được clipboard/);
+});
+
+test('transcript timestamp seeks its sentence, highlights playback and text opens an editable draft', async () => {
+  const ui = studio(); await ui.start();
+  const socket = ui.sockets.at(-1);
+  socket.receive({ type: 'segment_update', id: 1, start: 5, end: 10, duration: 5, status: 'READY', final_vi: 'Một câu có thể sửa.', text_zh: '原文' });
+  await ui.el('seg-row-1').querySelector('.transcript-time').click();
+  assert.equal(ui.el('video-player').currentTime, 5);
+  await ui.el('seg-vi-1').click();
+  assert.equal(ui.el('video-player').paused, true);
+  assert.equal(ui.el('seg-input-1').value, 'Một câu có thể sửa.');
+  assert.equal(ui.el('seg-row-1').querySelector('.transcript-editor').hidden, false);
+  assert.equal(ui.el('seg-zh-1').textContent, '原文');
+});
+
+test('transcript draft survives worker updates and same-session init, then cancel restores committed text', async () => {
+  const ui = studio(); await ui.start();
+  const socket = ui.sockets.at(-1);
+  await ui.el('seg-vi-0').click();
+  ui.el('seg-input-0').value = 'Bản người dùng đang sửa';
+  await ui.el('seg-input-0').emit('input');
+  assert.equal(ui.el('btn-export-hq').disabled, true);
+  const ready = { id: 0, start: 0, end: 10, duration: 10, status: 'PLAYED', audio_url: '/dub.wav', final_vi: '<b>Xin chào</b>' };
+  socket.receive({ type: 'segment_update', ...ready });
+  socket.receive({ type: 'init', duration: 10, segments_count: 1, segments: [ready] });
+  assert.equal(ui.el('seg-input-0').value, 'Bản người dùng đang sửa');
+  assert.equal(ui.el('seg-row-0').querySelector('.transcript-editor').hidden, false);
+  await ui.el('seg-row-0').querySelector('.transcript-editor-actions').children[1].click();
+  assert.equal(ui.el('seg-vi-0').textContent, '<b>Xin chào</b>');
+  assert.equal(ui.el('btn-export-hq').disabled, false);
+});
+
+test('saving transcript commits server text and a new audio revision, blocks duplicate saves and ignores stale updates', async () => {
+  const ui = studio(); await ui.start();
+  const video = ui.el('video-player');
+  await video.play(); await video.emit('timeupdate');
+  const oldDub = ui.audio.find(a => a.src === '/dub.wav');
+  await ui.el('seg-vi-0').click();
+  const input = ui.el('seg-input-0'); input.value = 'Bản dịch đã chỉnh.'; await input.emit('input');
+  let resolve;
+  ui.replies.set('/api/streaming/fixture/segments/0', () => new Promise(done => { resolve = done; }));
+  const save = ui.el('seg-row-0').querySelector('.transcript-editor-actions').children[0];
+  const saving = save.click(); await ui.flush(); await save.click();
+  assert.equal(save.disabled, true);
+  assert.equal(input.disabled, true);
+  assert.equal(ui.requests.filter(r => r.options.method === 'PATCH').length, 1);
+  assert.equal(ui.el('seg-vi-0').textContent, '<b>Xin chào</b>');
+  const segment = { id: 0, start: 0, end: 10, duration: 10, status: 'READY', final_vi: 'Bản dịch đã chỉnh.', audio_url: '/dub.wav?rev=1', revision: 1 };
+  resolve({ ok: true, json: async () => ({ segment }) }); await saving;
+  assert.deepEqual(JSON.parse(ui.requests.find(r => r.options.method === 'PATCH').options.body), { final_vi: 'Bản dịch đã chỉnh.' });
+  assert.equal(ui.el('seg-vi-0').textContent, 'Bản dịch đã chỉnh.');
+  assert.equal(ui.el('subtitle-text').textContent, 'Bản dịch đã chỉnh.');
+  assert.equal(oldDub.paused, true);
+  assert.ok(ui.audio.find(a => a.src === '/dub.wav?rev=1'));
+  assert.equal(ui.el('seg-row-0').querySelector('.transcript-editor').hidden, true);
+  assert.equal(ui.el('btn-export-hq').disabled, false);
+  ui.sockets.at(-1).receive({ type: 'segment_update', ...segment, revision: 0, final_vi: 'stale', audio_url: '/dub.wav' });
+  assert.equal(ui.el('seg-vi-0').textContent, 'Bản dịch đã chỉnh.');
+});
+
+test('failed transcript save retains the draft and exposes an actionable server error; blank input never submits', async () => {
+  const ui = studio(); await ui.start();
+  await ui.el('seg-vi-0').click();
+  const input = ui.el('seg-input-0'), actions = ui.el('seg-row-0').querySelector('.transcript-editor-actions');
+  input.value = '   '; await input.emit('input'); await actions.children[0].click();
+  assert.equal(ui.requests.filter(r => r.options.method === 'PATCH').length, 0);
+  input.value = 'Giữ lại bản sửa'; await input.emit('input');
+  ui.replies.set('/api/streaming/fixture/segments/0', { failure: true, detail: 'Đang xuất video. Hãy chờ xuất xong rồi lưu lại.' });
+  await actions.children[0].click();
+  assert.equal(input.value, 'Giữ lại bản sửa');
+  assert.equal(input.disabled, false);
+  assert.equal(ui.el('seg-row-0').querySelector('.transcript-editor').hidden, false);
+  assert.match(ui.el('seg-row-0').querySelector('.transcript-edit-message').textContent, /Đang xuất video/);
+  assert.equal(ui.el('seg-vi-0').textContent, '<b>Xin chào</b>');
+  assert.equal(ui.el('btn-export-hq').disabled, true);
+});
+
+test('new source clears transcript drafts and source metadata preserves native aspect ratio', async () => {
+  const ui = studio(); await ui.start();
+  await ui.el('seg-vi-0').click();
+  ui.el('seg-input-0').value = 'Một bản sửa cũ'; await ui.el('seg-input-0').emit('input');
+  ui.sockets.at(-1).receive({ type: 'finished', status: 'completed' });
+  ui.window.loadDroppedLocalVideo('D:/another.mp4');
+  assert.match(ui.el('segments-list').innerHTML, /Câu thoại sẽ xuất hiện/);
+  const video = ui.el('video-player'); video.videoWidth = 1920; video.videoHeight = 1080;
+  await video.emit('loadedmetadata');
+  assert.equal(ui.el('player-container').style.aspectRatio, '1920 / 1080');
+});
+
+test('server stop clears predownload spinner, controls and stale events without requiring the local Stop button', async () => {
+  for (const event of [
+    { type: 'progress', status: 'STOPPED', phase: 'stopped', stage: 'Đã dừng tác vụ', progress_pct: null },
+    { type: 'finished', status: 'cancelled' },
+    { type: 'finished', status: 'STOPPED' },
+  ]) {
+    const ui = studio(), socket = await startUrl(ui);
+    socket.receive({ type: 'progress', status: 'RUNNING', phase: 'download', stage: 'Đang tải bản gốc Douyin 1080p', progress_pct: 12 });
+    assert.equal(ui.el('buffering-alert').classList.contains('hidden'), false);
+    socket.receive(event);
+    assert.equal(ui.el('buffering-alert').classList.contains('hidden'), true);
+    assert.equal(ui.el('buffering-alert').dataset.state, 'stopped');
+    assert.equal(ui.el('buffering-text').textContent, '');
+    assert.equal(ui.el('btn-start').classList.contains('hidden'), false);
+    assert.equal(ui.el('btn-stop-worker').classList.contains('hidden'), true);
+    assert.equal(ui.el('task-connection-status').classList.contains('hidden'), true);
+    assert.equal(ui.el('btn-export-hq').disabled, true);
+    assert.equal(socket.readyState, 3);
+    socket.receive({ type: 'ready_to_play' });
+    socket.receive({ type: 'source_ready', video_url: '/cancelled-source.mp4' });
+    assert.equal(ui.el('video-player').src, undefined);
+    assert.equal(ui.el('video-player').playCount, 0);
+    assert.equal(ui.el('task-progress').dataset.status, 'STOPPED');
+  }
+});
+
+test('Tasks terminal snapshot cleans an externally stopped session even while websocket still appears connected', async () => {
+  const ui = studio(); await ui.start();
+  const socket = ui.sockets.at(-1);
+  socket.receive({ type: 'segment_update', id: 1, start: 5, end: 10, status: 'TTS' });
+  await ui.el('video-player').play();
+  ui.el('buffering-alert').classList.remove('hidden');
+  ui.replies.set('/api/tasks', { tasks: [{ task_id: 'fixture', status: 'STOPPED', phase: 'stopped', stage: 'Đã dừng tác vụ', progress_pct: null }] });
+  await ui.el('btn-refresh-tasks').click();
+  assert.equal(ui.el('buffering-alert').classList.contains('hidden'), true);
+  assert.equal(ui.el('worker-tts-badge').textContent, 'TTS: Idle');
+  assert.equal(ui.el('worker-tts-badge').classList.contains('animate-pulse'), false);
+  assert.equal(ui.el('video-player').paused, true);
+  assert.equal(ui.el('segments-count-badge').textContent, '0 câu');
+  assert.equal(ui.el('subtitle-text').textContent, '');
+  assert.equal(ui.el('bar-buffer-info').textContent, 'Buffer: 0.0s');
+});
+
+test('finished completion hides old loading overlay and clears worker activity; failures remain visible', async () => {
+  const ui = studio(); await ui.start();
+  const socket = ui.sockets.at(-1);
+  socket.receive({ type: 'segment_update', id: 0, start: 0, end: 10, status: 'TTS', final_vi: 'Xin chào' });
+  ui.el('buffering-alert').classList.remove('hidden');
+  socket.receive({ type: 'finished', status: 'completed' });
+  assert.equal(ui.el('buffering-alert').classList.contains('hidden'), true);
+  assert.equal(ui.el('worker-tts-badge').textContent, 'TTS: Idle');
+  socket.receive({ type: 'finished', status: 'failed', message: 'Dịch vụ không phản hồi' });
+  assert.equal(ui.el('buffering-alert').classList.contains('hidden'), false);
+  assert.equal(ui.el('buffering-alert').dataset.state, 'error');
+  assert.equal(ui.el('buffering-text').textContent, 'Dịch vụ không phản hồi');
 });

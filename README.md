@@ -26,6 +26,8 @@ Người dùng dán link video hoặc kéo thả file MP4, chỉ cần chờ b�
 
 Tài liệu: [Cài đặt và vận hành](docs/windows-guide.md) · [Chức năng giao diện](docs/ui-reference.md) · [Báo cáo kiểm thử](docs/reports/).
 
+**Transcript cạnh video:** bấm chữ trong bản dịch để sửa tại vị trí đó; bấm mốc thời gian hoặc câu gốc để tua theo câu. **Ctrl+Enter** lưu và tạo lại giọng đọc, giữ nguyên thời gian câu. Cần lưu hoặc hủy bản nháp trước khi xuất. Xem [hướng dẫn sửa transcript](docs/windows-guide.md#sửa-transcript-cạnh-video).
+
 ---
 
 ## ⚡ Tính Năng Nổi Bật

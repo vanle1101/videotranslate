@@ -26,14 +26,17 @@ class VideoDownloadError(RuntimeError):
 def friendly_download_error(error, host="trang video"):
     detail = str(error).lower()
     if any(word in detail for word in ("timed out", "timeout", "connection refused", "name resolution", "getaddrinfo", "unable to connect")):
-        return f"Không kết nối được {host}. Hãy thử mở link trong trình duyệt, kiểm tra mạng rồi thử lại hoặc chọn video đã tải về máy."
+        return f"Không kết nối được {host}. Kiểm tra mạng rồi thử lại hoặc chọn video đã tải về máy."
     if any(word in detail for word in ("fresh cookies", "cookies are needed", "login", "sign in", "403", "captcha", "verify you")):
-        return "Trang video yêu cầu đăng nhập hoặc xác minh. Hãy mở link trong trình duyệt; nếu tải trực tiếp vẫn bị chặn, chọn video đã lưu trên máy."
+        if re.fullmatch(r"(?:[a-z0-9-]+\.)*(?:douyin|iesdouyin)\.com", str(host).lower()):
+            return ("Douyin từ chối tải trực tiếp hoặc yêu cầu xác minh. Đăng nhập Chrome không tự chuyển phiên sang Studio. "
+                    "Kiểm tra API tải video hoặc cookie đã nhập trong Cài đặt; nếu vẫn không tải được, chọn tệp video trên máy.")
+        return "Trang video từ chối tải trực tiếp hoặc yêu cầu đăng nhập/xác minh. Hãy thử lại hoặc chọn tệp video đã lưu trên máy."
     if any(word in detail for word in ("404", "not available", "unavailable", "private video", "removed")):
         return "Video không còn công khai hoặc link đã hết hạn. Hãy sao chép lại link từ video gốc."
     if "unsupported url" in detail:
         return "Link này chưa được trình tải hỗ trợ. Hãy dùng link của một video cụ thể hoặc chọn tệp video trên máy."
-    return "Không tải được video từ link này. Hãy mở link để kiểm tra video còn xem được, thử lại hoặc chọn tệp trên máy."
+    return "Không tải được video từ link này. Kiểm tra link còn công khai, thử lại hoặc chọn tệp video trên máy."
 
 
 class VideoDownloader:
@@ -151,7 +154,8 @@ class VideoDownloader:
                     continue
                 kind = event.pop("kind", "")
                 if kind == "progress":
-                    marker = (event.get("phase"), event.get("downloaded_bytes"))
+                    marker = (event.get("phase"), event.get("stage"), event.get("source"),
+                              event.get("downloaded_bytes"))
                     if marker != last_marker:
                         last_activity = time.monotonic()
                         last_marker = marker

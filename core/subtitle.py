@@ -2,6 +2,25 @@ from pathlib import Path
 from typing import List, Dict, Any
 from config import settings
 
+
+def _ass_text(text: str) -> str:
+    """Keep user text literal; only actual line breaks become ASS controls."""
+    text = text.replace("\r\n", "\n").replace("\r", "\n")
+    lines = text.split("\n")
+    # Keep deliberate line breaks. Wrap a single long sentence only when the
+    # editor has not already supplied its own lines.
+    if len(lines) == 1:
+        words = text.split()
+        if len(words) > 7:
+            middle = len(words) // 2
+            lines = [" ".join(words[:middle]), " ".join(words[middle:])]
+    # libass does not treat a doubled backslash as an escape: \\N would
+    # still introduce a line break. A zero-width word joiner after user-supplied
+    # backslashes keeps their visible glyph while preventing ASS escape parsing.
+    return "\\N".join(line.replace("\\", "\\\u2060").replace("{", "\\{").replace("}", "\\}")
+                       for line in lines)
+
+
 class SubtitleGenerator:
     def __init__(self):
         self.font = settings.SUBTITLE_FONT
@@ -71,11 +90,7 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
             if not text:
                 continue
             
-            # Auto split long sentences into maximum 2 lines for TikTok reading comfort
-            words = text.split()
-            if len(words) > 7:
-                mid = len(words) // 2
-                text = " ".join(words[:mid]) + "\\N" + " ".join(words[mid:])
+            text = _ass_text(text)
 
             start_ass = self._format_time_ass(seg["start"])
             end_ass = self._format_time_ass(seg["end"])
