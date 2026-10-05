@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import math
 import os
+import logging
 from typing import Optional
 
 
@@ -11,7 +12,22 @@ class GeminiError(RuntimeError):
     """A sanitized Gemini configuration or request error."""
 
 
+class GeminiIncompleteError(GeminiError):
+    """The selected model returned a bounded, incomplete generation."""
+
+    def __init__(self, reason: str):
+        self.reason = reason
+        descriptions = {
+            "MAX_TOKENS": "Gemini đạt giới hạn độ dài phản hồi (MAX_TOKENS). Đoạn video cần được rút ngắn.",
+            "SAFETY": "Gemini chặn phân tích theo bộ lọc nội dung (SAFETY).",
+            "RECITATION": "Gemini dừng phân tích theo bộ lọc trích dẫn (RECITATION).",
+        }
+        super().__init__(descriptions.get(reason, "Gemini dừng trước khi hoàn thành phân tích khung hình."))
+
+
 def _safe_error(exc: Exception) -> str:
+    if "timeout" in type(exc).__name__.lower():
+        return "Gemini hết thời gian chờ phản hồi. Hãy thử lại hoặc chọn model nhanh hơn."
     code = str(getattr(exc, "code", ""))
     details = str(getattr(exc, "details", "")).upper()
     if code in {"401", "403"} or (code == "400" and "API_KEY_INVALID" in details):
@@ -76,6 +92,10 @@ class GeminiClient:
         except GeminiError:
             raise
         except Exception as exc:
+            code = getattr(exc, "code", None)
+            safe_code = code if isinstance(code, int) and 100 <= code <= 599 else None
+            logging.getLogger("errors").warning("Gemini text request failed (%s, HTTP %s)",
+                                                type(exc).__name__, safe_code or "unknown")
             raise GeminiError(_safe_error(exc)) from None
         finally:
             if client is not None:
@@ -83,4 +103,68 @@ class GeminiClient:
                     client.close()
                 except Exception:
                     # Cleanup failures must not replace sanitized request errors.
+                    pass
+
+    def analyze_media(self, media: bytes, prompt: str, mime_type: str = "video/mp4",
+                      additional_media: Optional[list[tuple[bytes, str]]] = None) -> str:
+        """Send one bounded inline media part to Gemini (no Files API uploads)."""
+        if not self._api_key:
+            raise GeminiError("Chưa có API key Gemini. Nhập key trong Cài đặt.")
+        if not isinstance(media, (bytes, bytearray)) or not media:
+            raise GeminiError("Nội dung video gửi Gemini đang trống.")
+        additional_media = additional_media or []
+        if len(media) > 14_000_000 or mime_type not in {"video/mp4", "audio/wav", "audio/mpeg"}:
+            raise GeminiError("Định dạng hoặc dung lượng media gửi Gemini không hợp lệ.")
+        if any(not isinstance(blob, (bytes, bytearray)) or not blob or len(blob) > 2_000_000
+               or kind not in {"image/jpeg", "image/png"} for blob, kind in additional_media):
+            raise GeminiError("Ảnh tham chiếu gửi Gemini không hợp lệ hoặc vượt dung lượng.")
+        if len(additional_media) > 4 or len(media) + sum(len(blob) for blob, _ in additional_media) > 14_000_000:
+            raise GeminiError("Tổng dung lượng media gửi Gemini vượt giới hạn.")
+        if not isinstance(prompt, str) or not prompt.strip():
+            raise GeminiError("Yêu cầu phân tích video đang trống.")
+        client = None
+        try:
+            from google import genai
+            from google.genai import types
+            client = genai.Client(
+                api_key=self._api_key,
+                http_options={"timeout": max(1, round(self.timeout * 1000)), "retry_options": {"attempts": 1}},
+            )
+            parts = [types.Part.from_bytes(data=bytes(media), mime_type=mime_type)]
+            if mime_type == "video/mp4":
+                parts[0].video_metadata = types.VideoMetadata(fps=3)
+            parts.extend(types.Part.from_bytes(data=bytes(blob), mime_type=kind)
+                         for blob, kind in additional_media)
+            config = {"temperature": 0.1, "response_mime_type": "application/json", "max_output_tokens": 16384}
+            if self.model.startswith("gemini-2.5"):
+                config["thinking_config"] = {"thinking_budget": 1024}
+            response = client.models.generate_content(
+                model=self.model,
+                contents=[prompt, *parts],
+                config=config,
+            )
+            candidates = getattr(response, "candidates", None) or []
+            if not candidates:
+                raise GeminiError("Gemini chưa trả phân tích khung hình.")
+            reason = getattr(candidates[0].finish_reason, "value", candidates[0].finish_reason)
+            if reason != "STOP":
+                allowed = {"MAX_TOKENS", "SAFETY", "RECITATION", "BLOCKLIST", "PROHIBITED_CONTENT", "SPII", "OTHER"}
+                raise GeminiIncompleteError(reason if reason in allowed else "OTHER")
+            text = getattr(response, "text", None)
+            if not isinstance(text, str) or not text.strip():
+                raise GeminiError("Gemini trả về phân tích khung hình trống.")
+            return text.strip()
+        except GeminiError:
+            raise
+        except Exception as exc:
+            code = getattr(exc, "code", None)
+            safe_code = code if isinstance(code, int) and 100 <= code <= 599 else None
+            logging.getLogger("errors").warning("Gemini media request failed (%s, HTTP %s)",
+                                                type(exc).__name__, safe_code or "unknown")
+            raise GeminiError(_safe_error(exc)) from None
+        finally:
+            if client is not None:
+                try:
+                    client.close()
+                except Exception:
                     pass

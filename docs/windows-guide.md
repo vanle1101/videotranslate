@@ -66,6 +66,16 @@ Chạy `venv\Scripts\python.exe -B check_runtime.py` để kiểm tra cài đặ
 
 Có thể dán nguyên đoạn chia sẻ Douyin vào ô **Video nguồn**, gồm tiêu đề tiếng Trung, hashtag, mã chia sẻ và nhiều dòng. Ngay khi dán, giao diện tự thay đoạn chia sẻ bằng URL sạch và hiện thông báo đã nhận link. Nội dung tự gõ vẫn giữ nguyên để sửa. Link có định dạng Markdown sao chép từ chat như `[**link**](link)` cũng được nhận; dấu gạch dưới trong link không bị đổi. Dán nội dung chỉ nhận diện link; bấm **Bắt đầu** mới tải và dịch.
 
+### Dịch có đối chiếu hình và tiếng
+
+Với Gemini, bật **AI đọc chữ và kiểm chứng lời nói** trước khi bắt đầu. Faster-Whisper nhận diện toàn bộ âm thanh để giữ mốc câu thật. RapidOCR chạy tại máy, lấy mẫu hình 3 lần/giây để đo chữ và vị trí; thời điểm đổi chữ có thể lệch khoảng một khoảng lấy mẫu. Gemini nhận video nén kèm âm thanh theo đoạn khoảng 24 giây (tối đa 45 giây), bản nhận giọng và OCR để sửa nhận dạng, dịch theo ngữ cảnh, rồi kiểm tra lần hai bằng video. Model chỉ dịch/phân loại các vùng OCR đã đo, không được tạo tọa độ/thời gian mới. Ngữ cảnh đoạn trước chuyển sang đoạn tiếp theo. Mỗi đoạn thường dùng hai lượt Gemini; có sử dụng hạn mức và mất thêm thời gian.
+
+Chế độ này cần cấu hình Gemini ban đầu; Studio báo rõ nếu thiếu key hoặc đang chọn nhà cung cấp khác. Khi Gemini hết hạn mức, Studio có thể dùng model OpenRouter `:free` đã cấu hình và thông tin đăng nhập OpenRouter đã lưu. Nhánh này chỉ nhận văn bản ASR/OCR: sửa nguồn có dẫn chứng OCR cùng thời điểm, dịch, rồi kiểm tra nghĩa riêng (thường ba lượt cho mỗi batch). Transcript và cảnh báo ghi rõ **OpenRouter · bản chép + OCR**, không nhận là Gemini đã xem/nghe video. Không chuyển model trả phí; lỗi key, bộ lọc nội dung hoặc yêu cầu không hợp lệ không kích hoạt nhánh này. Nếu cả hai dịch vụ thất bại, tác vụ báo lỗi. File nén gửi Gemini tối đa 14 MB mỗi đoạn được dọn sau khi xử lý; video nguồn giữ nguyên. Khi tắt tùy chọn, ứng dụng dùng luồng dịch âm thanh như trước.
+
+Câu thiếu căn cứ được ghi **Cần kiểm tra**, kèm lý do trong transcript. Toàn bộ câu từ nhánh OpenRouter dự phòng cũng cần rà: kiểm thử thực tế phát hiện model vẫn tự tin với câu sai nghĩa dù đã tự kiểm tra. Studio chưa tạo giọng cho câu cần kiểm tra và khóa xuất video đến khi bạn nghe/xem lại rồi bấm **Lưu và tạo lại giọng**. Có thể giữ nguyên bản nháp và bấm lưu sau khi đã kiểm tra. Các câu chắc chắn từ luồng Gemini vẫn được xử lý. Chữ trên hình không đọc chắc, không xác định được vùng chữ hoặc được dịch qua nhánh OpenRouter dự phòng sẽ giữ nguyên, không tự che. Sửa lời thoại không duyệt thay bản dịch chữ trên hình; hiện chưa có trình duyệt OCR riêng.
+
+Phụ đề thoại dài tự chia thành trang ngắn 1–2 dòng; thời gian chuyển trang được ước tính trong câu, chưa phải căn chính xác từng từ. Tiêu đề/nhận định hiện trọn câu suốt khoảng xuất hiện, vừa vùng chữ được đo. Khi sửa thoại, vùng phụ đề Trung giữ vai trò che chữ cũ; lời Việt mới chạy một lần ở đáy hình và xuất cùng bản audio mới. Chế độ OCR không dùng thanh che ngang cố định. Model nhận dạng và OCR được giải phóng sau xử lý để giảm RAM. Cần xem lại nội dung, vị trí và tốc độ đọc trước khi xuất; có API không bảo đảm mọi câu đúng. Thay đổi áp dụng cho tác vụ mới sau khi mở lại ứng dụng; không tự sửa phiên đã xử lý.
+
 ### Sửa transcript cạnh video
 
 Ở cửa sổ rộng từ 1200 px, Studio có ba cột: **nguồn video và tác vụ** bên trái, **video và âm thanh** ở giữa, **Transcript và Giọng lồng tiếng** thành hai khung riêng bên phải. Từ 960 px, transcript vẫn nằm cạnh video, còn nguồn và tác vụ chuyển xuống dưới. Danh sách câu và giọng cuộn riêng. Hình ảnh giữ tỷ lệ nguồn, không bị kéo giãn.
@@ -74,10 +84,12 @@ Thanh phát có nút phát/tạm dừng, âm lượng tổng, tắt tiếng và 
 
 Khi tải, phần trăm, dung lượng đã nhận/tổng dung lượng, tốc độ và thời gian còn lại (ước tính) hiện ngay trong khung video. Nếu không có tổng dung lượng thì hiện **Chưa có %**. Studio đối chiếu trạng thái với máy chủ mỗi hai giây kể cả khi tab Tác vụ đóng; tác vụ đã dừng sẽ tắt vòng xoay. Khi mất kết nối hoặc không tìm thấy tác vụ, giao diện báo rõ và không tự nhận là đã tải xong. Phản hồi cũ không ghi đè tiến độ mới hơn.
 
-1. Bấm **mốc thời gian** hoặc **câu gốc** để tua đến đầu câu. Câu đang phát được đánh dấu trong transcript.
-2. Khi câu đã **Sẵn sàng**, bấm vào chữ cần sửa trong **bản dịch tiếng Việt**. Video tạm dừng, ô sửa mở tại vị trí chữ đã bấm; có thể sửa từng chữ hoặc cả câu.
+1. Bấm **mốc thời gian** hoặc **câu gốc** để tua đến đầu câu. Bấm **Nghe gốc** để phát tiếng nguồn trong khoảng câu, kể cả câu **Cần kiểm tra**; giọng Việt và nhạc nền tạm dừng. Phát hết câu sẽ tự dừng.
+2. Khi câu đã **Sẵn sàng** hoặc **Cần kiểm tra**, bấm vào chữ cần sửa trong **bản dịch tiếng Việt**. Video tạm dừng, ô sửa mở tại vị trí chữ đã bấm; có thể sửa từng chữ hoặc cả câu.
 3. Bấm **Lưu và tạo lại giọng** hoặc nhấn **Ctrl+Enter**. Studio tạo lại giọng đọc, căn vào thời lượng câu cũ rồi cập nhật phụ đề, phát lại và dữ liệu xuất video. Chỉ xác nhận lưu sau khi máy chủ xử lý thành công.
 4. Bấm **Hủy sửa** hoặc nhấn **Esc** để bỏ bản nháp. Khi lỗi lưu, bản nháp vẫn được giữ để thử lại. Cập nhật realtime của câu khác không ghi đè nội dung đang sửa.
+
+Nếu nghe lại xác nhận câu **Cần kiểm tra** thực sự không có người nói, bấm **Không có lời thoại**. Thao tác này bỏ lời và giọng nháp trong đúng khoảng câu, giữ thời gian và chữ nguồn để đối chiếu; có thể sửa lại thành lời thoại sau đó. Để trống ô sửa rồi lưu thông thường vẫn bị từ chối nhằm tránh xóa nhầm lời. Xác nhận im lặng không duyệt hoặc che chữ OCR trên hình.
 
 **Xuất Video Hoàn Chỉnh** bị khóa khi còn bản sửa chưa lưu hoặc đang tạo lại giọng. Lưu hoặc hủy bản sửa trước khi xuất. Mốc tua và căn giọng hiện theo **câu**, chưa có thời gian chính xác cho từng từ; vị trí chữ được bấm dùng để đặt con trỏ soạn thảo.
 
@@ -101,7 +113,7 @@ Nếu đường tải công khai không lấy được video, Studio tự thử 
 
 Lượt kiểm tra ngày 05/10/2026 dùng đúng link `_lAiSDH0bK8`: đã lấy mẫu **15 giây, 1080p, khoảng 28,5 MB** từ nguồn chất lượng gốc, giữ nguyên luồng hình/tiếng bằng remux. Chưa tải toàn bộ tệp nguồn khoảng **19,94 GB**. Sau một lượt Gemini trả 503, lần thử lại hoàn tất nhận diện, dịch và đọc cả 2 câu. Sửa một câu qua API đã tạo âm thanh mới, tăng revision và giữ nguyên mốc đầu/cuối; xuất MP4 H264/AAC **1920×1080, 15,017 giây, khoảng 11,3 MB** thành công. Bản tải nguồn giữ nguyên chất lượng; bản xuất lồng tiếng phải render lại để ghép âm thanh và phụ đề. Kết quả này chỉ xác nhận đoạn mẫu, chưa kiểm chứng xử lý toàn bộ video dài.
 
-Giới hạn hiện tại: Qt trên máy này cần bản xem trước WebM để phát H264/AAC. Bản xem trước có trần 90 MB nên video gần 3 giờ này chưa phát trọn vẹn trong Studio; tải nguồn thành công không đồng nghĩa preview video dài đã được hỗ trợ. Vùng che phụ đề Trung hiện cố định theo tỷ lệ khung hình, cần kiểm tra có che đúng vị trí chữ của từng video trước khi xuất.
+Giới hạn hiện tại: Qt trên máy này cần bản xem trước WebM để phát H264/AAC. Bản xem trước có trần 90 MB nên video gần 3 giờ này chưa phát trọn vẹn trong Studio; tải nguồn thành công không đồng nghĩa preview video dài đã được hỗ trợ. Khi tắt đọc hình ảnh, vùng che phụ đề Trung vẫn cố định theo tỷ lệ khung hình; chế độ đọc hình ảnh dùng vùng OCR đo được. Video không có luồng âm thanh chưa được chế độ này hỗ trợ.
 
 ### Cookie Douyin khi cần đăng nhập
 
@@ -125,7 +137,7 @@ venv\Scripts\python.exe -B -m pytest -p no:cacheprovider tests/test_local_runtim
 
 Hai script kiểm tra riêng: `tests/smoke_desktop.py` kiểm tra phát hình/âm thanh thật trong QtWebEngine, pause/seek/resume, năm tab ở 1024×640 và transcript cạnh video ở 1920×1080/1024×640. Kiểm tra transcript dùng phản hồi máy chủ giả lập để xác nhận vị trí con trỏ khi bấm chữ, lưu bản sửa và đồng bộ phụ đề trong DOM thật; không xác nhận chất lượng dịch hoặc tổng hợp giọng của dịch vụ. `tests/smoke_local_video.py` tạo câu nói tiếng Trung tổng hợp, nhận giọng thật, dịch, đọc tiếng Việt và xuất video. Script video cần Internet và model đã tải, tự dọn media thử; dùng `--keep-output` nếu muốn giữ MP4 cuối.
 
-Lượt chỉnh giao diện theo mẫu ngày 05/10/2026 đạt **65 bài Node**, **27 bài Python và 15 subtest** cho API cục bộ/desktop; một test tạo symlink thật được bỏ qua do quyền Windows, các kiểm tra loại link bằng mô phỏng vẫn đạt. Qt smoke đạt ở các chiều rộng 1920, 1672, 1366, 1280 và 1024 px, gồm dán link, 42,4% tiến độ, sửa transcript, nghe mẫu, phát/tua/tạm dừng, và vị trí lớp che trên vùng ảnh thực. Tiến độ dùng dữ liệu giả lập có kiểm soát, không tải lại video lớn. Fullscreen đã kiểm tra handler Qt và luồng JavaScript; chưa xác nhận thao tác vào fullscreen bằng chuột thật trong phiên người dùng.
+Lượt chỉnh giao diện theo mẫu ngày 05/10/2026 đạt **82 bài Node**; nhóm kiểm thử Python tập trung đạt **245 bài**, bỏ qua một bài tạo symlink thật do quyền Windows. Qt smoke đạt ở các chiều rộng 1920, 1672, 1366, 1280 và 1024 px, gồm dán link, 42,4% tiến độ, sửa transcript, nghe mẫu, nghe tiếng gốc, phát/tua/tạm dừng, và vị trí lớp che trên vùng ảnh thực. Tiến độ dùng dữ liệu giả lập có kiểm soát, không tải lại video lớn. Fullscreen đã kiểm tra handler Qt và luồng JavaScript; chưa xác nhận thao tác vào fullscreen bằng chuột thật trong phiên người dùng.
 
 Sau khi bổ sung transcript, `node --test tests/test_ui_interactions.mjs` đạt **50 bài**, gồm giữ bản nháp, xử lý lỗi lưu, chống lưu lặp, đổi audio revision, khóa xuất khi chưa lưu và dọn trạng thái tải khi dừng. Desktop smoke cũng đạt kiểm tra transcript/giọng mẫu/phát video nêu trên. Bộ Python liên quan đến resolver, worker tải, sửa transcript, tiến độ và cookie đạt **187 bài**. Các kết quả kiểm thử pipeline dịch thực tế trong đoạn tiếp theo là từ những lượt trước, không phải xác nhận toàn bộ video Douyin của lượt tải mới.
 

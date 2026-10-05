@@ -1241,7 +1241,8 @@ test('subtitle mask stays on the contained image for landscape and portrait sour
     assert.equal(parseFloat(mask.right), (600 - actualWidth) / 2);
     assert.ok(Math.abs(parseFloat(mask.bottom) - ((500 - actualHeight) / 2 + actualHeight * 0.14)) < 0.01);
     assert.ok(Math.abs(parseFloat(mask.height) - actualHeight * 0.14) < 0.01);
-    assert.ok(parseFloat(ui.el('subtitle-overlay').style.bottom) > parseFloat(mask.bottom));
+    assert.ok(Math.abs(parseFloat(ui.el('subtitle-overlay').style.bottom) - ((500 - actualHeight) / 2 + actualHeight * 0.08)) < 0.01);
+    assert.ok(Math.abs(parseFloat(ui.el('subtitle-overlay').style.left) - ((600 - actualWidth) / 2 + actualWidth * 0.07)) < 0.01);
   }
 });
 
@@ -1334,4 +1335,421 @@ test('finished completion hides old loading overlay and clears worker activity; 
   assert.equal(ui.el('buffering-alert').classList.contains('hidden'), false);
   assert.equal(ui.el('buffering-alert').dataset.state, 'error');
   assert.equal(ui.el('buffering-text').textContent, 'Dịch vụ không phản hồi');
+});
+
+test('visual translation choice is sent explicitly on every start path and stays fixed during the task', async () => {
+  for (const enabled of [false, true]) {
+    for (const path of ['url', 'local-file', 'upload']) {
+      const ui = studio(); await ui.flush();
+      ui.el('visual-translation').checked = enabled;
+      if (path === 'url') {
+        ui.el('video-url').value = 'https://v.douyin.com/example/';
+        await ui.el('video-url').emit('input');
+      } else if (path === 'local-file') ui.window.loadDroppedLocalVideo('D:/clip.mp4');
+      else {
+        ui.el('video-file').files = [{ name: 'clip.mp4', size: 100 }];
+        await ui.el('video-file').emit('change');
+      }
+      const endpoint = `/api/streaming/start-${path}`;
+      ui.replies.set(endpoint, { task_id: 'visual-fixture' });
+      await ui.el('btn-start').click();
+      const request = ui.requests.find(item => item.url === endpoint);
+      const body = path === 'upload' ? Object.fromEntries(request.options.body.parts.map(item => [item.name, item.value])) : JSON.parse(request.options.body);
+      assert.equal(body.visual_translation, path === 'upload' ? String(enabled) : enabled);
+      assert.equal(ui.el('visual-translation').disabled, true);
+      ui.sockets.at(-1).receive({ type: 'finished', status: 'completed' });
+      assert.equal(ui.el('visual-translation').disabled, false);
+    }
+  }
+});
+
+test('visual analysis progress describes analyzed duration separately from generated speech', async () => {
+  const ui = studio(); await ui.start();
+  ui.sockets.at(-1).receive({ type: 'progress', phase: 'visual', status: 'RUNNING', progress_pct: 40,
+    stage: 'Đang đối chiếu lời thoại, phụ đề và tiêu đề' });
+  assert.equal(ui.el('task-progress-value').textContent, '40%');
+  assert.match(ui.el('task-progress-detail').textContent, /thời lượng video đã phân tích/);
+  assert.doesNotMatch(ui.el('task-progress-detail').textContent, /số câu/);
+  ui.sockets.at(-1).receive({ type: 'progress', phase: 'processing', status: 'RUNNING', progress_pct: 10 });
+  assert.match(ui.el('task-progress-detail').textContent, /số câu/);
+});
+
+test('long translation appears as compact sequential pages with every word and sentence timing retained', async () => {
+  const ui = studio(); await ui.start();
+  const text = 'Đều quay bằng điện thoại thôi. Giả, hoàn toàn không có video bùng nổ trong một giây đâu. Chỉ cần bạn bình luận thì người khác có thể vào xem tài khoản của bạn.';
+  ui.sockets.at(-1).receive({ type: 'segment_update', id: 0, start: 0, end: 10, status: 'READY', final_vi: text });
+  const pages = [];
+  for (let time = 0; time < 10; time += .05) {
+    ui.el('video-player').currentTime = time;
+    await ui.el('video-player').emit('timeupdate');
+    const page = ui.el('subtitle-text').textContent;
+    assert.ok(page, 'No subtitle gap inside the sentence');
+    if (pages.at(-1) !== page) pages.push(page);
+  }
+  assert.ok(pages.length >= 3);
+  assert.ok(pages.every(page => page.split('\n').length <= 2 && page.replaceAll('\n', ' ').length <= 60));
+  assert.equal(pages.map(page => page.replaceAll('\n', ' ')).join(' '), text);
+  ui.el('video-player').currentTime = 10;
+  await ui.el('video-player').emit('timeupdate');
+  assert.equal(ui.el('subtitle-text').textContent, '');
+  ui.sockets.at(-1).receive({ type: 'segment_update', id: 0, start: 0, end: 10, status: 'READY', final_vi: 'Dòng một\nDòng hai' });
+  ui.el('video-player').currentTime = 2;
+  await ui.el('video-player').emit('timeupdate');
+  assert.equal(ui.el('subtitle-text').textContent, 'Dòng một\nDòng hai');
+});
+
+function visualFixture(ui, screenTexts) {
+  const segment = { id: 0, start: 0, end: 10, status: 'READY', final_vi: 'Lời thoại ngắn', audio_url: '/dub.wav' };
+  ui.sockets.at(-1).receive({ type: 'init', duration: 10, segments_count: 1, visual_translation: true,
+    screen_texts: screenTexts, segments: [segment] });
+  return segment;
+}
+
+test('screen translation stays on detected image boxes and only hardsubs suppress spoken captions', async () => {
+  const ui = studio(); await ui.start();
+  const video = ui.el('video-player'); video.videoWidth = 1080; video.videoHeight = 1920;
+  ui.el('player-container').getBoundingClientRect = () => ({ width: 600, height: 640 });
+  await video.emit('loadedmetadata');
+  const title = { start: 0, end: 10, text_vi: 'Tiêu đề', bbox: [.1, .1, .8, .1], kind: 'title' };
+  const subtitle = { start: 2, end: 4, text_vi: 'Dòng dịch', bbox: [.15, .7, .7, .06], kind: 'subtitle' };
+  visualFixture(ui, [title, subtitle]);
+  const overlay = ui.el('screen-text-overlay');
+  assert.equal(ui.el('chinese-sub-mask').style.display, 'none');
+  assert.equal(overlay.style.left, '120px');
+  assert.equal(overlay.style.width, '360px');
+  assert.equal(overlay.style.height, '640px');
+  assert.equal(overlay.children.length, 1);
+  assert.equal(ui.el('subtitle-text').textContent, 'Lời thoại ngắn');
+  video.currentTime = 2.5; await video.emit('timeupdate');
+  assert.equal(overlay.children.length, 2);
+  const rendered = overlay.children[1];
+  assert.equal(rendered.style.left, '15%');
+  assert.equal(rendered.style.top, '70%');
+  assert.equal(rendered.style.width, '70%');
+  assert.ok(Math.abs(parseFloat(rendered.style.height) - 6) < .00001);
+  assert.equal(rendered.textContent, 'Dòng dịch');
+  assert.ok(parseFloat(rendered.style.fontSize) <= 16.34);
+  assert.equal(ui.el('subtitle-text').textContent, '');
+  video.currentTime = 4; await video.emit('timeupdate');
+  assert.equal(overlay.children.length, 1);
+  assert.equal(ui.el('subtitle-text').textContent, 'Lời thoại ngắn');
+});
+
+test('screen text bounds, uncertainty, mask and subtitle toggles never leave old overlays on a new source', async () => {
+  const ui = studio(); await ui.start();
+  const valid = { start: -2, end: 40, text_vi: 'Chữ dịch', bbox: [-.1, .8, .4, .4], kind: 'subtitle' };
+  visualFixture(ui, [valid, { ...valid, needs_review: true }, { ...valid, bbox: [2, 0, .5, .1] }, { ...valid, text_vi: '' }]);
+  const overlay = ui.el('screen-text-overlay');
+  assert.equal(overlay.children.length, 1);
+  assert.equal(overlay.children[0].style.left, '0%');
+  assert.ok(Math.abs(parseFloat(overlay.children[0].style.width) - 30) < .00001);
+  assert.ok(Math.abs(parseFloat(overlay.children[0].style.height) - 20) < .00001);
+  ui.el('toggle-mask-chinese').checked = false; await ui.el('toggle-mask-chinese').emit('change');
+  assert.equal(overlay.children[0].dataset.mask, 'false');
+  assert.equal(ui.el('chinese-sub-mask').style.display, 'none');
+  ui.el('toggle-subtitles').checked = false; await ui.el('toggle-subtitles').emit('change');
+  assert.equal(overlay.children.length, 0);
+  assert.equal(ui.el('subtitle-overlay').style.display, 'none');
+  ui.el('toggle-subtitles').checked = true; await ui.el('toggle-subtitles').emit('change');
+  assert.equal(overlay.children.length, 1);
+  assert.equal(ui.el('subtitle-text').textContent, '');
+  ui.sockets.at(-1).receive({ type: 'finished', status: 'completed' });
+  ui.window.loadDroppedLocalVideo('D:/next.mp4');
+  assert.equal(overlay.children.length, 0);
+  assert.equal(ui.el('subtitle-text').textContent, '');
+});
+
+test('uncertain transcript remains editable, shows review reason and can confirm unchanged text', async () => {
+  const ui = studio(); await ui.start();
+  const segment = { id: 0, start: 0, end: 10, status: 'NEEDS_REVIEW', final_vi: 'Bản dịch cần kiểm tra',
+    needs_review: true, review_reason: 'Lời nói và chữ trên hình chưa khớp.', revision: 0 };
+  ui.sockets.at(-1).receive({ type: 'segment_update', ...segment });
+  const row = ui.el('seg-row-0'), warning = row.querySelector('.transcript-review');
+  assert.equal(warning.hidden, false);
+  assert.equal(warning.textContent, segment.review_reason);
+  assert.equal(warning.getAttribute('role'), 'status');
+  assert.equal(row.dataset.needsReview, 'true');
+  assert.equal(ui.el('seg-vi-0').disabled, false);
+  assert.equal(ui.el('btn-export-hq').disabled, true);
+  await ui.el('video-player').play();
+  assert.equal(ui.el('video-player').paused, true);
+  assert.equal(ui.el('subtitle-text').textContent, '');
+  assert.match(ui.el('buffering-text').textContent, /cần kiểm tra/);
+  await ui.el('seg-vi-0').click();
+  assert.equal(ui.el('seg-input-0').value, segment.final_vi);
+  ui.replies.set('/api/streaming/fixture/segments/0', { segment: { ...segment, status: 'READY', needs_review: false,
+    review_reason: '', revision: 1, audio_url: '/reviewed.wav' }, screen_texts: [] });
+  await row.querySelector('.transcript-editor-actions').children[0].click();
+  assert.equal(ui.requests.filter(request => request.options.method === 'PATCH').length, 1);
+  assert.equal(warning.hidden, true);
+  assert.equal(row.dataset.needsReview, 'false');
+  assert.equal(ui.el('subtitle-text').textContent, segment.final_vi);
+  assert.equal(ui.el('btn-export-hq').disabled, false);
+});
+
+test('screen translations update on websocket edits and reject stale revision overlays', async () => {
+  const ui = studio(); await ui.start();
+  const original = { start: 0, end: 10, text_vi: 'Bản cũ', bbox: [.1, .7, .8, .08], kind: 'subtitle' };
+  const segment = visualFixture(ui, [original]);
+  const overlay = ui.el('screen-text-overlay');
+  assert.equal(overlay.children[0].textContent, 'Bản cũ');
+  ui.sockets.at(-1).receive({ type: 'segment_update', ...segment, final_vi: 'Bản mới', revision: 2,
+    screen_texts: [{ ...original, text_vi: 'Bản mới' }] });
+  assert.equal(overlay.children[0].textContent, 'Bản mới');
+  ui.sockets.at(-1).receive({ type: 'segment_update', ...segment, revision: 1, screen_texts: [original] });
+  assert.equal(overlay.children[0].textContent, 'Bản mới');
+  await ui.el('seg-vi-0').click();
+  ui.el('seg-input-0').value = 'Bản cuối'; await ui.el('seg-input-0').emit('input');
+  ui.replies.set('/api/streaming/fixture/segments/0', { segment: { ...segment, final_vi: 'Bản cuối', revision: 3 },
+    screen_texts: [{ ...original, text_vi: 'Bản cuối' }] });
+  await ui.el('seg-row-0').querySelector('.transcript-editor-actions').children[0].click();
+  assert.equal(overlay.children[0].textContent, 'Bản cuối');
+  assert.equal(ui.el('subtitle-text').textContent, '');
+});
+
+test('editing across multiple OCR rows keeps source masks but shows the sentence once without restarting its pages', async () => {
+  const ui = studio(); await ui.start();
+  const rows = [
+    { start: 0, end: 2, text_vi: 'Phụ đề cũ đầu', bbox: [.1, .7, .8, .05], kind: 'subtitle' },
+    { start: 2, end: 5, text_vi: 'Phụ đề cũ sau', bbox: [.1, .75, .8, .05], kind: 'subtitle' },
+    { start: 0, end: 10, text_vi: 'Tiêu đề', bbox: [.1, .1, .8, .05], kind: 'title' },
+  ];
+  const segment = visualFixture(ui, rows), overlay = ui.el('screen-text-overlay');
+  const text = 'Một câu đã sửa giữ nguyên đầy đủ ý nghĩa qua nhiều vùng phụ đề cũ trên màn hình.';
+  await ui.el('seg-vi-0').click();
+  ui.el('seg-input-0').value = text; await ui.el('seg-input-0').emit('input');
+  const masks = rows.map(item => item.kind === 'subtitle' ? { ...item, text_vi: '', mask_only: true } : item);
+  ui.replies.set('/api/streaming/fixture/segments/0', { segment: { ...segment, final_vi: text, end: 5, revision: 1 }, screen_texts: masks });
+  await ui.el('seg-row-0').querySelector('.transcript-editor-actions').children[0].click();
+  const pages = [];
+  for (let time = 0; time < 5; time += .1) {
+    ui.el('video-player').currentTime = time; await ui.el('video-player').emit('timeupdate');
+    assert.equal(overlay.children.length, 2);
+    assert.equal(overlay.children[0].textContent, '');
+    assert.equal(overlay.children[0].dataset.maskOnly, 'true');
+    assert.equal(overlay.children[1].textContent, 'Tiêu đề');
+    const page = ui.el('subtitle-text').textContent;
+    assert.ok(page);
+    if (pages.at(-1) !== page) pages.push(page);
+  }
+  assert.equal(pages.map(page => page.replaceAll('\n', ' ')).join(' '), text);
+  ui.el('toggle-mask-chinese').checked = false; await ui.el('toggle-mask-chinese').emit('change');
+  assert.equal(overlay.children.length, 1);
+  assert.equal(overlay.children[0].textContent, 'Tiêu đề');
+  ui.el('toggle-mask-chinese').checked = true; await ui.el('toggle-mask-chinese').emit('change');
+  ui.el('toggle-subtitles').checked = false; await ui.el('toggle-subtitles').emit('change');
+  assert.equal(overlay.children.length, 1);
+  assert.equal(overlay.children[0].dataset.maskOnly, 'true');
+  ui.el('toggle-mask-chinese').checked = false; await ui.el('toggle-mask-chinese').emit('change');
+  assert.equal(overlay.children.length, 0);
+});
+
+test('edited speech masks reject uncertain or excessive source regions and never inherit stale text', async () => {
+  const ui = studio(); await ui.start();
+  const mask = { start: 0, end: 10, text_vi: 'Stale full sentence', bbox: [.1, .7, .8, .05], kind: 'subtitle', mask_only: true };
+  visualFixture(ui, [mask, { ...mask, needs_review: true }, { ...mask, bbox: [0, 0, 1, .8] }, { ...mask, bbox: [-.1, .7, .8, .05] }]);
+  const overlay = ui.el('screen-text-overlay');
+  assert.equal(overlay.children.length, 1);
+  assert.equal(overlay.children[0].textContent, '');
+  assert.equal(ui.el('subtitle-text').textContent, 'Lời thoại ngắn');
+});
+
+test('spoken and OCR paging balance a final orphan word to match export', async () => {
+  const text = 'Sai. Video kém chất lượng còn làm giảm mức độ ưu tiên tài khoản.';
+  const expected = ['Sai. Video kém\nchất lượng còn làm', 'giảm mức độ ưu tiên tài khoản.'];
+  const ui = studio(); await ui.start();
+  ui.sockets.at(-1).receive({ type: 'segment_update', id: 0, start: 0, end: 4.5, status: 'READY', final_vi: text });
+  const video = ui.el('video-player');
+  const pages = [];
+  for (let time = 0; time < 4.5; time += .05) {
+    video.currentTime = time; await video.emit('timeupdate');
+    const page = ui.el('subtitle-text').textContent;
+    if (pages.at(-1) !== page) pages.push(page);
+  }
+  assert.deepEqual(pages, expected);
+  video.currentTime = 2.35; await video.emit('timeupdate');
+  assert.equal(ui.el('subtitle-text').textContent, expected[0]);
+  video.currentTime = 2.36; await video.emit('timeupdate');
+  assert.equal(ui.el('subtitle-text').textContent, expected[1]);
+  // A tall/wide subtitle region uses the same two-line, 60-character budget.
+  visualFixture(ui, [{ start: 0, end: 4.5, text_vi: text, bbox: [.03, .1, .94, .1], kind: 'subtitle' }]);
+  const ocrPages = [];
+  for (let time = 0; time < 4.5; time += .05) {
+    video.currentTime = time; await video.emit('timeupdate');
+    const page = ui.el('screen-text-overlay').children[0].textContent;
+    if (ocrPages.at(-1) !== page) ocrPages.push(page);
+  }
+  assert.deepEqual(ocrPages, expected);
+});
+
+test('transcript distinguishes OpenRouter transcript plus OCR from video AI and keeps review status prominent', async () => {
+  const ui = studio(); await ui.start();
+  const segment = { id: 0, start: 0, end: 10, status: 'READY', final_vi: 'Bản đã đối chiếu.' };
+  ui.sockets.at(-1).receive({ type: 'segment_update', ...segment, source_method: 'text-ai' });
+  assert.equal(ui.el('seg-badge-0').textContent, 'Sẵn sàng · OpenRouter · bản chép + OCR');
+  ui.sockets.at(-1).receive({ type: 'segment_update', ...segment, source_method: 'video-ai' });
+  assert.equal(ui.el('seg-badge-0').textContent, 'Sẵn sàng · AI hình + tiếng');
+  ui.sockets.at(-1).receive({ type: 'segment_update', ...segment, source_method: 'text-ai', status: 'NEEDS_REVIEW', needs_review: true });
+  assert.equal(ui.el('seg-badge-0').textContent, 'Cần kiểm tra');
+  assert.equal(ui.el('seg-row-0').querySelector('.transcript-review').hidden, false);
+});
+
+test('long screen title remains complete throughout its interval and fits without enlarging its region', async () => {
+  const ui = studio(); await ui.start();
+  const title = 'Những lời đồn về lượt xem trên Douyin mà có thể bạn chưa biết.';
+  visualFixture(ui, [{ start: 0, end: 10, text_vi: title, bbox: [.1, .1, .8, .1], kind: 'title' }]);
+  const overlay = ui.el('screen-text-overlay'), video = ui.el('video-player');
+  let shown;
+  for (const time of [0, 1, 3, 6, 9.99]) {
+    video.currentTime = time; await video.emit('timeupdate');
+    assert.equal(overlay.children.length, 1);
+    const node = overlay.children[0];
+    assert.equal(node.textContent.replaceAll('\n', ' '), title);
+    assert.equal(node.textContent, 'Những lời đồn về lượt xem trên\nDouyin mà có thể bạn chưa biết.');
+    assert.ok(node.textContent.split('\n').length <= 2);
+    assert.equal(node.style.left, '10%');
+    assert.equal(node.style.top, '10%');
+    assert.equal(node.style.width, '80%');
+    assert.equal(node.style.height, '10%');
+    assert.ok(parseFloat(node.style.fontSize) < 16, 'Long title shrinks to fit instead of temporal pagination');
+    if (shown) assert.equal(node.textContent, shown);
+    shown = node.textContent;
+    assert.equal(ui.el('subtitle-text').textContent, 'Lời thoại ngắn');
+  }
+  video.currentTime = 10; await video.emit('timeupdate');
+  assert.equal(overlay.children.length, 0);
+});
+
+test('original audition plays an uncertain source segment without translated audio or review gate and stops at its end', async () => {
+  const ui = studio(); await ui.start();
+  const video = ui.el('video-player'), socket = ui.sockets.at(-1);
+  await video.play();
+  const bgm = ui.audio.find(item => item.src === '/bgm.m4a'), dub = ui.audio.find(item => item.src === '/dub.wav');
+  socket.receive({ type: 'segment_update', id: 1, start: 2, end: 4, duration: 2, status: 'NEEDS_REVIEW',
+    needs_review: true, final_vi: 'Bản cần nghe lại', review_reason: 'Âm thanh chưa rõ.' });
+  const button = ui.el('seg-row-1').querySelector('.transcript-listen-original');
+  const bgmPlays = bgm.playCount, dubPlays = dub.playCount;
+  await button.click();
+  assert.equal(video.currentTime, 2);
+  assert.equal(video.paused, false);
+  assert.equal(video.muted, false);
+  assert.equal(bgm.paused, true); assert.equal(dub.paused, true);
+  assert.equal(button.getAttribute('aria-pressed'), 'true');
+  assert.equal(ui.el('buffering-alert').classList.contains('hidden'), true);
+  // A previously queued native pause event can arrive after play has started.
+  await video.emit('pause');
+  await video.emit('seeking'); await video.emit('seeked');
+  video.currentTime = 3; await video.emit('timeupdate');
+  await video.emit('play'); await video.emit('ratechange');
+  assert.equal(video.paused, false);
+  assert.equal(video.muted, false);
+  assert.equal(bgm.playCount, bgmPlays); assert.equal(dub.playCount, dubPlays);
+  assert.equal(ui.el('subtitle-text').textContent, '');
+  video.currentTime = 4.02; await ui.tickIntervals(50);
+  assert.equal(video.paused, true);
+  assert.equal(video.currentTime, 4);
+  assert.equal(video.muted, true);
+  assert.equal(button.textContent, 'Nghe gốc');
+  assert.equal(button.getAttribute('aria-pressed'), 'false');
+  video.currentTime = 1;
+  await video.play();
+  assert.equal(dub.paused, false);
+  assert.equal(bgm.paused, false);
+  assert.equal(video.muted, true);
+});
+
+test('stopping original audition restores master mute, cancels its timer and permits another sentence', async () => {
+  const ui = studio(); await ui.start();
+  const video = ui.el('video-player');
+  const first = ui.el('seg-row-0').querySelector('.transcript-listen-original');
+  await ui.el('player-mute-toggle').click();
+  await first.click();
+  assert.equal(video.volume, 1);
+  assert.equal(video.muted, false);
+  await first.click();
+  assert.equal(video.paused, true);
+  assert.equal(video.volume, 0);
+  assert.equal(video.muted, true);
+  await first.click();
+  ui.sockets.at(-1).receive({ type: 'segment_update', id: 1, start: 3, end: 5, status: 'NEEDS_REVIEW', needs_review: true, final_vi: 'Câu sau' });
+  const next = ui.el('seg-row-1').querySelector('.transcript-listen-original');
+  await next.click();
+  assert.equal(first.getAttribute('aria-pressed'), 'false');
+  assert.equal(next.getAttribute('aria-pressed'), 'true');
+  assert.equal(video.currentTime, 3);
+  video.pause(); await ui.flush();
+  assert.equal(next.getAttribute('aria-pressed'), 'false');
+  assert.equal(video.volume, 0);
+  video.currentTime = 6; await ui.tickIntervals(50);
+  assert.equal(video.currentTime, 6, 'Cancelled timer must not snap back to the old end');
+});
+
+test('source audition cleans up on source change, task stop and failed source playback', async () => {
+  for (const action of ['source', 'stop', 'failure', 'pagehide']) {
+    const ui = studio(); await ui.start();
+    const video = ui.el('video-player'), button = ui.el('seg-row-0').querySelector('.transcript-listen-original');
+    if (action === 'failure') video.play = async () => { throw new Error('source codec failed'); };
+    await button.click();
+    if (action === 'source') {
+      ui.sockets.at(-1).receive({ type: 'finished', status: 'completed' });
+      ui.window.loadDroppedLocalVideo('D:/next.mp4');
+    } else if (action === 'stop') await ui.window.studioStop();
+    else if (action === 'pagehide') await ui.window.emit('pagehide');
+    assert.equal(video.paused, true);
+    assert.equal(button.getAttribute('aria-pressed'), 'false');
+    if (action === 'failure') assert.match(ui.el('transcript-status').textContent, /Không phát được âm thanh gốc/);
+    video.currentTime = 12; await ui.tickIntervals(50);
+    assert.equal(video.currentTime, 12);
+  }
+});
+
+test('review silence requires its explicit action and becomes a ready silent interval without autoaccepting blank saves', async () => {
+  const ui = studio(); await ui.start();
+  const segment = { id: 0, start: 0, end: 10, status: 'NEEDS_REVIEW', needs_review: true,
+    final_vi: '', text_zh: '', revision: 0, audio_url: null };
+  ui.sockets.at(-1).receive({ type: 'segment_update', ...segment });
+  const row = ui.el('seg-row-0'), silence = row.querySelector('.transcript-confirm-silence');
+  assert.equal(silence.hidden, false);
+  await ui.el('seg-vi-0').click();
+  await row.querySelector('.transcript-editor-actions').children[0].click();
+  assert.equal(ui.requests.filter(item => item.options.method === 'PATCH').length, 0);
+  assert.match(row.querySelector('.transcript-edit-message').textContent, /Nhập bản dịch/);
+  let resolve;
+  ui.replies.set('/api/streaming/fixture/segments/0', () => new Promise(done => { resolve = done; }));
+  const saving = silence.click(); await ui.flush(); await silence.click();
+  assert.equal(silence.disabled, true);
+  assert.equal(ui.el('btn-export-hq').disabled, true);
+  const requests = ui.requests.filter(item => item.options.method === 'PATCH');
+  assert.equal(requests.length, 1);
+  assert.deepEqual(JSON.parse(requests[0].options.body), { final_vi: '', confirm_silence: true });
+  resolve({ ok: true, json: async () => ({ segment: { ...segment, status: 'READY', needs_review: false,
+    confirmed_silence: true, revision: 1 }, screen_texts: [] }) });
+  await saving;
+  assert.equal(silence.hidden, true);
+  assert.equal(row.querySelector('.transcript-review').hidden, true);
+  assert.equal(ui.el('seg-vi-0').textContent, 'Đã xác nhận không có lời thoại');
+  assert.equal(ui.el('subtitle-text').textContent, '');
+  assert.equal(ui.el('btn-export-hq').disabled, false);
+  await ui.el('video-player').play();
+  assert.equal(ui.el('video-player').paused, false);
+  assert.equal(ui.audio.filter(item => item.src === '/dub.wav').every(item => item.paused), true);
+  await ui.el('seg-vi-0').click();
+  assert.equal(ui.el('seg-input-0').value, '', 'Status label must never become editable spoken text');
+});
+
+test('failed explicit silence confirmation preserves a typed draft and keeps the review unresolved', async () => {
+  const ui = studio(); await ui.start();
+  ui.sockets.at(-1).receive({ type: 'segment_update', id: 0, start: 0, end: 10, status: 'NEEDS_REVIEW',
+    needs_review: true, final_vi: 'Nghi nhận nhầm', text_zh: '识别结果' });
+  await ui.el('seg-vi-0').click();
+  const input = ui.el('seg-input-0'); input.value = 'Bản đang sửa'; await input.emit('input');
+  const row = ui.el('seg-row-0');
+  ui.replies.set('/api/streaming/fixture/segments/0', { failure: true, detail: 'Đang xuất video, hãy thử lại sau.' });
+  await row.querySelector('.transcript-confirm-silence').click();
+  assert.equal(input.value, 'Bản đang sửa');
+  assert.equal(input.disabled, false);
+  assert.equal(row.querySelector('.transcript-confirm-silence').hidden, false);
+  assert.match(row.querySelector('.transcript-edit-message').textContent, /Đang xuất video/);
+  assert.equal(ui.el('seg-vi-0').textContent, 'Nghi nhận nhầm');
+  assert.equal(ui.el('btn-export-hq').disabled, true);
 });

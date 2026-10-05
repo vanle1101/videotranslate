@@ -104,6 +104,7 @@ class SmartSubtitleRemovalEngine(SubtitleRemovalEngine):
             str(output_path)
         ]
 
-        subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=True)
+        subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=True,
+                       creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
         print(f"[+] Targeted Subtitle Removal completed: {output_path.name}")
         return output_path

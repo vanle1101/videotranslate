@@ -344,6 +344,27 @@ class LocalAPITests(unittest.TestCase):
         self.assertEqual([message["type"] for message in messages], ["init", "telemetry", "error"])
         self.assertEqual(messages[-1]["message"], session.error)
 
+    def test_websocket_reconnect_reports_actual_fallback_provider_and_evidence(self):
+        sources = [{"provider": "openrouter-free", "model": "example/text:free", "evidence_mode": "asr-ocr-text"}]
+        warnings = ["OpenRouter dùng bản chép và OCR; chưa xem/nghe video."]
+        session = self.session(visual_translation=True, translation_sources=sources, warnings=warnings,
+                               source_processing_label=lambda: "Faster-Whisper + OCR tại máy; OpenRouter · dịch văn bản")
+        segment = session.segments[0]
+        segment.source_method = "text-ai"
+        segment.translation_provider = "openrouter-free"
+        segment.translation_model = "example/text:free"
+        segment.evidence_mode = "asr-ocr-text"
+        main.active_streaming_sessions[session.task_id] = session
+        with self.client.websocket_connect(f"/ws/stream/{session.task_id}") as websocket:
+            initial = websocket.receive_json()
+        self.assertEqual(initial["type"], "init")
+        self.assertEqual(initial["translation_sources"], sources)
+        self.assertEqual(initial["warnings"], warnings)
+        self.assertIn("OpenRouter", initial["asr_engine"])
+        self.assertNotIn("Gemini", initial["asr_engine"])
+        self.assertEqual(initial["segments"][0]["source_method"], "text-ai")
+        self.assertEqual(initial["segments"][0]["evidence_mode"], "asr-ocr-text")
+
 
 if __name__ == "__main__":
     unittest.main()

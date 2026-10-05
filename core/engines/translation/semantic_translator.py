@@ -154,6 +154,14 @@ class SemanticTranslator(TranslationEngine):
             if re.search(r"[\u3400-\u9fff]", source) and any(v.strip() == source for v in values.values()):
                 raise self._translation_error("trả lại nguyên văn tiếng Trung.")
             result[item_id] = {field: values[field].strip() for field in fields}
+            if "needs_review" in item:
+                if not isinstance(item["needs_review"], bool):
+                    raise self._translation_error("trả về đánh giá độ chắc chắn không hợp lệ.")
+                result[item_id]["needs_review"] = item["needs_review"]
+                reason = item.get("review_reason", "")
+                if not isinstance(reason, str):
+                    raise self._translation_error("trả về lý do cần kiểm tra không hợp lệ.")
+                result[item_id]["review_reason"] = reason.strip()[:500]
         if set(result) != set(expected):
             missing = sorted(set(expected) - set(result))
             raise self._translation_error(f"thiếu hoặc sai bản dịch cho segment {missing}.")
@@ -370,7 +378,7 @@ class SemanticTranslator(TranslationEngine):
         text_zh: str,
         duration: float,
         rolling_context: Optional[List[Dict[str, str]]] = None,
-        pronouns: str = "mình - các bạn"
+        pronouns: str = "Theo nhân vật và ngữ cảnh; không tự đổi quan hệ xưng hô"
     ) -> Dict[str, str]:
         """
         Translates a single segment with rolling context and strict duration budgeting.
@@ -391,9 +399,10 @@ Ngữ cảnh 5 câu thoại trước đó:
 Quy tắc bắt buộc:
 1. Dịch câu tiếng Trung được cung cấp sang tiếng Việt, không lặp lại nguyên văn tiếng Trung.
 2. Xưng hô: {pronouns}
-3. Thời lượng đọc cho phép: {duration:.1f} giây (tối đa {target_words} từ tiếng Việt).
-4. Trả về JSON duy nhất: {{"literal_vi": "...", "natural_vi": "...", "final_vi": "..."}}
+3. Thời lượng đọc: {duration:.1f} giây (mục tiêu tối đa {target_words} từ, chỉ tham khảo). Ưu tiên đủ ý, giữ phủ định/đối tượng/hành động hơn giới hạn từ; được vượt mục tiêu để tránh mất ý.
+4. Trả về JSON duy nhất: {{"literal_vi": "...", "natural_vi": "...", "final_vi": "...", "needs_review": false, "review_reason": ""}}
 5. Giữ đúng ý gốc. Không thêm thông tin hoặc hành động không có trong câu tiếng Trung; ưu tiên đúng nghĩa hơn văn phong.
+6. Đầu vào có thể bị nhận dạng âm thanh sai. Nếu câu vô nghĩa, mâu thuẫn ngữ cảnh hoặc không đủ căn cứ để hiểu, KHÔNG bịa thành câu có vẻ hợp lý. Giữ bản dịch nháp sát nguồn và needs_review=true, giải thích ngắn bằng tiếng Việt để người dùng nghe lại. Không tự sửa từ tiếng Trung chỉ vì nghe giống nhau.
 """
             raw = self._opencode_request(sys_instruction, f"Dịch câu: {clean_zh}")
             parsed = self._parse_opencode_results(raw, [{"id": 0, "text_zh": clean_zh}], single=True)

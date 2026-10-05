@@ -106,6 +106,7 @@ class StreamUrlRequest(BaseModel):
     voice_id: Optional[str] = None
     tts_engine: Optional[str] = None
     asr_engine: Optional[str] = None
+    visual_translation: bool = False
 
 class SeekRequest(BaseModel):
     task_id: str
@@ -116,7 +117,8 @@ class ExportHQRequest(BaseModel):
     mask_chinese: Optional[bool] = True
 
 class SegmentEditRequest(BaseModel):
-    final_vi: str = Field(min_length=1, max_length=2000, strict=True)
+    final_vi: str = Field(max_length=2000, strict=True)
+    confirm_silence: bool = Field(default=False, strict=True)
 
 class ConfigRequest(BaseModel):
     gemini_key: Optional[str] = None
@@ -519,6 +521,7 @@ async def run_session(session):
 
 @app.post("/api/streaming/start-url")
 async def start_streaming_url(req: StreamUrlRequest):
+    validate_visual_translation(req.visual_translation)
     if not req.url:
         raise HTTPException(status_code=400, detail="Vui lòng cung cấp link video")
 
@@ -538,6 +541,7 @@ async def start_streaming_url(req: StreamUrlRequest):
         voice=voice,
         tts_engine_name=engine,
         asr_engine_name=req.asr_engine or settings.ASR_ENGINE,
+        visual_translation=req.visual_translation,
         event_callback=lambda event_type, data: broadcast_session_event(task_id, event_type, data)
     )
 
@@ -566,8 +570,10 @@ async def start_streaming_upload(
     voice_id: Optional[str] = Form(None),
     tts_engine: Optional[str] = Form(None),
     asr_engine: str = Form(settings.ASR_ENGINE),
+    visual_translation: bool = Form(False),
     ref_audio: Optional[UploadFile] = File(None)
 ):
+    validate_visual_translation(visual_translation)
     tts_engine, voice = validated_voice(voice_id, tts_engine, voice)
     if ref_audio and ref_audio.filename and tts_engine != "vieneu-tts":
         raise HTTPException(status_code=422, detail="Mẫu giọng riêng chỉ được hỗ trợ khi chọn VieNeu.")
@@ -594,6 +600,7 @@ async def start_streaming_upload(
         voice=voice,
         tts_engine_name=tts_engine,
         asr_engine_name=asr_engine,
+        visual_translation=visual_translation,
         ref_audio=ref_audio_path,
         event_callback=lambda event_type, data: broadcast_session_event(task_id, event_type, data)
     )
@@ -624,7 +631,7 @@ async def edit_streaming_segment(task_id: str, segment_id: int, req: SegmentEdit
     if active_export_tasks.get(f"export_{task_id}", {}).get("status") in {"RUNNING", "CANCELLING"}:
         raise HTTPException(status_code=409, detail="Video đang được xuất. Hãy chờ xuất xong trước khi sửa lời thoại.")
     try:
-        segment = await session.edit_segment(segment_id, req.final_vi)
+        segment = await session.edit_segment(segment_id, req.final_vi, confirm_silence=req.confirm_silence)
     except KeyError:
         raise HTTPException(status_code=404, detail="Không tìm thấy câu thoại.") from None
     except SegmentEditConflict as error:
@@ -633,7 +640,7 @@ async def edit_streaming_segment(task_id: str, segment_id: int, req: SegmentEdit
         raise HTTPException(status_code=422, detail="Nội dung hoặc thời lượng câu thoại không hợp lệ. Nhập từ 1 đến 2.000 ký tự.") from None
     except Exception:
         raise HTTPException(status_code=503, detail="Chưa tạo lại được giọng đọc. Nội dung và âm thanh cũ vẫn được giữ; hãy thử lại.") from None
-    return {"segment": segment}
+    return {"segment": segment, "screen_texts": getattr(session, "screen_texts", [])}
 
 @app.get("/api/streaming/bgm/{task_id}")
 async def get_streaming_bgm(task_id: str):
@@ -706,6 +713,7 @@ async def export_hq(req: ExportHQRequest):
             segments=segments_data,
             total_duration=session.total_duration,
             mask_chinese=req.mask_chinese if req.mask_chinese is not None else True,
+            screen_texts=getattr(session, "screen_texts", []) if getattr(session, "visual_translation", False) else None,
             progress_callback=_prog_cb,
             cancel_check=_cancel_chk
         )
@@ -756,6 +764,14 @@ class StreamLocalFileRequest(BaseModel):
     voice_id: Optional[str] = None
     tts_engine: Optional[str] = None
     asr_engine: Optional[str] = None
+    visual_translation: bool = False
+
+
+def validate_visual_translation(enabled):
+    if enabled and settings.LLM_PROVIDER != "gemini":
+        raise HTTPException(status_code=422, detail="Đọc chữ và kiểm chứng video cần chọn Gemini trong Cài đặt.")
+    if enabled and not (settings.GEMINI_API_KEY or os.getenv("GEMINI_API_KEY", "")).strip():
+        raise HTTPException(status_code=422, detail="Nhập key Gemini trước khi bật đọc chữ và kiểm chứng video.")
 
 
 def reject_private_media_path(path):
@@ -765,6 +781,7 @@ def reject_private_media_path(path):
 
 @app.post("/api/streaming/start-local-file")
 async def start_streaming_local_file(req: StreamLocalFileRequest):
+    validate_visual_translation(req.visual_translation)
     reject_private_media_path(req.file_path)
     p = Path(req.file_path)
     if not p.is_file():
@@ -779,6 +796,7 @@ async def start_streaming_local_file(req: StreamLocalFileRequest):
         voice=voice,
         tts_engine_name=engine,
         asr_engine_name=req.asr_engine or settings.ASR_ENGINE,
+        visual_translation=req.visual_translation,
         event_callback=lambda event_type, data: broadcast_session_event(task_id, event_type, data)
     )
     asyncio.create_task(run_session(session))
@@ -1056,6 +1074,11 @@ async def websocket_stream(websocket: WebSocket, task_id: str):
             "duration": session.total_duration,
             "segments_count": len(session.segments),
             "segments": [s.to_dict() for s in session.segments.values()],
+            "screen_texts": getattr(session, "screen_texts", []),
+            "visual_translation": getattr(session, "visual_translation", False),
+            "translation_sources": getattr(session, "translation_sources", []),
+            "asr_engine": session.source_processing_label() if hasattr(session, "source_processing_label") else "",
+            "warnings": list(getattr(session, "warnings", [])),
             "initial_buffer_seconds": session.initial_buffer_seconds,
             "bgm_url": session.bgm_url,
             "vocal_removal_engine": session.vocal_suppressor.name,

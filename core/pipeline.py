@@ -1,5 +1,6 @@
 import asyncio
 import os
+import subprocess
 import time
 from pathlib import Path
 from typing import Dict, Any, Callable, Optional, List
@@ -92,8 +93,8 @@ class VideoTranslationPipeline:
         await update_progress(12, "Stage 2/12: Đang trích xuất Master Audio...", "stage-extract")
         raw_audio = task_dir / "raw_audio.wav"
         cmd = ["ffmpeg", "-y", "-i", str(video_path), "-vn", "-acodec", "pcm_s16le", "-ar", "44100", "-ac", "2", str(raw_audio)]
-        import subprocess
-        subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=True)
+        subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=True,
+                       creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
 
         # Stage 3: BS-RoFormer Audio Separation
         await update_progress(22, "Stage 3/12: BS-RoFormer đang tách thoại Trung và nhạc nền/SFX...", "stage-roformer")
@@ -201,11 +202,11 @@ class VideoTranslationPipeline:
 
     def _assemble_voice_timeline(self, aligned_segments: List[Dict[str, Any]], total_duration: float, output_path: Path):
         """Assembles all aligned audio segment chunks at exact millisecond timeline positions."""
-        import subprocess
         valid_items = [s for s in aligned_segments if "audio_path" in s and Path(s["audio_path"]).exists()]
         if not valid_items:
             cmd = ["ffmpeg", "-y", "-f", "lavfi", "-i", "anullsrc=r=44100:cl=stereo", "-t", str(total_duration), str(output_path)]
-            subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=True)
+            subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=True,
+                           creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
             return
 
         inputs = []
@@ -222,4 +223,5 @@ class VideoTranslationPipeline:
         filter_complex = f"{';'.join(filter_parts)};{mix_str};[mixed]atrim=0:{total_duration},apad=whole_dur={total_duration}[out]"
 
         cmd = ["ffmpeg", "-y"] + inputs + ["-filter_complex", filter_complex, "-map", "[out]", "-ac", "2", "-ar", "44100", str(output_path)]
-        subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=True)
+        subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=True,
+                       creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))

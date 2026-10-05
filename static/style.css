@@ -114,7 +114,14 @@ html { scroll-padding-top: 106px; }
 #player-container { position: relative; display: flex; justify-content: center; align-items: center; width: 100%; height: 100%; min-height: 100%; aspect-ratio: auto !important; overflow: hidden; background: radial-gradient(ellipse at 10% 24%, #9133633d, transparent 35%), radial-gradient(ellipse at 80% 32%, #7951a334, transparent 47%), radial-gradient(ellipse at 56% 88%, #62515c28, transparent 48%), #0a101d; }
 #player-container:has(#player-placeholder:not(.hidden)) #chinese-sub-mask { display: none !important; }
 #video-player { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: contain; }
-#subtitle-text { text-shadow: 1px 1px 2px #000, -1px -1px 2px #000, 0 2px 5px #000; letter-spacing: .02em; }
+#subtitle-text { text-shadow: 1px 1px 2px #000, -1px -1px 2px #000, 0 2px 3px #000; letter-spacing: 0; font-family: Arial, sans-serif; }
+#subtitle-text { max-width: 100%; padding: 0; font-size: var(--subtitle-font-size, 14px); line-height: 1.25; white-space: pre-line; overflow-wrap: anywhere; border: 0; background: transparent; box-shadow: none; }
+.screen-text-overlay { position: absolute; pointer-events: none; z-index: 9; overflow: hidden; }
+.screen-text-item { position: absolute; display: flex; align-items: center; justify-content: center; padding: 0; color: #fff; background: #121212; line-height: 1.25; text-align: center; font-family: Arial, sans-serif; font-weight: 700; text-shadow: 0 1px 1px #000; overflow: hidden; overflow-wrap: anywhere; white-space: pre-line; }
+.screen-text-item[data-mask="false"] { background: transparent; }
+.visual-translation-option { display: flex; align-items: flex-start; gap: 8px; color: #ece4ff; font-size: 12px; line-height: 1.5; }
+.visual-translation-option input { margin-top: 3px; accent-color: #dc36bb; }
+.visual-translation-option small { display: block; color: #a9b9d4; font-size: 10px; margin-top: 3px; }
 #subtitle-text:empty { display: none; }
 .player-placeholder { position: absolute; inset: 0; display: flex; flex-direction: column; justify-content: center; align-items: center; gap: 12px; padding: 26px; text-align: center; }
 .player-placeholder > i { font-size: 38px; color: #b072da; }
@@ -205,6 +212,8 @@ html { scroll-padding-top: 106px; }
 .transcript-editor-actions button:first-child { border-color: #a84b89; background: #733157; color: #fff; }
 .transcript-edit-message { margin-top: 7px; color: #bdc8dc; font-size: 11px; line-height: 1.6; }
 .transcript-edit-message[data-error="true"] { color: #fda4af; }
+.transcript-review { margin-top: 10px; padding: 9px 11px; border: 1px solid #a86a22; border-left: 3px solid #f0b64d; border-radius: 7px; color: #ffe2a6; background: #4b321d66; font-size: 12px; line-height: 1.6; }
+.transcript-row[data-needs-review="true"] .transcript-state { color: #ffe2a6; }
 
 .voice-panel { display: flex; flex-direction: column; min-height: 0; padding: 16px 17px 10px; overflow: hidden; }
 .voice-list-heading { display: flex; align-items: center; justify-content: space-between; gap: 10px; margin-bottom: 9px; }

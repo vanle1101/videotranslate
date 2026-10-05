@@ -21,7 +21,8 @@ class AudioSegmenter:
             str(audio_path)
         ]
         res = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                             text=True, encoding="utf-8", errors="replace", check=True)
+                             text=True, encoding="utf-8", errors="replace", check=True,
+                             creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
         try:
             return float(res.stdout.strip())
         except Exception:
@@ -35,7 +36,8 @@ class AudioSegmenter:
             "-f", "null", "-"
         ]
         res = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                             text=True, encoding="utf-8", errors="replace", check=True)
+                             text=True, encoding="utf-8", errors="replace", check=True,
+                             creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
         output = res.stderr
 
         silences = []

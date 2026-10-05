@@ -2,6 +2,7 @@ import tempfile
 import time
 import math
 import wave
+import json
 from pathlib import Path
 from typing import Dict, Any, List, Optional
 from config import settings
@@ -12,6 +13,7 @@ from core.audio_ducking import PremiumAudioMixer
 from core.subtitle import SubtitleGenerator
 from core.video_composer import VideoComposer
 from core.media_process import run_media
+from core.subtitle_cues import normalize_screen_texts
 
 class HQExporter:
     """
@@ -34,16 +36,17 @@ class HQExporter:
         total_duration: float,
         mask_chinese: bool = True,
         progress_callback: Optional[Any] = None,
-        cancel_check: Optional[Any] = None
+        cancel_check: Optional[Any] = None,
+        screen_texts: Optional[List[Dict[str, Any]]] = None,
     ) -> Dict[str, Any]:
         with tempfile.TemporaryDirectory(prefix=f"hq_export_{task_id}_", dir=settings.TEMP_DIR) as temp_dir:
             return self._export(
                 task_id, Path(video_path), segments, total_duration, Path(temp_dir),
-                mask_chinese, progress_callback, cancel_check,
+                mask_chinese, progress_callback, cancel_check, screen_texts,
             )
 
     def _export(self, task_id, video_path, segments, total_duration, task_dir,
-                mask_chinese, progress_callback, cancel_check):
+                mask_chinese, progress_callback, cancel_check, screen_texts=None):
         if not math.isfinite(total_duration) or total_duration <= 0:
             raise ValueError("Thời lượng video phải lớn hơn 0.")
         t0 = time.time()
@@ -115,7 +118,12 @@ class HQExporter:
         ass_path = task_dir / "subtitles.ass"
         subtitle_segments = [dict(s, vi_text=s.get("final_vi") or s.get("vi_text") or s.get("text_vi") or "") for s in segments]
         self.sub_gen.generate_srt(subtitle_segments, srt_path)
-        self.sub_gen.generate_ass(subtitle_segments, ass_path)
+        video_size = self._video_size(video_path, cancel_check)
+        self.sub_gen.generate_ass(
+            subtitle_segments, ass_path,
+            screen_texts=normalize_screen_texts(screen_texts, total_duration),
+            video_size=video_size, mask_screen_text=mask_chinese,
+        )
 
         # 6. Render final video at its original dimensions.
         _report(95, "6/6 Render MP4 với phụ đề và âm thanh tiếng Việt...")
@@ -131,7 +139,9 @@ class HQExporter:
             audio_path=master_audio,
             subtitle_path=ass_path,
             output_path=rendered_video,
-            mask_chinese_sub=mask_chinese,
+            # OCR-aware exports mask their exact text regions in ASS. An empty
+            # detection list must not produce a blind strip across someone's body.
+            mask_chinese_sub=mask_chinese and screen_texts is None,
             cancel_check=cancel_check,
         )
         _check_cancel()
@@ -147,6 +157,27 @@ class HQExporter:
             "separation_engine": separation_engine,
             "warnings": warnings
         }
+
+    @staticmethod
+    def _video_size(video_path, cancel_check=None):
+        metadata = run_media([
+            "ffprobe", "-v", "error", "-select_streams", "v:0",
+            "-show_entries", "stream=width,height:stream_tags=rotate:stream_side_data=rotation",
+            "-of", "json", str(video_path),
+        ], cancel_check, capture_output=True)
+        try:
+            stream = json.loads(metadata)["streams"][0]
+            width, height = int(stream["width"]), int(stream["height"])
+            rotation = float(stream.get("tags", {}).get("rotate", 0))
+            for side_data in stream.get("side_data_list", []):
+                rotation = float(side_data.get("rotation", rotation))
+            if round(rotation / 90) % 2:
+                width, height = height, width
+            if width > 0 and height > 0:
+                return width, height
+        except (ValueError, TypeError, KeyError, IndexError):
+            pass
+        return 1080, 1920
 
     @staticmethod
     def _assemble_voice_timeline(segments, total_duration, output_path, cancel_check=None):

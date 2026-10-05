@@ -81,7 +81,8 @@ class SenseVoiceEngine(ASREngine):
             "-ar", "16000", "-ac", "1",
             str(temp_16k)
         ]
-        subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=True)
+        subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                       check=True, creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
 
         samples, sample_rate = sf.read(str(temp_16k))
         duration = len(samples) / sample_rate

@@ -17,7 +17,8 @@ class AudioSeparator:
             "-ar", "44100", "-ac", "2",
             str(output_wav)
         ]
-        subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=True)
+        subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=True,
+                       creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
         return output_wav
 
     def separate(self, video_path: str, task_id: str) -> Tuple[Path, Path]:
@@ -42,7 +43,8 @@ class AudioSeparator:
             demucs_available = True
         except ImportError:
             # Check CLI demucs
-            check = subprocess.run(["demucs", "--help"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            check = subprocess.run(["demucs", "--help"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                                   creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
             if check.returncode == 0:
                 demucs_available = True
 
@@ -59,7 +61,8 @@ class AudioSeparator:
                 str(original_audio)
             ]
             try:
-                subprocess.run(cmd, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                subprocess.run(cmd, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                               creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
                 # Find output files
                 model_folder = out_model_dir / settings.DEMUCS_MODEL / original_audio.stem
                 if (model_folder / "vocals.wav").exists() and (model_folder / "no_vocals.wav").exists():
@@ -83,7 +86,8 @@ class AudioSeparator:
             str(bgm_path)
         ]
         try:
-            subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=True)
+            subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=True,
+                           creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
         except Exception:
             shutil.copyfile(original_audio, bgm_path)
 

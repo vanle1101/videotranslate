@@ -58,7 +58,8 @@ def check_media_playback(page, folder):
         '-f', 'lavfi', '-i', 'sine=frequency=440:sample_rate=48000:duration=8',
         '-c:v', 'libx264', '-pix_fmt', 'yuv420p', '-c:a', 'aac',
         '-movflags', '+faststart', '-shortest', str(video),
-    ], check=True, capture_output=True, timeout=30)
+    ], check=True, capture_output=True, timeout=30,
+       creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
     javascript(page, f'window.loadDroppedLocalVideo({json.dumps(str(video))});')
     for _ in range(200):
         state = video_state(page)
@@ -139,6 +140,135 @@ def check_minimum_layout(window):
         results[tab] = geometry['scrollWidth']
     javascript(window.web_view.page(), "document.getElementById('tab-studio').click()")
     return results
+
+
+def check_original_segment_playback(page):
+    """Listen to a review row through real Qt media, isolating task creation only."""
+    javascript(page, '''
+        window.__auditionFetch = window.fetch;
+        window.__auditionSocket = window.WebSocket;
+        window.__auditionAudio = window.Audio;
+        window.__auditionTracks = [];
+        window.__auditionSource = document.getElementById('video-player').currentSrc;
+        window.__auditionVolume = document.getElementById('player-volume').value;
+        window.Audio = function(source) {
+            const audio = new window.__auditionAudio(source);
+            window.__auditionTracks.push(audio);
+            return audio;
+        };
+        window.Audio.prototype = window.__auditionAudio.prototype;
+        window.fetch = async (url, options) => {
+            if (String(url).startsWith('/api/streaming/start-')) {
+                return new Response(JSON.stringify({task_id: 'qt-source-audition',
+                    video_url: window.__auditionSource}));
+            }
+            if (url === '/api/tasks') return new Response(JSON.stringify({tasks: []}));
+            if (url === '/api/tasks/qt-source-audition/stop') return new Response(JSON.stringify({status: 'ok'}));
+            return window.__auditionFetch(url, options);
+        };
+        window.WebSocket = class {
+            static OPEN = 1;
+            constructor() {this.readyState = 1; window.__auditionWs = this;}
+            send() {}
+            close() {this.readyState = 3;}
+        };
+        document.getElementById('btn-start').click();
+    ''')
+
+    def audition_state():
+        return json.loads(javascript(page, '''JSON.stringify((() => {
+            const video = document.getElementById('video-player');
+            const button = document.querySelector('#seg-row-1 .transcript-listen-original');
+            return {time: video.currentTime, paused: video.paused, muted: video.muted,
+                volume: video.volume, pressed: button?.getAttribute('aria-pressed'),
+                label: button?.textContent,
+                tracks: window.__auditionTracks.map(audio => ({time: audio.currentTime,
+                    paused: audio.paused, ready: audio.readyState, error: audio.error?.message})),
+                review: document.getElementById('seg-row-1')?.dataset.needsReview};
+        })())'''))
+
+    try:
+        for _ in range(80):
+            if javascript(page, '!!window.__auditionWs') and video_state(page)['readyState'] >= 2:
+                break
+            wait(100)
+        assert javascript(page, '!!window.__auditionWs'), 'Audition task fixture did not start'
+        assert video_state(page)['readyState'] >= 2, video_state(page)
+        javascript(page, '''
+            const volume = document.getElementById('player-volume');
+            volume.value = '.35'; volume.dispatchEvent(new Event('input', {bubbles: true}));
+            document.getElementById('video-player').currentTime = 0;
+            window.__auditionWs.onmessage({data: JSON.stringify({type: 'init', duration: 8,
+                segments_count: 2, bgm_url: window.__auditionSource,
+                segments: [
+                    {id: 0, start: 0, end: 2.8, duration: 2.8, status: 'READY',
+                        final_vi: 'Câu đã tạo giọng.', audio_url: window.__auditionSource},
+                    {id: 1, start: 3, end: 4.4, duration: 1.4, status: 'NEEDS_REVIEW',
+                        needs_review: true, review_reason: 'Nghe lại âm thanh nguồn.',
+                        text_zh: '待确认', final_vi: 'Câu cần kiểm tra.', audio_url: null}
+                ]})});
+            document.getElementById('video-player').play();
+        ''')
+        for _ in range(60):
+            before = audition_state()
+            active_tracks = [track for track in before['tracks'] if not track['paused']]
+            if len(active_tracks) == 2 and all(track['time'] > .05 for track in active_tracks):
+                break
+            wait(50)
+        assert len(active_tracks) == 2, before
+        assert all(track['time'] > .05 and not track.get('error') for track in active_tracks), before
+        assert before['muted'] and before['review'] == 'true', before
+        javascript(page, "document.querySelector('#seg-row-1 .transcript-listen-original').click()")
+        wait(350)
+        playing = audition_state()
+        assert 3.15 <= playing['time'] < 4.4 and not playing['paused'], playing
+        assert not playing['muted'] and abs(playing['volume'] - .35) < .001, playing
+        assert playing['pressed'] == 'true' and playing['label'] == 'Dừng nghe gốc', playing
+        assert all(track['paused'] for track in playing['tracks']), playing
+        for _ in range(50):
+            finished = audition_state()
+            if finished['paused'] and finished['pressed'] == 'false':
+                break
+            wait(50)
+        assert finished['paused'] and abs(finished['time'] - 4.4) < .1, finished
+        assert finished['pressed'] == 'false' and finished['label'] == 'Nghe gốc', finished
+        assert finished['muted'] and abs(finished['volume'] - .35) < .001, finished
+        assert all(track['paused'] for track in finished['tracks']), finished
+        wait(200)
+        assert abs(audition_state()['time'] - finished['time']) < .05, finished
+
+        # Master mute remains a preference: explicit audition is audible, then restores it.
+        javascript(page, '''
+            document.getElementById('player-mute-toggle').click();
+            document.querySelector('#seg-row-1 .transcript-listen-original').click();
+        ''')
+        wait(250)
+        muted_audition = audition_state()
+        assert not muted_audition['muted'] and muted_audition['volume'] > 0 and not muted_audition['paused'], muted_audition
+        javascript(page, "document.querySelector('#seg-row-1 .transcript-listen-original').click()")
+        wait(150)
+        stopped = audition_state()
+        assert stopped['paused'] and stopped['muted'] and stopped['volume'] == 0, stopped
+        assert stopped['pressed'] == 'false' and all(track['paused'] for track in stopped['tracks']), stopped
+        return {'needs_review_audible': True, 'source_seconds': round(playing['time'] - 3, 3),
+                'dub_and_bgm_paused': True, 'stops_at_sentence_end': True,
+                'mute_and_volume_restored': True, 'manual_stop': True}
+    finally:
+        javascript(page, 'window.studioStop();')
+        wait(200)
+        javascript(page, '''
+            window.__auditionTracks.forEach(audio => {audio.pause(); audio.removeAttribute('src'); audio.load();});
+            window.Audio = window.__auditionAudio;
+            window.fetch = window.__auditionFetch;
+            window.WebSocket = window.__auditionSocket;
+            const volume = document.getElementById('player-volume');
+            volume.value = window.__auditionVolume;
+            volume.dispatchEvent(new Event('input', {bubbles: true}));
+            delete window.__auditionTracks;
+            delete window.__auditionWs;
+            document.getElementById('video-url').value = '';
+            document.getElementById('video-url').dispatchEvent(new Event('input', {bubbles: true}));
+        ''')
 
 
 def check_bgm_playback(page, folder, task_id):
@@ -377,7 +507,8 @@ def check_voice_catalog_and_preview(page, folder):
         subprocess.run(['ffmpeg', '-hide_banner', '-loglevel', 'error', '-nostdin', '-y',
                         '-f', 'lavfi', '-i', 'color=c=black:s=32x32:r=1:d=1',
                         '-c:v', 'libx264', '-pix_fmt', 'yuv420p', str(source_video)],
-                       check=True, capture_output=True, timeout=20)
+                       check=True, capture_output=True, timeout=20,
+                       creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
         javascript(page, f'window.loadDroppedLocalVideo({json.dumps(str(source_video))});')
         javascript(page, "document.getElementById('btn-start').click()")
         wait(200)
@@ -684,6 +815,7 @@ def main():
         transcript_smoke = check_transcript_editor(window)
         layout = check_minimum_layout(window)
         playback = check_media_playback(window.web_view.page(), media_folder.name)
+        original_playback = check_original_segment_playback(window.web_view.page())
         bgm = check_bgm_playback(window.web_view.page(), media_folder.name, Path(media_folder.name).name)
         javascript(window.web_view.page(), "document.getElementById('tab-models').click()")
         wait(300)
@@ -733,6 +865,7 @@ def main():
         wait(200)
         print(json.dumps({'result': 'PASS', 'desktop': result, 'upload': upload['requests'][0],
                           'playback': playback, 'bgm': bgm, 'layout_1024': layout,
+                          'original_segment_playback': original_playback,
                           'progress_and_logs': progress_logs, 'voices': voice_smoke, 'transcript': transcript_smoke}, ensure_ascii=False))
     finally:
         if window:

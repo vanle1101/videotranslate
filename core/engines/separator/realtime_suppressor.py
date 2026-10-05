@@ -45,7 +45,8 @@ class RealtimeVocalSuppressor:
         try:
             import json
             probe_res = subprocess.run(probe_cmd, capture_output=True, text=True,
-                                       encoding="utf-8", errors="replace", check=True)
+                                       encoding="utf-8", errors="replace", check=True,
+                                       creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
             probe_data = json.loads(probe_res.stdout)
             channels = int(probe_data["streams"][0].get("channels", 2))
         except Exception:
@@ -66,7 +67,10 @@ class RealtimeVocalSuppressor:
             "-vn", "-f", "s16le", "-ac", "2", "-ar", "22050", "pipe:1"
         ]
         try:
-            raw_bytes = subprocess.run(pcm_cmd, capture_output=True, check=True).stdout
+            raw_bytes = subprocess.run(
+                pcm_cmd, capture_output=True, check=True,
+                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+            ).stdout
             data = np.frombuffer(raw_bytes, dtype=np.int16).reshape(-1, 2).astype(np.float32)
             L, R = data[:, 0], data[:, 1]
             denom = np.sqrt(np.sum(L**2) * np.sum(R**2))
@@ -166,7 +170,8 @@ class RealtimeVocalSuppressor:
         dur_cmd = ["ffprobe", "-v", "error", "-show_entries", "format=duration", "-of", "default=noprint_wrappers=1:nokey=1", str(output_audio_path)]
         try:
             dur_res = subprocess.run(dur_cmd, capture_output=True, text=True,
-                                     encoding="utf-8", errors="replace", check=True)
+                                     encoding="utf-8", errors="replace", check=True,
+                                     creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
             duration = float(dur_res.stdout.strip())
         except Exception:
             duration = 1.0

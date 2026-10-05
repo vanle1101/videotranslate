@@ -27,7 +27,8 @@ class VietnameseTTS:
             "-of", "default=noprint_wrappers=1:nokey=1",
             str(audio_path)
         ]
-        res = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        res = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+                             creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
         try:
             return float(res.stdout.strip())
         except Exception:
@@ -44,7 +45,8 @@ class VietnameseTTS:
             "-filter:a", f"atempo={clamped_factor:.3f}",
             "-vn", str(output_wav)
         ]
-        subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=True)
+        subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=True,
+                       creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
 
     async def generate_full_dubbing(
         self,
@@ -87,7 +89,8 @@ class VietnameseTTS:
                 else:
                     # Convert to wav without speed change
                     cmd = ["ffmpeg", "-y", "-i", str(raw_seg_path), str(fitted_seg_path)]
-                    subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=True)
+                    subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=True,
+                                   creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
 
                 segment_wavs.append({
                     "start": seg["start"],
@@ -112,7 +115,8 @@ class VietnameseTTS:
                 "ffmpeg", "-y", "-f", "lavfi", "-i", f"anullsrc=r=44100:cl=stereo",
                 "-t", str(total_duration), str(output_path)
             ]
-            subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=True)
+            subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=True,
+                           creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
             return
 
         # Build FFmpeg complex filter with adelay
@@ -140,7 +144,8 @@ class VietnameseTTS:
             str(output_path)
         ]
 
-        res = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        res = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                             creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
         if res.returncode != 0:
             print(f"[!] Warning FFmpeg assembly failed: {res.stderr.decode('utf-8', errors='ignore')[:300]}")
             # Fallback simple concat
@@ -148,4 +153,5 @@ class VietnameseTTS:
                 "ffmpeg", "-y", "-f", "lavfi", "-i", f"anullsrc=r=44100:cl=stereo",
                 "-t", str(total_duration), str(output_path)
             ]
-            subprocess.run(cmd_fallback, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            subprocess.run(cmd_fallback, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                           creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))

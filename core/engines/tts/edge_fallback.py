@@ -84,6 +84,7 @@ class EdgeTTSFallbackEngine(TTSEngine):
                 result = subprocess.run(
                     ["ffmpeg", "-y", "-i", str(mp3_path), "-vn", "-ac", "1", "-ar", "24000", str(output_path)],
                     capture_output=True,
+                    creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
                 )
                 if result.returncode:
                     raise RuntimeError(result.stderr.decode("utf-8", errors="replace")[-1500:])

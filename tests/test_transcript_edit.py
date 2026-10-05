@@ -1,6 +1,7 @@
 """Transcript text/audio transactions, lifecycle and export consistency; offline."""
 import asyncio
 import threading
+import wave
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import Mock
@@ -98,6 +99,245 @@ def test_edit_completed_segment_publishes_text_and_fitted_audio_with_new_revisio
     assert not session.edit_tasks
     assert not list(session.cache_dir.glob("edit_*"))
     assert [p.name for p in session.segments_dir.iterdir()] == ["seg_0.wav"]
+
+
+@pytest.mark.parametrize("text", ["Lời thoại cũ", "Bản dịch đã kiểm tra"])
+def test_reviewed_visual_sentence_can_generate_audio_even_when_text_is_unchanged(session, text):
+    segment = session.segments[0]
+    segment.status = "NEEDS_REVIEW"
+    segment.source_method = "video-ai"
+    segment.needs_review = True
+    segment.review_reason = "Chữ nguồn chưa rõ"
+    Path(segment.audio_path).unlink()
+    segment.audio_path = segment.audio_url = None
+
+    async def run():
+        async with client() as api:
+            response = await api.patch(route(session), json={"final_vi": text})
+            assert response.status_code == 200, response.text
+            saved = response.json()["segment"]
+            assert saved["status"] == "READY"
+            assert saved["needs_review"] is False
+            assert not saved["review_reason"]
+            assert saved["final_vi"] == text
+            assert saved["revision"] == 1
+            assert saved["audio_url"].endswith("?rev=1")
+            audio = await api.get(saved["audio_url"])
+            assert audio.content == (text + " aligned").encode()
+
+    asyncio.run(run())
+    session.tts_engine.synthesize.assert_called_once()
+    assert not session.edit_tasks
+    assert not list(session.cache_dir.glob("edit_*"))
+
+
+@pytest.mark.parametrize("draft", ["", "Lời nhận dạng nhầm"])
+def test_explicit_silence_approves_review_without_tts_and_exports_silent_timeline(session, monkeypatch, draft):
+    from core.streaming.export import HQExporter
+
+    segment = session.segments[0]
+    segment.status = "NEEDS_REVIEW"
+    segment.needs_review = True
+    segment.review_reason = "ASR có chữ nhưng không nghe rõ lời nói"
+    segment.final_vi = segment.literal_vi = segment.natural_vi = draft
+    segment.translation_provider = "openrouter-free"
+    segment.translation_model = "provider/model:free"
+    segment.evidence_mode = "asr-ocr-text"
+    session.error = session._review_message()
+    session.visual_translation = True
+    session.screen_texts = [{"id": "o0", "start": 2, "end": 5, "kind": "title",
+                             "text_vi": "Tiêu đề vẫn còn", "bbox": [.1, .1, .8, .1]}]
+    audio_path = Path(segment.audio_path)
+    old_url = segment.audio_url
+    captured = {}
+
+    def export(**kwargs):
+        captured.update(kwargs)
+        output = session.cache_dir / "silent-timeline.wav"
+        HQExporter._assemble_voice_timeline(kwargs["segments"], kwargs["total_duration"], output)
+        with wave.open(str(output), "rb") as sound:
+            assert sound.getnframes() == round(session.total_duration * 44100)
+            assert not any(sound.readframes(sound.getnframes()))
+        output.unlink()
+        return {"output_filename": "silent.mp4", "elapsed_seconds": 0.1}
+
+    monkeypatch.setattr(main, "HQExporter", lambda: SimpleNamespace(export=export))
+
+    async def run():
+        async with client() as api:
+            payload = {"final_vi": "", "confirm_silence": True}
+            response = await api.patch(route(session), json=payload)
+            assert response.status_code == 200, response.text
+            saved = response.json()["segment"]
+            assert saved["status"] == "READY" and saved["confirmed_silence"] is True
+            assert saved["needs_review"] is False and saved["review_reason"] is None
+            assert saved["final_vi"] == saved["natural_vi"] == saved["literal_vi"] == saved["text_vi"] == ""
+            assert saved["audio_url"] is None and segment.audio_path is None
+            assert saved["subtitle_cues"] == [] and saved["tts_duration"] == 0
+            assert saved["revision"] == 1 and (saved["start"], saved["end"]) == (2, 5)
+            assert saved["text_zh"] == "原文"  # Retain the recognition evidence.
+            assert saved["translation_provider"] == "openrouter-free"
+            assert saved["translation_model"] == "provider/model:free"
+            assert saved["evidence_mode"] == "asr-ocr-text"
+            assert response.json()["screen_texts"] == session.screen_texts
+            assert not audio_path.exists() and (await api.get(old_url)).status_code == 404
+            assert session.error is None and session.total_processed_duration == 3
+            repeated = await api.patch(route(session), json=payload)
+            assert repeated.status_code == 200 and repeated.json()["segment"] == saved
+            assert session.total_processed_duration == 3
+            exported = await api.post("/api/streaming/export-hq", json={"task_id": session.task_id})
+            assert exported.status_code == 200, exported.text
+    asyncio.run(run())
+    assert captured["segments"][0]["audio_path"] is None
+    assert captured["screen_texts"] == session.screen_texts
+    session.tts_engine.synthesize.assert_not_called()
+    session.aligner.apply_atempo.assert_not_called()
+    assert not session.edit_tasks
+
+
+@pytest.mark.parametrize("payload", [
+    {"final_vi": "", "confirm_silence": False},
+    {"final_vi": "   "},
+    {"final_vi": "Câu vẫn có chữ", "confirm_silence": True},
+    {"final_vi": "", "confirm_silence": "true"},
+    {"final_vi": "", "confirm_silence": 1},
+])
+def test_silence_requires_explicit_boolean_and_empty_text_without_changing_draft(session, payload):
+    segment = session.segments[0]
+    segment.status = "NEEDS_REVIEW"
+    segment.needs_review = True
+    before = segment.to_dict()
+
+    async def run():
+        async with client() as api:
+            response = await api.patch(route(session), json=payload)
+            assert response.status_code == 422
+    asyncio.run(run())
+    assert segment.to_dict() == before
+    assert Path(segment.audio_path).read_bytes() == b"old audio"
+    session.tts_engine.synthesize.assert_not_called()
+
+
+def test_silence_cannot_clear_an_already_approved_spoken_sentence(session):
+    before = session.segments[0].to_dict()
+
+    async def run():
+        async with client() as api:
+            response = await api.patch(route(session), json={"final_vi": "", "confirm_silence": True})
+            assert response.status_code == 409
+    asyncio.run(run())
+    assert session.segments[0].to_dict() == before
+    session.tts_engine.synthesize.assert_not_called()
+
+
+def test_locked_old_audio_does_not_partially_approve_silence(session, monkeypatch):
+    segment = session.segments[0]
+    segment.status = "NEEDS_REVIEW"
+    segment.needs_review = True
+    before = segment.to_dict()
+    old_path = Path(segment.audio_path)
+    real_unlink = Path.unlink
+
+    def unlink(path, *args, **kwargs):
+        if path == old_path:
+            raise PermissionError("audio still open")
+        return real_unlink(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "unlink", unlink)
+
+    async def run():
+        async with client() as api:
+            response = await api.patch(route(session), json={"final_vi": "", "confirm_silence": True})
+            assert response.status_code == 503
+    asyncio.run(run())
+    assert segment.to_dict() == before and old_path.read_bytes() == b"old audio"
+    assert not session.edit_tasks
+
+
+def test_confirmed_silence_can_be_replaced_with_spoken_text(session):
+    segment = session.segments[0]
+    segment.status = "NEEDS_REVIEW"
+    segment.needs_review = True
+
+    async def run():
+        async with client() as api:
+            silent = await api.patch(route(session), json={"final_vi": "", "confirm_silence": True})
+            assert silent.status_code == 200
+            spoken = await api.patch(route(session), json={"final_vi": "Thật ra vẫn có lời thoại"})
+            assert spoken.status_code == 200
+            saved = spoken.json()["segment"]
+            assert saved["confirmed_silence"] is False and saved["revision"] == 2
+            assert saved["audio_url"].endswith("?rev=2") and saved["subtitle_cues"]
+            assert session.total_processed_duration == 3
+    asyncio.run(run())
+    session.tts_engine.synthesize.assert_called_once()
+
+
+def test_visual_transcript_edit_masks_source_regions_without_repeating_text_and_preserves_titles(session):
+    session.visual_translation = True
+    session.segments[0].source_method = "video-ai"
+    session.screen_texts = [
+        {"start": 1, "end": 4, "kind": "subtitle", "text_vi": "Lời cũ trên hình", "bbox": [.1, .8, .8, .1]},
+        {"start": 4, "end": 6, "kind": "subtitle", "text_vi": "Lời cũ tiếp theo", "bbox": [.1, .8, .8, .1]},
+        {"start": 0, "end": 6, "kind": "title", "text_vi": "Tên bộ phim", "bbox": [.1, .1, .8, .1]},
+        {"start": 7, "end": 9, "kind": "subtitle", "text_vi": "Câu khác", "bbox": [.1, .8, .8, .1]},
+    ]
+    edited_text = ("Sau khi kiểm tra lại toàn bộ nội dung, đây là câu đã sửa để lời đọc và phụ đề "
+                   "đồng bộ liên tục dù chữ gốc đổi nhiều lần trong cùng một câu thoại.")
+
+    async def run():
+        async with client() as api:
+            response = await api.patch(route(session), json={"final_vi": edited_text})
+            assert response.status_code == 200, response.text
+            screens = response.json()["screen_texts"]
+            for screen in screens:
+                if screen["kind"] == "subtitle" and screen["start"] < 5 and screen["end"] > 2:
+                    assert screen["text_vi"] == ""
+                    assert screen["mask_only"] is True
+                    assert screen["bbox"] == [.1, .8, .8, .1]
+                    assert 2 <= screen["start"] < screen["end"] <= 5
+                    assert not screen.get("needs_review")
+            assert any(screen["start"] == 1 and screen["end"] == 2
+                       and screen["text_vi"] == "Lời cũ trên hình" for screen in screens)
+            assert any(screen["start"] == 5 and screen["end"] == 6
+                       and screen["text_vi"] == "Lời cũ tiếp theo" for screen in screens)
+            assert any(screen["kind"] == "title" and screen["text_vi"] == "Tên bộ phim" for screen in screens)
+            assert any(screen["start"] == 7 and screen["text_vi"] == "Câu khác" for screen in screens)
+            assert screens == session.screen_texts
+            saved = response.json()["segment"]
+            cues = saved["subtitle_cues"]
+            assert len(cues) > 1
+            assert " ".join(" ".join(cue["text"].split()) for cue in cues) == edited_text
+            assert (cues[0]["start"], cues[-1]["end"]) == (2, 5)
+            assert all(left["end"] == right["start"] for left, right in zip(cues, cues[1:]))
+            # Mask boundaries must not restart or hide the sentence's own cues.
+            from core.subtitle_cues import normalize_screen_texts, uncovered_intervals
+            normalized = normalize_screen_texts(screens)
+            assert sum(item.get("mask_only", False) for item in normalized) == 2
+            for cue in cues:
+                assert uncovered_intervals(cue["start"], cue["end"], normalized) == [(cue["start"], cue["end"])]
+            assert session.events[-1][1]["screen_texts"] == screens
+
+    asyncio.run(run())
+
+
+def test_editing_speech_does_not_approve_an_unreliable_ocr_mask(session):
+    session.visual_translation = True
+    session.segments[0].source_method = "video-ai"
+    session.screen_texts = [{"start": 2, "end": 5, "kind": "subtitle", "text_vi": "Bản nháp",
+                             "bbox": [0, 0, 1, .8], "needs_review": True,
+                             "review_reason": "Vùng chữ quá lớn"}]
+
+    async def run():
+        async with client() as api:
+            response = await api.patch(route(session), json={"final_vi": "Lời thoại đã sửa"})
+            assert response.status_code == 200
+            assert response.json()["segment"]["final_vi"] == "Lời thoại đã sửa"
+            for screen in response.json()["screen_texts"]:
+                assert screen["needs_review"] is True
+                assert screen["review_reason"]
+
+    asyncio.run(run())
 
 
 @pytest.mark.parametrize("stage", ["synthesis", "alignment", "replace"])

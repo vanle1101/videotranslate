@@ -4,12 +4,18 @@ import json
 import shutil
 import subprocess
 import tempfile
+from contextlib import contextmanager
 from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import patch
 
 import pytest
 
 from config import settings
 from core.audio_ducking import PremiumAudioMixer
+from core.engines.alignment.timing_aligner import TimingBudgetAligner
+from core.engines.tts.edge_fallback import EdgeTTSFallbackEngine
+from core.streaming.segmenter import AudioSegmenter
 from core.subtitle import SubtitleGenerator
 from core.video_composer import VideoComposer
 
@@ -20,6 +26,7 @@ def ffmpeg(*args):
         capture_output=True,
         check=True,
         timeout=30,
+        creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
     )
 
 
@@ -29,6 +36,7 @@ def probe(path):
         capture_output=True,
         check=True,
         timeout=10,
+        creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
     )
     return json.loads(result.stdout)
 
@@ -99,3 +107,63 @@ def test_mixer_honors_saved_machine_gains(monkeypatch):
     monkeypatch.setattr(settings, "VOICE_VOLUME_BOOST_DB", 1)
     mixer = PremiumAudioMixer()
     assert (mixer.duck_amount_db, mixer.bgm_gain_db, mixer.voice_gain_db) == (-24, -5, 1)
+
+
+@contextmanager
+def background_launches(target):
+    """Reject visible launches before running real tiny media subprocesses."""
+    real_run = subprocess.run
+
+    def checked_run(*args, **kwargs):
+        assert kwargs.get("creationflags") == getattr(subprocess, "CREATE_NO_WINDOW", 0)
+        return real_run(*args, **kwargs)
+
+    with patch(target, side_effect=checked_run) as launch:
+        yield launch
+
+
+def test_edge_converts_service_mp3_to_real_pcm_without_console_windows(media):
+    folder, _, _, voice, _ = media
+    service_audio = folder / "service.mp3"
+    ffmpeg("-i", voice, service_audio)
+    service_bytes = service_audio.read_bytes()
+
+    async def save_response(path):
+        Path(path).write_bytes(service_bytes)
+
+    output = folder / "giọng Edge.wav"
+    with patch("core.engines.tts.edge_fallback.edge_tts.Communicate",
+               return_value=SimpleNamespace(save=save_response)), \
+            background_launches("core.engines.tts.edge_fallback.subprocess.run") as launch:
+        result = EdgeTTSFallbackEngine().synthesize("Xin chào", output)
+    assert [call.args[0][0] for call in launch.call_args_list] == ["ffmpeg"]
+    assert result == output
+    metadata = probe(output)
+    audio = metadata["streams"][0]
+    assert (audio["codec_name"], audio["sample_rate"], audio["channels"]) == ("pcm_s16le", "24000", 1)
+    assert float(metadata["format"]["duration"]) == pytest.approx(0.6, abs=0.03)
+    assert not list(folder.glob("edge_tts_*"))
+
+
+def test_repeated_alignment_duration_probes_stay_in_background(media, monkeypatch):
+    folder, _, bgm, voice, _ = media
+    monkeypatch.setattr(settings, "TEMP_DIR", folder)
+    aligner = TimingBudgetAligner()
+    with background_launches("core.engines.alignment.timing_aligner.subprocess.run") as launch:
+        durations = [aligner.get_audio_duration(path) for path in (voice, bgm, voice)]
+    assert durations == pytest.approx([0.6, 1.2, 0.6], abs=0.03)
+    assert [call.args[0][0] for call in launch.call_args_list] == ["ffprobe"] * 3
+
+
+def test_sentence_segmentation_probes_and_detects_silence_in_background(media):
+    folder, *_ = media
+    source = folder / "hai câu.wav"
+    ffmpeg("-f", "lavfi", "-i",
+           "sine=frequency=440:duration=1.4[a];anullsrc=r=44100:cl=mono:d=0.6[b];"
+           "sine=frequency=880:duration=1.4[c];[a][b][c]concat=n=3:v=0:a=1", source)
+    with background_launches("core.streaming.segmenter.subprocess.run") as launch:
+        segments = AudioSegmenter().segment_audio(source)
+    assert len(segments) == 2
+    assert [segment["start"] for segment in segments] == pytest.approx([0, 2.0], abs=0.02)
+    assert [segment["end"] for segment in segments] == pytest.approx([1.4, 3.4], abs=0.02)
+    assert [call.args[0][0] for call in launch.call_args_list] == ["ffprobe", "ffmpeg"]
