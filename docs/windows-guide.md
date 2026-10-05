@@ -68,7 +68,11 @@ Có thể dán nguyên đoạn chia sẻ Douyin vào ô **Video nguồn**, gồm
 
 ### Sửa transcript cạnh video
 
-Ở cửa sổ rộng từ 960 px, **Transcript** nằm ngang cạnh khung xem trước; danh sách câu cuộn riêng và có tùy chọn **Theo vị trí phát**. Khung video giữ tỷ lệ của nguồn. Nguồn video, tiến độ và giọng đọc nằm ở cột bên phải trên màn hình rộng, hoặc xuống dưới khi thu nhỏ cửa sổ.
+Ở cửa sổ rộng từ 1200 px, Studio có ba cột: **nguồn video và tác vụ** bên trái, **video và âm thanh** ở giữa, **Transcript và Giọng lồng tiếng** thành hai khung riêng bên phải. Từ 960 px, transcript vẫn nằm cạnh video, còn nguồn và tác vụ chuyển xuống dưới. Danh sách câu và giọng cuộn riêng. Hình ảnh giữ tỷ lệ nguồn, không bị kéo giãn.
+
+Thanh phát có nút phát/tạm dừng, âm lượng tổng, tắt tiếng và toàn màn hình. Âm lượng tổng áp dụng cả giọng Việt và nhạc nền; hai thanh bên dưới điều chỉnh tỷ lệ trộn từng phần. **Thư viện** liệt kê tối đa 100 video nguồn mới nhất đã lưu trong `workspace/inputs`, bỏ qua file tạm và link thư mục; bấm video chỉ chọn để xem trước, bấm **Bắt đầu** mới chạy dịch.
+
+Khi tải, phần trăm, dung lượng đã nhận/tổng dung lượng, tốc độ và thời gian còn lại (ước tính) hiện ngay trong khung video. Nếu không có tổng dung lượng thì hiện **Chưa có %**. Studio đối chiếu trạng thái với máy chủ mỗi hai giây kể cả khi tab Tác vụ đóng; tác vụ đã dừng sẽ tắt vòng xoay. Khi mất kết nối hoặc không tìm thấy tác vụ, giao diện báo rõ và không tự nhận là đã tải xong. Phản hồi cũ không ghi đè tiến độ mới hơn.
 
 1. Bấm **mốc thời gian** hoặc **câu gốc** để tua đến đầu câu. Câu đang phát được đánh dấu trong transcript.
 2. Khi câu đã **Sẵn sàng**, bấm vào chữ cần sửa trong **bản dịch tiếng Việt**. Video tạm dừng, ô sửa mở tại vị trí chữ đã bấm; có thể sửa từng chữ hoặc cả câu.
@@ -120,6 +124,8 @@ venv\Scripts\python.exe -B -m pytest -p no:cacheprovider tests/test_local_runtim
 ```
 
 Hai script kiểm tra riêng: `tests/smoke_desktop.py` kiểm tra phát hình/âm thanh thật trong QtWebEngine, pause/seek/resume, năm tab ở 1024×640 và transcript cạnh video ở 1920×1080/1024×640. Kiểm tra transcript dùng phản hồi máy chủ giả lập để xác nhận vị trí con trỏ khi bấm chữ, lưu bản sửa và đồng bộ phụ đề trong DOM thật; không xác nhận chất lượng dịch hoặc tổng hợp giọng của dịch vụ. `tests/smoke_local_video.py` tạo câu nói tiếng Trung tổng hợp, nhận giọng thật, dịch, đọc tiếng Việt và xuất video. Script video cần Internet và model đã tải, tự dọn media thử; dùng `--keep-output` nếu muốn giữ MP4 cuối.
+
+Lượt chỉnh giao diện theo mẫu ngày 05/10/2026 đạt **65 bài Node**, **27 bài Python và 15 subtest** cho API cục bộ/desktop; một test tạo symlink thật được bỏ qua do quyền Windows, các kiểm tra loại link bằng mô phỏng vẫn đạt. Qt smoke đạt ở các chiều rộng 1920, 1672, 1366, 1280 và 1024 px, gồm dán link, 42,4% tiến độ, sửa transcript, nghe mẫu, phát/tua/tạm dừng, và vị trí lớp che trên vùng ảnh thực. Tiến độ dùng dữ liệu giả lập có kiểm soát, không tải lại video lớn. Fullscreen đã kiểm tra handler Qt và luồng JavaScript; chưa xác nhận thao tác vào fullscreen bằng chuột thật trong phiên người dùng.
 
 Sau khi bổ sung transcript, `node --test tests/test_ui_interactions.mjs` đạt **50 bài**, gồm giữ bản nháp, xử lý lỗi lưu, chống lưu lặp, đổi audio revision, khóa xuất khi chưa lưu và dọn trạng thái tải khi dừng. Desktop smoke cũng đạt kiểm tra transcript/giọng mẫu/phát video nêu trên. Bộ Python liên quan đến resolver, worker tải, sửa transcript, tiến độ và cookie đạt **187 bài**. Các kết quả kiểm thử pipeline dịch thực tế trong đoạn tiếp theo là từ những lượt trước, không phải xác nhận toàn bộ video Douyin của lượt tải mới.
 

@@ -5,10 +5,107 @@ import json
 import urllib.request
 from pathlib import Path
 
+import pytest
+
 # Ensure root directory is in sys.path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from core.services.service_manager import service_manager
+
+
+@pytest.fixture(scope="module")
+def fullscreen_window_factory():
+    # These windows never load the backend or touch the user's Studio instance.
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setenv("QT_QPA_PLATFORM", "offscreen")
+        from desktop_app import StudioMainWindow
+        from PySide6.QtWidgets import QApplication, QMainWindow
+
+        app = QApplication.instance() or QApplication([])
+        windows = []
+
+        class PlayerWindow(QMainWindow):
+            _on_fullscreen_requested = StudioMainWindow._on_fullscreen_requested
+            restore_window = StudioMainWindow.restore_window
+
+            def __init__(self):
+                super().__init__()
+                self._fullscreen_restore_state = None
+
+        def create_window(maximized=False):
+            window = PlayerWindow()
+            window.resize(900, 600)
+            if maximized:
+                window.showMaximized()
+            else:
+                window.showNormal()
+            windows.append(window)
+            app.processEvents()
+            return window, app
+
+        yield create_window
+        for window in windows:
+            window.close()
+        app.processEvents()
+
+
+class FullscreenRequest:
+    def __init__(self, enabled):
+        self.enabled = enabled
+        self.accepted = False
+
+    def toggleOn(self):
+        return self.enabled
+
+    def accept(self):
+        self.accepted = True
+
+
+@pytest.mark.parametrize("maximized", [False, True])
+def test_player_fullscreen_restores_window(fullscreen_window_factory, maximized):
+    window, app = fullscreen_window_factory(maximized)
+    initial_size = window.size()
+    enter = FullscreenRequest(True)
+    window._on_fullscreen_requested(enter)
+    app.processEvents()
+    assert enter.accepted
+    assert window.isFullScreen()
+
+    # A repeated entry must not overwrite the saved normal/maximized state.
+    window._on_fullscreen_requested(FullscreenRequest(True))
+    leave = FullscreenRequest(False)
+    window._on_fullscreen_requested(leave)
+    app.processEvents()
+    assert leave.accepted
+    assert not window.isFullScreen()
+    assert window.isMaximized() == maximized
+    if not maximized:
+        assert window.size() == initial_size
+    assert window._fullscreen_restore_state is None
+
+
+def test_player_fullscreen_activation_preserves_player_mode(fullscreen_window_factory):
+    window, app = fullscreen_window_factory(maximized=True)
+    window._on_fullscreen_requested(FullscreenRequest(True))
+    window.showMinimized()
+    window.restore_window()
+    app.processEvents()
+    assert window.isFullScreen()
+    assert not window.isMinimized()
+
+    window._on_fullscreen_requested(FullscreenRequest(False))
+    app.processEvents()
+    assert window.isMaximized()
+    assert not window.isFullScreen()
+
+
+def test_player_fullscreen_extra_exit_keeps_window_state(fullscreen_window_factory):
+    window, app = fullscreen_window_factory(maximized=True)
+    leave = FullscreenRequest(False)
+    window._on_fullscreen_requested(leave)
+    app.processEvents()
+    assert leave.accepted
+    assert window.isMaximized()
 
 def test_desktop_backend_lifecycle():
     print("=" * 80)

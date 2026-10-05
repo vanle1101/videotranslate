@@ -70,6 +70,19 @@ def check_media_playback(page, folder):
     assert (state['width'], state['height']) == (180, 320), state
     assert 7.9 <= state['duration'] <= 8.2, state
     assert '/api/preview/' in state['source'] or '/api/local-file?path=' in state['source'], state
+    overlay = json.loads(javascript(page, '''JSON.stringify((() => {
+        const video = document.getElementById('video-player');
+        const frame = document.getElementById('player-container').getBoundingClientRect();
+        const mask = document.getElementById('chinese-sub-mask').getBoundingClientRect();
+        const scale = Math.min(frame.width / video.videoWidth, frame.height / video.videoHeight);
+        const width = video.videoWidth * scale, height = video.videoHeight * scale;
+        return {left: mask.left, width: mask.width, top: mask.top, height: mask.height,
+            expectedLeft: frame.left + (frame.width - width) / 2,
+            expectedTop: frame.top + (frame.height - height) / 2 + height * .72,
+            expectedWidth: width, expectedHeight: height * .14};
+    })())'''))
+    for key in ('left', 'top', 'width', 'height'):
+        assert abs(overlay[key] - overlay['expected' + key.title()]) < 1, overlay
     javascript(page, '''
         window.__smokePlayError = null;
         document.getElementById('video-player').muted = true;
@@ -104,7 +117,11 @@ def check_media_playback(page, folder):
 
 def check_minimum_layout(window):
     window.resize(1024, 640)
-    wait(300)
+    for _ in range(30):
+        wait(100)
+        if javascript(window.web_view.page(), 'innerWidth') == 1024:
+            break
+    assert javascript(window.web_view.page(), 'innerWidth') == 1024
     results = {}
     for tab in ('studio', 'tasks', 'models', 'diagnostics', 'settings'):
         javascript(window.web_view.page(), f'document.getElementById("tab-{tab}").click()')
@@ -215,8 +232,10 @@ def check_progress_and_logs(page):
             clipboard.clear()
     javascript(page, "document.getElementById('btn-start').click()")
     wait(200)
-    javascript(page, '''window.__downloadSocket.onmessage({data: JSON.stringify({type: 'progress',
-        ...window.__progressTask, progress_pct: 42.4})});''')
+    javascript(page, '''
+        window.__progressTask.progress_pct = 42.4;
+        window.__downloadSocket.onmessage({data: JSON.stringify({type: 'progress', ...window.__progressTask})});
+    ''')
     measured = json.loads(javascript(page, '''JSON.stringify({
         percent: document.getElementById('task-progress-value').textContent,
         aria: document.getElementById('task-progress-track').getAttribute('aria-valuenow'),
@@ -226,12 +245,13 @@ def check_progress_and_logs(page):
         pauseHidden: document.getElementById('btn-pause-worker').classList.contains('hidden'),
         exportDisabled: document.getElementById('btn-export-hq').disabled
     })'''))
-    assert measured['percent'] == '42%' and measured['aria'] == '42.4', measured
+    assert measured['percent'] == '42.4%' and measured['aria'] == '42.4', measured
     assert 'Đã nhận link Douyin' in measured['recognized'], measured
     assert measured['sourceType'] == 'TEXTAREA', measured
     assert measured['extractedUrl'] == 'https://v.douyin.com/_lAiSDH0bK8/', measured
     assert measured['pauseHidden'] and measured['exportDisabled'], measured
     javascript(page, '''
+        window.__progressTask.progress_pct = null;
         window.__downloadSocket.onmessage({data: JSON.stringify({type: 'progress', ...window.__progressTask})});
         document.getElementById('tab-tasks').click();
     ''')
@@ -480,9 +500,13 @@ def check_transcript_editor(window, screenshot_path=None):
     """)
     geometry = {}
     try:
-        for width, height in ((1920, 1080), (1024, 640)):
+        for width, height in ((1920, 1080), (1672, 941), (1366, 768), (1280, 800), (1024, 640)):
             window.resize(width, height)
-            wait(300)
+            for _ in range(30):
+                wait(100)
+                if javascript(page, 'innerWidth') == width:
+                    break
+            assert javascript(page, 'innerWidth') == width, (width, window.size(), window.web_view.size())
             measure = json.loads(javascript(page, """JSON.stringify((() => {
                 const r = selector => {
                     const b = document.querySelector(selector).getBoundingClientRect();
@@ -490,6 +514,10 @@ def check_transcript_editor(window, screenshot_path=None):
                 };
                 return {width:innerWidth,scrollWidth:document.documentElement.scrollWidth,
                     preview:r('.studio-preview'),transcript:r('.transcript-panel'),player:r('#player-container'),
+                    controls:r('.studio-controls'),voice:r('.voice-panel'),
+                    objectFit:getComputedStyle(document.getElementById('video-player')).objectFit,
+                    video:r('#video-player'),
+                    voiceIsSeparate:document.querySelector('.voice-panel').parentElement === document.querySelector('.studio-sidebar'),
                     playerStyle:document.getElementById('player-container').getAttribute('style'),
                     aspect:getComputedStyle(document.getElementById('player-container')).aspectRatio,
                     sourceRatio:document.getElementById('video-player').videoWidth / document.getElementById('video-player').videoHeight || 9/16,
@@ -498,7 +526,14 @@ def check_transcript_editor(window, screenshot_path=None):
             assert measure['scrollWidth'] <= measure['width'] + 1, measure
             assert abs(measure['preview']['y'] - measure['transcript']['y']) <= 1, measure
             assert measure['transcript']['x'] >= measure['preview']['right'], measure
-            assert abs(measure['player']['w'] / measure['player']['h'] - measure['sourceRatio']) < 0.02, measure
+            assert measure['voiceIsSeparate'] and measure['objectFit'] == 'contain', measure
+            assert abs(measure['player']['w'] - measure['stage']['w']) <= 1, measure
+            assert abs(measure['video']['h'] - measure['stage']['h']) <= 1, measure
+            if width >= 1200:
+                assert measure['controls']['right'] < measure['preview']['x'], measure
+                assert abs(measure['controls']['y'] - measure['preview']['y']) <= 1, measure
+            else:
+                assert measure['controls']['y'] > measure['preview']['y'] + measure['preview']['h'], measure
             geometry[str(width)] = measure
         window.resize(1920,1080)
         wait(200)

@@ -1,6 +1,7 @@
 import asyncio
 import os
 import shutil
+import stat
 import uuid
 import time
 from pathlib import Path
@@ -53,6 +54,40 @@ downloader = VideoDownloader()
 async def health():
     return {"status": "ok", "ffmpeg": bool(shutil.which("ffmpeg")),
             "ffprobe": bool(shutil.which("ffprobe"))}
+
+@app.get("/api/library")
+def list_library():
+    """List completed source videos without following links or scanning subfolders."""
+    source_dir = Path(settings.INPUT_DIR)
+    try:
+        if source_dir.is_symlink() or source_dir.is_junction():
+            return {"items": []}
+        root = source_dir.resolve(strict=True)
+        entries = list(root.iterdir())
+    except OSError:
+        return {"items": []}
+
+    items = []
+    for entry in entries:
+        if (entry.name.startswith(".") or entry.suffix.lower() not in {".mp4", ".mov", ".webm", ".mkv", ".avi"}
+                or any(suffix.lower() in {".part", ".tmp", ".temp"} for suffix in entry.suffixes)):
+            continue
+        try:
+            info = entry.lstat()
+            # Reparse points include Windows junctions; hidden/system files are
+            # not user-facing library media even if they have a video suffix.
+            if (not stat.S_ISREG(info.st_mode)
+                    or getattr(info, "st_file_attributes", 0) & (0x2 | 0x4 | 0x400)):
+                continue
+            resolved = entry.resolve(strict=True)
+            if resolved.parent != root:
+                continue
+        except OSError:
+            continue
+        items.append({"name": entry.name, "file_path": str(resolved),
+                      "size": info.st_size, "modified_at": info.st_mtime})
+    items.sort(key=lambda item: (-item["modified_at"], item["name"].casefold()))
+    return {"items": items[:100]}
 
 @app.get("/qtwebchannel.js")
 def qt_webchannel_client():

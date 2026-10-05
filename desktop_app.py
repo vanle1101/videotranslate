@@ -303,6 +303,7 @@ class StudioMainWindow(QMainWindow):
         self.port = port
         self.backend_url = f"http://127.0.0.1:{self.port}"
         self.app_icon = create_app_icon()
+        self._fullscreen_restore_state = None
 
         self.setWindowTitle("Douyin2TikTok AI Studio")
         self.setWindowIcon(self.app_icon)
@@ -320,6 +321,7 @@ class StudioMainWindow(QMainWindow):
         # Configure Web Settings
         settings_web = self.web_view.settings()
         settings_web.setAttribute(QWebEngineSettings.WebAttribute.JavascriptEnabled, True)
+        settings_web.setAttribute(QWebEngineSettings.WebAttribute.FullScreenSupportEnabled, True)
         # Translation/TTS finishes asynchronously after the Start click. Qt's
         # user-gesture gate otherwise rejects the delayed audio.play() request.
         settings_web.setAttribute(QWebEngineSettings.WebAttribute.PlaybackRequiresUserGesture, False)
@@ -333,6 +335,7 @@ class StudioMainWindow(QMainWindow):
         self.channel = QWebChannel(self.web_view.page())
         self.channel.registerObject("desktopBridge", self.bridge)
         self.web_view.page().setWebChannel(self.channel)
+        self.web_view.page().fullScreenRequested.connect(self._on_fullscreen_requested)
 
         # Setup System Tray
         self._setup_system_tray()
@@ -378,9 +381,37 @@ class StudioMainWindow(QMainWindow):
             self.restore_window()
 
     def restore_window(self):
-        self.showNormal()
+        if self._fullscreen_restore_state is not None:
+            self.showFullScreen()
+        elif self.isMaximized():
+            self.showMaximized()
+        else:
+            self.showNormal()
         self.activateWindow()
         self.raise_()
+
+    def _on_fullscreen_requested(self, request):
+        """Keep the native window in step with the player's Fullscreen API."""
+        if request.toggleOn():
+            if self._fullscreen_restore_state is None:
+                self._fullscreen_restore_state = (
+                    self.windowState() & ~Qt.WindowState.WindowMinimized
+                )
+            request.accept()
+            self.showFullScreen()
+            return
+
+        previous_state = self._fullscreen_restore_state
+        self._fullscreen_restore_state = None
+        request.accept()
+        if previous_state is None:
+            return
+        if previous_state & Qt.WindowState.WindowFullScreen:
+            self.showFullScreen()
+        elif previous_state & Qt.WindowState.WindowMaximized:
+            self.showMaximized()
+        else:
+            self.showNormal()
 
     def run_js(self, script: str):
         self.web_view.page().runJavaScript(script)

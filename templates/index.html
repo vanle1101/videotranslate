@@ -10,332 +10,151 @@
 </head>
 <body data-asr-engine="{{ settings.ASR_ENGINE }}" data-tts-engine="{{ settings.TTS_ENGINE }}" class="bg-[#0b0d13] text-gray-100 min-h-screen font-sans antialiased selection:bg-pink-500 selection:text-white">
   
-  <!-- App Header -->
-  <header class="border-b border-gray-800/80 bg-[#12151f]/95 backdrop-blur sticky top-0 z-50 px-6 py-2.5 flex items-center justify-between shadow-md select-none">
-    <div class="flex items-center space-x-6">
-      <!-- Logo -->
-      <div class="flex items-center space-x-3">
-        <div class="h-9 w-9 rounded-xl bg-gradient-to-tr from-pink-500 via-rose-500 to-violet-600 flex items-center justify-center shadow-lg shadow-pink-500/25">
-          <i class="fa-solid fa-bolt-lightning text-white text-base"></i>
-        </div>
-        <div>
-          <h1 class="font-bold text-sm tracking-tight text-white flex items-center gap-2">
-            Douyin2TikTok <span class="text-[9px] bg-gradient-to-r from-pink-500/20 to-violet-500/20 text-pink-400 px-2 py-0.5 rounded-full border border-pink-500/30 font-mono font-semibold">DESKTOP STUDIO</span>
-          </h1>
-          <p class="text-[10px] text-gray-400">{{ settings.ASR_ENGINE }} {{ settings.WHISPER_MODEL_SIZE }} · {{ settings.DEVICE | upper }} · {{ settings.TTS_ENGINE }}</p>
-        </div>
-      </div>
-
-      <!-- Navigation Tabs -->
-      <nav class="flex items-center space-x-1 bg-[#090b10] p-1 rounded-xl border border-gray-800">
-        <button id="tab-studio" class="nav-btn px-3 py-1.5 rounded-lg text-xs font-semibold text-white bg-pink-600/80 shadow transition flex items-center gap-1.5">
-          <i class="fa-solid fa-play text-pink-300"></i> Studio
-        </button>
-        <button id="tab-tasks" class="nav-btn px-3 py-1.5 rounded-lg text-xs font-semibold text-gray-400 hover:text-gray-200 transition flex items-center gap-1.5">
-          <i class="fa-solid fa-list-check text-teal-400"></i> Tác Vụ
-        </button>
-        <button id="tab-models" class="nav-btn px-3 py-1.5 rounded-lg text-xs font-semibold text-gray-400 hover:text-gray-200 transition flex items-center gap-1.5">
-          <i class="fa-solid fa-server text-violet-400"></i> Models
-        </button>
-        <button id="tab-diagnostics" class="nav-btn px-3 py-1.5 rounded-lg text-xs font-semibold text-gray-400 hover:text-gray-200 transition flex items-center gap-1.5">
-          <i class="fa-solid fa-terminal text-yellow-400"></i> Diagnostics
-        </button>
-        <button id="tab-settings" class="nav-btn px-3 py-1.5 rounded-lg text-xs font-semibold text-gray-400 hover:text-gray-200 transition flex items-center gap-1.5">
-          <i class="fa-solid fa-gear text-cyan-400"></i> Cài Đặt
-        </button>
-      </nav>
-    </div>
-    
-    <!-- Hardware Status -->
-    <div class="flex items-center space-x-3">
-      <div id="hardware-pill" class="flex items-center gap-2 bg-[#08090d] border border-gray-800 px-3 py-1 rounded-lg text-xs font-mono text-gray-300">
-        <i class="fa-solid fa-microchip text-violet-400"></i>
-        <span id="gpu-info-text">Detecting hardware...</span>
+  <header class="app-header">
+    <div class="app-brand">
+      <div class="app-logo" aria-hidden="true"><i class="fa-solid fa-bolt-lightning"></i></div>
+      <div class="app-brand-copy">
+        <h1>Douyin2TikTok AI Studio</h1>
+        <p>{{ settings.ASR_ENGINE }} {{ settings.WHISPER_MODEL_SIZE }} · {{ settings.DEVICE | upper }} · {{ settings.TTS_ENGINE }}</p>
       </div>
     </div>
+    <nav class="app-navigation" aria-label="Điều hướng ứng dụng">
+      <button id="tab-studio" class="nav-btn text-white bg-pink-600/80"><i class="fa-solid fa-play" aria-hidden="true"></i> Studio</button>
+      <button id="tab-tasks" class="nav-btn text-gray-400"><i class="fa-solid fa-list-check" aria-hidden="true"></i> Tác vụ</button>
+      <button id="tab-models" class="nav-btn text-gray-400"><i class="fa-solid fa-layer-group" aria-hidden="true"></i> Models</button>
+      <button id="tab-diagnostics" class="nav-btn text-gray-400"><i class="fa-solid fa-wave-square" aria-hidden="true"></i> Diagnostics</button>
+      <button id="tab-settings" class="nav-btn text-gray-400"><i class="fa-solid fa-gear" aria-hidden="true"></i> Cài đặt</button>
+    </nav>
+    <div id="hardware-pill" class="hardware-pill"><i class="fa-solid fa-microchip" aria-hidden="true"></i><span id="gpu-info-text">Đang kiểm tra phần cứng…</span></div>
   </header>
 
-  <!-- ======================================================== -->
-  <!-- 1. STUDIO VIEW (HOME PLAYER & REALTIME PROCESSING) -->
-  <!-- ======================================================== -->
   <div id="view-studio" class="app-view">
-    <!-- Live Telemetry Ribbon -->
-    <section class="border-b border-gray-800/80 bg-[#151926]/90 px-6 py-2 select-none">
-      <div class="max-w-7xl mx-auto flex flex-wrap items-center justify-between gap-4 text-xs font-mono">
-        <div class="flex items-center gap-5 flex-wrap">
-          <div class="flex items-center gap-1.5 text-gray-400">
-            <i class="fa-regular fa-clock text-pink-400"></i>
-            <span>Đang phát:</span>
-            <span id="tel-playing" class="text-white font-bold">00:00</span>
-          </div>
-          <div class="flex items-center gap-1.5 text-gray-400">
-            <i class="fa-solid fa-shield-halved text-emerald-400"></i>
-            <span>Playable:</span>
-            <span id="tel-playable" class="text-emerald-300 font-bold">00:00</span>
-          </div>
-          <div class="flex items-center gap-1.5 text-gray-400">
-            <i class="fa-solid fa-battery-half text-teal-400"></i>
-            <span>Buffer:</span>
-            <span id="tel-buffer" class="px-2 py-0.5 rounded text-[11px] font-bold bg-emerald-950/80 text-emerald-400 border border-emerald-800/80">+0.0s</span>
-          </div>
-          <div class="flex items-center gap-1.5 text-gray-400">
-            <i class="fa-solid fa-stopwatch text-violet-400"></i>
-            <span>TTFP:</span>
-            <span id="tel-ttfp" class="text-violet-300 font-bold">--</span>
-          </div>
-          <div class="flex items-center gap-1.5 text-gray-400">
-            <i class="fa-solid fa-gauge-high text-yellow-400"></i>
-            <span>RTF:</span>
-            <span id="tel-rtf" class="text-yellow-300 font-bold">0.0x</span>
-          </div>
-          <div class="flex items-center gap-1.5 text-gray-400">
-            <i class="fa-solid fa-sliders text-cyan-400"></i>
-            <span>Lọc thoại (ước tính):</span>
-            <span id="tel-suppression" class="px-2 py-0.5 rounded text-[11px] font-bold bg-cyan-950/80 text-cyan-400 border border-cyan-800/80">--</span>
-          </div>
-        </div>
-
-        <div class="flex items-center gap-2 text-[11px]">
-          <span class="text-gray-400">Workers:</span>
-          <span id="worker-asr-badge" class="px-2 py-0.5 rounded bg-gray-800 text-gray-300">ASR: Idle</span>
-          <span id="worker-trans-badge" class="px-2 py-0.5 rounded bg-gray-800 text-gray-300">Dịch: Idle</span>
-          <span id="worker-tts-badge" class="px-2 py-0.5 rounded bg-gray-800 text-gray-300">TTS: Idle</span>
-        </div>
+    <section class="telemetry-ribbon" aria-label="Trạng thái phát và xử lý">
+      <div class="telemetry-metrics">
+        <div class="telemetry-item"><i class="fa-solid fa-circle" aria-hidden="true"></i><span>Đang phát:</span><strong id="tel-playing">00:00</strong></div>
+        <div class="telemetry-item"><i class="fa-solid fa-shield-heart" aria-hidden="true"></i><span>Playable:</span><strong id="tel-playable">00:00</strong></div>
+        <div class="telemetry-item"><i class="fa-solid fa-database" aria-hidden="true"></i><span>Buffer:</span><strong id="tel-buffer">+0.0s</strong></div>
+        <div class="telemetry-item"><i class="fa-solid fa-stopwatch" aria-hidden="true"></i><span>TTFP:</span><strong id="tel-ttfp">--</strong></div>
+        <div class="telemetry-item"><i class="fa-solid fa-gauge-high" aria-hidden="true"></i><span>RTF:</span><strong id="tel-rtf">0.0x</strong></div>
+        <div class="telemetry-item"><i class="fa-solid fa-sliders" aria-hidden="true"></i><span>Lọc thoại (ước tính):</span><strong id="tel-suppression">--</strong></div>
       </div>
+      <div class="telemetry-workers"><span>Workers:</span><span id="worker-asr-badge">ASR: Idle</span><span id="worker-trans-badge">Dịch: Idle</span><span id="worker-tts-badge">TTS: Idle</span></div>
     </section>
-
-    <!-- Main Grid: Player Centric Layout -->
-    <p id="pipeline-warning" role="status" class="hidden max-w-7xl mx-auto px-6 pt-3 text-xs text-amber-300"></p>
+    <p id="pipeline-warning" role="status" class="hidden pipeline-warning"></p>
     <main class="studio-workspace">
-      
-      <!-- Center Left: Large Video Player (7 Cols) -->
-      <div class="studio-preview">
-        
-        <!-- Video Player Card -->
-        <div class="studio-player-card bg-[#12151f] border border-gray-800 rounded-2xl p-4 shadow-2xl space-y-3 relative">
-          <div class="studio-player-heading flex items-center justify-between pb-2 border-b border-gray-800 text-xs text-gray-300">
-            <span class="font-bold flex items-center gap-2">
-              <i class="fa-solid fa-tv text-pink-500"></i> XEM TRƯỚC VIDEO
-            </span>
-            <div class="flex items-center gap-3">
-              <label class="flex items-center gap-1.5 cursor-pointer text-[11px] text-gray-400 hover:text-gray-200">
-                <input type="checkbox" id="toggle-mask-chinese" checked class="rounded border-gray-700 text-pink-600 focus:ring-0">
-                Che phụ đề Trung
-              </label>
-              <label class="flex items-center gap-1.5 cursor-pointer text-[11px] text-gray-400 hover:text-gray-200">
-                <input type="checkbox" id="toggle-subtitles" checked class="rounded border-gray-700 text-pink-600 focus:ring-0">
-                Hiện Sub Việt
-              </label>
-            </div>
+      <aside class="studio-controls" aria-label="Nguồn video và cấu hình">
+        <section class="studio-source-card studio-card" aria-labelledby="source-heading">
+          <h2 id="source-heading" class="studio-card-heading"><i class="fa-solid fa-link" aria-hidden="true"></i>1. VIDEO NGUỒN (DOUYIN / URL / FILE)</h2>
+          <div class="source-tabs" role="group" aria-label="Kiểu nguồn video">
+            <button id="source-tab-url" type="button" class="source-tab is-active" aria-pressed="true"><i class="fa-solid fa-link" aria-hidden="true"></i> URL</button>
+            <button id="source-tab-file" type="button" class="source-tab" aria-pressed="false"><i class="fa-regular fa-file-video" aria-hidden="true"></i> Tải file</button>
+            <button id="source-tab-library" type="button" class="source-tab" aria-pressed="false"><i class="fa-regular fa-folder-open" aria-hidden="true"></i> Thư viện</button>
           </div>
-
-          <!-- Player Viewport with Dynamic Subtitle Overlay -->
-          <div class="studio-video-stage">
-          <div id="player-container" class="mx-auto bg-black rounded-xl overflow-hidden relative flex items-center justify-center border border-gray-800 shadow-inner group">
-            
-            <video id="video-player" playsinline controls class="w-full h-full object-contain"></video>
-
-            <!-- Chinese Subtitle Blur Mask Bar -->
-            <div id="chinese-sub-mask" class="absolute bottom-16 left-0 right-0 h-14 bg-black/65 backdrop-blur-md pointer-events-none transition-opacity duration-300"></div>
-
-            <!-- Real-Time Vietnamese Subtitle Overlay -->
-            <div id="subtitle-overlay" class="absolute bottom-16 left-4 right-4 text-center pointer-events-none z-10 transition-all duration-200">
-              <span id="subtitle-text" class="inline-block px-3 py-1 rounded-md text-base md:text-lg font-bold text-yellow-300 bg-black/75 shadow-lg border border-black/40 text-center tracking-wide leading-tight">
-                <!-- Dynamic sub text injected here -->
-              </span>
+          <div id="source-url-panel">
+            <div class="source-url-field">
+              <i class="fa-solid fa-link" aria-hidden="true"></i>
+              <textarea id="video-url" rows="1" spellcheck="false" aria-label="Link video hoặc nội dung chia sẻ" aria-describedby="video-url-help video-url-status" placeholder="Dán link hoặc toàn bộ nội dung chia sẻ…"></textarea>
+              <button id="clear-video-url" type="button" aria-label="Xóa link video" title="Xóa link"><i class="fa-solid fa-circle-xmark" aria-hidden="true"></i></button>
             </div>
-
-            <!-- Buffering Alert Overlay -->
-            <div id="buffering-alert" role="status" aria-live="polite" class="absolute inset-0 bg-black/70 backdrop-blur-sm flex flex-col items-center justify-center gap-3 z-20 hidden">
-              <i class="fa-solid fa-spinner fa-spin text-3xl text-pink-500"></i>
-              <p class="text-xs text-gray-200 font-mono" id="buffering-text">Đang tải giọng lồng tiếng...</p>
-            </div>
-
-            <!-- Placeholder when no video loaded -->
-            <div id="player-placeholder" class="absolute inset-0 flex flex-col items-center justify-center text-center p-6 text-gray-500">
-              <i class="fa-brands fa-tiktok text-4xl mb-2 text-pink-500/60"></i>
-              <p class="text-sm text-gray-300 font-medium">Chưa có video được nạp</p>
-              <p class="text-xs text-gray-500 mt-1">Dán link Douyin hoặc kéo thả video từ Windows Explorer vào đây</p>
-            </div>
+            <p id="video-url-help" class="source-help">Ứng dụng tự lấy link trong đoạn bạn dán. Không cần xóa chữ, hashtag hay mã chia sẻ.</p>
+            <p id="video-url-status" role="status" aria-live="polite" class="hidden source-help"></p>
           </div>
-
+          <div id="source-library-panel" class="hidden source-library-panel">
+            <p id="library-status" class="source-help" role="status">Chọn video đã có trong thư viện.</p>
+            <div id="library-list" class="source-library-list" aria-label="Video trong thư viện"></div>
           </div>
-
-          <!-- Segment Buffer Progress Bar -->
-          <div class="space-y-1 pt-1">
-            <div class="flex items-center justify-between text-[10px] font-mono text-gray-400">
-              <span id="bar-current-time">00:00</span>
-              <span class="text-pink-400 font-semibold" id="bar-buffer-info">Buffer: 0.0s</span>
-              <span id="bar-total-time">00:00</span>
-            </div>
-            <!-- Visual Segment Slices Track -->
-            <div id="segments-timeline-track" role="slider" tabindex="0" aria-label="Vị trí phát video" aria-valuemin="0" aria-valuemax="0" aria-valuenow="0" class="w-full h-2.5 bg-gray-900 rounded-full overflow-hidden flex relative border border-gray-800 cursor-pointer">
-              <div id="playback-head-marker" class="absolute top-0 bottom-0 w-1 bg-white z-10 shadow-glow" style="left: 0%;"></div>
-            </div>
+          <div id="drop-zone" role="button" tabindex="0" aria-label="Chọn video từ máy" class="source-drop-zone">
+            <input type="file" id="video-file" accept="video/*" class="hidden">
+            <i class="fa-solid fa-cloud-arrow-up" aria-hidden="true"></i>
+            <p id="file-name-display">Chọn video từ máy</p>
+            <span>Hỗ trợ: MP4, MOV, WebM, MKV (kéo thả trực tiếp từ Explorer)</span>
           </div>
+        </section>
+        <section class="studio-action-card studio-card" aria-labelledby="action-heading">
+          <h2 id="action-heading" class="studio-card-heading"><i class="fa-solid fa-sliders" aria-hidden="true"></i>2. DỊCH VÀ LỒNG TIẾNG</h2>
+          <div id="task-progress" class="hidden task-progress" aria-label="Tiến độ xử lý video">
+            <div class="task-progress-heading" role="status" aria-live="polite"><span id="task-progress-stage">Đang gửi yêu cầu…</span><span id="task-progress-value">Chưa có %</span></div>
+            <div id="task-progress-track" class="task-progress-track" role="progressbar" aria-label="Tiến độ bước hiện tại" aria-valuemin="0" aria-valuemax="100"><div id="task-progress-bar" class="task-progress-bar"></div></div>
+            <p id="task-progress-detail" class="task-progress-detail">Phần trăm được tính riêng cho từng bước.</p>
+            <p id="task-connection-status" role="status" class="hidden task-connection-status"></p>
+          </div>
+          <button id="btn-start" class="studio-start-button"><i class="fa-solid fa-play" aria-hidden="true"></i>BẮT ĐẦU DỊCH & PHÁT REALTIME</button>
+          <div class="worker-actions">
+            <button id="btn-pause-worker" class="hidden"><i class="fa-solid fa-pause" aria-hidden="true"></i> Tạm dừng</button>
+            <button id="btn-resume-worker" class="hidden"><i class="fa-solid fa-play" aria-hidden="true"></i> Tiếp tục</button>
+            <button id="btn-stop-worker" class="hidden"><i class="fa-solid fa-stop" aria-hidden="true"></i> Dừng hẳn</button>
+          </div>
+          <button id="btn-export-hq" disabled title="Hoàn tất các câu dịch trước khi xuất video" class="studio-export-button"><i class="fa-solid fa-arrow-up-from-bracket" aria-hidden="true"></i>Xuất Video Hoàn Chỉnh (MP4)</button>
+          <div class="buffer-setting"><label for="buffer-select">Đệm trước phát (Initial Buffer):</label><select id="buffer-select"><option value="5">5 giây (Nhanh nhất)</option><option value="10" selected>10 giây (Khuyên dùng)</option><option value="15">15 giây (Ổn định)</option><option value="30">30 giây (An toàn)</option></select></div>
+        </section>
+      </aside>
 
-          <!-- Audio Volume & Sidechain Controls -->
-          <div class="bg-[#090b10] border border-gray-800/80 rounded-xl p-3 flex flex-wrap items-center justify-between gap-4 text-xs">
-            <!-- Vietnamese Dub Audio Volume -->
-            <div class="flex items-center gap-2 flex-1 min-w-[190px]">
-              <i class="fa-solid fa-microphone-lines text-pink-400"></i>
-              <span class="text-gray-300 text-[11px] font-medium">Giọng Việt:</span>
-              <input type="range" id="vol-dub" min="0" max="1" step="0.05" value="1.0" class="w-full accent-pink-500 h-1.5 bg-gray-700 rounded-lg cursor-pointer">
-              <span id="vol-dub-val" class="font-mono text-gray-400 text-[10px] w-8">100%</span>
+      <section class="studio-preview studio-card" aria-label="Video và điều chỉnh âm thanh">
+        <div class="studio-player-card">
+          <div class="studio-player-heading">
+            <h2 class="studio-card-heading"><i class="fa-solid fa-video" aria-hidden="true"></i>XEM TRƯỚC VIDEO</h2>
+            <div class="player-options"><label><input type="checkbox" id="toggle-mask-chinese" checked> Che phụ đề Trung</label><label><input type="checkbox" id="toggle-subtitles" checked> Hiện Sub Việt</label></div>
+          </div>
+          <div class="player-surface">
+            <div class="studio-video-stage">
+              <div id="player-container">
+                <video id="video-player" playsinline></video>
+                <div id="chinese-sub-mask" class="absolute bottom-16 left-0 right-0 h-14 bg-black/65 backdrop-blur-md pointer-events-none transition-opacity duration-300"></div>
+                <div id="subtitle-overlay" class="absolute bottom-16 left-4 right-4 text-center pointer-events-none z-10 transition-all duration-200"><span id="subtitle-text" class="inline-block px-3 py-1 rounded-md text-base md:text-lg font-bold text-yellow-300 bg-black/75 shadow-lg border border-black/40 text-center tracking-wide leading-tight"></span></div>
+                <div id="buffering-alert" role="status" aria-live="polite" class="hidden player-buffering-overlay">
+                  <i class="fa-solid fa-spinner fa-spin" aria-hidden="true"></i>
+                  <p id="buffering-text">Đang tải giọng lồng tiếng...</p>
+                  <div id="player-download-progress" class="player-download-progress hidden" aria-live="polite">
+                    <div class="player-progress-heading"><strong id="player-progress-value">Chưa có %</strong><span id="player-progress-detail">Đang chờ số liệu từ máy chủ…</span></div>
+                    <div id="player-progress-track" class="player-progress-track" role="progressbar" aria-label="Tiến độ tải video" aria-valuemin="0" aria-valuemax="100"><div id="player-progress-bar" class="player-progress-bar"></div></div>
+                  </div>
+                </div>
+                <div id="player-placeholder" class="player-placeholder"><i class="fa-solid fa-film" aria-hidden="true"></i><p>Chưa có video được nạp</p><span>Dán link Douyin hoặc kéo thả video để bắt đầu.</span></div>
+              </div>
             </div>
-
-            <!-- Original Audio / BGM Volume -->
-            <div class="flex items-center gap-2 flex-1 min-w-[190px]">
-              <i class="fa-solid fa-music text-violet-400"></i>
-              <span class="text-gray-300 text-[11px] font-medium">BGM & SFX:</span>
-              <input type="range" id="vol-bgm" min="0" max="1" step="0.05" value="0.30" class="w-full accent-violet-500 h-1.5 bg-gray-700 rounded-lg cursor-pointer">
-              <span id="vol-bgm-val" class="font-mono text-gray-400 text-[10px] w-8">30%</span>
-            </div>
-
-            <!-- Vocal Suppression Badge -->
-            <div class="flex items-center gap-2 bg-gray-900 px-2 py-1 rounded text-[10px] text-gray-300 font-mono border border-gray-800">
-              <span class="text-rose-400">Lọc thoại Trung:</span>
-              <span id="player-suppression-badge" title="Mức giảm ước tính của bộ lọc" class="text-cyan-300 font-bold">--</span>
-              <span class="text-gray-500">|</span>
-              <span class="text-emerald-400">BGM:</span>
-              <span class="text-gray-200">Đã lọc</span>
+            <p id="player-task-status" class="player-task-status hidden" role="status"></p>
+            <div class="player-transport">
+              <div id="segments-timeline-track" role="slider" tabindex="0" aria-label="Vị trí phát video" aria-valuemin="0" aria-valuemax="0" aria-valuenow="0"><div id="playback-head-marker" style="left: 0%;"></div></div>
+              <div class="player-transport-row">
+                <button id="player-play-toggle" type="button" aria-label="Phát video" title="Phát / tạm dừng"><i class="fa-solid fa-play" aria-hidden="true"></i></button>
+                <span class="player-time"><span id="bar-current-time">00:00</span><span class="player-time-divider">/</span><span id="bar-total-time">00:00</span></span>
+                <span id="bar-buffer-info" class="player-buffer-info">Buffer: 0.0s</span>
+                <button id="player-mute-toggle" type="button" aria-label="Tắt tiếng video" title="Bật / tắt tiếng"><i class="fa-solid fa-volume-high" aria-hidden="true"></i></button>
+                <input id="player-volume" type="range" min="0" max="1" step="0.05" value="1" aria-label="Âm lượng video">
+                <button id="player-fullscreen" type="button" aria-label="Xem video toàn màn hình" title="Toàn màn hình"><i class="fa-solid fa-expand" aria-hidden="true"></i></button>
+                <button id="player-settings" type="button" aria-label="Mở cài đặt phát và xử lý" title="Cài đặt"><i class="fa-solid fa-gear" aria-hidden="true"></i></button>
+              </div>
             </div>
           </div>
         </div>
-
-      </div>
-
-      <section class="transcript-panel" aria-labelledby="transcript-heading">
-        <div class="transcript-heading">
-          <div>
-            <h2 id="transcript-heading">Transcript</h2>
-            <p>Bấm vào câu để tua video. Bấm bản dịch để sửa từng chữ.</p>
+        <section class="studio-audio-panel" aria-labelledby="audio-heading">
+          <h3 id="audio-heading"><i class="fa-solid fa-headphones" aria-hidden="true"></i>ĐIỀU CHỈNH ÂM THANH</h3>
+          <div class="audio-mixers">
+            <div class="audio-mixer"><i class="fa-solid fa-microphone-lines" aria-hidden="true"></i><label for="vol-dub">Giọng Việt</label><input type="range" id="vol-dub" min="0" max="1" step="0.05" value="1.0"><span id="vol-dub-val">100%</span></div>
+            <div class="audio-mixer audio-mixer-bgm"><i class="fa-solid fa-music" aria-hidden="true"></i><label for="vol-bgm">BGM & SFX</label><input type="range" id="vol-bgm" min="0" max="1" step="0.05" value="0.30"><span id="vol-bgm-val">30%</span></div>
           </div>
-          <span id="segments-count-badge" class="transcript-count">0 câu</span>
-        </div>
-        <div class="transcript-toolbar">
-          <label class="transcript-follow"><input id="transcript-follow" type="checkbox" checked> Theo vị trí phát</label>
-          <span class="transcript-time-note">Mốc thời gian theo câu</span>
-        </div>
-        <div id="segments-list" class="transcript-list" aria-label="Câu thoại gốc và bản dịch" tabindex="0">
-          <div class="transcript-empty">
-            <i class="fa-regular fa-file-lines" aria-hidden="true"></i>
-            <p>Câu thoại sẽ xuất hiện tại đây</p>
-            <span>Nạp video và bắt đầu dịch để xem, sửa và nghe lại cạnh khung hình.</span>
-          </div>
-        </div>
-        <p id="transcript-status" class="transcript-status" role="status" aria-live="polite">Bản sửa sẽ cập nhật phụ đề và tạo lại giọng đọc, giữ nguyên mốc thời gian.</p>
+          <div class="audio-suppression"><i class="fa-solid fa-wave-square" aria-hidden="true"></i><span>Lọc thoại Trung:</span><strong id="player-suppression-badge" title="Mức giảm ước tính của bộ lọc">--</strong><span class="audio-divider">|</span><span class="audio-bgm-label"><i class="fa-solid fa-music" aria-hidden="true"></i> BGM:</span><span id="player-bgm-status">Chưa có</span></div>
+        </section>
       </section>
 
-      <!-- Center Right: Input & Realtime Controls (5 Cols) -->
-      <aside class="studio-controls" aria-label="Nguồn video và cấu hình">
-        
-        <!-- Input Card -->
-        <div class="bg-[#12151f] border border-gray-800 rounded-2xl p-4 shadow-xl space-y-3">
-          <h2 class="text-xs font-bold text-gray-200 uppercase tracking-wider flex items-center gap-2">
-            <i class="fa-brands fa-tiktok text-pink-500"></i> 1. Video Nguồn (Douyin / URL / File)
-          </h2>
-
-          <div>
-            <textarea id="video-url" rows="2" spellcheck="false" aria-label="Link video hoặc nội dung chia sẻ" aria-describedby="video-url-help video-url-status" placeholder="Dán toàn bộ nội dung chia sẻ Douyin hoặc link video vào đây…"
-              class="w-full bg-[#08090d] border border-gray-700 focus:border-pink-500 rounded-xl px-3 py-2 text-xs text-gray-100 placeholder-gray-500 focus:outline-none transition"></textarea>
-            <p id="video-url-help" class="mt-1 text-[11px] text-gray-400">Ứng dụng tự lấy link trong đoạn bạn dán. Không cần xóa chữ, hashtag hay mã chia sẻ.</p>
-            <p id="video-url-status" role="status" aria-live="polite" class="hidden mt-2 text-[11px] text-gray-400"></p>
-          </div>
-
-          <div class="flex items-center justify-between text-[10px] text-gray-500">
-            <div class="border-t border-gray-800 flex-1"></div>
-            <span class="px-2">hoặc chọn file từ máy / kéo thả</span>
-            <div class="border-t border-gray-800 flex-1"></div>
-          </div>
-
-          <!-- Drag & Drop Zone with Native File Picker Button -->
-          <div id="drop-zone" role="button" tabindex="0" aria-label="Chọn video từ máy" class="border-2 border-dashed border-gray-700 hover:border-pink-500/80 rounded-xl p-3 text-center cursor-pointer transition bg-[#08090d]/60 group">
-            <input type="file" id="video-file" accept="video/*" class="hidden">
-            <i class="fa-solid fa-folder-open text-2xl text-pink-400 group-hover:scale-110 transition duration-200 mb-1"></i>
-            <p class="text-xs text-gray-200 font-semibold" id="file-name-display">Chọn video từ máy</p>
-            <p class="text-[10px] text-gray-400 mt-0.5">Hỗ trợ: MP4, MOV, WebM, MKV (Kéo thả trực tiếp từ Explorer)</p>
-          </div>
-        </div>
-
-        <!-- Realtime Engine Configuration Card -->
-        <div class="bg-[#12151f] border border-gray-800 rounded-2xl p-4 shadow-xl space-y-3">
-          <h2 class="text-xs font-bold text-gray-200 uppercase tracking-wider flex items-center gap-2">
-            <i class="fa-solid fa-sliders text-pink-400"></i> 2. Dịch và lồng tiếng
-          </h2>
-
-          <!-- Execution Action Buttons -->
-          <div class="pt-1 space-y-2">
-            <div id="task-progress" class="hidden task-progress" aria-label="Tiến độ xử lý video">
-              <div class="task-progress-heading" role="status" aria-live="polite">
-                <span id="task-progress-stage">Đang gửi yêu cầu…</span>
-                <span id="task-progress-value">Chưa có %</span>
-              </div>
-              <div id="task-progress-track" class="task-progress-track" role="progressbar" aria-label="Tiến độ bước hiện tại" aria-valuemin="0" aria-valuemax="100">
-                <div id="task-progress-bar" class="task-progress-bar"></div>
-              </div>
-              <p id="task-progress-detail" class="task-progress-detail">Phần trăm được tính riêng cho từng bước.</p>
-              <p id="task-connection-status" role="status" class="hidden task-connection-status"></p>
-            </div>
-            <button id="btn-start" class="w-full py-3 px-4 rounded-xl bg-gradient-to-r from-pink-500 via-rose-500 to-violet-600 hover:opacity-95 text-white font-bold text-xs shadow-lg shadow-pink-500/25 flex items-center justify-center gap-2 transition active:scale-[0.99]">
-              <i class="fa-solid fa-play"></i> BẮT ĐẦU DỊCH & PHÁT REALTIME
-            </button>
-            
-            <div class="flex gap-2">
-              <button id="btn-pause-worker" class="hidden flex-1 py-2 px-3 rounded-lg bg-amber-600/80 hover:bg-amber-600 text-white text-xs font-semibold transition">
-                <i class="fa-solid fa-pause"></i> Tạm dừng
-              </button>
-              <button id="btn-resume-worker" class="hidden flex-1 py-2 px-3 rounded-lg bg-emerald-600/80 hover:bg-emerald-600 text-white text-xs font-semibold transition">
-                <i class="fa-solid fa-play"></i> Tiếp tục
-              </button>
-              <button id="btn-stop-worker" class="hidden py-2 px-3 rounded-lg bg-rose-700/80 hover:bg-rose-700 text-white text-xs font-semibold transition">
-                <i class="fa-solid fa-stop"></i> Dừng hẳn
-              </button>
-            </div>
-
-            <!-- HQ Export Button -->
-            <button id="btn-export-hq" disabled title="Hoàn tất các câu dịch trước khi xuất video" class="w-full py-2.5 px-3 rounded-xl border border-violet-500/50 hover:bg-violet-600/20 text-violet-300 font-semibold text-xs flex items-center justify-center gap-2 transition">
-              <i class="fa-solid fa-film text-pink-400"></i> Xuất Video Hoàn Chỉnh (MP4)
-            </button>
-          </div>
-
-          <!-- Buffer Ahead Setting -->
-          <div>
-            <div>
-              <label class="text-[11px] text-gray-400 block mb-1">Đệm trước phát (Initial Buffer):</label>
-              <select id="buffer-select" class="w-full bg-[#08090d] border border-gray-700 rounded-xl px-3 py-1.5 text-xs text-gray-200 focus:outline-none focus:border-pink-500">
-                <option value="5">5 giây (Nhanh nhất)</option>
-                <option value="10" selected>10 giây (Khuyên dùng)</option>
-                <option value="15">15 giây (Ổn định)</option>
-                <option value="30">30 giây (An toàn)</option>
-              </select>
-            </div>
-
-          </div>
-
-          <section class="voice-picker" aria-labelledby="voice-list-title">
-            <div class="voice-list-heading">
-              <h3 id="voice-list-title">Giọng lồng tiếng</h3>
-              <span id="voice-count" class="voice-count" role="status" aria-live="polite"></span>
-            </div>
-            <p id="voice-source" class="voice-source" aria-live="polite">Đang tải danh sách giọng…</p>
-            <input type="hidden" id="voice-select" value="{{ settings.EDGE_VOICE if settings.TTS_ENGINE in ['edge', 'edge-tts'] else 'Trúc Ly' }}">
-            <label for="voice-search" class="voice-search-label">Tìm theo tên, vùng miền hoặc nguồn</label>
-            <input id="voice-search" type="search" placeholder="Ví dụ: Trúc Ly, miền Nam, Piper…" autocomplete="off" class="voice-search" aria-controls="voice-list">
-            <div id="voice-list" class="voice-list" role="group" aria-labelledby="voice-list-title" tabindex="0"></div>
-            <p id="voice-empty" class="hidden voice-source">Không tìm thấy giọng phù hợp. Thử tên hoặc nguồn khác.</p>
-            <p id="voice-catalog-status" class="voice-source" role="status"></p>
-          </section>
-          <div class="voice-preview-panel">
-            <div class="voice-preview-controls">
-              <audio id="voice-preview-audio" class="hidden" controls preload="none" aria-label="Mẫu giọng lồng tiếng"></audio>
-            </div>
-            <p id="voice-preview-status" class="voice-preview-status" role="status" aria-live="polite" aria-atomic="true"></p>
-          </div>
-
-
-        </div>
-
+      <aside class="studio-sidebar" aria-label="Transcript và giọng lồng tiếng">
+        <section class="transcript-panel studio-card" aria-labelledby="transcript-heading">
+          <div class="transcript-heading"><h2 id="transcript-heading"><i class="fa-regular fa-file-lines" aria-hidden="true"></i>Transcript</h2><span id="segments-count-badge" class="transcript-count">0 câu</span><p>Bấm vào câu để tua video. Bấm bản dịch để sửa từng chữ.</p></div>
+          <div class="transcript-toolbar"><label class="transcript-follow"><input id="transcript-follow" type="checkbox" checked> Theo vị trí phát</label><span class="transcript-time-note">Mốc thời gian theo câu</span></div>
+          <div id="segments-list" class="transcript-list" aria-label="Câu thoại gốc và bản dịch" tabindex="0"><div class="transcript-empty"><i class="fa-regular fa-file-lines" aria-hidden="true"></i><p>Chưa có nội dung transcript</p><span>Nạp video và bắt đầu dịch để xem, sửa và nghe lại cạnh khung hình.</span></div></div>
+          <p id="transcript-status" class="transcript-status" role="status" aria-live="polite">Bản sửa sẽ cập nhật phụ đề và tạo lại giọng đọc, giữ nguyên mốc thời gian.</p>
+        </section>
+        <section class="voice-panel studio-card" aria-labelledby="voice-list-title">
+          <div class="voice-list-heading"><h3 id="voice-list-title"><i class="fa-solid fa-microphone-lines" aria-hidden="true"></i>Giọng lồng tiếng</h3><span id="voice-count" class="voice-count" role="status" aria-live="polite"></span></div>
+          <p id="voice-source" class="voice-source" aria-live="polite">Đang tải danh sách giọng…</p>
+          <input type="hidden" id="voice-select" value="{{ settings.EDGE_VOICE if settings.TTS_ENGINE in ['edge', 'edge-tts'] else 'Trúc Ly' }}">
+          <label for="voice-search" class="sr-only">Tìm theo tên, vùng miền hoặc nguồn</label>
+          <div class="voice-search-controls"><div class="voice-search-field"><i class="fa-solid fa-magnifying-glass" aria-hidden="true"></i><input id="voice-search" type="search" placeholder="Tìm theo tên, vùng miền hoặc nguồn" autocomplete="off" class="voice-search" aria-controls="voice-list"></div><button id="voice-filter" type="button" aria-label="Lọc giọng theo nguồn" title="Lọc giọng theo nguồn"><i class="fa-solid fa-filter" aria-hidden="true"></i><span>Tất cả</span></button></div>
+          <div id="voice-list" class="voice-list" role="group" aria-labelledby="voice-list-title" tabindex="0"></div>
+          <p id="voice-empty" class="hidden voice-source">Không tìm thấy giọng phù hợp. Thử tên hoặc nguồn khác.</p>
+          <p id="voice-catalog-status" class="voice-source" role="status"></p>
+          <div class="voice-preview-panel"><div class="voice-preview-controls"><audio id="voice-preview-audio" class="hidden" controls preload="none" aria-label="Mẫu giọng lồng tiếng"></audio></div><p id="voice-preview-status" class="voice-preview-status" role="status" aria-live="polite" aria-atomic="true"></p></div>
+        </section>
       </aside>
     </main>
   </div>

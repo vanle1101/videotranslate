@@ -1,4 +1,6 @@
 """Local API contracts using stub sessions; no AI models or external services."""
+import os
+import stat
 import tempfile
 import unittest
 from pathlib import Path
@@ -62,6 +64,109 @@ class LocalAPITests(unittest.TestCase):
         self.assertEqual(response.json()["status"], "ok")
         self.assertIsInstance(response.json()["ffmpeg"], bool)
         self.assertIsInstance(response.json()["ffprobe"], bool)
+
+    def test_library_lists_only_direct_completed_media_without_reading_contents(self):
+        nested = self.root / "private"
+        nested.mkdir()
+        (nested / "private.mp4").write_bytes(b"private nested media")
+        (self.root / "folder.mp4").mkdir()
+        for name in (".private.mp4", ".env", "cookies.txt", "clip.mp4.part", "clip.tmp.mp4", "clip.temp.MOV", "voice.wav"):
+            (self.root / name).write_bytes(b"excluded fixture")
+        for name in ("new.MOV", "sample.webm", "sample.mkv", "sample.avi"):
+            (self.root / name).write_bytes(b"media fixture")
+        os.utime(self.video, (1000, 1000))
+        newest = self.root / "new.MOV"
+        os.utime(newest, (2000000000, 2000000000))
+        expected = {self.video.name, "new.MOV", "sample.webm", "sample.mkv", "sample.avi"}
+        before = {path.name: path.stat().st_size for path in self.root.iterdir() if path.is_file()}
+        with patch.object(settings, "INPUT_DIR", self.root), \
+                patch.object(main, "create_streaming_session", side_effect=AssertionError("read-only API")), \
+                patch.object(main.downloader, "download", side_effect=AssertionError("read-only API")), \
+                patch.object(Path, "read_bytes", side_effect=AssertionError("metadata only")):
+            response = self.client.get("/api/library")
+        self.assertEqual(response.status_code, 200)
+        items = response.json()["items"]
+        self.assertEqual({item["name"] for item in items}, expected)
+        self.assertEqual(items[0]["name"], "new.MOV")
+        self.assertEqual(items[-1]["name"], self.video.name)
+        self.assertEqual(items[0]["modified_at"], 2000000000)
+        for item in items:
+            self.assertEqual(set(item), {"name", "file_path", "size", "modified_at"})
+            self.assertEqual(Path(item["file_path"]).parent, self.root.resolve())
+            self.assertEqual(item["size"], Path(item["file_path"]).stat().st_size)
+        self.assertEqual(before, {path.name: path.stat().st_size for path in self.root.iterdir() if path.is_file()})
+
+    def test_library_caps_newest_media_and_does_not_accept_an_outside_directory(self):
+        for index in range(105):
+            video = self.root / f"clip_{index:03d}.mp4"
+            video.write_bytes(b"tiny media fixture")
+            os.utime(video, (2000 + index, 2000 + index))
+        os.utime(self.video, (1000, 1000))
+        with patch.object(settings, "INPUT_DIR", self.root):
+            response = self.client.get("/api/library", params={"path": str(self.root.parent), "directory": ".."})
+        items = response.json()["items"]
+        self.assertEqual(len(items), 100)
+        self.assertEqual(items[0]["name"], "clip_104.mp4")
+        self.assertEqual(items[-1]["name"], "clip_005.mp4")
+        self.assertTrue(all(Path(item["file_path"]).parent == self.root.resolve() for item in items))
+
+    def test_library_missing_directory_is_empty_and_is_not_created(self):
+        absent = self.root / "not-created"
+        with patch.object(settings, "INPUT_DIR", absent):
+            response = self.client.get("/api/library")
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json(), {"items": []})
+        self.assertFalse(absent.exists())
+
+    def test_library_skips_symlinks_even_when_the_target_is_inside_the_library(self):
+        inside_link = self.root / "alias.mp4"
+        try:
+            inside_link.symlink_to(self.video)
+        except (OSError, NotImplementedError):
+            self.skipTest("File symlinks are unavailable for this test user")
+        outside_dir = self.root / "private"
+        outside_dir.mkdir()
+        outside = outside_dir / "outside.mp4"
+        outside.write_bytes(b"private target")
+        (self.root / "outside-link.mp4").symlink_to(outside)
+        (self.root / "dangling.mp4").symlink_to(self.root / "absent.mp4")
+        with patch.object(settings, "INPUT_DIR", self.root):
+            response = self.client.get("/api/library")
+        self.assertEqual([item["name"] for item in response.json()["items"]], [self.video.name])
+
+    def test_library_skips_hidden_system_and_reparse_files_on_windows(self):
+        original_lstat = Path.lstat
+        for attributes in (0x2, 0x4, 0x400):
+            with self.subTest(attributes=attributes):
+                def simulated_lstat(path):
+                    info = original_lstat(path)
+                    if path == self.video:
+                        return SimpleNamespace(st_mode=info.st_mode, st_size=info.st_size,
+                                               st_mtime=info.st_mtime, st_file_attributes=attributes)
+                    return info
+                with patch.object(settings, "INPUT_DIR", self.root), \
+                        patch.object(Path, "lstat", simulated_lstat):
+                    response = self.client.get("/api/library")
+                self.assertEqual(response.json(), {"items": []})
+
+    def test_library_rejects_link_file_modes_without_resolving_the_target(self):
+        original_lstat, original_resolve = Path.lstat, Path.resolve
+
+        def link_lstat(path):
+            if path == self.video:
+                return SimpleNamespace(st_mode=stat.S_IFLNK | 0o777, st_file_attributes=0)
+            return original_lstat(path)
+
+        def refuse_target_resolution(path, *args, **kwargs):
+            if path == self.video:
+                raise AssertionError("Library must not follow file links")
+            return original_resolve(path, *args, **kwargs)
+
+        with patch.object(settings, "INPUT_DIR", self.root), \
+                patch.object(Path, "lstat", link_lstat), \
+                patch.object(Path, "resolve", refuse_target_resolution):
+            response = self.client.get("/api/library")
+        self.assertEqual(response.json(), {"items": []})
 
     def test_home_renders_configured_engines_and_voice(self):
         response = self.client.get("/")

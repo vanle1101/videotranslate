@@ -8,6 +8,9 @@ const template = readFileSync(new URL('../templates/index.html', import.meta.url
 
 function studio(cookieReply = { configured: false, count: 0, message: '' }, voiceConfig = {}) {
   const elements = new Map(), audio = [], sockets = [], requests = [], alerts = [], copied = [];
+  const intervals = new Map();
+  const timeouts = new Map();
+  let nextIntervalId = 1;
   let ready;
   class Element {
     constructor(id = '') {
@@ -15,6 +18,7 @@ function studio(cookieReply = { configured: false, count: 0, message: '' }, voic
       this.style.setProperty = (name, value) => { this.style[name] = value; };
       this.value = ''; this.files = []; this.checked = true;
       this.paused = true; this.currentTime = 0; this.playbackRate = 1; this.ended = false;
+      this.volume = 1; this.muted = false;
       this.playCount = 0; this.classes = new Set(); this.hidden = false; this.disabled = false;
       this.classList = {
         add: (...names) => names.forEach(name => this.classes.add(name)),
@@ -24,7 +28,12 @@ function studio(cookieReply = { configured: false, count: 0, message: '' }, voic
       };
     }
     addEventListener(name, callback) { (this.events[name] ||= []).push(callback); }
-    async emit(name, data = {}) { for (const callback of this.events[name] || []) await callback({ target: this, preventDefault() {}, stopPropagation() {}, ...data }); }
+    async emit(name, data = {}) {
+      // Native DOM dispatch invokes every listener synchronously. Awaiting each
+      // listener separately would defer pause handlers behind unrelated ones.
+      const pending = (this.events[name] || []).map(callback => callback({ target: this, preventDefault() {}, stopPropagation() {}, ...data }));
+      await Promise.all(pending);
+    }
     set innerHTML(value) {
       this.html = value; this.children = [];
       for (const match of value.matchAll(/id="([^"]+)"/g)) elements.set(match[1], new Element(match[1]));
@@ -48,6 +57,7 @@ function studio(cookieReply = { configured: false, count: 0, message: '' }, voic
     load() { this.currentTime = 0; }
     pause() { this.paused = true; this.emit('pause'); }
     async play() { this.paused = false; this.playCount++; await this.emit('play'); }
+    async requestFullscreen() { this.fullscreenCount = (this.fullscreenCount || 0) + 1; document.fullscreenElement = this; }
     getBoundingClientRect() { return { left: 0, width: 100 }; }
     matches(selector) {
       const attribute = selector.match(/\[([\w-]+)(?:="([^"]*)")?\]/);
@@ -79,11 +89,20 @@ function studio(cookieReply = { configured: false, count: 0, message: '' }, voic
     elements.set(match[2], element);
   }
   const el = id => elements.get(id);
-  for (const [id, value] of Object.entries({ 'vol-dub': '1', 'vol-bgm': '0.3', 'buffer-select': '10', 'voice-select': 'vi-VN-HoaiMyNeural' })) el(id).value = value;
+  const playerSurface = new Element();
+  playerSurface.className = 'player-surface';
+  playerSurface.appendChild(el('player-container'));
+  for (const [id, value] of Object.entries({ 'vol-dub': '1', 'vol-bgm': '0.3', 'player-volume': '1', 'buffer-select': '10', 'voice-select': 'vi-VN-HoaiMyNeural' })) el(id).value = value;
+  const documentEvents = {};
   const document = {
     getElementById: el,
-    createElement: tag => { const element = new Element(); element.tagName = tag.toUpperCase(); return element; }, querySelectorAll: () => [],
-    addEventListener: (_, callback) => { ready = callback; },
+    createElement: tag => { const element = new Element(); element.tagName = tag.toUpperCase(); return element; },
+    querySelectorAll: selector => selector === '.source-tab' ? ['source-tab-url', 'source-tab-file', 'source-tab-library'].map(el) : [],
+    addEventListener: (event, callback) => {
+      if (event === 'DOMContentLoaded') ready = callback;
+      else (documentEvents[event] ||= []).push(callback);
+    },
+    async exitFullscreen() { this.fullscreenElement = null; },
     body: new Element(), activeElement: null,
   };
   document.body.dataset = { asrEngine: 'faster-whisper', ttsEngine: 'edge-tts' };
@@ -115,7 +134,7 @@ function studio(cookieReply = { configured: false, count: 0, message: '' }, voic
     return { ok: !reply.failure, json: async () => reply };
   };
   vm.runInNewContext(source, {
-    document, window, Audio, WebSocket, fetch, console, alert: value => alerts.push(value),
+    document, window, Audio, WebSocket, fetch, console, AbortController, alert: value => alerts.push(value),
     Option: function(text, value) { this.text = text; this.value = value; },
     FormData: class {
       constructor() { this.parts = []; }
@@ -124,10 +143,30 @@ function studio(cookieReply = { configured: false, count: 0, message: '' }, voic
     URL: Object.assign(class extends URL {}, { createObjectURL: () => 'blob:video', revokeObjectURL() {} }),
     navigator: { clipboard: { writeText: async text => { copied.push(text); } } },
     localStorage: { removeItem(key) { saved.delete(key); }, getItem(key) { return saved.get(key); }, setItem(key, value) { saved.set(key, value); } },
-    setTimeout() {}, setInterval() { return 1; }, clearInterval() {},
+    setTimeout(callback, delay) { const id = nextIntervalId++; timeouts.set(id, { callback, delay }); return id; },
+    clearTimeout(id) { timeouts.delete(id); },
+    setInterval(callback, delay) {
+      const id = nextIntervalId++;
+      intervals.set(id, { callback, delay });
+      return id;
+    },
+    clearInterval(id) { intervals.delete(id); },
   });
   ready();
   const flush = () => new Promise(resolve => setImmediate(resolve));
+  async function tickIntervals(delay) {
+    await flush();
+    for (const timer of [...intervals.values()]) {
+      if (timer.delay === delay) await timer.callback();
+    }
+    await flush();
+  }
+  async function tickTimeouts(delay) {
+    for (const [id, timer] of [...timeouts]) {
+      if (timer.delay === delay) { timeouts.delete(id); timer.callback(); }
+    }
+    await flush();
+  }
   async function start() {
     await flush();
     window.loadDroppedLocalVideo('D:/clip.mp4');
@@ -139,7 +178,7 @@ function studio(cookieReply = { configured: false, count: 0, message: '' }, voic
   const row = id => el('voice-list').querySelectorAll('.voice-row').find(item => item.dataset.voiceId === id);
   const choose = id => row(id).querySelector('.voice-choose-button').click();
   const preview = id => row(id).querySelector('.voice-preview-button').click();
-  return { el, row, choose, preview, audio, sockets, requests, replies, alerts, copied, window, flush, start, saved };
+  return { el, row, choose, preview, audio, sockets, requests, replies, alerts, copied, window, document, playerSurface, flush, tickIntervals, tickTimeouts, start, saved };
 }
 
 const voiceCatalog = {
@@ -288,7 +327,9 @@ test('successful voice preview uses controls, reports playback errors and releas
   assert.notEqual(ui.saved.get('studio.voice-id'), 'vieneu:Trúc Ly');
   await ui.el('voice-preview-audio').emit('error');
   assert.match(ui.el('voice-preview-status').textContent, /Không phát được mẫu giọng/);
-  assert.equal(ui.row('vieneu:Trúc Ly').querySelector('.voice-preview-button').textContent, 'Nghe thử');
+  assert.equal(ui.row('vieneu:Trúc Ly').querySelector('.voice-preview-button').title, 'Nghe thử');
+  assert.match(ui.row('vieneu:Trúc Ly').querySelector('.voice-preview-button').getAttribute('aria-label'), /Nghe thử giọng Trúc Ly/);
+  assert.match(ui.row('vieneu:Trúc Ly').querySelector('.voice-preview-button').innerHTML, /fa-play/);
   assert.equal(ui.row('vieneu:Trúc Ly').dataset.previewing, 'false');
   assert.equal(ui.el('voice-preview-audio').paused, true);
   assert.equal(ui.el('voice-preview-audio').src, undefined);
@@ -309,13 +350,16 @@ test('same-row preview button stops audio and choosing another row keeps sample 
   const ui = studio(undefined, { catalog: voiceCatalog }); await ui.flush();
   ui.replies.set('/api/voices/preview', { preview_id: 'sample-toggle', audio_url: '/api/voices/preview/sample-toggle/audio' });
   await ui.preview('vieneu:Trúc Ly');
-  assert.match(ui.row('vieneu:Trúc Ly').querySelector('.voice-preview-button').textContent, /Dừng mẫu/);
+  assert.match(ui.row('vieneu:Trúc Ly').querySelector('.voice-preview-button').title, /Dừng mẫu/);
+  assert.match(ui.row('vieneu:Trúc Ly').querySelector('.voice-preview-button').getAttribute('aria-label'), /Dừng mẫu giọng Trúc Ly/);
+  assert.match(ui.row('vieneu:Trúc Ly').querySelector('.voice-preview-button').innerHTML, /fa-stop/);
   assert.equal(ui.row('vieneu:Trúc Ly').dataset.previewing, 'true');
   await ui.preview('vieneu:Trúc Ly');
   assert.equal(ui.el('voice-preview-audio').paused, true);
   assert.equal(ui.el('voice-preview-audio').src, undefined);
   assert.equal(ui.row('vieneu:Trúc Ly').dataset.previewing, 'false');
-  assert.match(ui.row('vieneu:Trúc Ly').querySelector('.voice-preview-button').textContent, /Nghe thử/);
+  assert.match(ui.row('vieneu:Trúc Ly').querySelector('.voice-preview-button').title, /Nghe thử/);
+  assert.match(ui.row('vieneu:Trúc Ly').querySelector('.voice-preview-button').innerHTML, /fa-play/);
   assert.equal(ui.requests.filter(req => req.url === '/api/voices/preview').length, 1);
   assert.ok(ui.requests.some(req => req.url === '/api/voices/preview/sample-toggle' && req.options.method === 'DELETE'));
   assert.equal(ui.el('voice-select').value, voiceCatalog.default_voice_id);
@@ -502,6 +546,72 @@ test('saved buffer and arbitrary configured model are displayed and sent to back
   assert.equal(JSON.parse(request.options.body).initial_buffer_seconds, 15);
 });
 
+test('library selection previews an existing local video and waits for an explicit start', async () => {
+  const ui = studio(); await ui.flush();
+  const item = { name: 'Bản gốc & bản dịch.mp4', file_path: 'D:/Studio/inputs/Bản gốc & bản dịch.mp4', size: 28510209, modified_at: 1791200000 };
+  ui.replies.set('/api/library', { items: [item] });
+  await ui.el('source-tab-library').click(); await ui.flush();
+  assert.equal(ui.el('source-library-panel').classList.contains('hidden'), false);
+  assert.equal(ui.el('source-url-panel').classList.contains('hidden'), true);
+  assert.equal(ui.el('source-tab-library').getAttribute('aria-pressed'), 'true');
+  assert.ok(ui.requests.some(request => request.url === '/api/library'));
+  const selection = ui.el('library-list').querySelector('button');
+  assert.ok(selection, 'Library must offer a selectable existing video');
+  await selection.click();
+  assert.equal(ui.window.currentLocalFilePath, item.file_path);
+  assert.equal(ui.el('video-url').value, '');
+  assert.equal(new URL(ui.el('video-player').src, 'http://localhost').searchParams.get('path'), item.file_path);
+  assert.match(ui.el('file-name-display').textContent, /Bản gốc & bản dịch\.mp4/);
+  assert.equal(ui.requests.some(request => request.url.includes('/streaming/start')), false);
+  ui.replies.set('/api/streaming/start-local-file', { task_id: 'library-fixture', video_url: '/fixture.mp4' });
+  await ui.el('btn-start').click();
+  const request = ui.requests.find(request => request.url === '/api/streaming/start-local-file');
+  assert.equal(JSON.parse(request.options.body).file_path, item.file_path);
+  assert.equal(ui.requests.some(request => request.url === '/api/streaming/start-url'), false);
+});
+
+test('library explains empty and failed listings and switching to URL preserves the source controls', async () => {
+  for (const [reply, expected] of [[{ items: [] }, /chưa|trống/i], [{ failure: true }, /chưa đọc được|không|lỗi/i]]) {
+    const ui = studio(); await ui.flush();
+    ui.replies.set('/api/library', reply);
+    await ui.el('source-tab-library').click(); await ui.flush();
+    assert.match(ui.el('library-status').textContent, expected);
+    assert.equal(ui.el('library-list').querySelectorAll('button').length, 0);
+    await ui.el('source-tab-url').click();
+    assert.equal(ui.el('source-url-panel').classList.contains('hidden'), false);
+    assert.equal(ui.el('source-library-panel').classList.contains('hidden'), true);
+    assert.equal(ui.el('source-tab-url').getAttribute('aria-pressed'), 'true');
+    assert.equal(ui.requests.some(request => request.url.includes('/streaming/start')), false);
+  }
+});
+
+test('custom player buttons play and pause the selected preview and control its audio', async () => {
+  const ui = studio(); await ui.flush();
+  ui.window.loadDroppedLocalVideo('D:/preview.mp4');
+  const video = ui.el('video-player');
+  await ui.el('player-play-toggle').click();
+  assert.equal(video.paused, false);
+  assert.match(ui.el('player-play-toggle').getAttribute('aria-label'), /Tạm dừng/);
+  await ui.el('player-play-toggle').click();
+  assert.equal(video.paused, true);
+  assert.match(ui.el('player-play-toggle').getAttribute('aria-label'), /Phát/);
+  ui.el('player-volume').value = '0.4';
+  await ui.el('player-volume').emit('input');
+  assert.equal(video.volume, 0.4);
+  await ui.el('player-mute-toggle').click();
+  assert.equal(video.muted || video.volume === 0, true);
+  assert.match(ui.el('player-mute-toggle').getAttribute('aria-label'), /Bật tiếng/);
+  await ui.el('player-mute-toggle').click();
+  assert.equal(video.muted, false);
+  assert.equal(video.volume, 0.4);
+  await ui.el('player-fullscreen').click();
+  assert.equal(ui.playerSurface.fullscreenCount, 1);
+  assert.equal(ui.document.fullscreenElement, ui.playerSurface);
+  await ui.el('player-fullscreen').click();
+  assert.equal(ui.document.fullscreenElement, null);
+  assert.equal(ui.requests.some(request => request.url.includes('/streaming/start')), false);
+});
+
 test('paused seek never plays dubbing, play resumes same segment, and speed stays synchronized', async () => {
   const ui = studio(); await ui.start();
   const video = ui.el('video-player');
@@ -516,6 +626,31 @@ test('paused seek never plays dubbing, play resumes same segment, and speed stay
   const bgm = ui.audio.find(item => item.src === '/bgm.m4a');
   assert.equal(bgm.playbackRate, 1.5);
   assert.ok(Math.abs(bgm.volume - 0.3 * 10 ** (-18 / 20)) < 0.00001);
+});
+
+test('master mute and volume apply to translated speech and background without unmuting original speech', async () => {
+  const ui = studio(); await ui.start();
+  const video = ui.el('video-player');
+  video.currentTime = 2;
+  await ui.el('player-play-toggle').click();
+  const dub = ui.audio.find(item => item.src === '/dub.wav');
+  const bgm = ui.audio.find(item => item.src === '/bgm.m4a');
+  assert.ok(dub && bgm);
+  assert.equal(video.muted, true, 'Original speech stays muted during dubbing');
+  ui.el('vol-dub').value = '0.8'; await ui.el('vol-dub').emit('input');
+  ui.el('player-volume').value = '0.5'; await ui.el('player-volume').emit('input');
+  assert.equal(dub.volume, 0.4);
+  assert.ok(Math.abs(bgm.volume - 0.3 * 0.5 * 10 ** (-18 / 20)) < 0.00001);
+  await ui.el('player-mute-toggle').click();
+  assert.equal(dub.volume, 0);
+  assert.equal(bgm.volume, 0);
+  assert.equal(video.muted, true);
+  assert.equal(ui.el('vol-dub').value, '0.8');
+  assert.equal(ui.el('vol-bgm').value, '0.3');
+  await ui.el('player-mute-toggle').click();
+  assert.equal(dub.volume, 0.4);
+  assert.ok(Math.abs(bgm.volume - 0.3 * 0.5 * 10 ** (-18 / 20)) < 0.00001);
+  assert.equal(video.muted, true);
 });
 
 test('timeline uses current marker after init and replays READY colors', async () => {
@@ -587,6 +722,7 @@ async function startUrl(ui) {
   await ui.el('video-url').emit('input');
   ui.replies.set('/api/streaming/start-url', { task_id: 'download-fixture', video_url: null });
   await ui.el('btn-start').click();
+  await ui.flush();
   return ui.sockets.at(-1);
 }
 
@@ -734,7 +870,7 @@ test('pending URL task displays honest progress, controls and source-ready previ
   assert.equal(ui.el('btn-export-hq').disabled, true);
   assert.equal(ui.el('video-player').src, undefined);
   socket.receive({ type: 'progress', phase: 'download', stage: 'Đang tải video', progress_pct: 42.4, status: 'RUNNING', can_pause: false });
-  assert.equal(ui.el('task-progress-value').textContent, '42%');
+  assert.equal(ui.el('task-progress-value').textContent, '42.4%');
   assert.equal(ui.el('task-progress-bar').style.width, '42.4%');
   assert.equal(ui.el('task-progress-track')['aria-valuenow'], '42.4');
   socket.receive({ type: 'progress', phase: 'prepare', stage: 'Đang tách âm thanh', progress_pct: null, status: 'RUNNING', can_pause: false });
@@ -744,6 +880,181 @@ test('pending URL task displays honest progress, controls and source-ready previ
   socket.receive({ type: 'source_ready', video_url: '/api/video/download-fixture' });
   assert.equal(ui.el('video-player').src, '/api/video/download-fixture');
   assert.equal(ui.el('btn-export-hq').disabled, true);
+});
+
+test('player shows measured download percentage, bytes, speed and ETA beside the loading state', async () => {
+  const ui = studio(), socket = await startUrl(ui);
+  const downloading = {
+    type: 'progress', phase: 'download', stage: 'Đang tải bản gốc Douyin 1080p',
+    progress_pct: 2.2, status: 'RUNNING', can_pause: false,
+    downloaded_bytes: 438680000, total_bytes: 19940000000, speed: 12500000, eta: 120,
+  };
+  socket.receive(downloading);
+  assert.equal(ui.el('player-download-progress').classList.contains('hidden'), false);
+  assert.equal(ui.el('player-progress-value').textContent, '2.2%');
+  assert.equal(ui.el('task-progress-value').textContent, '2.2%');
+  assert.equal(ui.el('player-progress-bar').style.width, '2.2%');
+  const firstDetail = ui.el('player-progress-detail').textContent;
+  assert.match(firstDetail, /(?:438[.,]68\s*MB|0[.,]44\s*GB)/);
+  assert.match(firstDetail, /19[.,]94\s*GB/);
+  assert.match(firstDetail, /12[.,]5(?:0)?\s*MB\/s/);
+  assert.match(firstDetail, /(?:2\s*(?:phút|min)|0?2:00)/);
+
+  socket.receive({ ...downloading, downloaded_bytes: 2200000000, progress_pct: 11 });
+  assert.match(ui.el('player-progress-detail').textContent, /2[.,]2(?:0)?\s*GB/);
+  assert.match(ui.el('player-progress-detail').textContent, /19[.,]94\s*GB/);
+  assert.equal(ui.el('player-progress-bar').style.width, '11%');
+
+  socket.receive({ type: 'progress', phase: 'prepare', stage: 'Đang kiểm tra tệp video', progress_pct: null, status: 'RUNNING' });
+  assert.equal(ui.el('player-download-progress').classList.contains('hidden'), true);
+  assert.equal(ui.el('buffering-text').textContent, 'Đang kiểm tra tệp video');
+  assert.equal(ui.requests.some(request => request.url.endsWith('/stop')), false);
+});
+
+test('unknown download total never invents a percentage while keeping actual received bytes visible', async () => {
+  const ui = studio(), socket = await startUrl(ui);
+  socket.receive({
+    type: 'progress', phase: 'download', stage: 'Đang tải video', progress_pct: null,
+    status: 'RUNNING', downloaded_bytes: 1250000000, total_bytes: null, speed: null, eta: null,
+  });
+  assert.equal(ui.el('player-download-progress').classList.contains('hidden'), false);
+  assert.doesNotMatch(ui.el('player-progress-value').textContent, /\d[.,]?\d*%/);
+  assert.match(ui.el('player-progress-detail').textContent, /1[.,]25\s*GB/);
+  assert.doesNotMatch(ui.el('player-progress-detail').textContent, /NaN|Infinity|null|undefined/);
+});
+
+test('Studio polls with an open websocket and reconciles download progress then an external stop', async () => {
+  const ui = studio(), socket = await startUrl(ui);
+  ui.el('view-tasks').classList.add('hidden');
+  socket.receive({ type: 'progress', phase: 'download', stage: 'Đang tải video', progress_pct: 1, status: 'RUNNING' });
+  const downloads = {
+    task_id: 'download-fixture', task_type: 'Dịch video', phase: 'download', status: 'RUNNING',
+    stage: 'Đang tải bản gốc Douyin 1080p', progress_pct: 2.2,
+    downloaded_bytes: 438680000, total_bytes: 19940000000, speed: 12500000, eta: 120,
+  };
+  ui.replies.set('/api/tasks', { tasks: [downloads] });
+  const requestCount = ui.requests.filter(request => request.url === '/api/tasks').length;
+  assert.equal(socket.readyState, 1);
+  await ui.tickIntervals(2000);
+  assert.ok(ui.requests.filter(request => request.url === '/api/tasks').length > requestCount);
+  assert.equal(ui.el('player-progress-value').textContent, '2.2%');
+  assert.equal(ui.el('task-progress-stage').textContent, downloads.stage);
+  assert.equal(ui.el('buffering-alert').classList.contains('hidden'), false);
+
+  ui.replies.set('/api/tasks', { tasks: [{ ...downloads, status: 'STOPPED', phase: 'stopped', stage: 'Đã dừng tác vụ' }] });
+  await ui.tickIntervals(2000);
+  assert.equal(ui.el('buffering-alert').classList.contains('hidden'), true);
+  assert.equal(ui.el('player-download-progress').classList.contains('hidden'), true);
+  assert.equal(ui.el('player-task-status').classList.contains('hidden'), false);
+  assert.match(ui.el('player-task-status').textContent, /Đã dừng/);
+  assert.equal(ui.el('btn-start').classList.contains('hidden'), false);
+  assert.equal(ui.el('btn-stop-worker').classList.contains('hidden'), true);
+  assert.equal(ui.requests.some(request => request.url.endsWith('/stop')), false);
+});
+
+test('failed task polling warns in the player despite an apparently open websocket and recovers', async () => {
+  for (const failure of [
+    { failure: true, detail: 'service unavailable' },
+    () => { throw new Error('network offline'); },
+  ]) {
+    const ui = studio(), socket = await startUrl(ui);
+    ui.el('view-tasks').classList.add('hidden');
+    socket.receive({ type: 'progress', phase: 'download', stage: 'Đang tải video', progress_pct: 2.2, status: 'RUNNING' });
+    ui.replies.set('/api/tasks', failure);
+    await ui.tickIntervals(2000);
+    assert.equal(socket.readyState, 1);
+    assert.equal(ui.el('player-task-status').classList.contains('hidden'), false);
+    assert.match(ui.el('player-task-status').textContent, /Không kết nối/);
+    assert.equal(ui.el('player-task-status').dataset.state, 'disconnected');
+    assert.equal(ui.el('player-progress-value').textContent, '2.2%');
+    assert.equal(ui.requests.some(request => request.url.endsWith('/stop')), false);
+
+    ui.replies.set('/api/tasks', { tasks: [{ task_id: 'download-fixture', phase: 'download', stage: 'Đang tải video', progress_pct: 3.4, status: 'RUNNING' }] });
+    await ui.tickIntervals(2000);
+    assert.equal(ui.el('player-progress-value').textContent, '3.4%');
+    assert.notEqual(ui.el('player-task-status').dataset.state, 'disconnected');
+  }
+});
+
+test('missing active task is reported beside the player without pretending the download completed', async () => {
+  const ui = studio(), socket = await startUrl(ui);
+  ui.el('view-tasks').classList.add('hidden');
+  socket.receive({ type: 'progress', phase: 'download', stage: 'Đang tải video', progress_pct: 2.2, status: 'RUNNING' });
+  ui.replies.set('/api/tasks', { tasks: [] });
+  await ui.tickIntervals(2000);
+  assert.equal(ui.el('player-task-status').classList.contains('hidden'), false);
+  assert.match(ui.el('player-task-status').textContent, /Không tìm thấy/);
+  assert.notEqual(ui.el('task-progress').dataset.status, 'COMPLETED');
+  assert.equal(ui.el('btn-export-hq').disabled, true);
+  assert.equal(ui.requests.some(request => request.url.endsWith('/stop')), false);
+});
+
+test('an identical valid task snapshot clears connection and missing-task warnings', async () => {
+  for (const unavailableReply of [{ failure: true }, { tasks: [] }]) {
+    const ui = studio(), socket = await startUrl(ui);
+    await ui.flush();
+    const progress = { task_id: 'download-fixture', phase: 'download', stage: 'Đang tải video',
+      progress_pct: 2.2, status: 'RUNNING', downloaded_bytes: 438680000,
+      total_bytes: 19940000000, speed: 12500000, eta: 120 };
+    socket.receive({ type: 'progress', ...progress });
+    ui.replies.set('/api/tasks', unavailableReply);
+    await ui.el('btn-refresh-tasks').click();
+    assert.equal(ui.el('player-task-status').dataset.state, 'disconnected');
+    assert.equal(ui.el('player-task-status').classList.contains('hidden'), false);
+
+    ui.replies.set('/api/tasks', { tasks: [progress] });
+    await ui.el('btn-refresh-tasks').click();
+    assert.equal(ui.el('player-task-status').classList.contains('hidden'), true);
+    assert.notEqual(ui.el('player-task-status').dataset.state, 'disconnected');
+    assert.equal(ui.el('task-connection-status').classList.contains('hidden'), true);
+    assert.equal(ui.el('player-download-progress').classList.contains('hidden'), false);
+    assert.equal(ui.el('player-progress-value').textContent, '2.2%');
+    assert.equal(ui.el('buffering-alert').classList.contains('hidden'), false);
+    assert.equal(ui.requests.some(request => request.url.endsWith('/stop')), false);
+  }
+});
+
+test('a slow task snapshot cannot overwrite progress or introduce a warning after a newer websocket event', async () => {
+  for (const staleReply of [
+    { tasks: [{ task_id: 'download-fixture', phase: 'download', status: 'RUNNING', stage: 'Đang tải video', progress_pct: 1 }] },
+    { tasks: [] },
+  ]) {
+    const ui = studio(), socket = await startUrl(ui);
+    await ui.flush();
+    socket.receive({ type: 'progress', phase: 'download', status: 'RUNNING', stage: 'Đang tải video', progress_pct: 1 });
+    let finishSnapshot;
+    ui.replies.set('/api/tasks', () => new Promise(resolve => { finishSnapshot = resolve; }));
+    const refreshing = ui.el('btn-refresh-tasks').click();
+    await ui.flush();
+    socket.receive({ type: 'progress', phase: 'download', status: 'RUNNING', stage: 'Đang tải bản gốc Douyin', progress_pct: 3.4 });
+    finishSnapshot({ ok: true, json: async () => staleReply });
+    await refreshing;
+    assert.equal(ui.el('player-progress-value').textContent, '3.4%');
+    assert.equal(ui.el('task-progress-stage').textContent, 'Đang tải bản gốc Douyin');
+    assert.equal(ui.el('player-download-progress').classList.contains('hidden'), false);
+    assert.equal(ui.el('player-task-status').classList.contains('hidden'), true);
+  }
+});
+
+test('slow task polling allows only one request in flight and resumes after it settles', async () => {
+  const ui = studio(), socket = await startUrl(ui);
+  socket.receive({ type: 'progress', phase: 'download', status: 'RUNNING', stage: 'Đang tải video', progress_pct: 2.2 });
+  let finishSnapshot;
+  ui.replies.set('/api/tasks', () => new Promise(resolve => { finishSnapshot = resolve; }));
+  const before = ui.requests.filter(request => request.url === '/api/tasks').length;
+  const refreshing = ui.el('btn-refresh-tasks').click();
+  await ui.flush();
+  await ui.tickIntervals(2000);
+  await ui.el('btn-refresh-tasks').click();
+  await ui.tickIntervals(2000);
+  assert.equal(ui.requests.filter(request => request.url === '/api/tasks').length, before + 1);
+  const snapshot = { tasks: [{ task_id: 'download-fixture', phase: 'download', status: 'RUNNING', stage: 'Đang tải video', progress_pct: 2.4 }] };
+  finishSnapshot({ ok: true, json: async () => snapshot });
+  await refreshing;
+  ui.replies.set('/api/tasks', snapshot);
+  await ui.tickIntervals(2000);
+  assert.equal(ui.requests.filter(request => request.url === '/api/tasks').length, before + 2);
+  assert.equal(ui.el('player-progress-value').textContent, '2.4%');
 });
 
 test('stopping before task-id arrives cancels the returned task and never attaches its media', async () => {
@@ -914,6 +1225,58 @@ test('new source clears transcript drafts and source metadata preserves native a
   const video = ui.el('video-player'); video.videoWidth = 1920; video.videoHeight = 1080;
   await video.emit('loadedmetadata');
   assert.equal(ui.el('player-container').style.aspectRatio, '1920 / 1080');
+});
+
+test('subtitle mask stays on the contained image for landscape and portrait sources', async () => {
+  const ui = studio(); await ui.flush();
+  const video = ui.el('video-player');
+  ui.el('player-container').getBoundingClientRect = () => ({ width: 600, height: 500 });
+  for (const [width, height] of [[1920, 1080], [1080, 1920]]) {
+    video.videoWidth = width; video.videoHeight = height;
+    await video.emit('loadedmetadata');
+    const scale = Math.min(600 / width, 500 / height);
+    const actualWidth = width * scale, actualHeight = height * scale;
+    const mask = ui.el('chinese-sub-mask').style;
+    assert.equal(parseFloat(mask.left), (600 - actualWidth) / 2);
+    assert.equal(parseFloat(mask.right), (600 - actualWidth) / 2);
+    assert.ok(Math.abs(parseFloat(mask.bottom) - ((500 - actualHeight) / 2 + actualHeight * 0.14)) < 0.01);
+    assert.ok(Math.abs(parseFloat(mask.height) - actualHeight * 0.14) < 0.01);
+    assert.ok(parseFloat(ui.el('subtitle-overlay').style.bottom) > parseFloat(mask.bottom));
+  }
+});
+
+test('master mute persists through start and selecting the next source after stop', async () => {
+  const ui = studio(); await ui.flush();
+  await ui.el('player-mute-toggle').click();
+  await ui.start();
+  const video = ui.el('video-player');
+  assert.equal(video.volume, 0);
+  await ui.window.studioStop();
+  ui.window.loadDroppedLocalVideo('D:/next.mp4');
+  assert.equal(video.volume, 0);
+  await ui.el('player-mute-toggle').click();
+  assert.equal(video.volume, 1);
+});
+
+test('a stalled task read times out and allows polling to recover without stopping the download', async () => {
+  const ui = studio(), socket = await startUrl(ui);
+  socket.receive({ type: 'progress', phase: 'download', status: 'RUNNING', progress_pct: 2.2 });
+  let signal;
+  ui.replies.set('/api/tasks', options => new Promise((resolve, reject) => {
+    signal = options.signal;
+    signal.addEventListener('abort', () => reject(new Error('read timed out')));
+  }));
+  const poll = ui.el('btn-refresh-tasks').click();
+  await ui.flush();
+  await ui.tickTimeouts(8000);
+  await poll;
+  assert.equal(signal.aborted, true);
+  assert.equal(ui.el('player-task-status').dataset.state, 'disconnected');
+  ui.replies.set('/api/tasks', { tasks: [{ task_id: 'download-fixture', phase: 'download', status: 'RUNNING', progress_pct: 3.4 }] });
+  await ui.el('btn-refresh-tasks').click();
+  assert.equal(ui.el('player-progress-value').textContent, '3.4%');
+  assert.equal(ui.el('player-task-status').classList.contains('hidden'), true);
+  assert.equal(ui.requests.some(request => request.url.endsWith('/stop')), false);
 });
 
 test('server stop clears predownload spinner, controls and stale events without requiring the local Stop button', async () => {

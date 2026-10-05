@@ -19,6 +19,16 @@ Tài liệu kiểm kê toàn bộ thành phần giao diện (UI Inventory), các
 
 ## 2. Studio View (`#view-studio`)
 
+Studio dùng ba cột từ 1200 px: nguồn/tác vụ bên trái, video/âm thanh ở giữa, transcript và giọng ở hai khung riêng bên phải. Ở 960–1199 px, nguồn/tác vụ nằm dưới video và transcript.
+
+| Điều khiển | Kết nối | Hành vi |
+|---|---|---|
+| URL / Tải file / Thư viện | `#source-tab-url`, `#source-tab-file`, `#source-tab-library`; `GET /api/library` | Chọn nguồn, mở bộ chọn file hoặc liệt kê video trong `workspace/inputs`; không tự bắt đầu dịch |
+| Xóa link | `#clear-video-url` | Xóa nội dung ô URL; khóa khi đang chạy tác vụ |
+| Thanh phát tùy chỉnh | `#player-play-toggle`, `#player-mute-toggle`, `#player-volume`, `#player-fullscreen` | Phát/tạm dừng, âm lượng tổng cho cả ba nguồn âm thanh, toàn màn hình qua Qt |
+| Tiến độ trong video | `#player-download-progress`, `#player-task-status`; WebSocket + `GET /api/tasks` | Hiện số liệu tải được đo; nhận biết dừng, mất kết nối và tác vụ không còn tồn tại |
+| Lọc nguồn giọng | `#voice-filter` | Chuyển lần lượt qua tất cả nguồn và từng nguồn giọng; kết hợp với tìm kiếm |
+
 ### 2.1 Telemetry Ribbon & Workers Status
 | # | Page / Scope | Component | Element ID / Selector | Action | Backend / API / Handler | Expected Behavior | Status |
 |---|---|---|---|---|---|---|---|
