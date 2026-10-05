@@ -263,6 +263,15 @@ class ServiceManager:
         logger.info("[*] ServiceManager: Initiating graceful shutdown...")
         self.is_running = False
 
+        # Export workers run in threads. Signal cancellation before stopping the
+        # event loop so their media subprocesses can exit and remove partial files.
+        api = sys.modules.get("main")
+        for task in list(getattr(api, "active_export_tasks", {}).values()):
+            if task.get("status") in {"RUNNING", "CANCELLING"}:
+                task["cancelled"] = True
+                task["status"] = "CANCELLING"
+                task["stage"] = "Đang dừng xuất video..."
+
         # 1. Cancel and stop all streaming sessions
         try:
             pipeline = sys.modules.get("core.streaming.pipeline")
@@ -270,7 +279,7 @@ class ServiceManager:
             for task_id, session in list(active_streaming_sessions.items()):
                 try:
                     logger.info(f"Stopping active streaming session: {task_id}")
-                    worker = getattr(session, "worker_task", None)
+                    worker = getattr(session, "worker_task", None) or getattr(session, "start_task", None)
                     loop = worker.get_loop() if worker is not None else None
                     if loop is not None and loop.is_running():
                         loop.call_soon_threadsafe(session.stop)
@@ -280,6 +289,13 @@ class ServiceManager:
                     logger.warning(f"Could not stop streaming session {task_id}: {exc}")
         except Exception as e:
             logger.warning(f"Session cancellation error: {e}")
+
+        preview_module = sys.modules.get("core.media_preview")
+        if preview_module is not None:
+            try:
+                preview_module.preview_manager.shutdown()
+            except Exception:
+                logger.warning("Could not fully stop the compatible video preview worker.")
 
         # Close only the browser bridge owned by this application.
         muse_module = sys.modules.get("core.services.muse_service")

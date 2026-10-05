@@ -90,8 +90,8 @@
           </div>
           <div class="flex items-center gap-1.5 text-gray-400">
             <i class="fa-solid fa-sliders text-cyan-400"></i>
-            <span>Vocal Suppression:</span>
-            <span id="tel-suppression" class="px-2 py-0.5 rounded text-[11px] font-bold bg-cyan-950/80 text-cyan-400 border border-cyan-800/80">-26.0 dB</span>
+            <span>Lọc thoại (ước tính):</span>
+            <span id="tel-suppression" class="px-2 py-0.5 rounded text-[11px] font-bold bg-cyan-950/80 text-cyan-400 border border-cyan-800/80">--</span>
           </div>
         </div>
 
@@ -105,6 +105,7 @@
     </section>
 
     <!-- Main Grid: Player Centric Layout -->
+    <p id="pipeline-warning" role="status" class="hidden max-w-7xl mx-auto px-6 pt-3 text-xs text-amber-300"></p>
     <main class="max-w-7xl mx-auto p-6 grid grid-cols-1 lg:grid-cols-12 gap-6">
       
       <!-- Center Left: Large Video Player (7 Cols) -->
@@ -131,7 +132,7 @@
           <!-- Player Viewport with Dynamic Subtitle Overlay -->
           <div id="player-container" class="aspect-[9/16] max-h-[530px] mx-auto bg-black rounded-xl overflow-hidden relative flex items-center justify-center border border-gray-800 shadow-inner group">
             
-            <video id="video-player" playsinline class="w-full h-full object-contain"></video>
+            <video id="video-player" playsinline controls class="w-full h-full object-contain"></video>
 
             <!-- Chinese Subtitle Blur Mask Bar -->
             <div id="chinese-sub-mask" class="absolute bottom-16 left-0 right-0 h-14 bg-black/65 backdrop-blur-md pointer-events-none transition-opacity duration-300"></div>
@@ -165,7 +166,7 @@
               <span id="bar-total-time">00:00</span>
             </div>
             <!-- Visual Segment Slices Track -->
-            <div id="segments-timeline-track" class="w-full h-2.5 bg-gray-900 rounded-full overflow-hidden flex relative border border-gray-800 cursor-pointer">
+            <div id="segments-timeline-track" role="slider" tabindex="0" aria-label="Vị trí phát video" aria-valuemin="0" aria-valuemax="0" aria-valuenow="0" class="w-full h-2.5 bg-gray-900 rounded-full overflow-hidden flex relative border border-gray-800 cursor-pointer">
               <div id="playback-head-marker" class="absolute top-0 bottom-0 w-1 bg-white z-10 shadow-glow" style="left: 0%;"></div>
             </div>
           </div>
@@ -191,10 +192,10 @@
             <!-- Vocal Suppression Badge -->
             <div class="flex items-center gap-2 bg-gray-900 px-2 py-1 rounded text-[10px] text-gray-300 font-mono border border-gray-800">
               <span class="text-rose-400">Lọc thoại Trung:</span>
-              <span id="player-suppression-badge" class="text-cyan-300 font-bold">-26.0 dB</span>
+              <span id="player-suppression-badge" title="Mức giảm ước tính của bộ lọc" class="text-cyan-300 font-bold">--</span>
               <span class="text-gray-500">|</span>
               <span class="text-emerald-400">BGM:</span>
-              <span class="text-gray-200">Giữ nguyên</span>
+              <span class="text-gray-200">Đã lọc</span>
             </div>
           </div>
         </div>
@@ -222,7 +223,7 @@
           </div>
 
           <!-- Drag & Drop Zone with Native File Picker Button -->
-          <div id="drop-zone" class="border-2 border-dashed border-gray-700 hover:border-pink-500/80 rounded-xl p-3 text-center cursor-pointer transition bg-[#08090d]/60 group">
+          <div id="drop-zone" role="button" tabindex="0" aria-label="Chọn video từ máy" class="border-2 border-dashed border-gray-700 hover:border-pink-500/80 rounded-xl p-3 text-center cursor-pointer transition bg-[#08090d]/60 group">
             <input type="file" id="video-file" accept="video/*" class="hidden">
             <i class="fa-solid fa-folder-open text-2xl text-pink-400 group-hover:scale-110 transition duration-200 mb-1"></i>
             <p class="text-xs text-gray-200 font-semibold" id="file-name-display">Chọn file từ máy (Native Dialog)</p>
@@ -579,6 +580,7 @@
             <option value="5">5s (Nhanh nhất)</option>
             <option value="10" selected>10s (Cân bằng tốt)</option>
             <option value="15">15s (An toàn không giật)</option>
+            <option value="30">30s (Đệm dài)</option>
           </select>
         </div>
       </div>
@@ -596,13 +598,13 @@
   <!-- ======================================================== -->
   <!-- MODAL: HQ EXPORT -->
   <!-- ======================================================== -->
-  <div id="export-modal" class="fixed inset-0 bg-black/85 backdrop-blur-sm z-50 flex items-center justify-center p-4 hidden">
+  <div id="export-modal" role="dialog" aria-modal="true" aria-labelledby="export-modal-title" class="fixed inset-0 bg-black/85 backdrop-blur-sm z-50 flex items-center justify-center p-4 hidden">
     <div class="bg-[#161922] border border-gray-800 rounded-2xl max-w-md w-full p-6 space-y-4 shadow-2xl">
       <div class="flex items-center justify-between pb-3 border-b border-gray-800">
-        <h3 class="text-sm font-bold text-white flex items-center gap-2">
+        <h3 id="export-modal-title" class="text-sm font-bold text-white flex items-center gap-2">
           <i class="fa-solid fa-film text-pink-500"></i> Xuất Video Hoàn Chỉnh (HQ Export)
         </h3>
-        <button id="btn-close-export-modal" class="text-gray-400 hover:text-white">
+        <button id="btn-close-export-modal" aria-label="Đóng hộp thoại xuất video" class="text-gray-400 hover:text-white">
           <i class="fa-solid fa-xmark text-lg"></i>
         </button>
       </div>

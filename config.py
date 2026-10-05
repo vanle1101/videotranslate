@@ -2,6 +2,7 @@ import os
 import sys
 from pathlib import Path
 from typing import Literal
+from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 BASE_DIR = Path(__file__).resolve().parent
@@ -91,6 +92,7 @@ class Settings(BaseSettings):
     # OpenCode reuses its local login; no translation LLM is loaded into RAM.
     LLM_PROVIDER: str = "openrouter-free" # also 'opencode', 'free', 'gemini', 'deepseek', 'openai', 'muse'
     MUSE_BROWSER_MODE: Literal["dedicated", "existing"] = "dedicated"
+    MUSE_CHROME_PORT: int = Field(default=0, ge=0, le=65535)
     OPENCODE_API_KEY: str = "" # Optional local override; otherwise read OpenCode auth.json.
     OPENCODE_MODEL: str = "big-pickle"
     OPENCODE_TIMEOUT: float = 60.0
@@ -108,6 +110,8 @@ class Settings(BaseSettings):
     # Audio & Vocal Separation
     # Options: 'roformer' (via python-audio-separator), 'demucs', 'none'
     SEPARATION_ENGINE: str = "realtime"
+    SUPPRESSION_MODE: Literal["AUTO", "DSP_MONO_ADAPTIVE_FORMANT", "DSP_STEREO_CENTER_CANCEL"] = "AUTO"
+    INITIAL_BUFFER_SECONDS: float = Field(default=10.0, gt=0, le=120)
     DEMUCS_MODEL: str = "htdemucs"
     ROFORMER_MODEL: str = "model_bs_roformer_ep_317_sdr_12.9755.ckpt"
 

@@ -11,7 +11,7 @@ from fastapi.responses import HTMLResponse, FileResponse, Response
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from fastapi.requests import Request
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from config import settings
 from core.downloader import VideoDownloader
@@ -27,6 +27,7 @@ from core.streaming.pipeline import (
     active_streaming_sessions
 )
 from core.streaming.export import HQExporter
+from core.media_preview import preview_manager
 from core.services.muse_service import ERRORS as MUSE_ERRORS, MuseError, muse_service
 
 app = FastAPI(title=f"{settings.APP_NAME} - Realtime Streaming Studio")
@@ -58,7 +59,7 @@ def qt_webchannel_client():
 
 class StreamUrlRequest(BaseModel):
     url: str
-    initial_buffer_seconds: Optional[float] = 10.0
+    initial_buffer_seconds: Optional[float] = Field(default=None, gt=0, le=120)
     voice: Optional[str] = None
     tts_engine: Optional[str] = None
     asr_engine: Optional[str] = None
@@ -155,8 +156,8 @@ async def get_settings():
         "gemini_model": settings.GEMINI_MODEL,
         "deepseek_configured": bool(settings.DEEPSEEK_API_KEY or os.getenv("DEEPSEEK_API_KEY")),
         "suppression_mode": getattr(settings, "SUPPRESSION_MODE", "AUTO"),
-        "ducking_level": str(int(getattr(settings, "BGM_VOLUME_DUCKED_DB", -14))),
-        "buffer_target": "10"
+        "ducking_level": f"{settings.BGM_VOLUME_DUCKED_DB:g}",
+        "buffer_target": f"{settings.INITIAL_BUFFER_SECONDS:g}"
     }
 
 @app.post("/api/settings")
@@ -177,6 +178,18 @@ async def update_settings(req: ConfigRequest):
         if value is not None and ("\n" in value or "\r" in value):
             raise HTTPException(status_code=422, detail="Cấu hình không được chứa ký tự xuống dòng")
     env_updates = {}
+    if req.suppression_mode is not None:
+        if req.suppression_mode not in {"AUTO", "DSP_MONO_ADAPTIVE_FORMANT", "DSP_STEREO_CENTER_CANCEL"}:
+            raise HTTPException(status_code=422, detail="Chế độ tách thoại không hợp lệ")
+        env_updates["SUPPRESSION_MODE"] = req.suppression_mode
+    if req.buffer_target is not None:
+        try:
+            value = float(req.buffer_target)
+            if not 0 < value <= 120:
+                raise ValueError
+            env_updates["INITIAL_BUFFER_SECONDS"] = str(value)
+        except ValueError:
+            raise HTTPException(status_code=422, detail="Đệm trước phát phải lớn hơn 0 và tối đa 120 giây") from None
     if req.muse_browser_mode is not None:
         env_updates["MUSE_BROWSER_MODE"] = req.muse_browser_mode
     if req.openrouter_model is not None:
@@ -209,7 +222,7 @@ async def update_settings(req: ConfigRequest):
         except OSError:
             raise HTTPException(status_code=500, detail="Không thể ghi cấu hình vào .env") from None
         for name, value in env_updates.items():
-            setattr(settings, name, float(value) if name == "BGM_VOLUME_DUCKED_DB" else value)
+            setattr(settings, name, float(value) if name in {"BGM_VOLUME_DUCKED_DB", "INITIAL_BUFFER_SECONDS"} else value)
             if name in {"GEMINI_API_KEY", "DEEPSEEK_API_KEY"}:
                 os.environ[name] = value
 
@@ -222,7 +235,7 @@ async def update_settings(req: ConfigRequest):
         else:
             apply_settings()
 
-    return {"status": "ok", "message": "Cấu hình đã được lưu an toàn vào .env và áp dụng tức thì!"}
+    return {"status": "ok", "message": "Đã lưu cấu hình. Phiên dịch và lần xuất tiếp theo sẽ dùng cấu hình mới."}
 
 # -------------------------------------------------------------
 # TASK MANAGER API
@@ -240,7 +253,7 @@ async def list_tasks():
         tot_cnt = max(1, len(sess.segments))
         pct = int((ready_cnt / tot_cnt) * 100) if tot_cnt > 0 else 0
 
-        status_str = "FAILED" if sess.error else ("PAUSED" if sess.is_paused else ("RUNNING" if sess.is_running else "COMPLETED"))
+        status_str = "STOPPED" if getattr(sess, "is_stopped", False) else ("FAILED" if sess.error else ("PAUSED" if sess.is_paused else ("RUNNING" if sess.is_running else "COMPLETED")))
         tasks.append({
             "task_id": task_id,
             "task_type": "Realtime Dubbing",
@@ -249,7 +262,7 @@ async def list_tasks():
             "stage": sess.error or f"Đã dịch {ready_cnt}/{tot_cnt} câu ({pct}%)",
             "duration": sess.total_duration,
             "elapsed_seconds": round(time.time() - sess.start_wall_time, 1) if sess.start_wall_time else 0,
-            "video_url": f"/api/inputs/{sess.video_path.name}" if hasattr(sess, "video_path") and sess.video_path else "",
+            "video_url": "",  # A completed translation is not an exported dubbed video.
             "can_pause": status_str == "RUNNING",
             "can_resume": status_str == "PAUSED",
             "can_stop": status_str in ["RUNNING", "PAUSED"]
@@ -283,6 +296,8 @@ async def list_tasks():
 async def pause_task(task_id: str):
     sess = get_streaming_session(task_id)
     if sess:
+        if not sess.is_running or getattr(sess, "is_stopped", False):
+            raise HTTPException(status_code=409, detail="Phiên dịch đã kết thúc")
         sess.pause()
         return {"status": "ok", "task_id": task_id, "action": "paused"}
     raise HTTPException(status_code=404, detail="Task không tồn tại hoặc không thể tạm dừng")
@@ -291,6 +306,8 @@ async def pause_task(task_id: str):
 async def resume_task(task_id: str):
     sess = get_streaming_session(task_id)
     if sess:
+        if not sess.is_running or getattr(sess, "is_stopped", False):
+            raise HTTPException(status_code=409, detail="Phiên dịch đã kết thúc")
         sess.resume()
         return {"status": "ok", "task_id": task_id, "action": "resumed"}
     raise HTTPException(status_code=404, detail="Task không tồn tại hoặc không thể tiếp tục")
@@ -313,9 +330,7 @@ async def stop_task(task_id: str):
         return {"status": "ok", "task_id": task_id, "action": "stopped"}
 
     if task_id in active_export_tasks:
-        active_export_tasks[task_id]["cancelled"] = True
-        active_export_tasks[task_id]["status"] = "CANCELLED"
-        active_export_tasks[task_id]["stage"] = "Đã hủy bởi người dùng"
+        await cancel_export_hq(task_id)
         return {"status": "ok", "task_id": task_id, "action": "cancelled"}
 
     raise HTTPException(status_code=404, detail="Task không tồn tại")
@@ -361,7 +376,7 @@ async def start_streaming_url(req: StreamUrlRequest):
     session = create_streaming_session(
         task_id=task_id,
         video_path=video_path,
-        initial_buffer_seconds=req.initial_buffer_seconds or 10.0,
+        initial_buffer_seconds=req.initial_buffer_seconds or settings.INITIAL_BUFFER_SECONDS,
         voice=req.voice or settings.EDGE_VOICE,
         tts_engine_name=req.tts_engine or settings.TTS_ENGINE,
         asr_engine_name=req.asr_engine or settings.ASR_ENGINE,
@@ -380,7 +395,7 @@ async def start_streaming_url(req: StreamUrlRequest):
 @app.post("/api/streaming/start-upload")
 async def start_streaming_upload(
     file: UploadFile = File(...),
-    initial_buffer_seconds: float = Form(10.0),
+    initial_buffer_seconds: Optional[float] = Form(None, gt=0, le=120),
     voice: str = Form(settings.EDGE_VOICE),
     tts_engine: str = Form(settings.TTS_ENGINE),
     asr_engine: str = Form(settings.ASR_ENGINE),
@@ -405,7 +420,7 @@ async def start_streaming_upload(
     session = create_streaming_session(
         task_id=task_id,
         video_path=saved_path,
-        initial_buffer_seconds=initial_buffer_seconds,
+        initial_buffer_seconds=initial_buffer_seconds or settings.INITIAL_BUFFER_SECONDS,
         voice=voice,
         tts_engine_name=tts_engine,
         asr_engine_name=asr_engine,
@@ -431,10 +446,10 @@ async def get_segment_audio(task_id: str, seg_id: int):
 
 @app.get("/api/streaming/bgm/{task_id}")
 async def get_streaming_bgm(task_id: str):
-    bgm_path = settings.BASE_DIR / "workspace" / "cache" / task_id / "bgm_suppressed.m4a"
+    bgm_path = settings.BASE_DIR / "workspace" / "cache" / task_id / "bgm_suppressed.ogg"
     if not bgm_path.exists():
         raise HTTPException(status_code=404, detail="BGM stream not found or still generating")
-    return FileResponse(bgm_path, media_type="audio/mp4")
+    return FileResponse(bgm_path, media_type="audio/ogg")
 
 @app.post("/api/streaming/seek")
 async def streaming_seek(req: SeekRequest):
@@ -460,6 +475,8 @@ async def export_hq(req: ExportHQRequest):
         raise HTTPException(status_code=400, detail="Chưa có câu thoại nào sẵn sàng để xuất HQ")
 
     export_id = f"export_{req.task_id}"
+    if active_export_tasks.get(export_id, {}).get("status") in {"RUNNING", "CANCELLING"}:
+        raise HTTPException(status_code=409, detail="Video này đang được xuất. Hãy chờ tác vụ hiện tại kết thúc.")
     active_export_tasks[export_id] = {
         "task_id": export_id,
         "parent_session_id": req.task_id,
@@ -517,8 +534,8 @@ async def export_hq(req: ExportHQRequest):
         status_name = "CANCELLED" if active_export_tasks.get(export_id, {}).get("cancelled") else "FAILED"
         if export_id in active_export_tasks:
             active_export_tasks[export_id]["status"] = status_name
-            active_export_tasks[export_id]["stage"] = f"Lỗi: {e}"
-        raise HTTPException(status_code=500, detail=str(e))
+            active_export_tasks[export_id]["stage"] = "Đã hủy bởi người dùng" if status_name == "CANCELLED" else f"Lỗi: {e}"
+        raise HTTPException(status_code=409 if status_name == "CANCELLED" else 500, detail="Đã hủy xuất video" if status_name == "CANCELLED" else str(e))
 
 @app.get("/api/streaming/export-hq/status/{task_id}")
 async def get_export_hq_status(task_id: str):
@@ -531,15 +548,17 @@ async def get_export_hq_status(task_id: str):
 async def cancel_export_hq(task_id: str):
     export_id = task_id if task_id.startswith("export_") else f"export_{task_id}"
     if export_id in active_export_tasks:
+        if active_export_tasks[export_id]["status"] not in {"RUNNING", "CANCELLING"}:
+            raise HTTPException(status_code=409, detail="Tác vụ xuất đã kết thúc")
         active_export_tasks[export_id]["cancelled"] = True
-        active_export_tasks[export_id]["status"] = "CANCELLED"
-        active_export_tasks[export_id]["stage"] = "Đã hủy bởi người dùng"
+        active_export_tasks[export_id]["status"] = "CANCELLING"
+        active_export_tasks[export_id]["stage"] = "Đang dừng xuất video..."
         return {"status": "ok", "message": "Đã yêu cầu hủy xuất video"}
     raise HTTPException(status_code=404, detail="Không tìm thấy tác vụ export")
 
 class StreamLocalFileRequest(BaseModel):
     file_path: str
-    initial_buffer_seconds: Optional[float] = 10.0
+    initial_buffer_seconds: Optional[float] = Field(default=None, gt=0, le=120)
     voice: Optional[str] = None
     tts_engine: Optional[str] = None
     asr_engine: Optional[str] = None
@@ -554,7 +573,7 @@ async def start_streaming_local_file(req: StreamLocalFileRequest):
     session = create_streaming_session(
         task_id=task_id,
         video_path=p,
-        initial_buffer_seconds=req.initial_buffer_seconds or 10.0,
+        initial_buffer_seconds=req.initial_buffer_seconds or settings.INITIAL_BUFFER_SECONDS,
         voice=req.voice or settings.EDGE_VOICE,
         tts_engine_name=req.tts_engine or settings.TTS_ENGINE,
         asr_engine_name=req.asr_engine or settings.ASR_ENGINE,
@@ -575,6 +594,49 @@ async def get_local_file(path: str):
     if not p.exists():
         raise HTTPException(status_code=404, detail="File không tồn tại")
     return FileResponse(p)
+
+
+class PreviewRequest(BaseModel):
+    file_path: Optional[str] = None
+    task_id: Optional[str] = None
+
+
+@app.post("/api/preview")
+async def create_media_preview(req: PreviewRequest):
+    session = get_streaming_session(req.task_id) if req.task_id else None
+    source = session.video_path if session else req.file_path
+    if not source:
+        raise HTTPException(status_code=404, detail="Không tìm thấy video cần xem trước")
+    try:
+        return preview_manager.start(source)
+    except (FileNotFoundError, ValueError):
+        raise HTTPException(status_code=404, detail="Video nguồn không tồn tại") from None
+    except RuntimeError as error:
+        raise HTTPException(status_code=409, detail=str(error)) from None
+
+
+@app.post("/api/preview/upload")
+async def create_uploaded_preview(file: UploadFile = File(...)):
+    try:
+        return await asyncio.to_thread(preview_manager.start_upload, file.file, Path(file.filename or "video").suffix)
+    except RuntimeError as error:
+        raise HTTPException(status_code=409, detail=str(error)) from None
+
+
+@app.get("/api/preview/{preview_id}")
+async def get_media_preview_status(preview_id: str):
+    try:
+        return preview_manager.status(preview_id)
+    except KeyError:
+        raise HTTPException(status_code=404, detail="Bản xem trước không tồn tại") from None
+
+
+@app.get("/api/preview/{preview_id}/media")
+async def get_compatible_preview(preview_id: str):
+    try:
+        return FileResponse(preview_manager.media(preview_id), media_type="video/webm")
+    except KeyError:
+        raise HTTPException(status_code=404, detail="Bản xem trước chưa sẵn sàng") from None
 
 @app.get("/api/diagnostics/logs")
 async def get_diagnostics_logs(category: str = "app", lines: int = 100):

@@ -1,6 +1,6 @@
-import subprocess
 from pathlib import Path
 from config import settings
+from core.media_process import run_media
 
 
 def _escape_filter_filename(path: Path) -> str:
@@ -25,7 +25,8 @@ class VideoComposer:
         audio_path: Path,
         subtitle_path: Path,
         output_path: Path,
-        mask_chinese_sub: bool = True
+        mask_chinese_sub: bool = True,
+        cancel_check=None,
     ) -> Path:
         """
         Merges video, ducked Vietnamese audio, and burns ASS subtitles.
@@ -75,12 +76,12 @@ class VideoComposer:
         ]
 
         print(f"[*] Running FFmpeg render...")
-        res = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-        if res.returncode != 0:
-            err_msg = res.stderr.decode('utf-8', errors='replace').strip()
+        try:
+            run_media(cmd, cancel_check=cancel_check)
+        except RuntimeError as exc:
             # A successful export must contain the requested subtitles. Surface
             # the actual failure instead of silently producing an incomplete clip.
-            raise RuntimeError(f"FFmpeg video composition failed: {err_msg}")
+            raise RuntimeError(f"FFmpeg video composition failed: {exc}") from exc
 
         print(f"[+] Final Video Ready: {output_path}")
         return output_path

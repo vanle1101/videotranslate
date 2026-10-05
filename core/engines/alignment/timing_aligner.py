@@ -1,5 +1,6 @@
 import subprocess
 import time
+import math
 from pathlib import Path
 from typing import List, Dict, Any, Tuple, Optional
 from config import settings
@@ -9,14 +10,8 @@ from core.engines.tts.base import TTSEngine
 class TimingBudgetAligner(AlignmentEngine):
     """
     Time-Budgeting & Speech Alignment Engine.
-    Enforces natural speech tempo without chipmunk / Donald duck speedups.
-    Algorithm:
-    1. If TTS duration exceeds slot duration:
-       - Check if speed ratio > 1.15x
-       - Request concise rewrite from LLM
-       - Re-synthesize
-       - Apply mild tempo-stretch (clamped between 0.90x and 1.15x)
-       - Adjust timeline offset if required
+    Fits complete speech into its allotted slot while preserving pitch.
+    Callers can report when a segment needs more than the preferred speed range.
     """
     def __init__(self, speed_limits: Tuple[float, float] = (0.90, 1.15)):
         self.min_speed, self.max_speed = speed_limits
@@ -53,15 +48,43 @@ class TimingBudgetAligner(AlignmentEngine):
         except Exception:
             return 0.0
 
-    def apply_atempo(self, input_wav: Path, output_wav: Path, speed_factor: float):
-        """Applies FFmpeg atempo clamped to safe range."""
-        clamped = max(self.min_speed, min(self.max_speed, speed_factor))
-        cmd = [
-            "ffmpeg", "-y", "-i", str(input_wav),
-            "-filter:a", f"atempo={clamped:.3f}",
-            "-vn", str(output_wav)
-        ]
-        subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=True)
+    def apply_atempo(self, input_wav: Path, output_wav: Path, speed_factor: float,
+                     fit_duration: Optional[float] = None):
+        """Fit all speech into its slot without silently cutting the last words."""
+        if not math.isfinite(speed_factor) or speed_factor <= 0:
+            raise ValueError("Tốc độ giọng đọc không hợp lệ.")
+        if fit_duration is not None and (not math.isfinite(fit_duration) or fit_duration <= 0):
+            raise ValueError("Thời lượng đoạn thoại không hợp lệ.")
+        actual_speed = speed_factor if fit_duration is not None else max(self.min_speed, min(self.max_speed, speed_factor))
+        for _ in range(4):
+            # Chaining values <= 2 avoids atempo dropping samples at high speeds.
+            factor = actual_speed
+            filters = []
+            while factor > 2.0:
+                filters.append("atempo=2.0")
+                factor /= 2.0
+            while factor < 0.5:
+                filters.append("atempo=0.5")
+                factor /= 0.5
+            filters.append(f"atempo={factor:.8f}")
+            cmd = [
+                "ffmpeg", "-v", "error", "-nostdin", "-y", "-i", str(input_wav),
+                "-filter:a", ",".join(filters), "-vn", str(output_wav),
+            ]
+            subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                           creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0), check=True)
+            if fit_duration is None:
+                return actual_speed
+            rendered_duration = self.get_audio_duration(output_wav)
+            if rendered_duration <= 0:
+                raise RuntimeError("Không đọc được âm thanh sau khi căn thời lượng.")
+            if rendered_duration <= fit_duration + 0.0001:
+                return actual_speed
+            # atempo works in blocks, so source_duration / speed is approximate.
+            # Re-render the complete original at a slightly faster rate instead
+            # of letting playback/export trim the final syllable at the slot end.
+            actual_speed *= rendered_duration / fit_duration * 1.01
+        raise RuntimeError("Không thể căn đủ lời vào thời lượng đoạn thoại. Hãy rút gọn bản dịch.")
 
     def align_and_budget(
         self,
@@ -91,32 +114,24 @@ class TimingBudgetAligner(AlignmentEngine):
             # 1. Synthesize with current TTS engine
             tts_engine.synthesize(text_vi, raw_wav, voice=voice, ref_audio=ref_audio)
             tts_dur = self.get_audio_duration(raw_wav)
-            speed_ratio = round(tts_dur / max(0.5, slot_duration), 2)
+            speed_ratio = max(self.min_speed, tts_dur / max(0.01, slot_duration))
 
             print(f"    Segment #{seg_id}: slot={slot_duration:.2f}s, tts={tts_dur:.2f}s, ratio={speed_ratio}x")
 
-            # 2. If Vietnamese speech is significantly too long (> 1.15x), attempt rewrite
+            # Do not "shorten" a translation by deleting its final words. That
+            # silently changes meaning and can remove negation or an action.
             if speed_ratio > self.max_speed:
-                print(f"    [!] Segment #{seg_id} exceeds {self.max_speed}x. Prompting for concise rewrite...")
-                # Shorten sentence
-                shortened = text_vi
-                words = text_vi.split()
-                if len(words) > 5:
-                    target_word_count = max(3, int(slot_duration * 3.0))
-                    shortened = " ".join(words[:target_word_count])
-                    seg["final_vi"] = shortened
-                    seg["vi_text"] = shortened
-                    tts_engine.synthesize(shortened, raw_wav, voice=voice, ref_audio=ref_audio)
-                    tts_dur = self.get_audio_duration(raw_wav)
-                    speed_ratio = round(tts_dur / max(0.5, slot_duration), 2)
+                print(f"    [!] Segment #{seg_id} needs {speed_ratio:.2f}x to preserve all spoken words.")
 
-            # 3. Apply mild atempo time-stretch within safe bounds (0.90x <= speed <= 1.15x)
-            self.apply_atempo(raw_wav, fitted_wav, speed_ratio)
+            try:
+                speed_ratio = self.apply_atempo(raw_wav, fitted_wav, speed_ratio, fit_duration=slot_duration)
+            finally:
+                raw_wav.unlink(missing_ok=True)
 
             seg_copy = dict(seg)
             seg_copy["target_words"] = int(slot_duration * 3.0)
             seg_copy["tts_duration"] = tts_dur
-            seg_copy["speed_ratio"] = speed_ratio
+            seg_copy["speed_ratio"] = round(speed_ratio, 2)
             seg_copy["audio_path"] = str(fitted_wav.resolve())
             aligned_segments.append(seg_copy)
 

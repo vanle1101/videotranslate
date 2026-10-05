@@ -3,6 +3,7 @@ import http from 'node:http';
 import { timingSafeEqual } from 'node:crypto';
 import path from 'node:path';
 import { pathToFileURL } from 'node:url';
+import { installMuseChatAdapter } from './chat_adapter.mjs';
 
 const token = process.env.MUSE_BRIDGE_TOKEN;
 if (!token || token.length < 32 || !process.env.MUSE_RUNTIME_DIR || !process.env.MUSE_PROFILE_DIR) process.exit(1);
@@ -10,12 +11,13 @@ delete process.env.MUSE_CDP;
 process.env.MUSE_URL = 'https://muse.ai/';
 process.env.MUSE_HEADLESS = '0';
 const { driver, SELECTORS } = await import(pathToFileURL(path.join(process.env.MUSE_RUNTIME_DIR, 'muse-driver.mjs')).href);
+installMuseChatAdapter(driver, SELECTORS);
 const browserMode = process.env.MUSE_BROWSER_MODE || 'dedicated';
 if (!['existing', 'dedicated'].includes(browserMode)) process.exit(1);
 if (browserMode === 'existing') {
   const { installChromeConnection } = await import('./chrome_connection.mjs');
   const { chromium } = await import(pathToFileURL(path.join(process.env.MUSE_RUNTIME_DIR, 'node_modules/playwright-core/index.mjs')).href);
-  installChromeConnection(driver, chromium, browserMode);
+  installChromeConnection(driver, chromium, browserMode, Number(process.env.MUSE_CHROME_PORT || 0));
 }
 const send = (res, status, data) => {
   if (res.destroyed || res.writableEnded) return;
@@ -86,8 +88,8 @@ const server = http.createServer(async (req, res) => {
     if (typeof result.reply !== 'string' || !result.reply.trim()) return send(res, 502, { error: 'empty_reply' });
     send(res, 200, { reply: result.reply.trim() });
   } catch (err) {
-    if (err.message === 'chrome_connection_required') {
-      return send(res, 409, { error: 'chrome_connection_required' });
+    if (['chrome_connection_required', 'chrome_connection_timeout', 'chrome_page_failed', 'muse_navigation_failed', 'muse_new_chat_failed'].includes(err.message)) {
+      return send(res, 409, { error: err.message });
     }
     send(res, err instanceof SyntaxError || err.message === 'invalid_request' ? 400 : 502,
       { error: err instanceof SyntaxError || err.message === 'invalid_request' ? 'invalid_request' : 'browser_error' });

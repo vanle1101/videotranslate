@@ -1,7 +1,8 @@
-import subprocess
 import math
 from pathlib import Path
 from typing import Optional
+from config import settings
+from core.media_process import run_media
 
 class PremiumAudioMixer:
     """
@@ -14,15 +15,15 @@ class PremiumAudioMixer:
     """
     def __init__(
         self,
-        voice_gain_db: float = 2.5,
-        bgm_gain_db: float = -2.0,
-        duck_amount_db: float = -14.0,
+        voice_gain_db: Optional[float] = None,
+        bgm_gain_db: Optional[float] = None,
+        duck_amount_db: Optional[float] = None,
         attack_ms: int = 40,
         release_ms: int = 350
     ):
-        self.voice_gain_db = voice_gain_db
-        self.bgm_gain_db = bgm_gain_db
-        self.duck_amount_db = duck_amount_db
+        self.voice_gain_db = settings.VOICE_VOLUME_BOOST_DB if voice_gain_db is None else voice_gain_db
+        self.bgm_gain_db = settings.BGM_VOLUME_NORMAL_DB if bgm_gain_db is None else bgm_gain_db
+        self.duck_amount_db = settings.BGM_VOLUME_DUCKED_DB if duck_amount_db is None else duck_amount_db
         self.attack_ms = attack_ms
         self.release_ms = release_ms
 
@@ -31,7 +32,8 @@ class PremiumAudioMixer:
         instrumental_path: Path,
         voice_path: Path,
         output_path: Path,
-        total_duration: Optional[float] = None
+        total_duration: Optional[float] = None,
+        cancel_check=None,
     ) -> Path:
         """
         Executes premium mix with FFmpeg filter graph.
@@ -50,7 +52,7 @@ class PremiumAudioMixer:
         # Each filter output can be consumed only once. Split the voice for
         # the sidechain detector and for the audible voiceover in the final mix.
         # Padding both inputs also prevents a short voice track cutting BGM off.
-        ratio = max(3.0, min(12.0, abs(self.duck_amount_db) / 2.5))
+        ratio = 1.0 if self.duck_amount_db == 0 else max(1.0, min(20.0, abs(self.duck_amount_db) / 2.5))
         padding = f",apad=whole_dur={total_duration}" if total_duration else ""
         voice_padding = padding if total_duration else ",apad"
         trim = f",atrim=duration={total_duration}" if total_duration else ""
@@ -75,9 +77,6 @@ class PremiumAudioMixer:
             str(output_path)
         ]
 
-        result = subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
-        if result.returncode:
-            detail = result.stderr.decode("utf-8", errors="replace").strip()
-            raise RuntimeError(f"FFmpeg audio mixing failed: {detail}")
+        run_media(cmd, cancel_check=cancel_check)
         print(f"[+] Master audio successfully created: {output_path.name}")
         return output_path

@@ -9,7 +9,7 @@ import urllib.request
 
 import pytest
 
-from core.services.muse_service import BASE_DIR, MuseError, MuseService
+from core.services.muse_service import BASE_DIR, ERRORS, MuseError, MuseService
 from config import settings
 
 
@@ -21,6 +21,7 @@ def service(tmp_path, monkeypatch):
     bridge = tmp_path / "integrations/muse/bridge.mjs"
     bridge.parent.mkdir(parents=True)
     bridge.write_text((BASE_DIR / "integrations/muse/bridge.mjs").read_text(encoding="utf-8"), encoding="utf-8")
+    (bridge.parent / "chat_adapter.mjs").write_text((BASE_DIR / "integrations/muse/chat_adapter.mjs").read_text(encoding="utf-8"), encoding="utf-8")
     runtime = tmp_path / "workspace/tools/muse-chat-mcp"
     runtime.mkdir(parents=True)
     (runtime / "muse-driver.mjs").write_text("""
@@ -40,6 +41,7 @@ export const driver = {
    if (prompt === 'empty') return {reply:''};
    if (prompt === 'crash') throw Error('private-transcript-secret');
    if (prompt === 'env-check') return {reply:String(!process.env.MUSE_CDP && !process.env.GEMINI_API_KEY)};
+   if (prompt === 'port-check') return {reply:process.env.MUSE_CHROME_PORT};
    return {reply:prompt};
  }
 };
@@ -68,6 +70,21 @@ def test_login_translate_and_owned_shutdown(service):
     assert service._token is None and service._port is None
     assert not service.status()["running"]
     service.stop()
+
+
+@pytest.mark.parametrize("code", [
+    "chrome_connection_required", "chrome_connection_timeout",
+    "chrome_page_failed", "muse_navigation_failed", "muse_new_chat_failed",
+])
+def test_login_preserves_connection_failure_code_through_bridge(service, code):
+    driver = service.runtime_dir / "muse-driver.mjs"
+    with driver.open("a", encoding="utf-8") as source:
+        source.write(f"\ndriver.launch = async () => {{ throw new Error({json.dumps(code)}); }};\n")
+    with pytest.raises(MuseError) as caught:
+        service.start_login()
+    assert caught.value.code == code
+    assert str(caught.value) == ERRORS[code]
+    assert not service.status()["logged_in"]
 
 
 def test_stop_allows_reconnect_but_shutdown_rejects_queued_translation(service):
@@ -178,6 +195,12 @@ def test_inherited_credentials_and_cdp_are_not_forwarded(service, monkeypatch):
     monkeypatch.setenv("GEMINI_API_KEY", "test-secret-not-forwarded")
     monkeypatch.setenv("MUSE_CDP", "http://127.0.0.1:9222")
     assert service.translate("env-check") == "true"
+
+
+def test_explicit_chrome_port_comes_from_app_settings_not_inherited_environment(service, monkeypatch):
+    monkeypatch.setattr(settings, "MUSE_CHROME_PORT", 9222)
+    monkeypatch.setenv("MUSE_CHROME_PORT", "9333")
+    assert service.translate("port-check") == "9222"
 
 
 def test_missing_install_and_blank_prompt_do_not_launch(tmp_path):

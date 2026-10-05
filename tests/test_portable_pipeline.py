@@ -6,6 +6,9 @@ import struct
 import subprocess
 import tempfile
 import time
+import threading
+import sys
+import json
 import unittest
 import wave
 from pathlib import Path
@@ -19,6 +22,7 @@ from core.engines.tts.edge_fallback import EdgeTTSFallbackEngine
 from core.streaming.pipeline import SegmentItem, StreamingPipelineSession
 from core.streaming.segmenter import AudioSegmenter
 from core.streaming.export import HQExporter
+from core.media_process import run_media
 
 
 def write_wave(path, duration=1, silent=False):
@@ -53,6 +57,74 @@ class PortablePipelineTests(unittest.TestCase):
         self.assertEqual(session.tts_engine_name, settings.TTS_ENGINE)
         self.assertEqual(session.faster_whisper.model_size, settings.WHISPER_MODEL_SIZE)
         self.assertIsNone(session.vieneu)
+        self.assertEqual(session.initial_buffer_seconds, settings.INITIAL_BUFFER_SECONDS)
+
+    def test_stop_waits_for_thread_before_removing_its_input(self):
+        session = self.session()
+        marker = self.root / "thread_input.wav"
+        marker.write_bytes(b"in use")
+        started, release = threading.Event(), threading.Event()
+
+        def work():
+            started.set()
+            if not release.wait(3):
+                raise RuntimeError("test thread timeout")
+            self.assertTrue(marker.exists())
+
+        async def run():
+            async def stage():
+                try:
+                    await session._run_blocking(work)
+                finally:
+                    marker.unlink()
+
+            task = asyncio.create_task(stage())
+            try:
+                while not started.is_set():
+                    await asyncio.sleep(0.01)
+                task.cancel()
+                await asyncio.sleep(0.03)
+                task.cancel()
+                await asyncio.sleep(0.03)
+                self.assertFalse(task.done())
+                self.assertTrue(marker.exists())
+            finally:
+                release.set()
+                await asyncio.gather(task, return_exceptions=True)
+            self.assertTrue(task.cancelled())
+            self.assertFalse(marker.exists())
+
+        asyncio.run(run())
+
+    def test_ffmpeg_cancellation_reaps_process(self):
+        processes = []
+        original = subprocess.Popen
+
+        def record(*args, **kwargs):
+            process = original(*args, **kwargs)
+            processes.append(process)
+            return process
+
+        started = time.monotonic()
+        with patch("core.media_process.subprocess.Popen", side_effect=record):
+            with self.assertRaisesRegex(RuntimeError, "hủy"):
+                run_media([sys.executable, "-B", "-c", "import time; time.sleep(20)"],
+                          lambda: time.monotonic() - started > 0.1)
+        self.assertLess(time.monotonic() - started, 3)
+        self.assertIsNotNone(processes[0].poll())
+
+    def test_stopped_completed_session_removes_only_its_generated_cache(self):
+        session = self.session()
+        segment = SegmentItem(0, 0, 1, 1)
+        session.segments = {0: segment}
+        segment_audio = session.segments_dir / "seg_0.wav"
+        segment_audio.write_bytes(b"generated audio")
+        unrelated = session.cache_dir / "user_notes.txt"
+        unrelated.write_text("keep this", encoding="utf-8")
+        session.stop()
+        self.assertFalse(segment_audio.exists())
+        self.assertTrue(unrelated.exists())
+        self.assertTrue(session.is_stopped)
 
     def test_cpu_model_uses_local_files_and_no_torch(self):
         local = self.root / "workspace" / "models" / "faster-whisper-test"
@@ -180,7 +252,8 @@ class PortablePipelineTests(unittest.TestCase):
             await session.start()
             await session.worker_task
 
-        with patch.object(settings, "TTS_ENGINE", "edge-tts"), patch.object(settings, "ASR_ENGINE", "faster-whisper"):
+        with patch.object(settings, "TTS_ENGINE", "edge-tts"), patch.object(settings, "ASR_ENGINE", "faster-whisper"), \
+                patch.object(settings, "SUPPRESSION_MODE", "DSP_MONO_ADAPTIVE_FORMANT"):
             asyncio.run(run())
         self.assertIsNone(session.error)
         self.assertTrue(session.first_play_emitted)
@@ -188,6 +261,98 @@ class PortablePipelineTests(unittest.TestCase):
         self.assertTrue(Path(session.segments[0].audio_path).is_file())
         self.assertFalse(list(session.cache_dir.glob("slice_*.wav")))
         self.assertFalse(list(session.cache_dir.glob("tts_*_raw.wav")))
+        self.assertFalse(session.raw_audio_16k.exists())
+        self.assertIsNone(session.faster_whisper.model)
+        self.assertEqual(session.suppression_stats["mode"], "DSP_MONO_ADAPTIVE_FORMANT")
+        self.assertEqual(session.bgm_audio_path.suffix, ".ogg")
+        probe = subprocess.run([
+            "ffprobe", "-v", "error", "-show_streams", "-of", "json", str(session.bgm_audio_path),
+        ], capture_output=True, check=True)
+        self.assertEqual(json.loads(probe.stdout)["streams"][0]["codec_name"], "opus")
+
+    @unittest.skipUnless(shutil.which("ffmpeg") and shutil.which("ffprobe"), "FFmpeg is required")
+    def test_long_speech_fits_slot_without_losing_translated_text(self):
+        session = self.session()
+        session.raw_audio_16k = self.root / "source.wav"
+        write_wave(session.raw_audio_16k, 0.5)
+        session.asr_engine = Mock(transcribe=Mock(return_value=[{"text_zh": "完整的句子"}]))
+        text = "Giữ lại toàn bộ nội dung cuối câu."
+        session.translator.translate_single_segment = Mock(return_value={"final_vi": text})
+        session.tts_engine = Mock()
+        session.tts_engine.synthesize = lambda text, output_path, **kw: write_wave(output_path, 2)
+        segment = SegmentItem(0, 0, 0.5, 0.5)
+        session.total_duration = 0.5
+        session.segments = {0: segment}
+        asyncio.run(session._process_segment(segment))
+        duration = session.aligner.get_audio_duration(Path(segment.audio_path))
+        self.assertLessEqual(duration, 0.5001)
+        self.assertGreater(duration, 0.35)
+        self.assertEqual(segment.final_vi, text)
+        self.assertGreater(segment.speed_ratio, 1.15)
+        self.assertTrue(session.warnings)
+
+    def test_cancelled_final_render_preserves_previous_output(self):
+        exporter = HQExporter()
+        destination = self.root / "douyin_translated_regression_hq.mp4"
+        destination.write_bytes(b"previous completed export")
+        cancelled = False
+
+        def compose(**kwargs):
+            nonlocal cancelled
+            kwargs["output_path"].write_bytes(b"partial render")
+            cancelled = True
+
+        with patch.object(settings, "SEPARATION_ENGINE", "none"), \
+                patch("core.streaming.export.run_media"), \
+                patch.object(exporter, "_assemble_voice_timeline"), \
+                patch.object(exporter.mixer, "mix"), \
+                patch.object(exporter.composer, "compose", side_effect=compose):
+            with self.assertRaisesRegex(RuntimeError, "hủy"):
+                exporter.export("regression", self.root / "video.mp4", [], 1,
+                                cancel_check=lambda: cancelled)
+        self.assertEqual(destination.read_bytes(), b"previous completed export")
+        self.assertFalse(list(self.root.glob("hq_export_*")))
+
+    @unittest.skipUnless(shutil.which("ffmpeg") and shutil.which("ffprobe"), "FFmpeg is required")
+    def test_offline_alignment_does_not_shorten_translation_by_deleting_words(self):
+        aligner = self.session().aligner
+        text = "Giữ nguyên đầy đủ hành động và ý nghĩa ở cuối câu."
+        segment = {"id": 1, "start": 0, "end": 0.5, "final_vi": text}
+        tts = SimpleNamespace(synthesize=lambda text, path, **kw: write_wave(path, 2))
+        result = aligner.align_and_budget([segment], tts, None)
+        self.assertEqual(segment["final_vi"], text)
+        self.assertEqual(result[0]["final_vi"], text)
+        self.assertLessEqual(aligner.get_audio_duration(Path(result[0]["audio_path"])), 0.5001)
+        self.assertFalse(list(aligner.temp_dir.glob("*_raw.wav")))
+
+    @unittest.skipUnless(shutil.which("ffmpeg") and shutil.which("ffprobe"), "FFmpeg is required")
+    def test_alignment_checks_actual_duration_for_short_sentence_slots(self):
+        aligner = self.session().aligner
+        source = self.root / "complete speech.wav"
+        write_wave(source, 1)
+        for duration in (0.2, 0.35, 0.9, 1.1):
+            with self.subTest(duration=duration):
+                destination = self.root / f"fitted_{duration}.wav"
+                speed = aligner.apply_atempo(source, destination, 1 / duration, fit_duration=duration)
+                self.assertGreaterEqual(speed, 1 / duration)
+                self.assertLessEqual(aligner.get_audio_duration(destination), duration + 0.0001)
+
+    @unittest.skipUnless(shutil.which("ffmpeg"), "FFmpeg is required")
+    def test_timeline_keeps_silence_and_exact_segment_positions(self):
+        speech = self.root / "speech.wav"
+        write_wave(speech, 0.25)
+        timeline = self.root / "timeline.wav"
+        HQExporter._assemble_voice_timeline([
+            {"start": 0.5, "end": 0.75, "audio_path": str(speech)},
+            {"start": 1.25, "end": 1.5, "audio_path": str(speech)},
+        ], 2, timeline)
+        with wave.open(str(timeline)) as result:
+            self.assertEqual(result.getnframes(), 88200)
+            self.assertEqual(result.readframes(22050), bytes(22050 * 4))
+            self.assertNotEqual(result.readframes(11025), bytes(11025 * 4))
+            self.assertEqual(result.readframes(22050), bytes(22050 * 4))
+            self.assertNotEqual(result.readframes(11025), bytes(11025 * 4))
+            self.assertEqual(result.readframes(22050), bytes(22050 * 4))
 
     @unittest.skipUnless(shutil.which("ffmpeg") and shutil.which("ffprobe"), "FFmpeg is required")
     def test_cpu_export_needs_no_roformer_and_removes_temp(self):

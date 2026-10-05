@@ -1,6 +1,14 @@
+import { performance } from 'node:perf_hooks';
+
+const CONNECTION_TIMEOUT_MS = 60000;
+
 /** Attach only after the user enables Chrome's remote-debugging connection. */
-export function installChromeConnection(driver, chromium, mode) {
+export function installChromeConnection(driver, chromium, mode, port = 0) {
   if (mode !== 'existing') return;
+  if (!Number.isInteger(port) || port < 0 || port > 65535) throw new Error('chrome_connection_required');
+  // Chrome's consent-based server uses this fixed WebSocket path. An explicit
+  // local port targets the instance chosen by the user without profile discovery.
+  const endpoint = port ? `ws://127.0.0.1:${port}/devtools/browser` : 'chrome';
 
   let owned = null;
   let pending = null;
@@ -32,57 +40,76 @@ export function installChromeConnection(driver, chromium, mode) {
   }
 
   async function connect(version) {
-    const old = owned;
-    owned = null;
-    await release(old);
-    if (version !== generation) throw connectionError();
-    const record = { browser: null, ctx: null, page: null, disconnected: false };
-    owned = record;
+    let record = owned;
+    const reusable = record?.page && !record.page.isClosed() && record.browser.isConnected();
+    if (!reusable) {
+      owned = null;
+      await release(record);
+      if (version !== generation) throw connectionError();
+      record = { browser: null, ctx: null, page: null, disconnected: false, ready: false };
+      owned = record;
+    }
+    let phase = 'connect';
+    const connectionStarted = performance.now();
     const stillCurrent = () => {
       if (version !== generation || owned !== record) throw connectionError();
     };
     try {
-      record.browser = await chromium.connectOverCDP('chrome', {
-        noDefaults: true,
-        timeout: 20000,
-      });
-      stillCurrent();
-      record.ctx = record.browser.contexts()[0];
-      if (!record.ctx) throw connectionError();
-      // Never inspect existing tabs, cookies, storage, or another Chrome profile.
-      record.page = await record.ctx.newPage();
-      stillCurrent();
-      record.page.setDefaultTimeout(20000);
-      await record.page.goto('https://muse.ai/', {
-        waitUntil: 'domcontentloaded',
-        timeout: 60000,
-      });
+      if (!reusable) {
+        record.browser = await chromium.connectOverCDP(endpoint, {
+          noDefaults: true,
+          timeout: CONNECTION_TIMEOUT_MS,
+        });
+        stillCurrent();
+        phase = 'page';
+        record.ctx = record.browser.contexts()[0];
+        if (!record.ctx) throw connectionError();
+        // Never inspect existing tabs, cookies, storage, or another Chrome profile.
+        record.page = await record.ctx.newPage();
+        stillCurrent();
+        record.page.setDefaultTimeout(20000);
+      }
+      phase = 'navigate';
+      if (!record.ready) {
+        await record.page.goto('https://muse.ai/', {
+          waitUntil: 'domcontentloaded',
+          timeout: 60000,
+        });
+      }
       stillCurrent();
       await record.page.bringToFront();
       stillCurrent();
+      record.ready = true;
       driver.browser = record.browser;
       driver.ctx = record.ctx;
       driver.page = record.page;
       return record.page;
-    } catch {
+    } catch (error) {
+      // Playwright's named-channel connector can wrap a transport TimeoutError
+      // in a plain Error. Preserve the deadline diagnostic in that case too.
+      const connectionTimedOut = phase === 'connect' &&
+        (error?.name === 'TimeoutError' || performance.now() - connectionStarted >= CONNECTION_TIMEOUT_MS);
+      // Keep the owned tab and consented connection after a recoverable load
+      // failure, so retrying Muse does not create another tab or consent dialog.
+      if (phase === 'navigate' && version === generation && owned === record &&
+          record.page && !record.page.isClosed() && record.browser.isConnected()) {
+        record.ready = false;
+        throw new Error('muse_navigation_failed');
+      }
       if (owned === record) owned = null;
       await release(record);
       // Do not expose endpoint details, browser diagnostics, or profile paths.
-      throw connectionError();
+      if (version !== generation) throw connectionError();
+      const code = phase === 'connect'
+        ? (connectionTimedOut ? 'chrome_connection_timeout' : 'chrome_connection_required')
+        : phase === 'page' ? 'chrome_page_failed' : 'muse_navigation_failed';
+      throw new Error(code);
     }
   }
 
   driver.launch = async function () {
     if (closing) await closing;
     if (pending) return pending;
-    if (owned?.page && !owned.page.isClosed() && owned.browser.isConnected()) {
-      try {
-        await owned.page.bringToFront();
-        return owned.page;
-      } catch {
-        throw connectionError();
-      }
-    }
     const operation = connect(generation);
     pending = operation;
     try {

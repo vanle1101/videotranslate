@@ -179,6 +179,17 @@ class ServiceStartupTests(unittest.TestCase):
             self.manager.shutdown_all()
         session.stop.assert_called_once_with()
 
+    def test_shutdown_cancels_active_exports_without_changing_completed_outputs(self):
+        active = {"status": "RUNNING", "cancelled": False}
+        complete = {"status": "COMPLETED", "cancelled": False}
+        with patch.dict(sys.modules, {"main": SimpleNamespace(active_export_tasks={
+            "active": active, "complete": complete,
+        })}):
+            self.manager.shutdown_all()
+        self.assertTrue(active["cancelled"])
+        self.assertEqual(active["status"], "CANCELLING")
+        self.assertEqual(complete, {"status": "COMPLETED", "cancelled": False})
+
 
 if __name__ == "__main__":
     unittest.main()

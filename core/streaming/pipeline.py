@@ -1,6 +1,7 @@
 import asyncio
 import time
 import subprocess
+import functools
 from pathlib import Path
 from typing import Dict, Any, Optional, List, Callable
 from config import settings
@@ -60,7 +61,7 @@ class StreamingPipelineSession:
         self,
         task_id: str,
         video_path: Path,
-        initial_buffer_seconds: float = 10.0,
+        initial_buffer_seconds: Optional[float] = None,
         voice: Optional[str] = None,
         tts_engine_name: Optional[str] = None,
         asr_engine_name: Optional[str] = None,
@@ -69,7 +70,7 @@ class StreamingPipelineSession:
     ):
         self.task_id = task_id
         self.video_path = video_path
-        self.initial_buffer_seconds = initial_buffer_seconds
+        self.initial_buffer_seconds = settings.INITIAL_BUFFER_SECONDS if initial_buffer_seconds is None else initial_buffer_seconds
         self.voice = voice or settings.EDGE_VOICE
         self.tts_engine_name = tts_engine_name or settings.TTS_ENGINE
         self.asr_engine_name = asr_engine_name or settings.ASR_ENGINE
@@ -78,6 +79,7 @@ class StreamingPipelineSession:
 
         # Cache directories
         self.cache_dir = settings.BASE_DIR / "workspace" / "cache" / task_id
+        self._owns_cache = not self.cache_dir.exists()
         self.segments_dir = self.cache_dir / "segments"
         self.segments_dir.mkdir(parents=True, exist_ok=True)
 
@@ -110,11 +112,13 @@ class StreamingPipelineSession:
 
         # Control flags & queues
         self.is_running = False
+        self.is_stopped = False
         self.is_paused = False
         self.pause_event = asyncio.Event()
         self.pause_event.set()
         self.queue: asyncio.PriorityQueue = asyncio.PriorityQueue()
         self.worker_task: Optional[asyncio.Task] = None
+        self.start_task: Optional[asyncio.Task] = None
         self.rolling_context: List[Dict[str, str]] = []
 
     async def emit(self, event_type: str, data: Dict[str, Any]):
@@ -128,17 +132,28 @@ class StreamingPipelineSession:
                     await res
 
     async def start(self):
+        self.start_task = asyncio.current_task()
         try:
             await self._start()
+        except asyncio.CancelledError:
+            self.is_running = False
+            self._release_runtime()
+            await self.emit("finished", self.get_telemetry())
+            raise
         except Exception as exc:
             self.is_running = False
             self.error = str(exc)
+            self._release_runtime()
             await self.emit("error", {"message": self.error})
             await self.emit("finished", self.get_telemetry())
             raise
+        finally:
+            self.start_task = None
 
     async def _start(self):
         """Initializes audio extraction, segmentation, and launches worker loop."""
+        if self.is_stopped:
+            raise asyncio.CancelledError
         self.is_running = True
         self.start_wall_time = time.time()
         self.asr_engine = self.faster_whisper
@@ -168,21 +183,24 @@ class StreamingPipelineSession:
         ]
         await self._run_ffmpeg(cmd)
 
-        self.total_duration = await asyncio.to_thread(self.segmenter.get_audio_duration, self.raw_audio_16k)
+        self.total_duration = await self._run_blocking(self.segmenter.get_audio_duration, self.raw_audio_16k)
         if self.total_duration <= 0:
             raise ValueError("Video không có âm thanh hợp lệ để dịch.")
 
         # 1.5 Extract suppressed BGM & SFX (Removes Chinese Speech by -26dB, preserves BGM & Foley)
-        self.bgm_audio_path = self.cache_dir / "bgm_suppressed.m4a"
-        self.suppression_stats = await asyncio.to_thread(
+        # The bundled QtWebEngine does not ship proprietary AAC decoding.
+        self.bgm_audio_path = self.cache_dir / "bgm_suppressed.ogg"
+        self.suppression_stats = await self._run_blocking(
             self.vocal_suppressor.process_file,
             input_audio_path=self.video_path,
-            output_audio_path=self.bgm_audio_path
+            output_audio_path=self.bgm_audio_path,
+            forced_mode=None if settings.SUPPRESSION_MODE == "AUTO" else settings.SUPPRESSION_MODE,
+            cancel_check=lambda: self.is_stopped,
         )
         self.bgm_url = f"/api/streaming/bgm/{self.task_id}"
 
         # 2. Discover natural sentence segments
-        raw_segs = await asyncio.to_thread(self.segmenter.segment_audio, self.raw_audio_16k)
+        raw_segs = await self._run_blocking(self.segmenter.segment_audio, self.raw_audio_16k)
         for s in raw_segs:
             item = SegmentItem(s["id"], s["start"], s["end"], s["duration"])
             self.segments[item.id] = item
@@ -208,6 +226,9 @@ class StreamingPipelineSession:
 
         # 5. Launch background worker
         self.worker_task = asyncio.create_task(self._worker_loop())
+        self.worker_task.add_done_callback(
+            lambda task: self._release_runtime() if task.cancelled() else None
+        )
 
     async def seek(self, target_time: float):
         """Re-prioritizes processing to immediately serve the target playback position."""
@@ -280,8 +301,9 @@ class StreamingPipelineSession:
             "realtime_factor": self.realtime_factor,
             "time_to_first_play": self.time_to_first_play,
             "ready_to_play": self.first_play_emitted,
-            "status": "failed" if self.error else ("running" if self.is_running else "finished"),
+            "status": "cancelled" if self.is_stopped else ("failed" if self.error else ("running" if self.is_running else "finished")),
             "error": self.error,
+            "warnings": list(self.warnings),
             "vocal_removal_engine": self.vocal_suppressor.name,
             "suppression_level": f"{self.vocal_suppressor.suppression_level_db:.1f} dB",
             "suppression_rtf": self.suppression_stats.get("throughput_rtf", "0.0x")
@@ -289,7 +311,8 @@ class StreamingPipelineSession:
 
     async def _run_ffmpeg(self, cmd):
         proc = await asyncio.create_subprocess_exec(
-            *cmd, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE
+            *cmd, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
         )
         try:
             _, stderr = await proc.communicate()
@@ -300,6 +323,63 @@ class StreamingPipelineSession:
             raise
         if proc.returncode:
             raise RuntimeError(stderr.decode("utf-8", errors="replace")[-1500:])
+
+    async def _run_blocking(self, function, *args, **kwargs):
+        """Cancellation cannot kill a Python worker thread; wait before removing its files."""
+        if self.is_stopped:
+            raise asyncio.CancelledError
+        work = asyncio.get_running_loop().run_in_executor(
+            None, functools.partial(function, *args, **kwargs),
+        )
+        cancelled = False
+        while True:
+            try:
+                result = await asyncio.shield(work)
+                break
+            except asyncio.CancelledError:
+                if work.cancelled():
+                    raise
+                cancelled = True
+                continue
+            except Exception:
+                if cancelled:
+                    raise asyncio.CancelledError from None
+                raise
+        if cancelled or self.is_stopped:
+            raise asyncio.CancelledError
+        return result
+
+    def _release_runtime(self):
+        # Finished sessions retain media for replay/export, not another copy of
+        # Whisper/SenseVoice in RAM for every video processed in this app.
+        self.faster_whisper.model = None
+        self.sensevoice.recognizer = None
+        if self.vieneu is not None:
+            self.vieneu.model = None
+        def remove_generated(path):
+            try:
+                path.unlink(missing_ok=True)
+            except OSError:
+                # Windows may still have an HTTP media read open. Releasing
+                # runtime state must not turn successful work into a failure.
+                pass
+
+        raw_audio = getattr(self, "raw_audio_16k", None)
+        if raw_audio:
+            remove_generated(raw_audio)
+        if self.is_stopped and self._owns_cache:
+            # A stopped session is removed from the registry, so its generated
+            # media can no longer be replayed/exported. Remove only paths that
+            # this session generated; never recurse into user-owned content.
+            if self.bgm_audio_path:
+                remove_generated(self.bgm_audio_path)
+            for segment_id in self.segments:
+                remove_generated(self.segments_dir / f"seg_{segment_id}.wav")
+            for directory in (self.segments_dir, self.cache_dir):
+                try:
+                    directory.rmdir()
+                except OSError:
+                    pass
 
     async def _update_ready(self):
         self._recalculate_telemetry()
@@ -326,7 +406,7 @@ class StreamingPipelineSession:
                 "-i", str(self.raw_audio_16k), "-t", f"{seg.duration:.3f}",
                 "-c:a", "pcm_s16le", str(slice_wav),
             ])
-            asr_res = await asyncio.to_thread(self.asr_engine.transcribe, slice_wav, language="zh")
+            asr_res = await self._run_blocking(self.asr_engine.transcribe, slice_wav, language="zh")
             # A slice can contain several sentences. Keep every recognized word.
             seg.text_zh = " ".join(
                 part.get("text_zh", part.get("text", "")).strip() for part in (asr_res or [])
@@ -335,7 +415,7 @@ class StreamingPipelineSession:
             if seg.text_zh:
                 seg.status = "TRANSLATING"
                 await self.emit("segment_update", seg.to_dict())
-                trans = await asyncio.to_thread(
+                trans = await self._run_blocking(
                     self.translator.translate_single_segment,
                     text_zh=seg.text_zh, duration=seg.duration,
                     rolling_context=self.rolling_context, pronouns="mình - các bạn",
@@ -350,20 +430,25 @@ class StreamingPipelineSession:
 
                 seg.status = "TTS"
                 await self.emit("segment_update", seg.to_dict())
-                await asyncio.to_thread(
+                await self._run_blocking(
                     self.tts_engine.synthesize, text=seg.final_vi,
                     output_path=raw_tts_wav, voice=self.voice, ref_audio=self.ref_audio,
                 )
                 seg.status = "ALIGNING"
                 await self.emit("segment_update", seg.to_dict())
-                tts_dur = await asyncio.to_thread(self.aligner.get_audio_duration, raw_tts_wav)
+                tts_dur = await self._run_blocking(self.aligner.get_audio_duration, raw_tts_wav)
                 if tts_dur <= 0:
                     raise RuntimeError("Không đọc được âm thanh từ TTS.")
-                speed_ratio = max(self.aligner.min_speed, min(
-                    self.aligner.max_speed, tts_dur / max(0.5, seg.duration)
-                ))
+                speed_ratio = max(self.aligner.min_speed, tts_dur / max(0.01, seg.duration))
+                if speed_ratio > self.aligner.max_speed:
+                    self.warnings.append(
+                        f"Đoạn {seg.id + 1} cần đọc {speed_ratio:.2f}x để giữ đủ lời trong thời lượng gốc."
+                    )
                 final_seg_wav = self.segments_dir / f"seg_{seg.id}.wav"
-                await asyncio.to_thread(self.aligner.apply_atempo, raw_tts_wav, final_seg_wav, speed_ratio)
+                speed_ratio = await self._run_blocking(
+                    self.aligner.apply_atempo, raw_tts_wav, final_seg_wav,
+                    speed_ratio, fit_duration=seg.duration,
+                )
                 seg.tts_duration = tts_dur
                 seg.speed_ratio = round(speed_ratio, 2)
                 seg.audio_path = str(final_seg_wav.resolve())
@@ -403,6 +488,7 @@ class StreamingPipelineSession:
             raise
         finally:
             self.is_running = False
+            self._release_runtime()
             await self.emit("finished", self.get_telemetry())
 
     def pause(self):
@@ -414,10 +500,17 @@ class StreamingPipelineSession:
         self.pause_event.set()
 
     def stop(self):
+        if self.is_stopped:
+            return
+        self.is_stopped = True
         self.is_running = False
         self.pause_event.set()
-        if self.worker_task:
+        if self.start_task and not self.start_task.done():
+            self.start_task.cancel()
+        if self.worker_task and not self.worker_task.done():
             self.worker_task.cancel()
+        if not self.start_task and (not self.worker_task or self.worker_task.done()):
+            self._release_runtime()
         active_streaming_sessions.pop(self.task_id, None)
 
 # Session Manager
@@ -429,7 +522,7 @@ def get_streaming_session(task_id: str) -> Optional[StreamingPipelineSession]:
 def create_streaming_session(
     task_id: str,
     video_path: Path,
-    initial_buffer_seconds: float = 10.0,
+    initial_buffer_seconds: Optional[float] = None,
     voice: Optional[str] = None,
     tts_engine_name: Optional[str] = None,
     asr_engine_name: Optional[str] = None,

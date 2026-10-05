@@ -110,6 +110,173 @@ document.addEventListener("DOMContentLoaded", () => {
   let isBufferingUnderrun = false;
   let lastWsReportTime = 0;
   let lastExportedFileUrl = "";
+  let previewObjectUrl = null;
+  let exportingTaskId = null;
+  let exportCancelled = false;
+  let duckingLevel = -14;
+  let previewGeneration = 0;
+  let previewDescriptor = null;
+  let previewFallbackTried = false;
+  let previewPending = false;
+  let previewResumeTime = null;
+  let playWhenPreviewReady = false;
+  let translationReady = false;
+  let audioPermissionNeeded = false;
+  const mediaPlayButton = document.createElement("button");
+  mediaPlayButton.type = "button";
+  mediaPlayButton.className = "hidden rounded-lg bg-pink-600 px-4 py-2 text-xs font-semibold text-white";
+  mediaPlayButton.textContent = "Bấm để phát video và âm thanh";
+  bufferingAlert.appendChild(mediaPlayButton);
+
+  function reportPlayFailure(error) {
+    if (error.name === "AbortError") return;
+    if (error.name === "NotAllowedError") {
+      audioPermissionNeeded = true;
+      videoPlayer.pause();
+      bufferingText.textContent = "Trình duyệt cần một thao tác để bật âm thanh.";
+      mediaPlayButton.classList.remove("hidden");
+      bufferingAlert.classList.remove("hidden");
+    } else {
+      showMediaError("Không thể phát âm thanh hoặc video. Xem Diagnostics rồi thử lại.");
+    }
+  }
+  mediaPlayButton.addEventListener("click", () => {
+    audioPermissionNeeded = false;
+    mediaPlayButton.classList.add("hidden");
+    bufferingAlert.classList.add("hidden");
+    if (bgmAudio) bgmAudio.play().catch(reportPlayFailure);
+    if (activeAudio) activeAudio.play().catch(reportPlayFailure);
+    videoPlayer.play().catch(reportPlayFailure);
+  });
+
+  function escapeHtml(value) {
+    return String(value ?? "").replace(/[&<>"']/g, ch => ({"&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;"}[ch]));
+  }
+
+  function stopPreviewAudio() {
+    isBufferingUnderrun = false;
+    videoPlayer.pause();
+    if (activeAudio) activeAudio.pause();
+    if (bgmAudio) bgmAudio.pause();
+    activeAudio = null;
+    activePlayingSegId = null;
+    bgmAudio = null;
+    videoPlayer.muted = false;
+  }
+
+  function setPreviewSource(source, descriptor = null) {
+    const canReuse = previewFallbackTried && !previewPending && videoPlayer.readyState >= 2 &&
+      videoPlayer.currentSrc?.includes("/api/preview/") && descriptor?.task_id &&
+      ((previewDescriptor?.file_path && previewDescriptor.file_path === window.currentLocalFilePath) ||
+       (previewDescriptor?.file && previewDescriptor.file === selectedFile));
+    stopPreviewAudio();
+    previewGeneration++;
+    previewDescriptor = descriptor || (typeof source === "string" ? { file_path: window.currentLocalFilePath } : { file: source });
+    previewFallbackTried = !!canReuse;
+    previewPending = false;
+    audioPermissionNeeded = false;
+    mediaPlayButton.classList.add("hidden");
+    previewResumeTime = null;
+    playWhenPreviewReady = false;
+    if (canReuse) {
+      videoPlayer.currentTime = 0;
+      playerPlaceholder.classList.add("hidden");
+      return;
+    }
+    if (previewObjectUrl) URL.revokeObjectURL(previewObjectUrl);
+    previewObjectUrl = typeof source === "string" ? null : URL.createObjectURL(source);
+    videoPlayer.src = previewObjectUrl || source;
+    videoPlayer.load();
+    playerPlaceholder.classList.add("hidden");
+  }
+
+  function showMediaError(message) {
+    previewPending = false;
+    videoPlayer.pause();
+    bufferingText.textContent = message;
+    bufferingAlert.classList.remove("hidden");
+  }
+
+  async function loadCompatiblePreview() {
+    if (previewFallbackTried) {
+      showMediaError("Không thể phát bản xem trước. Hãy kiểm tra FFmpeg trong Diagnostics rồi chọn lại video.");
+      return;
+    }
+    previewFallbackTried = true;
+    previewPending = true;
+    const generation = previewGeneration;
+    const resumeTime = videoPlayer.currentTime || 0;
+    const shouldPlay = !videoPlayer.paused || translationReady;
+    videoPlayer.pause();
+    bufferingText.textContent = "Đang chuẩn bị bản xem trước tương thích… Video gốc vẫn được giữ nguyên.";
+    bufferingAlert.classList.remove("hidden");
+    try {
+      let response;
+      if (previewDescriptor?.file) {
+        const body = new FormData();
+        body.append("file", previewDescriptor.file);
+        response = await fetch("/api/preview/upload", { method: "POST", body });
+      } else {
+        response = await fetch("/api/preview", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(previewDescriptor || {}) });
+      }
+      let data = await response.json();
+      if (!response.ok) throw new Error(data.detail || "Không thể chuẩn bị bản xem trước");
+      while (generation === previewGeneration && data.status === "PROCESSING") {
+        await new Promise(resolve => setTimeout(resolve, 400));
+        if (generation !== previewGeneration) return;
+        response = await fetch(`/api/preview/${data.preview_id}`);
+        data = await response.json();
+        if (!response.ok) throw new Error(data.detail || "Không đọc được trạng thái bản xem trước");
+      }
+      if (generation !== previewGeneration) return;
+      if (data.status !== "READY") throw new Error(data.error || "Không thể tạo bản xem trước");
+      previewResumeTime = resumeTime;
+      playWhenPreviewReady = shouldPlay || translationReady;
+      videoPlayer.src = data.video_url;
+      videoPlayer.load();
+    } catch (error) {
+      if (generation === previewGeneration) showMediaError(`Lỗi xem trước: ${error.message}`);
+    }
+  }
+
+  videoPlayer.addEventListener("error", () => {
+    if (videoPlayer.error && [3, 4].includes(videoPlayer.error.code)) loadCompatiblePreview();
+    else showMediaError("Không tải được video. Hãy kiểm tra đường dẫn hoặc chọn lại file.");
+  });
+  videoPlayer.addEventListener("loadedmetadata", () => {
+    if (previewResumeTime !== null) videoPlayer.currentTime = Math.min(previewResumeTime, videoPlayer.duration || 0);
+  });
+  videoPlayer.addEventListener("canplay", () => {
+    if (previewResumeTime === null) return;
+    previewResumeTime = null;
+    previewPending = false;
+    if (!currentTaskId || translationReady) bufferingAlert.classList.add("hidden");
+    else bufferingText.textContent = "Đang chờ các câu dịch đầu tiên...";
+    if (playWhenPreviewReady) videoPlayer.play().catch(reportPlayFailure);
+  });
+
+  function selectPreviewSource(source) {
+    segments = {};
+    translationReady = false;
+    totalVideoDuration = 0;
+    currentTaskId = null;
+    if (currentWs) currentWs.close();
+    currentWs = null;
+    subtitleText.textContent = "";
+    document.getElementById("pipeline-warning")?.classList.add("hidden");
+    bufferingAlert.classList.add("hidden");
+    renderSegmentsDrawer();
+    renderTimelineSlices();
+    setPreviewSource(source);
+  }
+
+  function setSelectValue(select, value, label = value) {
+    if (!select || value == null) return;
+    if (![...select.options].some(option => option.value === String(value))) {
+      select.add(new Option(String(label), String(value)));
+    }
+    select.value = String(value);
+  }
 
   // =========================================================
   // 1. NAVIGATION TABS (STUDIO / TASKS / MODELS / DIAGNOSTICS / SETTINGS)
@@ -172,24 +339,41 @@ document.addEventListener("DOMContentLoaded", () => {
   // =========================================================
   window.loadDroppedLocalVideo = function(filePath) {
     if (!filePath) return;
+    if (btnStart.classList.contains("hidden") || exportingTaskId) {
+      alert("Hãy dừng phiên dịch hiện tại trước khi chọn video khác.");
+      return;
+    }
     window.currentLocalFilePath = filePath;
     selectedFile = null;
     videoUrlInput.value = "";
     const fileName = filePath.split(/[\\/]/).pop();
-    fileNameDisplay.innerHTML = `<span class="text-pink-400 font-bold">[LOCAL FILE]</span> ${fileName}`;
+    fileNameDisplay.textContent = `[LOCAL FILE] ${fileName}`;
     
     // Preview in video player immediately
-    videoPlayer.src = `/api/local-file?path=${encodeURIComponent(filePath)}`;
-    videoPlayer.load();
-    playerPlaceholder.classList.add("hidden");
+    selectPreviewSource(`/api/local-file?path=${encodeURIComponent(filePath)}`);
   };
 
   dropZone.addEventListener("click", () => {
+    if (btnStart.classList.contains("hidden") || exportingTaskId) return;
     if (window.desktopBridge && typeof window.desktopBridge.pickVideoFile === "function") {
       window.desktopBridge.pickVideoFile();
     } else {
       fileInput.click();
     }
+  });
+  dropZone.addEventListener("keydown", event => {
+    if (event.key === "Enter" || event.key === " ") {
+      event.preventDefault();
+      dropZone.click();
+    }
+  });
+  fileInput.addEventListener("click", event => event.stopPropagation());
+  videoUrlInput.addEventListener("input", () => {
+    if (!videoUrlInput.value.trim()) return;
+    selectedFile = null;
+    window.currentLocalFilePath = null;
+    fileInput.value = "";
+    fileNameDisplay.textContent = "Chọn file từ máy (Native Dialog)";
   });
 
   fileInput.addEventListener("change", (e) => {
@@ -198,9 +382,7 @@ document.addEventListener("DOMContentLoaded", () => {
       window.currentLocalFilePath = null;
       fileNameDisplay.textContent = `Đã chọn: ${selectedFile.name} (${(selectedFile.size / 1024 / 1024).toFixed(1)}MB)`;
       videoUrlInput.value = "";
-      videoPlayer.src = URL.createObjectURL(selectedFile);
-      videoPlayer.load();
-      playerPlaceholder.classList.add("hidden");
+      selectPreviewSource(selectedFile);
     }
   });
 
@@ -210,14 +392,13 @@ document.addEventListener("DOMContentLoaded", () => {
   dropZone.addEventListener("drop", (e) => {
     e.preventDefault();
     dropZone.classList.remove("border-pink-500");
+    if (btnStart.classList.contains("hidden") || exportingTaskId) return;
     if (e.dataTransfer.files.length > 0) {
       selectedFile = e.dataTransfer.files[0];
       window.currentLocalFilePath = null;
       fileNameDisplay.textContent = `Đã chọn: ${selectedFile.name} (${(selectedFile.size / 1024 / 1024).toFixed(1)}MB)`;
       videoUrlInput.value = "";
-      videoPlayer.src = URL.createObjectURL(selectedFile);
-      videoPlayer.load();
-      playerPlaceholder.classList.add("hidden");
+      selectPreviewSource(selectedFile);
     }
   });
 
@@ -237,14 +418,15 @@ document.addEventListener("DOMContentLoaded", () => {
   });
   volBgmSlider.addEventListener("input", () => {
     volBgmVal.textContent = `${Math.round(volBgmSlider.value * 100)}%`;
-    if (bgmAudio) bgmAudio.volume = parseFloat(volBgmSlider.value);
+    syncPlayback();
   });
 
   videoPlayer.addEventListener("play", () => {
     if (bgmAudio) {
       bgmAudio.currentTime = videoPlayer.currentTime;
-      bgmAudio.play().catch(() => {});
+      bgmAudio.play().catch(reportPlayFailure);
     }
+    syncPlayback();
   });
 
   videoPlayer.addEventListener("pause", () => {
@@ -259,6 +441,14 @@ document.addEventListener("DOMContentLoaded", () => {
       activeAudio = null;
       activePlayingSegId = null;
     }
+    if (currentWs?.readyState === WebSocket.OPEN) {
+      currentWs.send(JSON.stringify({ type: "seek", time: videoPlayer.currentTime }));
+    }
+  });
+  videoPlayer.addEventListener("seeked", syncPlayback);
+  videoPlayer.addEventListener("ratechange", () => {
+    if (bgmAudio) bgmAudio.playbackRate = videoPlayer.playbackRate;
+    if (activeAudio) activeAudio.playbackRate = videoPlayer.playbackRate;
   });
 
   function formatTime(secs) {
@@ -278,7 +468,21 @@ document.addEventListener("DOMContentLoaded", () => {
       return;
     }
 
+    if (exportingTaskId) {
+      alert("Hãy chờ xuất video hoặc hủy tác vụ xuất trước khi bắt đầu phiên mới.");
+      return;
+    }
+    stopPreviewAudio();
+    if (currentWs) currentWs.close();
+    currentWs = null;
+    currentTaskId = null;
+    totalVideoDuration = 0;
+    translationReady = false;
+    lastExportedFileUrl = "";
     btnStart.classList.add("hidden");
+    videoUrlInput.disabled = true;
+    fileInput.disabled = true;
+    dropZone.setAttribute("aria-disabled", "true");
     btnPauseWorker.classList.remove("hidden");
     btnResumeWorker.classList.add("hidden");
     btnStopWorker.classList.remove("hidden");
@@ -341,8 +545,7 @@ document.addEventListener("DOMContentLoaded", () => {
       const data = await res.json();
       currentTaskId = data.task_id;
 
-      videoPlayer.src = data.video_url;
-      videoPlayer.load();
+      setPreviewSource(data.video_url, { task_id: currentTaskId });
       videoPlayer.volume = parseFloat(volBgmSlider.value);
       playerPlaceholder.classList.add("hidden");
 
@@ -365,7 +568,9 @@ document.addEventListener("DOMContentLoaded", () => {
     const proto = window.location.protocol === "https:" ? "wss:" : "ws:";
     currentWs = new WebSocket(`${proto}//${window.location.host}/ws/stream/${taskId}`);
 
+    const socket = currentWs;
     currentWs.onmessage = (event) => {
+      if (socket !== currentWs) return;
       const msg = JSON.parse(event.data);
 
       if (msg.type === "init") {
@@ -380,13 +585,14 @@ document.addEventListener("DOMContentLoaded", () => {
             bgmAudio = null;
           }
           bgmAudio = new Audio(bgmUrl);
+          bgmAudio.addEventListener("error", () => showMediaError("Không phát được nhạc nền. Xem Diagnostics và thử lại phiên dịch."));
           bgmAudio.volume = parseFloat(volBgmSlider.value);
           videoPlayer.muted = true; // Raw audio muted; BGM + Foley plays via bgmAudio!
         }
 
         if (msg.suppression_level) {
-          telSuppression.textContent = msg.suppression_level;
-          playerSuppressionBadge.textContent = msg.suppression_level;
+          telSuppression.textContent = `≈ ${msg.suppression_level}`;
+          playerSuppressionBadge.textContent = `≈ ${msg.suppression_level}`;
         }
 
         msg.segments.forEach(s => {
@@ -399,6 +605,12 @@ document.addEventListener("DOMContentLoaded", () => {
         segments[msg.id] = msg;
         updateSegmentSlice(msg);
         updateSegmentDrawerItem(msg);
+        if (isBufferingUnderrun && ["READY", "PLAYED"].includes(msg.status) &&
+            videoPlayer.currentTime >= msg.start && videoPlayer.currentTime < msg.end) {
+          isBufferingUnderrun = false;
+          bufferingAlert.classList.add("hidden");
+          videoPlayer.play().catch(reportPlayFailure);
+        }
 
         // Worker status badges
         if (msg.status === "ASR") {
@@ -417,6 +629,11 @@ document.addEventListener("DOMContentLoaded", () => {
         }
       }
       else if (msg.type === "telemetry") {
+        const warning = document.getElementById("pipeline-warning");
+        if (warning) {
+          warning.textContent = (msg.warnings || []).join(" · ");
+          warning.classList.toggle("hidden", !warning.textContent);
+        }
         telPlayable.textContent = formatTime(msg.playable_until);
         const buf = msg.buffer_ahead || 0;
         telBuffer.textContent = `+${buf.toFixed(1)}s`;
@@ -438,19 +655,23 @@ document.addEventListener("DOMContentLoaded", () => {
         }
       }
       else if (msg.type === "ready_to_play") {
-        bufferingAlert.classList.add("hidden");
-        videoPlayer.play().catch(() => {});
-        if (bgmAudio) {
-          bgmAudio.currentTime = videoPlayer.currentTime;
-          bgmAudio.play().catch(() => {});
+        translationReady = true;
+        if (!previewPending) {
+          bufferingAlert.classList.add("hidden");
+          videoPlayer.play().catch(error => {
+            if (error.name === "NotSupportedError") loadCompatiblePreview();
+            else reportPlayFailure(error);
+          });
         }
       }
       else if (msg.type === "export_progress") {
         if (exportProgressBar) exportProgressBar.style.width = `${msg.progress}%`;
         if (exportProgressPct) exportProgressPct.textContent = `${msg.progress}%`;
-        if (exportStatusText) exportStatusText.innerHTML = `<i class="fa-solid fa-spinner fa-spin text-pink-400"></i> ${msg.stage}`;
+        if (exportStatusText) exportStatusText.textContent = msg.stage;
       }
       else if (msg.type === "error") {
+        isBufferingUnderrun = false;
+        videoPlayer.pause();
         bufferingText.textContent = msg.message || msg.error || "Xử lý thất bại. Xem Diagnostics rồi thử lại.";
         bufferingAlert.classList.remove("hidden");
         resetWorkerControls();
@@ -464,29 +685,31 @@ document.addEventListener("DOMContentLoaded", () => {
   }
 
   // Realtime Dubbing Frame Loop
-  videoPlayer.addEventListener("timeupdate", () => {
+  function syncPlayback() {
     const curTime = videoPlayer.currentTime;
     telPlaying.textContent = formatTime(curTime);
     barCurrentTime.textContent = formatTime(curTime);
 
     if (totalVideoDuration > 0) {
       const pct = (curTime / totalVideoDuration) * 100;
-      playbackHeadMarker.style.left = `${Math.min(100, Math.max(0, pct))}%`;
+      if (playbackHeadMarker) playbackHeadMarker.style.left = `${Math.min(100, Math.max(0, pct))}%`;
+      timelineTrack.setAttribute("aria-valuenow", String(Math.round(curTime)));
     }
 
     // Sync BGM
     if (bgmAudio && !videoPlayer.paused) {
+      bgmAudio.playbackRate = videoPlayer.playbackRate;
       if (Math.abs(bgmAudio.currentTime - curTime) > 0.25) {
         bgmAudio.currentTime = curTime;
       }
-      if (bgmAudio.paused) bgmAudio.play().catch(() => {});
+      if (bgmAudio.paused && !audioPermissionNeeded) bgmAudio.play().catch(reportPlayFailure);
     }
 
     // Active Vietnamese Dub Segment
     let matchedSeg = null;
     for (const id in segments) {
       const s = segments[id];
-      if (curTime >= s.start && curTime <= s.end) {
+      if (curTime >= s.start && curTime < s.end) {
         matchedSeg = s;
         break;
       }
@@ -495,8 +718,14 @@ document.addEventListener("DOMContentLoaded", () => {
     if (matchedSeg) {
       subtitleText.textContent = matchedSeg.final_vi || matchedSeg.natural_vi || matchedSeg.literal_vi || "";
       subtitleOverlay.classList.remove("opacity-0");
+      if (!["READY", "PLAYED"].includes(matchedSeg.status) && !videoPlayer.paused) {
+        isBufferingUnderrun = true;
+        videoPlayer.pause();
+        bufferingText.textContent = "Đang chờ dịch và tạo giọng cho câu tiếp theo...";
+        bufferingAlert.classList.remove("hidden");
+      }
 
-      if (matchedSeg.status === "READY" && matchedSeg.audio_url) {
+      if (["READY", "PLAYED"].includes(matchedSeg.status) && matchedSeg.audio_url) {
         if (activePlayingSegId !== matchedSeg.id) {
           if (activeAudio) {
             activeAudio.pause();
@@ -504,11 +733,15 @@ document.addEventListener("DOMContentLoaded", () => {
           }
           activePlayingSegId = matchedSeg.id;
           activeAudio = new Audio(matchedSeg.audio_url);
+          activeAudio.addEventListener("error", () => showMediaError(`Không phát được giọng đọc câu #${matchedSeg.id}. Xem Diagnostics rồi thử lại.`));
           activeAudio.volume = parseFloat(volDubSlider.value);
           const offset = Math.max(0, curTime - matchedSeg.start);
           activeAudio.currentTime = offset;
-          activeAudio.play().catch(() => {});
         }
+        activeAudio.playbackRate = videoPlayer.playbackRate;
+        const offset = Math.max(0, curTime - matchedSeg.start);
+        if (Math.abs(activeAudio.currentTime - offset) > 0.25) activeAudio.currentTime = offset;
+        if (!videoPlayer.paused && activeAudio.paused && !activeAudio.ended && !audioPermissionNeeded) activeAudio.play().catch(reportPlayFailure);
       }
     } else {
       subtitleText.textContent = "";
@@ -520,6 +753,11 @@ document.addEventListener("DOMContentLoaded", () => {
       }
     }
 
+    if (bgmAudio) {
+      const speaking = matchedSeg && ["READY", "PLAYED"].includes(matchedSeg.status) && matchedSeg.audio_url;
+      bgmAudio.volume = parseFloat(volBgmSlider.value) * (speaking ? Math.pow(10, duckingLevel / 20) : 1);
+    }
+
     // Report playback head over WebSocket
     if (currentWs && currentWs.readyState === WebSocket.OPEN) {
       if (Date.now() - lastWsReportTime > 500) {
@@ -527,11 +765,14 @@ document.addEventListener("DOMContentLoaded", () => {
         currentWs.send(JSON.stringify({ type: "playback_position", time: curTime }));
       }
     }
-  });
+  }
+  videoPlayer.addEventListener("timeupdate", syncPlayback);
 
   // Timeline Slices
   function renderTimelineSlices() {
     timelineTrack.innerHTML = '<div id="playback-head-marker" class="absolute top-0 bottom-0 w-1 bg-white z-10 shadow-glow" style="left: 0%;"></div>';
+    playbackHeadMarker = document.getElementById("playback-head-marker");
+    timelineTrack.setAttribute("aria-valuemax", String(Math.ceil(totalVideoDuration)));
     if (!totalVideoDuration) return;
     for (const id in segments) {
       const s = segments[id];
@@ -541,7 +782,9 @@ document.addEventListener("DOMContentLoaded", () => {
       slice.style.left = `${(s.start / totalVideoDuration) * 100}%`;
       slice.style.width = `${Math.max(0.5, (s.duration / totalVideoDuration) * 100)}%`;
       timelineTrack.appendChild(slice);
+      updateSegmentSlice(s);
     }
+    syncPlayback();
   }
 
   function updateSegmentSlice(seg) {
@@ -569,8 +812,8 @@ document.addEventListener("DOMContentLoaded", () => {
             <span>[${formatTime(s.start)} - ${formatTime(s.end)}]</span>
             <span id="seg-badge-${s.id}" class="px-1.5 py-0.2 rounded text-[9px] bg-gray-800 text-gray-300">${s.status}</span>
           </div>
-          <p class="text-gray-300 font-sans text-xs truncate" id="seg-zh-${s.id}">${s.text_zh || "..."}</p>
-          <p class="text-pink-300 font-sans text-xs font-semibold" id="seg-vi-${s.id}">${s.final_vi || s.natural_vi || ""}</p>
+          <p class="text-gray-300 font-sans text-xs truncate" id="seg-zh-${s.id}">${escapeHtml(s.text_zh || "...")}</p>
+          <p class="text-pink-300 font-sans text-xs font-semibold" id="seg-vi-${s.id}">${escapeHtml(s.final_vi || s.natural_vi || "")}</p>
         </div>
       `;
       segmentsList.appendChild(row);
@@ -611,71 +854,76 @@ document.addEventListener("DOMContentLoaded", () => {
     videoPlayer.currentTime = targetTime;
     if (bgmAudio) bgmAudio.currentTime = targetTime;
 
-    if (currentWs && currentWs.readyState === WebSocket.OPEN) {
-      currentWs.send(JSON.stringify({ type: "seek", time: targetTime }));
-    }
+  });
+  timelineTrack.addEventListener("keydown", event => {
+    if (!["ArrowLeft", "ArrowRight", "Home", "End"].includes(event.key) || !totalVideoDuration) return;
+    event.preventDefault();
+    const target = event.key === "Home" ? 0 : event.key === "End" ? totalVideoDuration : videoPlayer.currentTime + (event.key === "ArrowLeft" ? -5 : 5);
+    videoPlayer.currentTime = Math.min(totalVideoDuration, Math.max(0, target));
   });
 
   // Worker controls
   function resetWorkerControls() {
+    videoUrlInput.disabled = false;
+    fileInput.disabled = false;
+    dropZone.setAttribute("aria-disabled", "false");
     btnStart.classList.remove("hidden");
     btnPauseWorker.classList.add("hidden");
     btnResumeWorker.classList.add("hidden");
     btnStopWorker.classList.add("hidden");
   }
 
-  btnPauseWorker.addEventListener("click", () => {
-    if (currentWs) currentWs.send(JSON.stringify({ type: "pause" }));
-    btnPauseWorker.classList.add("hidden");
-    btnResumeWorker.classList.remove("hidden");
-  });
-
-  btnResumeWorker.addEventListener("click", () => {
-    if (currentWs) currentWs.send(JSON.stringify({ type: "resume" }));
-    btnResumeWorker.classList.add("hidden");
-    btnPauseWorker.classList.remove("hidden");
-  });
-
-  btnStopWorker.addEventListener("click", () => {
-    if (currentWs) currentWs.send(JSON.stringify({ type: "stop" }));
-    resetWorkerControls();
-  });
-
-  // Tray control helpers exposed on window
-  window.studioPause = () => { if (currentWs) currentWs.send(JSON.stringify({ type: "pause" })); };
-  window.studioResume = () => { if (currentWs) currentWs.send(JSON.stringify({ type: "resume" })); };
-  window.studioStop = () => { if (currentWs) currentWs.send(JSON.stringify({ type: "stop" })); resetWorkerControls(); };
+  async function controlTask(id, action) {
+    if (!id) return;
+    try {
+      const response = await fetch(`/api/tasks/${encodeURIComponent(id)}/${action}`, { method: "POST" });
+      const data = await response.json();
+      if (!response.ok) throw new Error(data.detail || "Không thể điều khiển tác vụ");
+      if (id === currentTaskId) {
+        if (action === "stop") {
+          stopPreviewAudio();
+          segments = {};
+          translationReady = false;
+          playWhenPreviewReady = false;
+          previewGeneration++;
+          previewPending = false;
+          previewResumeTime = null;
+          subtitleText.textContent = "";
+          subtitleOverlay.classList.add("opacity-0");
+          renderTimelineSlices();
+          renderSegmentsDrawer();
+          segmentsCountBadge.textContent = "0 câu";
+          resetWorkerControls();
+          bufferingAlert.classList.add("hidden");
+          if (currentWs) {
+            currentWs.onmessage = null;
+            currentWs.close();
+          }
+          currentWs = null;
+          currentTaskId = null;
+        } else {
+          btnPauseWorker.classList.toggle("hidden", action === "pause");
+          btnResumeWorker.classList.toggle("hidden", action === "resume");
+        }
+      }
+      await updateTasksTable();
+    } catch (error) {
+      alert("Lỗi điều khiển tác vụ: " + error.message);
+    }
+  }
+  window.studioPause = () => controlTask(currentTaskId, "pause");
+  window.studioResume = () => controlTask(currentTaskId, "resume");
+  window.studioStop = () => controlTask(currentTaskId, "stop");
+  btnPauseWorker.addEventListener("click", window.studioPause);
+  btnResumeWorker.addEventListener("click", window.studioResume);
+  btnStopWorker.addEventListener("click", window.studioStop);
 
   // =========================================================
   // 7. TASK MANAGER VIEW
   // =========================================================
-  window.pauseTask = async (id) => {
-    try {
-      await fetch(`/api/tasks/${id}/pause`, { method: "POST" });
-      updateTasksTable();
-    } catch (e) {
-      alert("Lỗi tạm dừng tác vụ: " + e.message);
-    }
-  };
-
-  window.resumeTask = async (id) => {
-    try {
-      await fetch(`/api/tasks/${id}/resume`, { method: "POST" });
-      updateTasksTable();
-    } catch (e) {
-      alert("Lỗi tiếp tục tác vụ: " + e.message);
-    }
-  };
-
-  window.stopTask = async (id) => {
-    try {
-      await fetch(`/api/tasks/${id}/stop`, { method: "POST" });
-      if (id === currentTaskId) resetWorkerControls();
-      updateTasksTable();
-    } catch (e) {
-      alert("Lỗi hủy tác vụ: " + e.message);
-    }
-  };
+  window.pauseTask = id => controlTask(id, "pause");
+  window.resumeTask = id => controlTask(id, "resume");
+  window.stopTask = id => controlTask(id, "stop");
 
   async function updateTasksTable() {
     const tbody = document.getElementById("tasks-table-body");
@@ -699,8 +947,8 @@ document.addEventListener("DOMContentLoaded", () => {
         let statusBadge = "";
         if (t.status === "RUNNING") {
           statusBadge = `<span class="px-2 py-0.5 rounded bg-emerald-950 text-emerald-400 border border-emerald-800 text-[10px] animate-pulse">ĐANG CHẠY</span>`;
-        } else if (t.status === "PAUSED") {
-          statusBadge = `<span class="px-2 py-0.5 rounded bg-amber-950 text-amber-400 border border-amber-800 text-[10px]">TẠM DỪNG</span>`;
+        } else if (t.status === "PAUSED" || t.status === "CANCELLING") {
+          statusBadge = `<span class="px-2 py-0.5 rounded bg-amber-950 text-amber-400 border border-amber-800 text-[10px]">${t.status === "CANCELLING" ? "ĐANG DỪNG" : "TẠM DỪNG"}</span>`;
         } else if (t.status === "COMPLETED") {
           statusBadge = `<span class="px-2 py-0.5 rounded bg-blue-950 text-blue-400 border border-blue-800 text-[10px]">HOÀN THÀNH</span>`;
         } else if (t.status === "CANCELLED" || t.status === "STOPPED") {
@@ -731,7 +979,7 @@ document.addEventListener("DOMContentLoaded", () => {
               <div class="w-24 bg-gray-800 h-2 rounded-full overflow-hidden">
                 <div class="bg-gradient-to-r from-pink-500 to-violet-500 h-full transition-all duration-300" style="width: ${t.progress_pct}%"></div>
               </div>
-              <span class="text-[10px] text-gray-300 font-sans">${t.progress_pct}% (${t.stage || ''})</span>
+              <span class="text-[10px] text-gray-300 font-sans">${t.progress_pct}% (${escapeHtml(t.stage || '')})</span>
             </div>
           </td>
           <td class="p-3.5 text-gray-300">${formatTime(t.duration)}</td>
@@ -745,6 +993,9 @@ document.addEventListener("DOMContentLoaded", () => {
     }
   }
   document.getElementById("btn-refresh-tasks")?.addEventListener("click", updateTasksTable);
+  setInterval(() => {
+    if (!document.getElementById("view-tasks").classList.contains("hidden")) updateTasksTable();
+  }, 2000);
 
   // =========================================================
   // 8. MODEL MANAGER VIEW
@@ -885,7 +1136,7 @@ document.addEventListener("DOMContentLoaded", () => {
           settingsGeminiKey.value = "";
           settingsGeminiKey.placeholder = cfg.gemini_configured ? "Đã có key — để trống để giữ nguyên" : "Nhập Gemini API key";
         }
-        if (settingsGeminiModel && cfg.gemini_model) settingsGeminiModel.value = cfg.gemini_model;
+        if (settingsGeminiModel && cfg.gemini_model != null) settingsGeminiModel.value = cfg.gemini_model;
         const museMode = document.getElementById("settings-muse-browser-mode");
         if (museMode) museMode.value = cfg.muse_browser_mode || "dedicated";
         if (settingsOpenRouterModel) settingsOpenRouterModel.value = cfg.openrouter_model;
@@ -908,8 +1159,10 @@ document.addEventListener("DOMContentLoaded", () => {
             : "Chưa tìm thấy key. Mở OpenCode → /connect → OpenCode Zen rồi tải lại tab Cài đặt.";
         }
         if (settingsSuppressionMode && cfg.suppression_mode) settingsSuppressionMode.value = cfg.suppression_mode;
-        if (settingsDuckingLevel && cfg.ducking_level) settingsDuckingLevel.value = cfg.ducking_level;
-        if (settingsBufferTarget && cfg.buffer_target) settingsBufferTarget.value = cfg.buffer_target;
+        setSelectValue(settingsDuckingLevel, cfg.ducking_level, `${cfg.ducking_level} dB`);
+        setSelectValue(settingsBufferTarget, cfg.buffer_target, `${cfg.buffer_target}s`);
+        setSelectValue(bufferSelect, cfg.buffer_target, `${cfg.buffer_target} giây`);
+        duckingLevel = Number(cfg.ducking_level ?? -14);
       }
     } catch (e) {
       console.warn("Could not load backend settings:", e);
@@ -1085,45 +1338,63 @@ document.addEventListener("DOMContentLoaded", () => {
       return;
     }
     exportModal.classList.remove("hidden");
-    exportStatusBox.classList.add("hidden");
-    exportResultBox.classList.add("hidden");
-    btnConfirmExport.classList.remove("hidden");
+    exportStatusBox.classList.toggle("hidden", !exportingTaskId);
+    exportResultBox.classList.toggle("hidden", !lastExportedFileUrl || !!exportingTaskId);
+    btnConfirmExport.classList.toggle("hidden", !!exportingTaskId);
+    btnCloseExportModal.focus();
   });
 
-  btnCloseExportModal.addEventListener("click", () => exportModal.classList.add("hidden"));
+  function closeExportModal() {
+    exportModal.classList.add("hidden");
+    btnExportHQ.focus();
+  }
+  btnCloseExportModal.addEventListener("click", closeExportModal);
+  exportModal.addEventListener("keydown", event => {
+    if (event.key === "Escape") closeExportModal();
+    if (event.key !== "Tab") return;
+    const buttons = [...exportModal.querySelectorAll("button, a, input, select")].filter(el => !el.disabled && el.getClientRects().length);
+    const first = buttons[0], last = buttons[buttons.length - 1];
+    if (event.shiftKey && document.activeElement === first) { event.preventDefault(); last?.focus(); }
+    else if (!event.shiftKey && document.activeElement === last) { event.preventDefault(); first?.focus(); }
+  });
 
   btnCancelExport?.addEventListener("click", async () => {
-    if (!currentTaskId) return;
+    if (!exportingTaskId) return;
     try {
-      await fetch(`/api/streaming/export-hq/cancel/${currentTaskId}`, { method: "POST" });
+      const response = await fetch(`/api/streaming/export-hq/cancel/${exportingTaskId}`, { method: "POST" });
+      const data = await response.json();
+      if (!response.ok) throw new Error(data.detail || "Không thể hủy tác vụ xuất");
+      exportCancelled = true;
+      btnCancelExport.disabled = true;
       if (exportStatusText) exportStatusText.textContent = "Đang hủy tác vụ xuất video...";
-      setTimeout(() => {
-        exportStatusBox.classList.add("hidden");
-        btnConfirmExport.classList.remove("hidden");
-        updateTasksTable();
-      }, 1000);
+      updateTasksTable();
     } catch (e) {
       alert("Lỗi hủy xuất: " + e.message);
     }
   });
 
   btnConfirmExport.addEventListener("click", async () => {
+    if (!currentTaskId || exportingTaskId) return;
+    const taskId = currentTaskId;
+    exportingTaskId = taskId;
+    exportCancelled = false;
+    btnCancelExport.disabled = false;
     btnConfirmExport.classList.add("hidden");
     exportStatusBox.classList.remove("hidden");
     exportResultBox.classList.add("hidden");
     if (exportProgressBar) exportProgressBar.style.width = "5%";
     if (exportProgressPct) exportProgressPct.textContent = "5%";
-    exportStatusText.innerHTML = '<i class="fa-solid fa-spinner fa-spin text-pink-400"></i> Khởi động BS-RoFormer tách vocal & Foley...';
+    exportStatusText.textContent = "Đang chuẩn bị âm thanh, phụ đề và xuất video...";
 
     // Poll for status updates
     const pollInterval = setInterval(async () => {
       try {
-        const sRes = await fetch(`/api/streaming/export-hq/status/${currentTaskId}`);
+        const sRes = await fetch(`/api/streaming/export-hq/status/${taskId}`);
         if (sRes.ok) {
           const sData = await sRes.json();
           if (exportProgressBar) exportProgressBar.style.width = `${sData.progress}%`;
           if (exportProgressPct) exportProgressPct.textContent = `${sData.progress}%`;
-          if (exportStatusText) exportStatusText.innerHTML = `<i class="fa-solid fa-spinner fa-spin text-pink-400"></i> ${sData.stage}`;
+          if (exportStatusText) exportStatusText.textContent = sData.stage;
           if (sData.status === "COMPLETED" || sData.status === "FAILED" || sData.status === "CANCELLED") {
             clearInterval(pollInterval);
           }
@@ -1135,7 +1406,7 @@ document.addEventListener("DOMContentLoaded", () => {
       const res = await fetch("/api/streaming/export-hq", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ task_id: currentTaskId, mask_chinese: toggleMaskChinese.checked })
+        body: JSON.stringify({ task_id: taskId, mask_chinese: toggleMaskChinese.checked })
       });
       clearInterval(pollInterval);
       const data = await res.json();
@@ -1159,8 +1430,12 @@ document.addEventListener("DOMContentLoaded", () => {
     } catch (e) {
       clearInterval(pollInterval);
       exportStatusBox.classList.remove("hidden");
-      exportStatusText.textContent = `Lỗi xuất video: ${e.message}`;
+      exportStatusText.textContent = exportCancelled ? "Đã hủy xuất video." : `Lỗi xuất video: ${e.message}`;
       btnConfirmExport.classList.remove("hidden");
+    } finally {
+      exportingTaskId = null;
+      btnCancelExport.disabled = true;
+      updateTasksTable();
     }
   });
 
@@ -1182,4 +1457,5 @@ document.addEventListener("DOMContentLoaded", () => {
     }
   });
 
+  loadSettingsForm();
 });

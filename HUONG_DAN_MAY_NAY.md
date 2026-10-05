@@ -1,10 +1,10 @@
 # Chạy trên Windows, RAM 16 GB
 
-Máy đã kiểm tra ngày 04/10/2026: Intel i5-13420H (8 nhân / 12 luồng), RAM 16 GB, NVIDIA RTX 2050 4 GB, Windows 11, Python 3.12.10 và FFmpeg 9.0.1.
+Máy đã kiểm tra ngày 05/10/2026: Intel i5-13420H (8 nhân / 12 luồng), RAM 16 GB, NVIDIA RTX 2050 4 GB, Windows 11, Python 3.12.10 và FFmpeg 9.0.1.
 
 ## Mở ứng dụng
 
-Nhấp đúp **start.bat**, chọn video MP4, chọn giọng Hoài My hoặc Nam Minh, rồi bấm **Bắt đầu dịch & phát realtime**. Chờ xử lý xong trước khi bấm xuất MP4. Thành phẩm nằm trong `workspace/outputs`.
+Nhấp đúp **Douyin2TikTok AI Studio.lnk** (logo Studio) hoặc **start.bat**, chọn video MP4, chọn giọng Hoài My hoặc Nam Minh, rồi bấm **Bắt đầu dịch & phát realtime**. Chờ xử lý xong trước khi bấm xuất MP4. Thành phẩm nằm trong `workspace/outputs`. Nếu chuyển thư mục, chạy `create_shortcut.ps1` để tạo lại lối mở; `setup.ps1` cũng tạo lối mở này sau cài đặt.
 
 Môi trường `venv`, cấu hình `.env` và model Whisper Small đã được cài ở máy này. Sau khi khởi động lại Windows không cần cài lại. Nếu chuyển sang máy khác hoặc bị thiếu thư viện, chạy **setup.bat**. Script dùng Python 3.12, tái sử dụng package hệ thống phù hợp, chỉ bổ sung package thiếu vào venv và không sửa Python toàn cục. FFmpeg và FFprobe phải có trong PATH. Dung lượng cài mới khoảng 1–2 GB.
 
@@ -42,9 +42,15 @@ Tích hợp dựa trên driver MIT của [Muse-Chat-MCP](https://github.com/ducl
 
 Chế độ **Chrome đang dùng** mở một tab Muse mới bằng phiên đã đăng nhập, không sao chép cookie, key hoặc hồ sơ Chrome. Quyền remote debugging cho ứng dụng local khả năng điều khiển trình duyệt; phần tích hợp này chỉ thao tác tab Muse do nó tạo. Đóng tool sẽ đóng tab đó và ngắt kết nối, giữ Chrome và các tab khác. Có thể tắt remote debugging sau khi dùng. Tool không tự bật quyền này và không âm thầm chuyển sang Chrome khác khi kết nối lỗi.
 
+Nếu mở nhiều phiên Chrome, đặt `MUSE_CHROME_PORT` trong `.env` bằng cổng hiện trên trang `chrome://inspect/#remote-debugging` của phiên muốn dùng, ví dụ `9222`, rồi khởi động lại tool. Giá trị `0` dùng cổng Chrome tự công bố. Cổng cụ thể chọn máy chủ kết nối của Chrome; không tự chọn hồ sơ theo tên hay màu cửa sổ. Bạn vẫn cần chấp nhận hộp thoại kết nối trong đúng phiên Chrome. Khi trang Muse tải lỗi, tool giữ tab vừa mở để lần bấm **Kết nối Muse** tiếp theo thử lại trên cùng tab.
+
 Chế độ **Chrome riêng** lưu phiên ở `workspace/muse-profile` và đóng trình duyệt riêng khi thoát. Kết nối nội bộ chỉ nghe ở localhost, có mã xác thực riêng mỗi lần chạy và chỉ hỗ trợ đăng nhập/dịch. Runtime và hồ sơ đăng nhập không được đẩy GitHub. Driver phụ thuộc giao diện Muse nên có thể cần cập nhật khi trang thay đổi.
 
 ## Kiểm tra và xử lý lỗi
+
+Bản Qt trên máy không giải mã H.264/AAC trực tiếp. Khi cần, ứng dụng tự tạo bản xem trước WebM VP8/Opus (tối đa 640 px, dưới 90 MB, một worker / hai luồng encoder) và dọn khi thoát. Video nguồn và MP4 xuất vẫn giữ nguyên. Nhạc nền trong Studio dùng Ogg Opus; MP4 cuối dùng AAC. Hoài My và Nam Minh là hai giọng tiếng Việt Microsoft Edge-TTS qua Internet, không phải model giọng cài tại máy.
+
+Cài đặt buffer, giảm giọng và ducking đã được nối xuống pipeline; giọng đọc tiếp tục sau pause, timeline giữ con trỏ, Stop xóa trạng thái âm thanh đã hủy. Xuất MP4 ráp giọng tuần tự để tránh giới hạn dòng lệnh Windows. FFmpeg đang xuất có thể hủy; tác vụ AI trong thread kết thúc lượt đang chạy rồi giải phóng model. Chỉ chuyển video hoàn chỉnh vào outputs khi render thành công.
 
 Chạy `venv\Scripts\python.exe -B check_runtime.py` để kiểm tra cài đặt ngoại tuyến. Nếu lỗi khởi động, xem tab Diagnostics hoặc `workspace/logs`. Link Douyin/TikTok có thể bị yêu cầu đăng nhập/cookie theo nền tảng; có thể tải video hợp lệ về máy rồi chọn file MP4.
 
@@ -53,13 +59,13 @@ Bản PyAV được giới hạn dưới 19 vì Faster-Whisper 1.2.1 vẫn gọi
 Kiểm thử hồi quy không cần mạng/model:
 
 ```powershell
-venv\Scripts\python.exe -B -m pytest -p no:cacheprovider tests/test_local_runtime.py tests/test_windows_media.py tests/test_portable_pipeline.py tests/test_local_api.py tests/test_opencode_client.py tests/test_opencode_translation.py tests/test_opencode_api.py tests/test_openrouter_client.py tests/test_openrouter_api.py tests/test_gemini_client.py tests/test_gemini_api.py tests/test_muse_service.py tests/test_muse_api.py tests/test_cloud_translation.py tests/test_edge_tts_retry.py
+venv\Scripts\python.exe -B -m pytest -p no:cacheprovider tests/test_local_runtime.py tests/test_windows_media.py tests/test_portable_pipeline.py tests/test_local_api.py tests/test_opencode_client.py tests/test_opencode_translation.py tests/test_opencode_api.py tests/test_openrouter_client.py tests/test_openrouter_api.py tests/test_gemini_client.py tests/test_gemini_api.py tests/test_muse_service.py tests/test_muse_api.py tests/test_cloud_translation.py tests/test_edge_tts_retry.py tests/test_media_preview.py
 ```
 
-Hai script kiểm tra riêng: `tests/smoke_desktop.py` kiểm tra QtWebEngine và thao tác chọn file; `tests/smoke_local_video.py` tạo câu nói tiếng Trung tổng hợp, nhận giọng thật, dịch, đọc tiếng Việt và xuất video. Script video cần Internet và model đã tải, tự dọn media thử.
+Hai script kiểm tra riêng: `tests/smoke_desktop.py` kiểm tra phát hình/âm thanh thật trong QtWebEngine, pause/seek/resume và năm tab ở 1024×640; `tests/smoke_local_video.py` tạo câu nói tiếng Trung tổng hợp, nhận giọng thật, dịch, đọc tiếng Việt và xuất video. Script video cần Internet và model đã tải, tự dọn media thử; dùng `--keep-output` nếu muốn giữ MP4 cuối.
 
-Kết nối Chrome đang dùng có bộ kiểm thử `node --test tests/test_chrome_connection.mjs`: kiểm tra giữ nguyên các tab khác, ngắt kết nối đúng lúc và xử lý đóng tool trong khi đang kết nối. Cần người dùng bật quyền Chrome để kiểm tra Muse thật; các kiểm thử giả lập không xác nhận quyền tài khoản.
+Kết nối Chrome đang dùng có bộ kiểm thử `node --test tests/test_chrome_connection.mjs tests/test_muse_chat_adapter.mjs`: kiểm tra giữ nguyên các tab khác, ngắt kết nối đúng lúc, xử lý đóng tool trong khi đang kết nối, mở đoạn chat phụ trên giao diện tiếng Việt và đợi nội dung trả lời xuất hiện. Cần người dùng bật quyền Chrome để kiểm tra Muse thật; các kiểm thử giả lập không xác nhận quyền tài khoản.
 
-Kết quả tại máy này: 148 bài hồi quy và 94 subtests đạt; thử desktop và các nút kiểm tra kết nối đạt; video tổng hợp 6,864 giây qua 3 đoạn thoại, đã chạy thật với OpenRouter Free ở lần trước và Gemini 2.5 Flash ở lần này, đọc tiếng Việt và xuất MP4 thành công. Gemini 2.5 Flash đã kiểm tra dịch một đoạn và theo lô bằng API thật, giữ nguyên ID/thời gian/metadata. Edge-TTS thử lại tối đa 3 lần nếu dịch vụ kết thúc mà không trả âm thanh. Bản dịch AI vẫn cần xem lại trước khi xuất bản. Chưa kiểm chứng trên video dài hoặc tài khoản tải video riêng của người dùng. `pip check` còn báo xung đột của các công cụ toàn cục có sẵn (aider-chat, patchright, selenium); các package toàn cục đó không được chỉnh sửa bởi lần cài này.
+Kết quả tại máy này: 186 bài hồi quy Python và 108 subtests đạt; 40 bài Node cho kết nối Chrome, Muse và UI cũng đạt. Desktop phát được video qua bản xem trước WebM, pause/seek/resume và phát BGM Ogg thành công. Video tổng hợp 6,864 giây qua 3 đoạn thoại đã chạy thật với OpenRouter Free ở lần trước và Gemini 2.5 Flash ở lần này, đọc tiếng Việt và xuất MP4 thành công. Gemini 2.5 Flash đã kiểm tra dịch một đoạn và theo lô bằng API thật, giữ nguyên ID/thời gian/metadata; dịch vụ có lúc trả 503, lần thử lại đã thành công. Edge-TTS thử lại tối đa 3 lần nếu dịch vụ kết thúc mà không trả âm thanh. Bản dịch AI vẫn cần xem lại trước khi xuất bản. Chưa kiểm chứng trên video dài hoặc tài khoản tải video riêng của người dùng. `pip check` còn báo xung đột của các công cụ toàn cục có sẵn (aider-chat, patchright, selenium); các package toàn cục đó không được chỉnh sửa bởi lần cài này.
 
 `.env`, video, model và venv không được đẩy lên GitHub. Các bài audit cũ của dự án có yêu cầu model/mẫu video riêng và không thuộc bộ kiểm thử hồi quy trên.

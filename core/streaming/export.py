@@ -1,5 +1,7 @@
 import tempfile
 import time
+import math
+import wave
 from pathlib import Path
 from typing import Dict, Any, List, Optional
 from config import settings
@@ -9,12 +11,13 @@ from core.engines.separator.realtime_suppressor import RealtimeVocalSuppressor
 from core.audio_ducking import PremiumAudioMixer
 from core.subtitle import SubtitleGenerator
 from core.video_composer import VideoComposer
+from core.media_process import run_media
 
 class HQExporter:
     """
     Offline High-Quality Final Video Exporter.
-    Combines BS-RoFormer CUDA separation, dynamic sidechain ducking,
-    and ASS subtitle burn-in / Chinese masking into a 1080x1920 MP4.
+    Combines configured separation, dynamic ducking, and ASS subtitles,
+    preserving the source video dimensions and aspect ratio.
     """
     def __init__(self):
         self.separator = None
@@ -41,7 +44,7 @@ class HQExporter:
 
     def _export(self, task_id, video_path, segments, total_duration, task_dir,
                 mask_chinese, progress_callback, cancel_check):
-        if total_duration <= 0:
+        if not math.isfinite(total_duration) or total_duration <= 0:
             raise ValueError("Thời lượng video phải lớn hơn 0.")
         t0 = time.time()
 
@@ -60,9 +63,8 @@ class HQExporter:
         _report(10, "1/6 Trích xuất âm thanh gốc (Master Audio)...")
         _check_cancel()
         raw_audio = task_dir / "raw_audio.wav"
-        import subprocess
-        cmd = ["ffmpeg", "-y", "-i", str(video_path), "-vn", "-acodec", "pcm_s16le", "-ar", "44100", "-ac", "2", str(raw_audio)]
-        subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=True)
+        cmd = ["ffmpeg", "-v", "error", "-nostdin", "-y", "-i", str(video_path), "-vn", "-acodec", "pcm_s16le", "-ar", "44100", "-ac", "2", str(raw_audio)]
+        run_media(cmd, cancel_check)
 
         # 2. Use the configured separator; the CPU profile needs no large AI model.
         _report(35, "2/6 Xử lý giọng gốc và âm thanh nền...")
@@ -83,36 +85,16 @@ class HQExporter:
             if separation_engine not in ("dsp", "realtime"):
                 warnings.append(f"Export dùng DSP thay cho {separation_engine}.")
             instrumental_path = task_dir / "background.wav"
-            self.suppressor.process_file(raw_audio, instrumental_path)
+            self.suppressor.process_file(raw_audio, instrumental_path,
+                                         forced_mode=None if settings.SUPPRESSION_MODE == "AUTO" else settings.SUPPRESSION_MODE,
+                                         cancel_check=cancel_check)
             separation_engine = "dsp"
 
         # 3. Assemble Voice Timeline
         _report(55, "3/6 Ráp timeline giọng đọc tiếng Việt...")
         _check_cancel()
         voice_wav = task_dir / "voice_timeline.wav"
-        valid_items = [s for s in segments if s.get("audio_path") and Path(s["audio_path"]).exists()]
-
-        if valid_items:
-            inputs = []
-            filter_parts = []
-            mix_inputs = []
-
-            for idx, item in enumerate(valid_items):
-                inputs.extend(["-i", str(item["audio_path"])])
-                delay_ms = int(item["start"] * 1000)
-                # Do not let a long voice segment overlap the next segment.
-                slot_duration = max(0.01, float(item["end"]) - float(item["start"]))
-                filter_parts.append(f"[{idx}:a]atrim=0:{slot_duration},adelay={delay_ms}|{delay_ms}[a{idx}]")
-                mix_inputs.append(f"[a{idx}]")
-
-            mix_str = "".join(mix_inputs) + f"amix=inputs={len(valid_items)}:dropout_transition=0:normalize=0[mixed]"
-            filter_complex = f"{';'.join(filter_parts)};{mix_str};[mixed]atrim=0:{total_duration},apad=whole_dur={total_duration}[out]"
-
-            cmd = ["ffmpeg", "-y"] + inputs + ["-filter_complex", filter_complex, "-map", "[out]", "-ac", "2", "-ar", "44100", str(voice_wav)]
-            subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=True)
-        else:
-            cmd = ["ffmpeg", "-y", "-f", "lavfi", "-i", "anullsrc=r=44100:cl=stereo", "-t", str(total_duration), str(voice_wav)]
-            subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=True)
+        self._assemble_voice_timeline(segments, total_duration, voice_wav, cancel_check)
 
         # 4. Sidechain Audio Ducking
         _report(70, "4/6 Dynamic Sidechain Ducking & Foley Master...")
@@ -122,7 +104,8 @@ class HQExporter:
             instrumental_path=instrumental_path,
             voice_path=voice_wav,
             output_path=master_audio,
-            total_duration=total_duration
+            total_duration=total_duration,
+            cancel_check=cancel_check,
         )
 
         # 5. Subtitles
@@ -134,19 +117,25 @@ class HQExporter:
         self.sub_gen.generate_srt(subtitle_segments, srt_path)
         self.sub_gen.generate_ass(subtitle_segments, ass_path)
 
-        # 6. Render final TikTok 9:16 Video
-        _report(95, "6/6 Render hoàn chỉnh TikTok 9:16 MP4...")
+        # 6. Render final video at its original dimensions.
+        _report(95, "6/6 Render MP4 với phụ đề và âm thanh tiếng Việt...")
         _check_cancel()
         output_filename = f"douyin_translated_{task_id}_hq.mp4"
         final_video_path = settings.OUTPUT_DIR / output_filename
 
+        # Render into the temporary task directory. Failed/cancelled exports must
+        # never leave a partial video in outputs or replace a previous result.
+        rendered_video = task_dir / output_filename
         self.composer.compose(
             video_path=video_path,
             audio_path=master_audio,
             subtitle_path=ass_path,
-            output_path=final_video_path,
-            mask_chinese_sub=mask_chinese
+            output_path=rendered_video,
+            mask_chinese_sub=mask_chinese,
+            cancel_check=cancel_check,
         )
+        _check_cancel()
+        rendered_video.replace(final_video_path)
 
         elapsed = round(time.time() - t0, 1)
         _report(100, "Xuất video hoàn tất thành công!")
@@ -158,3 +147,51 @@ class HQExporter:
             "separation_engine": separation_engine,
             "warnings": warnings
         }
+
+    @staticmethod
+    def _assemble_voice_timeline(segments, total_duration, output_path, cancel_check=None):
+        """Write PCM sequentially; never open hundreds of decoders or hold a video in RAM."""
+        rate, frame_bytes = 44100, 4
+        total_frames = round(total_duration * rate)
+        position = 0
+        silence = bytes(rate * frame_bytes)
+
+        def check_cancel():
+            if cancel_check and cancel_check():
+                raise RuntimeError("Tác vụ đã bị hủy bởi người dùng.")
+
+        with wave.open(str(output_path), "wb") as output:
+            output.setparams((2, 2, rate, 0, "NONE", "not compressed"))
+
+            def pad_to(target):
+                nonlocal position
+                while position < target:
+                    check_cancel()
+                    frames = min(rate, target - position)
+                    output.writeframesraw(silence[:frames * frame_bytes])
+                    position += frames
+
+            for item in sorted(segments, key=lambda row: float(row["start"])):
+                check_cancel()
+                if not item.get("audio_path"):
+                    if item.get("final_vi") or item.get("text_vi"):
+                        raise ValueError("Đoạn có bản dịch nhưng thiếu âm thanh lồng tiếng.")
+                    continue
+                if not Path(item["audio_path"]).is_file():
+                    raise FileNotFoundError("Không tìm thấy âm thanh lồng tiếng. Hãy dịch lại video.")
+                start = max(0, round(float(item["start"]) * rate))
+                end = min(total_frames, round(float(item["end"]) * rate))
+                if start < position or end <= start:
+                    raise ValueError("Timeline lồng tiếng bị chồng lấn hoặc có thời gian không hợp lệ.")
+                pad_to(start)
+                # Each normal streaming segment is at most eight seconds. This
+                # bounds decode memory and keeps the command short on Windows.
+                decoded = run_media([
+                    "ffmpeg", "-v", "error", "-nostdin", "-i", str(item["audio_path"]),
+                    "-t", str((end - start) / rate), "-f", "s16le", "-acodec", "pcm_s16le",
+                    "-ar", str(rate), "-ac", "2", "pipe:1",
+                ], cancel_check, capture_output=True)
+                decoded = decoded[:(end - start) * frame_bytes]
+                output.writeframesraw(decoded)
+                position += len(decoded) // frame_bytes
+            pad_to(total_frames)

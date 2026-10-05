@@ -22,6 +22,16 @@ ERRORS = {
         "Trong Chrome đang dùng, mở chrome://inspect/#remote-debugging và bật "
         "Allow remote debugging. Kết nối lại Muse rồi chấp nhận hộp thoại kết nối của Chrome."
     ),
+    "chrome_connection_timeout": (
+        "Chrome chưa hoàn tất kết nối sau 60 giây. Kiểm tra hộp thoại kết nối "
+        "trong Chrome, bấm Allow/Cho phép rồi thử lại."
+    ),
+    "chrome_page_failed": "Đã kết nối Chrome nhưng không mở được tab Muse mới. Hãy kết nối lại.",
+    "muse_navigation_failed": (
+        "Đã kết nối Chrome nhưng chưa tải được trang Muse. "
+        "Kiểm tra muse.ai trong Chrome và đường truyền rồi thử lại."
+    ),
+    "muse_new_chat_failed": "Chưa mở được đoạn chat phụ mới trong Muse. Kiểm tra trang Muse rồi thử lại.",
     "login_required": "Hãy đăng nhập Meta trong cửa sổ Muse rồi thử lại.",
     "approval_required": "Muse đang chờ bạn xác nhận trong cửa sổ trình duyệt.",
     "timed_out": "Muse trả lời quá lâu. Bản dịch chưa hoàn tất, hãy thử lại.",
@@ -138,7 +148,8 @@ class MuseService:
                 env.pop(name, None)
         env.update(MUSE_BRIDGE_TOKEN=token, MUSE_RUNTIME_DIR=str(self.runtime_dir),
                    MUSE_PROFILE_DIR=str(self.profile_dir), MUSE_HEADLESS="0", MUSE_CHANNEL="chrome",
-                   MUSE_BROWSER_MODE=self.browser_mode())
+                   MUSE_BROWSER_MODE=self.browser_mode(),
+                   MUSE_CHROME_PORT=str(settings.MUSE_CHROME_PORT))
         kwargs = {"creationflags": subprocess.CREATE_NO_WINDOW | subprocess.CREATE_NEW_PROCESS_GROUP} if os.name == "nt" else {"start_new_session": True}
         try:
             # Publish ownership atomically with shutdown so a process cannot escape
@@ -177,7 +188,7 @@ class MuseService:
         with self._lock:
             self._check_generation(generation)
             self._ensure_started()
-            self._request("/login", {}, timeout=100)
+            self._request("/login", {}, timeout=150)
             return self.status()
 
     def translate(self, prompt: str, system: str | None = None) -> str:
@@ -189,7 +200,7 @@ class MuseService:
             self._ensure_started()
             state = self._request("/health")
             if not state.get("logged_in"):
-                self._request("/login", {}, timeout=100)
+                self._request("/login", {}, timeout=150)
                 state = self._request("/health")
             if not state.get("logged_in"):
                 raise MuseError(ERRORS["login_required"])

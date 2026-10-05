@@ -91,3 +91,11 @@ def test_subtitle_rounding_carries_to_the_next_second():
     assert generator._format_time_ass(59.9999) == "0:01:00.00"
     assert generator._format_time_srt(59.9999) == "00:01:00,000"
     assert generator._format_time_ass(-0.1) == "0:00:00.00"
+
+
+def test_mixer_honors_saved_machine_gains(monkeypatch):
+    monkeypatch.setattr(settings, "BGM_VOLUME_DUCKED_DB", -24)
+    monkeypatch.setattr(settings, "BGM_VOLUME_NORMAL_DB", -5)
+    monkeypatch.setattr(settings, "VOICE_VOLUME_BOOST_DB", 1)
+    mixer = PremiumAudioMixer()
+    assert (mixer.duck_amount_db, mixer.bgm_gain_db, mixer.voice_gain_db) == (-24, -5, 1)

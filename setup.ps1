@@ -27,3 +27,4 @@ if (-not $SkipModel) {
 }
 & $pythonExe -B check_runtime.py
 if ($LASTEXITCODE -ne 0) { throw 'Runtime checks failed.' }
+& (Join-Path $PSScriptRoot 'create_shortcut.ps1')

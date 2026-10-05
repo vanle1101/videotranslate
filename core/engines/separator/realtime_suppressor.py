@@ -3,6 +3,7 @@ import subprocess
 from pathlib import Path
 from typing import Optional, List, Dict, Any
 import numpy as np
+from core.media_process import run_media
 
 class RealtimeVocalSuppressor:
     """
@@ -98,7 +99,8 @@ class RealtimeVocalSuppressor:
         self,
         input_audio_path: Path,
         output_audio_path: Path,
-        forced_mode: Optional[str] = None
+        forced_mode: Optional[str] = None,
+        cancel_check=None,
     ) -> Dict[str, Any]:
         """
         Processes audio file using auto-selected optimal strategy.
@@ -108,6 +110,8 @@ class RealtimeVocalSuppressor:
 
         analysis = self.analyze_audio_properties(input_audio_path)
         selected_mode = forced_mode or analysis["mode"]
+        if selected_mode not in ("DSP_STEREO_CENTER_CANCEL", "DSP_MONO_ADAPTIVE_FORMANT"):
+            raise ValueError(f"Chế độ giảm giọng không hợp lệ: {selected_mode}")
         self.last_mode = selected_mode
 
         if selected_mode == "DSP_STEREO_CENTER_CANCEL":
@@ -138,29 +142,23 @@ class RealtimeVocalSuppressor:
             )
             suppression_est_db = -20.0
 
-        is_wav = output_audio_path.suffix.lower() == ".wav"
-        codec_args = ["-c:a", "pcm_s16le"] if is_wav else ["-c:a", "aac", "-b:a", "192k"]
+        suffix = output_audio_path.suffix.lower()
+        if suffix == ".wav":
+            codec_args = ["-c:a", "pcm_s16le"]
+        elif suffix in (".ogg", ".opus"):
+            codec_args = ["-c:a", "libopus", "-b:a", "128k", "-ar", "48000"]
+        else:
+            codec_args = ["-c:a", "aac", "-b:a", "192k"]
 
         cmd = [
-            "ffmpeg", "-y", "-i", str(input_audio_path),
+            "ffmpeg", "-v", "error", "-nostdin", "-y", "-i", str(input_audio_path),
             "-filter_complex", filter_complex,
             "-map", "[aout]",
             *codec_args,
             str(output_audio_path)
         ]
 
-        proc = subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
-                              text=True, encoding="utf-8", errors="replace")
-        if proc.returncode != 0:
-            # Fallback simple notch
-            fallback_cmd = [
-                "ffmpeg", "-y", "-i", str(input_audio_path),
-                "-vn",
-                "-af", "equalizer=f=1200:t=q:w=1.5:g=-20,equalizer=f=2400:t=q:w=2.0:g=-18",
-                *codec_args,
-                str(output_audio_path)
-            ]
-            subprocess.run(fallback_cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=True)
+        run_media(cmd, cancel_check)
 
         elapsed = max(0.001, time.time() - t0)
 

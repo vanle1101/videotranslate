@@ -162,6 +162,74 @@ class LocalAPITests(unittest.TestCase):
         self.assertEqual(task["status"], "FAILED")
         self.assertIn("ASR failed", task["stage"])
 
+    def test_settings_persist_and_apply_buffer_suppression_and_fractional_ducking(self):
+        with patch.object(main, "update_env_file") as persist, \
+                patch.object(settings, "INITIAL_BUFFER_SECONDS", 10.0), \
+                patch.object(settings, "SUPPRESSION_MODE", "AUTO"), \
+                patch.object(settings, "BGM_VOLUME_DUCKED_DB", -14.0):
+            response = self.client.post("/api/settings", json={
+                "buffer_target": "30", "suppression_mode": "DSP_MONO_ADAPTIVE_FORMANT", "ducking_level": "-18.5",
+            })
+            self.assertEqual(response.status_code, 200)
+            persist.assert_called_once_with({
+                "INITIAL_BUFFER_SECONDS": "30.0", "SUPPRESSION_MODE": "DSP_MONO_ADAPTIVE_FORMANT", "BGM_VOLUME_DUCKED_DB": "-18.5",
+            })
+            current = self.client.get("/api/settings").json()
+            self.assertEqual(current["buffer_target"], "30")
+            self.assertEqual(current["suppression_mode"], "DSP_MONO_ADAPTIVE_FORMANT")
+            self.assertEqual(current["ducking_level"], "-18.5")
+            with patch.object(main, "create_streaming_session", return_value=self.session()) as create:
+                self.client.post("/api/streaming/start-local-file", json={"file_path": str(self.video)})
+            self.assertEqual(create.call_args.kwargs["initial_buffer_seconds"], 30.0)
+
+    def test_invalid_audio_settings_are_rejected_before_persistence(self):
+        for payload in ({"buffer_target": "nan"}, {"buffer_target": "0"}, {"buffer_target": "121"},
+                        {"suppression_mode": "unknown"}, {"ducking_level": "nan"}):
+            with self.subTest(payload=payload), patch.object(main, "update_env_file") as persist:
+                response = self.client.post("/api/settings", json=payload)
+                self.assertEqual(response.status_code, 422)
+                persist.assert_not_called()
+
+    def test_invalid_stream_buffer_does_not_create_session(self):
+        for buffer_seconds in (0, -1, 121):
+            with self.subTest(buffer_seconds=buffer_seconds), patch.object(main, "create_streaming_session") as create:
+                response = self.client.post("/api/streaming/start-local-file", json={
+                    "file_path": str(self.video), "initial_buffer_seconds": buffer_seconds,
+                })
+                self.assertEqual(response.status_code, 422)
+                create.assert_not_called()
+
+    def test_pause_and_resume_reject_finished_session(self):
+        session = self.session(pause=Mock(), resume=Mock())
+        main.active_streaming_sessions[session.task_id] = session
+        for action in ("pause", "resume"):
+            response = self.client.post(f"/api/tasks/{session.task_id}/{action}")
+            self.assertEqual(response.status_code, 409)
+            getattr(session, action).assert_not_called()
+
+    def test_export_rejects_duplicate_while_running_or_cancelling(self):
+        session = self.session()
+        main.active_streaming_sessions[session.task_id] = session
+        for status in ("RUNNING", "CANCELLING"):
+            export = {"status": status, "progress": 25}
+            main.active_export_tasks[f"export_{session.task_id}"] = export
+            with self.subTest(status=status), patch.object(main, "HQExporter") as create:
+                response = self.client.post("/api/streaming/export-hq", json={"task_id": session.task_id})
+                self.assertEqual(response.status_code, 409)
+                create.assert_not_called()
+                self.assertIs(main.active_export_tasks[f"export_{session.task_id}"], export)
+
+    def test_cancel_export_keeps_worker_busy_until_it_acknowledges(self):
+        main.active_export_tasks["export_fixture"] = {"status": "RUNNING", "cancelled": False}
+        response = self.client.post("/api/streaming/export-hq/cancel/fixture")
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(main.active_export_tasks["export_fixture"]["status"], "CANCELLING")
+        self.assertTrue(main.active_export_tasks["export_fixture"]["cancelled"])
+        main.active_export_tasks["export_fixture"]["status"] = "COMPLETED"
+        response = self.client.post("/api/streaming/export-hq/cancel/fixture")
+        self.assertEqual(response.status_code, 409)
+        self.assertEqual(main.active_export_tasks["export_fixture"]["status"], "COMPLETED")
+
     def test_websocket_replays_startup_failure_to_late_connection(self):
         session = self.session(error="Input audio missing", first_play_emitted=False)
         session.get_telemetry.return_value = {"status": "failed", "error": session.error}

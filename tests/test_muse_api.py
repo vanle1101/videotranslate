@@ -7,7 +7,7 @@ from fastapi.testclient import TestClient
 
 import main
 from config import settings
-from core.services.muse_service import MuseError
+from core.services.muse_service import ERRORS, MuseError
 
 
 @pytest.fixture
@@ -137,12 +137,16 @@ def test_invalid_browser_mode_changes_nothing(muse, monkeypatch):
     service.change_browser_mode.assert_not_called()
 
 
-def test_chrome_permission_error_is_fixed_and_actionable(muse):
+@pytest.mark.parametrize("code", [
+    "chrome_connection_required", "chrome_connection_timeout",
+    "chrome_page_failed", "muse_navigation_failed", "muse_new_chat_failed",
+])
+def test_chrome_connection_error_is_fixed_and_actionable(muse, code):
     service, client = muse
-    service.start_login.side_effect = MuseError("private chrome details", code="chrome_connection_required")
+    service.start_login.side_effect = MuseError("private chrome details", code=code)
     data = client.post("/api/muse/login").json()
-    assert data["error_code"] == "chrome_connection_required"
-    assert "chrome://inspect/#remote-debugging" in data["error"]
+    assert data["error_code"] == code
+    assert data["error"] == ERRORS[code]
     assert "private" not in data["error"]
 
 

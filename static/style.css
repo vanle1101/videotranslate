@@ -30,3 +30,21 @@
   border-color: rgba(236, 72, 153, 0.4);
   background-color: #1a1e29;
 }
+
+:is(button, a, input, select, [tabindex]):focus-visible {
+  outline: 2px solid #f472b6;
+  outline-offset: 3px;
+}
+
+html { scroll-padding-top: 100px; }
+#export-modal > div { max-height: calc(100vh - 2rem); overflow-y: auto; }
+#buffering-text { max-width: 90%; text-align: center; overflow-wrap: anywhere; }
+#segments-list p { overflow-wrap: anywhere; }
+@media (max-width: 1280px) {
+  header, header > div:first-child { flex-wrap: wrap; gap: 0.75rem; }
+  header nav { flex-wrap: wrap; }
+  #hardware-pill { max-width: 100%; overflow-wrap: anywhere; }
+}
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after { animation-duration: 0.01ms !important; transition-duration: 0.01ms !important; }
+}

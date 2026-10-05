@@ -33,7 +33,17 @@ from config import settings
 from core.services.service_manager import service_manager
 
 SINGLE_INSTANCE_SERVER = "Douyin2TikTok_AI_Studio_SingleInstance_Port"
+WINDOWS_APP_ID = "Douyin2TikTok.AIStudio.Desktop"
 logger = logging.getLogger("app")
+
+def configure_windows_identity():
+    """Give the taskbar a Studio identity instead of grouping under Python."""
+    if sys.platform == "win32":
+        try:
+            import ctypes
+            ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(WINDOWS_APP_ID)
+        except (AttributeError, OSError):
+            logger.warning("Could not set the Windows taskbar application identity.")
 
 def create_app_icon() -> QIcon:
     """Generates a high-resolution dark studio icon for window and system tray."""
@@ -297,6 +307,9 @@ class StudioMainWindow(QMainWindow):
         # Configure Web Settings
         settings_web = self.web_view.settings()
         settings_web.setAttribute(QWebEngineSettings.WebAttribute.JavascriptEnabled, True)
+        # Translation/TTS finishes asynchronously after the Start click. Qt's
+        # user-gesture gate otherwise rejects the delayed audio.play() request.
+        settings_web.setAttribute(QWebEngineSettings.WebAttribute.PlaybackRequiresUserGesture, False)
         settings_web.setAttribute(QWebEngineSettings.WebAttribute.LocalContentCanAccessRemoteUrls, True)
         settings_web.setAttribute(QWebEngineSettings.WebAttribute.LocalContentCanAccessFileUrls, True)
         settings_web.setAttribute(QWebEngineSettings.WebAttribute.ScrollAnimatorEnabled, True)
@@ -389,14 +402,18 @@ class StudioMainWindow(QMainWindow):
     # Close confirmation & clean process shutdown
     def closeEvent(self, event):
         from core.streaming.pipeline import active_streaming_sessions
+        from main import active_export_tasks
         running_sessions = [s for s in active_streaming_sessions.values() if getattr(s, "is_running", False)]
-        is_processing = len(running_sessions) > 0
+        is_processing = bool(running_sessions) or any(
+            task.get("status") in {"RUNNING", "CANCELLING"}
+            for task in active_export_tasks.values()
+        )
 
         if is_processing:
             reply = QMessageBox.question(
                 self,
                 "Xác nhận đóng Douyin2TikTok AI Studio",
-                "Tiến trình dịch / lồng tiếng realtime đang hoạt động.\nBạn có muốn dừng mọi tác vụ và thoát sạch ứng dụng?",
+                "Tiến trình dịch, lồng tiếng hoặc xuất video đang hoạt động.\nBạn có muốn dừng mọi tác vụ và thoát sạch ứng dụng?",
                 QMessageBox.StandardButton.Cancel | QMessageBox.StandardButton.Yes,
                 QMessageBox.StandardButton.Cancel
             )
@@ -415,6 +432,7 @@ class StudioMainWindow(QMainWindow):
 # -------------------------------------------------------------
 
 def main():
+    configure_windows_identity()
     app = QApplication(sys.argv)
     app.setApplicationName("Douyin2TikTok AI Studio")
     app.setOrganizationName("Douyin2TikTok")
