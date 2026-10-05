@@ -16,4 +16,5 @@ __pycache__/
 .env
 .pytest_cache/
 .ruff_cache/
+tests/ui_audit_results.json
 Douyin2TikTok AI Studio.lnk
