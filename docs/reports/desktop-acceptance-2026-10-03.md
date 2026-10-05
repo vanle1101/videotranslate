@@ -1,6 +1,6 @@
-# Douyin2TikTok AI Studio - Desktop Application Final Acceptance Report
+# Desktop acceptance report — 2026-10-03
 
-> Historical report from 2026-10-03 on a different machine. Its blanket PASS claims do not describe the current Windows/16 GB configuration. See `HUONG_DAN_MAY_NAY.md` for current runtime and verification limits.
+> Historical report from 2026-10-03 on a different machine. Its blanket PASS claims do not describe the current Windows/16 GB configuration. See the [Windows guide](../windows-guide.md) for current runtime and verification limits.
 
 **Date:** 2026-10-03  
 **Target:** Standalone Windows Desktop Application (`Start Douyin2TikTok AI Studio.bat` + `PySide6` + `QWebEngineView`)  

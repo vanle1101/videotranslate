@@ -1,4 +1,4 @@
-# Chạy trên Windows, RAM 16 GB
+# Cài đặt và vận hành trên Windows
 
 Máy đã kiểm tra ngày 05/10/2026: Intel i5-13420H (8 nhân / 12 luồng), RAM 16 GB, NVIDIA RTX 2050 4 GB, Windows 11, Python 3.12.10 và FFmpeg 9.0.1.
 

@@ -1,6 +1,6 @@
 # Douyin2TikTok AI Studio
 
-> **Windows / 16 GB profile:** run `setup.bat` once, then `start.bat`. Defaults use Whisper Small on CPU int8, Edge-TTS and DSP separation. Premium engines described below require separate installation. See [local setup notes](HUONG_DAN_MAY_NAY.md).
+> **Windows / 16 GB profile:** run `setup.bat` once, then `start.bat`. Defaults use Whisper Small on CPU int8, Edge-TTS and DSP separation. Premium engines described below require separate installation. See the [Windows installation and operating guide](docs/windows-guide.md).
 
 > **Translation:** OpenRouter Free reuses the OpenRouter login stored locally by OpenCode (`auth.json`). Keys are never committed or returned to the settings UI. Test the connection in Settings. OpenCode Zen CLI remains optional but currently returns an upstream 403. Gemini, DeepSeek and Google/MyMemory remain selectable alternatives.
 

@@ -1,4 +1,4 @@
-# Douyin2TikTok AI Studio — UI Function Inventory
+# Tham chiếu chức năng giao diện
 
 Tài liệu kiểm kê toàn bộ thành phần giao diện (UI Inventory), các thao tác người dùng (Actions), API / Handlers liên quan, hành vi kỳ vọng (Expected Behavior), và trạng thái kiểm tra (Status).
 

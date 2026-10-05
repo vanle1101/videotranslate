@@ -1,5 +1,4 @@
-# BÁO CÁO TỔNG QUAN: KIẾN TRÚC REAL-TIME STREAMING SEGMENT PIPELINE
-## Douyin2TikTok AI Studio PRO - Phục Vụ Video Trung Quốc Chuyển Ngữ Tiếng Việt Realtime
+# Kiến trúc và tích hợp xử lý video theo đoạn
 
 ---
 
@@ -47,13 +46,13 @@ Dự án đã được tái cấu trúc hoàn toàn trực tiếp tại thư m�
 
 | Thành phần | Module thực tế | Công nghệ / Model áp dụng | Tốc độ / Latency |
 | :--- | :--- | :--- | :--- |
-| **Speech Segmenter** | [segmenter.py](file:///E:/Dịch%20video/core/streaming/segmenter.py) | FFmpeg `silencedetect` + Logic gộp tách câu tự nhiên | **70x - 100x realtime** (~70ms cho 10s audio) |
-| **Chinese ASR** | [sensevoice_engine.py](file:///E:/Dịch%20video/core/engines/asr/sensevoice_engine.py) | `FunAudioLLM/SenseVoice` int8 ONNX (Dấu câu, Emotion) | **~0.25s - 0.35s** / segment |
-| **Semantic Translator** | [semantic_translator.py](file:///E:/Dịch%20video/core/engines/translation/semantic_translator.py) | VideoLingo Rolling Context (5-10 câu) + Time Budget (~3 từ/s) | **~0.15s - 0.40s** / segment |
-| **Vietnamese TTS** | [vieneu_engine.py](file:///E:/Dịch%20video/core/engines/tts/vieneu_engine.py) | `VieNeu-TTS v3 Turbo` (Preset Voice + Zero-shot Clone) | **~1.8s** / câu (Warm RAM) |
-| **Timing Aligner** | [timing_aligner.py](file:///E:/Dịch%20video/core/engines/alignment/timing_aligner.py) | FFmpeg `atempo` clamp (0.90x đến 1.15x) | **~20ms** / segment |
-| **Realtime Ducking** | [app.js](file:///E:/Dịch%20video/static/app.js) | Sidechain volume automation (Vocal: 100%, BGM: 20%) | **0ms (Zero Latency Browser)** |
-| **HQ Offline Export** | [export.py](file:///E:/Dịch%20video/core/streaming/export.py) | `BS-RoFormer` (CUDA) + ASS Burn-in + TikTok 9:16 Encode | Chế độ xuất video chất lượng cao |
+| **Speech Segmenter** | [segmenter.py](../../core/streaming/segmenter.py) | FFmpeg `silencedetect` + Logic gộp tách câu tự nhiên | **70x - 100x realtime** (~70ms cho 10s audio) |
+| **Chinese ASR** | [sensevoice_engine.py](../../core/engines/asr/sensevoice_engine.py) | `FunAudioLLM/SenseVoice` int8 ONNX (Dấu câu, Emotion) | **~0.25s - 0.35s** / segment |
+| **Semantic Translator** | [semantic_translator.py](../../core/engines/translation/semantic_translator.py) | VideoLingo Rolling Context (5-10 câu) + Time Budget (~3 từ/s) | **~0.15s - 0.40s** / segment |
+| **Vietnamese TTS** | [vieneu_engine.py](../../core/engines/tts/vieneu_engine.py) | `VieNeu-TTS v3 Turbo` (Preset Voice + Zero-shot Clone) | **~1.8s** / câu (Warm RAM) |
+| **Timing Aligner** | [timing_aligner.py](../../core/engines/alignment/timing_aligner.py) | FFmpeg `atempo` clamp (0.90x đến 1.15x) | **~20ms** / segment |
+| **Realtime Ducking** | [app.js](../../static/app.js) | Sidechain volume automation (Vocal: 100%, BGM: 20%) | **0ms (Zero Latency Browser)** |
+| **HQ Offline Export** | [export.py](../../core/streaming/export.py) | `BS-RoFormer` (CUDA) + ASS Burn-in + TikTok 9:16 Encode | Chế độ xuất video chất lượng cao |
 
 ---
 

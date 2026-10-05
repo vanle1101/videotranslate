@@ -1,10 +1,10 @@
 # Douyin2TikTok AI Studio
 
-> **Bản cấu hình Windows / RAM 16 GB:** xem [hướng dẫn cài đặt và vận hành](HUONG_DAN_MAY_NAY.md). Chạy `setup.bat` cho máy mới, `start.bat` để mở. Cấu hình mặc định hiện tại: Whisper Small CPU int8, Edge-TTS và DSP; các engine cao cấp trong phần giới thiệu bên dưới là tùy chọn cần cài riêng.
+> **Bản cấu hình Windows / RAM 16 GB:** xem [hướng dẫn cài đặt và vận hành](docs/windows-guide.md). Chạy `setup.bat` cho máy mới, `start.bat` để mở. Cấu hình mặc định hiện tại: Whisper Small CPU int8, Edge-TTS và DSP; các engine cao cấp trong phần giới thiệu bên dưới là tùy chọn cần cài riêng.
 
 > **Dùng key có sẵn trong OpenCode:** mặc định **OpenRouter Free**, tự đọc key local, không cần tải LLM dịch. OpenCode Zen CLI vẫn có thể chọn nhưng hiện gặp lỗi 403 từ dịch vụ. Kiểm tra kết nối ở Cài đặt; key không gửi ra giao diện hay đẩy GitHub. Gemini, DeepSeek và Google/MyMemory vẫn có thể chọn riêng.
 
-> **Gemini và Muse:** Gemini đứng đầu Cài đặt, có kiểm tra model đã lưu và xử lý lỗi API rõ ràng. Muse dùng được phiên đăng nhập Chrome đang mở sau khi bạn cho phép Chrome kết nối, hoặc dùng hồ sơ Chrome riêng. Chạy `setup_muse.bat` một lần rồi kết nối trong Cài đặt. Tích hợp không tự cấp token; xem [hướng dẫn Muse](HUONG_DAN_MAY_NAY.md#muse-qua-tài-khoản-của-bạn-thử-nghiệm).
+> **Gemini và Muse:** Gemini đứng đầu Cài đặt, có kiểm tra model đã lưu và xử lý lỗi API rõ ràng. Muse dùng được phiên đăng nhập Chrome đang mở sau khi bạn cho phép Chrome kết nối, hoặc dùng hồ sơ Chrome riêng. Chạy `setup_muse.bat` một lần rồi kết nối trong Cài đặt. Tích hợp không tự cấp token; xem [hướng dẫn Muse](docs/windows-guide.md#muse-qua-tài-khoản-của-bạn-thử-nghiệm).
 
 <div align="center">
 
@@ -16,7 +16,7 @@
 [![PyTorch CUDA](https://img.shields.io/badge/CUDA-12.4%20%7C%20Torch%202.6-red?logo=pytorch&style=flat-square)](https://pytorch.org/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg?style=flat-square)](LICENSE)
 
-**Tiếng Việt** | [English](README_EN.md)
+**Tiếng Việt** | [English](README.en.md)
 
 </div>
 
@@ -24,7 +24,7 @@
 
 Người dùng dán link video hoặc kéo thả file MP4, chỉ cần chờ bộ nhớ đệm (buffer) vài giây là video bắt đầu phát ngay với phụ đề và giọng lồng tiếng Việt, trong khi hệ thống ngầm tiếp tục xử lý các đoạn tiếp theo phía trước.
 
-> 📖 **Tài liệu hướng dẫn:** Xem chi tiết đầy đủ trong thư mục [`docs/`](docs/) — hướng dẫn cài đặt, cấu hình model, tối ưu GPU và xuất bản video triệu view.
+Tài liệu: [Cài đặt và vận hành](docs/windows-guide.md) · [Chức năng giao diện](docs/ui-reference.md) · [Báo cáo kiểm thử](docs/reports/).
 
 ---
 
