@@ -64,6 +64,14 @@ Chạy `venv\Scripts\python.exe -B check_runtime.py` để kiểm tra cài đặ
 
 Ô link tự trích URL từ nội dung Chia sẻ; các domain video được hỗ trợ có thể bỏ `https://`. Dán link mới bỏ lựa chọn file cũ. Bấm Bắt đầu tạo tác vụ ngay, rồi lần lượt hiện kết nối, tải, chuẩn bị, nhận giọng, dịch và tạo giọng. Phần trăm tải dựa trên số byte khi máy chủ cung cấp tổng dung lượng; phần trăm xử lý dựa trên số câu hoàn tất. Các bước chưa đo được hiện “Chưa có %”. Dừng hoạt động cả khi còn đang kết nối; Tạm dừng chỉ khả dụng sau khi chuẩn bị xong. Playlist bị từ chối trước khi tải các video.
 
+### Phiên Douyin từ Chrome
+
+Đăng nhập trong Chrome không tự chia sẻ phiên với Studio. Khi kết nối mạng đã hoạt động nhưng bộ tải báo 403 hoặc cần cookie mới, vào **Cài đặt → Tải video Douyin** và nhập tệp cookie định dạng **Netscape `.txt`** (tối đa 1 MiB). Nếu đang dùng tiện ích xuất cookie trong Chrome, chỉ xuất trang Douyin đang đăng nhập; chọn tệp trực tiếp trong Studio, không gửi nội dung cookie vào chat. Sau khi nhập, quay lại Studio và thử tải link. Nhập tệp thành công chỉ xác nhận đã lưu cookie hợp lệ về định dạng/thời hạn, không xác nhận Douyin cho phép tải hoặc tài khoản đã xác thực.
+
+Ứng dụng chỉ giữ cookie của `douyin.com`, `iesdouyin.com` và các tên miền con tương ứng, bỏ cookie hết hạn và của trang khác. Bản sao cục bộ nằm trong `workspace/private`, không được đưa lên Git, không trả giá trị cookie qua API/log hoặc đường phục vụ video. Bộ tải chỉ dùng bản sao này cho link Douyin; thao tác **Xóa phiên đã nhập** chỉ xóa bản sao của Studio, không đăng xuất Chrome hay xóa tệp bạn đã xuất. Nếu phiên hết hạn, xuất và nhập lại. Không tự đọc hồ sơ Chrome hoặc thay đổi quyền trình duyệt.
+
+Lần thử sau khi bật VPN ngày 05/10/2026: link ngắn chuyển hướng sau 1,9 giây; trang video đầy đủ trả HTTP 200 sau 1,1 giây. Bộ tải không có cookie nhận HTTP 403; chưa xác nhận tải thật bằng phiên đã nhập. VPN đã giải quyết timeout của lượt thử đó nhưng không đảm bảo tải được mọi video.
+
 Nếu kết nối nguồn không tiến triển trong 60 giây, app kết thúc tác vụ và giữ thông báo lỗi ở Studio/Tasks. Lần thử link Douyin thật ngày 05/10/2026 đã nhận link và tạo task sau 31 ms, nhưng kết nối từ máy này hết thời gian chờ; đây chưa phải một lượt tải Douyin thành công. Diagnostics giữ xuống dòng, phân biệt lỗi/cảnh báo và có nút sao chép log nguyên văn qua clipboard của Windows.
 
 Lượt tải HTTP từ máy chủ cục bộ qua bản desktop `pythonw` đã tạo task sau 32 ms, tải xong, tách âm thanh và hoàn tất video im lặng 1 giây sau 8,53 giây; video/máy chủ thử đã được dọn. Kiểm tra clipboard thật qua QtWebChannel cũng đạt. Kết quả này xác nhận đường tải và nối pipeline, không thay cho kiểm tra truy cập Douyin qua Internet.

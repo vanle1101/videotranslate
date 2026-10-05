@@ -6,7 +6,7 @@ import assert from 'node:assert/strict';
 const source = readFileSync(new URL('../static/app.js', import.meta.url), 'utf8');
 const template = readFileSync(new URL('../templates/index.html', import.meta.url), 'utf8');
 
-function studio() {
+function studio(cookieReply = { configured: false, count: 0, message: '' }) {
   const elements = new Map(), audio = [], sockets = [], requests = [], alerts = [], copied = [];
   let ready;
   class Element {
@@ -71,6 +71,7 @@ function studio() {
     ['/api/hardware', {}], ['/api/tasks', { tasks: [] }],
     ['/api/settings', { buffer_target: '15', ducking_level: '-18', opencode_free_models: [], gemini_model: 'gemini-fixture' }],
     ['/api/muse/status', {}],
+    ['/api/douyin/cookies', cookieReply],
   ]);
   const window = { location: { protocol: 'http:', host: 'localhost' } };
   const fetch = async (url, options = {}) => {
@@ -82,6 +83,10 @@ function studio() {
   vm.runInNewContext(source, {
     document, window, Audio, WebSocket, fetch, console, alert: value => alerts.push(value),
     Option: function(text, value) { this.text = text; this.value = value; },
+    FormData: class {
+      constructor() { this.parts = []; }
+      append(name, value, filename) { this.parts.push({ name, value, filename }); }
+    },
     URL: Object.assign(class extends URL {}, { createObjectURL: () => 'blob:video', revokeObjectURL() {} }),
     navigator: { clipboard: { writeText: async text => { copied.push(text); } } },
     localStorage: { removeItem() {} }, setTimeout() {}, setInterval() { return 1; }, clearInterval() {},
@@ -98,6 +103,133 @@ function studio() {
   }
   return { el, audio, sockets, requests, replies, alerts, copied, window, flush, start };
 }
+
+test('Douyin cookie status is local-only and import never claims the session is authenticated', async () => {
+  const ui = studio({ configured: true, count: 3, message: 'server status' });
+  await ui.flush();
+  assert.match(ui.el('douyin-cookies-state').textContent, /Đã nhập 3 cookie/);
+  assert.match(ui.el('douyin-cookies-status').textContent, /Chạy lại link Douyin/);
+  assert.equal(ui.el('btn-delete-douyin-cookies').disabled, false);
+  assert.match(template, /id="douyin-cookies-status" role="status" aria-live="polite"/);
+  assert.ok(template.indexOf('id="douyin-cookies-panel"') < template.indexOf('id="settings-llm-provider"'));
+});
+
+test('Douyin cookie import sends a file only with fixed upload name, blocks duplicates and clears selection', async () => {
+  const ui = studio(); await ui.flush();
+  let finish;
+  ui.replies.set('/api/douyin/cookies', () => new Promise(resolve => { finish = resolve; }));
+  const input = ui.el('douyin-cookies-file');
+  const file = { name: 'private-export-name.txt', size: 300 };
+  input.files = [file]; input.value = 'private-export-name.txt';
+  const pending = input.emit('change');
+  await ui.flush();
+  assert.equal(ui.el('douyin-cookies-panel')['aria-busy'], 'true');
+  for (const id of ['btn-import-douyin-cookies', 'btn-refresh-douyin-cookies', 'btn-delete-douyin-cookies']) {
+    assert.equal(ui.el(id).disabled, true);
+  }
+  await input.emit('change');
+  await ui.el('btn-refresh-douyin-cookies').click();
+  const posts = ui.requests.filter(req => req.url === '/api/douyin/cookies' && req.options.method === 'POST');
+  assert.equal(posts.length, 1);
+  assert.equal(posts[0].options.headers['X-Studio-Request'], 'douyin-cookies');
+  assert.equal(posts[0].options.body.parts[0].name, 'file');
+  assert.equal(posts[0].options.body.parts[0].value, file);
+  assert.equal(posts[0].options.body.parts[0].filename, 'douyin-cookies.txt');
+  assert.equal(posts[0].options.headers['Content-Type'], undefined);
+  finish({ ok: true, json: async () => ({ configured: true, count: 2, message: 'untrusted-file-name' }) });
+  await pending;
+  assert.equal(input.value, '');
+  assert.equal(input.disabled, false);
+  assert.equal(ui.el('douyin-cookies-panel')['aria-busy'], 'false');
+  assert.match(ui.el('douyin-cookies-status').textContent, /chưa được xác minh/);
+  assert.doesNotMatch(ui.el('douyin-cookies-status').textContent, /untrusted|private-export/);
+  assert.equal(ui.alerts.length, 0);
+});
+
+test('Douyin cookie chooser rejects wrong extension, empty and oversized files before upload', async () => {
+  for (const file of [
+    { name: 'sensitive.json', size: 10 },
+    { name: 'sensitive.txt', size: 0 },
+    { name: 'sensitive.txt', size: 1024 * 1024 + 1 },
+  ]) {
+    const ui = studio({ configured: true, count: 4 }); await ui.flush();
+    const input = ui.el('douyin-cookies-file');
+    input.files = [file]; input.value = file.name;
+    await input.emit('change');
+    assert.equal(ui.requests.some(req => req.options.method === 'POST'), false);
+    assert.equal(input.value, '');
+    assert.match(ui.el('douyin-cookies-state').textContent, /Đã nhập 4/);
+    assert.match(ui.el('douyin-cookies-status').textContent, /tối đa 1 MiB/);
+    assert.doesNotMatch(ui.el('douyin-cookies-status').textContent, /sensitive/);
+  }
+});
+
+test('failed Douyin import preserves existing configuration and never renders backend error contents', async () => {
+  const ui = studio({ configured: true, count: 4 }); await ui.flush();
+  ui.replies.set('/api/douyin/cookies', () => ({ ok: false, status: 400, json: async () => ({ detail: 'cookie-secret user-file.txt' }) }));
+  const input = ui.el('douyin-cookies-file');
+  input.files = [{ name: 'local.txt', size: 100 }]; input.value = 'local.txt';
+  await input.emit('change');
+  assert.match(ui.el('douyin-cookies-state').textContent, /Đã nhập 4/);
+  assert.match(ui.el('douyin-cookies-status').textContent, /được giữ nguyên/);
+  assert.doesNotMatch(ui.el('douyin-cookies-status').textContent, /cookie-secret|user-file/);
+  assert.equal(ui.el('btn-delete-douyin-cookies').disabled, false);
+  assert.equal(input.value, '');
+});
+
+test('late initial status cannot overwrite a completed cookie import', async () => {
+  let resolveInitial;
+  const ui = studio(() => new Promise(resolve => { resolveInitial = resolve; }));
+  ui.replies.set('/api/douyin/cookies', { configured: true, count: 2 });
+  ui.el('douyin-cookies-file').files = [{ name: 'local.txt', size: 100 }];
+  await ui.el('douyin-cookies-file').emit('change');
+  const success = ui.el('douyin-cookies-status').textContent;
+  resolveInitial({ ok: true, json: async () => ({ configured: false, count: 0 }) });
+  await ui.flush();
+  assert.match(ui.el('douyin-cookies-state').textContent, /Đã nhập 2/);
+  assert.equal(ui.el('douyin-cookies-status').textContent, success);
+  assert.equal(ui.el('btn-delete-douyin-cookies').disabled, false);
+});
+
+test('cookie deletion uses explicit request header, retains state after network failure, and refresh recovers', async () => {
+  const ui = studio({ configured: true, count: 4 }); await ui.flush();
+  ui.replies.set('/api/douyin/cookies', () => { throw new Error('private-network-detail'); });
+  await ui.el('btn-delete-douyin-cookies').click();
+  const request = ui.requests.find(req => req.options.method === 'DELETE');
+  assert.equal(request.options.headers['X-Studio-Request'], 'douyin-cookies');
+  assert.equal(request.options.body, undefined);
+  assert.match(ui.el('douyin-cookies-state').textContent, /Đã nhập 4/);
+  assert.doesNotMatch(ui.el('douyin-cookies-status').textContent, /private-network-detail/);
+  assert.equal(ui.el('btn-delete-douyin-cookies').disabled, false);
+  ui.replies.set('/api/douyin/cookies', { configured: true, count: 4 });
+  await ui.el('btn-refresh-douyin-cookies').click();
+  assert.match(ui.el('douyin-cookies-status').textContent, /Đã có cookie/);
+  ui.replies.set('/api/douyin/cookies', { configured: false, count: 0 });
+  await ui.el('btn-delete-douyin-cookies').click();
+  assert.match(ui.el('douyin-cookies-state').textContent, /Chưa có cookie/);
+  assert.match(ui.el('douyin-cookies-status').textContent, /Đã xóa bản cookie khỏi Studio/);
+  assert.equal(ui.el('btn-delete-douyin-cookies').disabled, true);
+});
+
+test('cookie status failures preserve configured state without exposing malformed responses', async () => {
+  const ui = studio({ configured: true, count: 4 }); await ui.flush();
+  ui.replies.set('/api/douyin/cookies', { configured: 'secret-value', count: '<unsafe>' });
+  await ui.el('btn-refresh-douyin-cookies').click();
+  assert.match(ui.el('douyin-cookies-state').textContent, /Đã nhập 4/);
+  assert.match(ui.el('douyin-cookies-status').textContent, /Không kiểm tra được trạng thái/);
+  assert.doesNotMatch(ui.el('douyin-cookies-status').textContent, /secret-value|unsafe/);
+  assert.equal(ui.el('btn-refresh-douyin-cookies').disabled, false);
+});
+
+test('expired saved cookies remain removable from Settings', async () => {
+  const ui = studio({ configured: false, stored: true, count: 0 }); await ui.flush();
+  assert.match(ui.el('douyin-cookies-state').textContent, /hết hạn/);
+  assert.equal(ui.el('btn-delete-douyin-cookies').disabled, false);
+  ui.replies.set('/api/douyin/cookies', { configured: false, stored: false, count: 0 });
+  await ui.el('btn-delete-douyin-cookies').click();
+  assert.equal(ui.requests.filter(req => req.options.method === 'DELETE').length, 1);
+  assert.equal(ui.el('btn-delete-douyin-cookies').disabled, true);
+});
 
 test('saved buffer and arbitrary configured model are displayed and sent to backend', async () => {
   const ui = studio(); await ui.start();

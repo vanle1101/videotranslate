@@ -15,6 +15,10 @@ from pydantic import BaseModel, Field
 
 from config import settings
 from core.downloader import VideoDownloader
+from core.douyin_cookies import (
+    DouyinCookieError, import_douyin_cookies, get_douyin_cookie_status,
+    clear_douyin_cookies,
+)
 from core.hardware import detect_hardware
 from core.model_manager import ModelManager
 from core.engines.translation.opencode_client import (
@@ -159,6 +163,50 @@ async def get_settings():
         "ducking_level": f"{settings.BGM_VOLUME_DUCKED_DB:g}",
         "buffer_target": f"{settings.INITIAL_BUFFER_SECONDS:g}"
     }
+
+
+def require_douyin_cookie_request(request: Request):
+    # A cross-origin HTML form cannot provide this header. No CORS permissions
+    # are granted to external origins, so a website cannot replace a local login.
+    if request.url.hostname not in {"127.0.0.1", "localhost", "::1"}:
+        raise HTTPException(status_code=403, detail="Chỉ cho phép thao tác từ Studio trên máy này.")
+    if request.headers.get("x-studio-request") != "douyin-cookies":
+        raise HTTPException(status_code=403, detail="Hãy nhập phiên từ Cài đặt trong Studio.")
+    origin = request.headers.get("origin")
+    if origin is not None and origin != str(request.base_url).rstrip("/"):
+        raise HTTPException(status_code=403, detail="Chỉ cho phép thao tác từ Studio trên máy này.")
+    if request.headers.get("sec-fetch-site") == "cross-site":
+        raise HTTPException(status_code=403, detail="Chỉ cho phép thao tác từ Studio trên máy này.")
+
+
+@app.get("/api/douyin/cookies")
+async def douyin_cookie_status():
+    return await asyncio.to_thread(get_douyin_cookie_status)
+
+
+@app.post("/api/douyin/cookies")
+async def import_douyin_cookie_file(request: Request, file: UploadFile = File(...)):
+    try:
+        require_douyin_cookie_request(request)
+        content = await file.read(1024 * 1024 + 1)
+        if len(content) > 1024 * 1024:
+            raise HTTPException(status_code=413, detail="Tệp cookie vượt quá giới hạn 1 MiB.")
+        return await asyncio.to_thread(import_douyin_cookies, content)
+    except DouyinCookieError as error:
+        raise HTTPException(status_code=422, detail=str(error)) from None
+    except OSError:
+        raise HTTPException(status_code=503, detail="Không lưu được phiên Douyin. Hãy thử lại.") from None
+    finally:
+        await file.close()
+
+
+@app.delete("/api/douyin/cookies")
+async def delete_douyin_cookie_file(request: Request):
+    require_douyin_cookie_request(request)
+    try:
+        return await asyncio.to_thread(clear_douyin_cookies)
+    except (OSError, DouyinCookieError):
+        raise HTTPException(status_code=503, detail="Không xóa được phiên Douyin. Hãy thử lại.") from None
 
 @app.post("/api/settings")
 @app.post("/api/config")
@@ -587,8 +635,15 @@ class StreamLocalFileRequest(BaseModel):
     tts_engine: Optional[str] = None
     asr_engine: Optional[str] = None
 
+
+def reject_private_media_path(path):
+    if Path(path).resolve().is_relative_to((settings.WORKSPACE_DIR / "private").resolve()):
+        raise HTTPException(status_code=404, detail="Không tìm thấy video.")
+
+
 @app.post("/api/streaming/start-local-file")
 async def start_streaming_local_file(req: StreamLocalFileRequest):
+    reject_private_media_path(req.file_path)
     p = Path(req.file_path)
     if not p.is_file():
         raise HTTPException(status_code=404, detail=f"File không tồn tại: {req.file_path}")
@@ -614,6 +669,7 @@ async def start_streaming_local_file(req: StreamLocalFileRequest):
 
 @app.get("/api/local-file")
 async def get_local_file(path: str):
+    reject_private_media_path(path)
     p = Path(path)
     if not p.exists():
         raise HTTPException(status_code=404, detail="File không tồn tại")
@@ -631,6 +687,7 @@ async def create_media_preview(req: PreviewRequest):
     source = session.video_path if session else req.file_path
     if not source:
         raise HTTPException(status_code=404, detail="Không tìm thấy video cần xem trước")
+    reject_private_media_path(source)
     try:
         return preview_manager.start(source)
     except (FileNotFoundError, ValueError):

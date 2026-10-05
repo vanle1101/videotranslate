@@ -95,6 +95,16 @@ document.addEventListener("DOMContentLoaded", () => {
   const btnTestGemini = document.getElementById("btn-test-gemini");
   const geminiTestResult = document.getElementById("gemini-test-result");
   const btnSaveSettings = document.getElementById("btn-save-settings");
+  const douyinCookiesPanel = document.getElementById("douyin-cookies-panel");
+  const douyinCookiesFile = document.getElementById("douyin-cookies-file");
+  const douyinCookiesState = document.getElementById("douyin-cookies-state");
+  const douyinCookiesStatus = document.getElementById("douyin-cookies-status");
+  const btnImportDouyinCookies = document.getElementById("btn-import-douyin-cookies");
+  const btnRefreshDouyinCookies = document.getElementById("btn-refresh-douyin-cookies");
+  const btnDeleteDouyinCookies = document.getElementById("btn-delete-douyin-cookies");
+  let douyinCookiesConfigured = false;
+  let douyinCookiesBusy = false;
+  let douyinCookiesVersion = 0;
 
   // Connect to Desktop Bridge via QWebChannel
   if (typeof QWebChannel !== "undefined" && window.qt && window.qt.webChannelTransport) {
@@ -1342,6 +1352,120 @@ document.addEventListener("DOMContentLoaded", () => {
   // =========================================================
   // 10. SETTINGS & API CONNECTION CHECKS
   // =========================================================
+  function setDouyinCookiesBusy(busy) {
+    douyinCookiesBusy = busy;
+    douyinCookiesPanel?.setAttribute("aria-busy", String(busy));
+    if (douyinCookiesFile) douyinCookiesFile.disabled = busy;
+    if (btnImportDouyinCookies) btnImportDouyinCookies.disabled = busy;
+    if (btnRefreshDouyinCookies) btnRefreshDouyinCookies.disabled = busy;
+    if (btnDeleteDouyinCookies) btnDeleteDouyinCookies.disabled = busy || !douyinCookiesConfigured;
+  }
+
+  function showDouyinCookiesMessage(message, isError = false) {
+    if (!douyinCookiesStatus) return;
+    douyinCookiesStatus.textContent = message;
+    douyinCookiesStatus.classList.toggle("text-rose-300", isError);
+    douyinCookiesStatus.classList.toggle("text-gray-400", !isError);
+  }
+
+  function applyDouyinCookiesStatus(data) {
+    if (typeof data?.configured !== "boolean" || !Number.isInteger(data.count) || data.count < 0) {
+      throw new Error("invalid cookie status");
+    }
+    douyinCookiesConfigured = data.stored === true || data.configured;
+    douyinCookiesState.textContent = data.configured
+      ? `Đã nhập ${data.count} cookie Douyin trên máy này.`
+      : data.stored === true
+        ? "Cookie đã lưu hết hạn hoặc không còn hợp lệ. Nhập lại hoặc xóa bản cũ."
+        : "Chưa có cookie Douyin đã nhập.";
+    btnDeleteDouyinCookies.disabled = douyinCookiesBusy || !douyinCookiesConfigured;
+  }
+
+  async function refreshDouyinCookies() {
+    if (!douyinCookiesStatus || douyinCookiesBusy) return;
+    const version = ++douyinCookiesVersion;
+    btnRefreshDouyinCookies.disabled = true;
+    showDouyinCookiesMessage("Đang kiểm tra cookie đã lưu trên máy…");
+    try {
+      const response = await fetch("/api/douyin/cookies", { cache: "no-store" });
+      if (!response.ok) throw new Error("cookie status unavailable");
+      const data = await response.json();
+      if (version !== douyinCookiesVersion) return;
+      applyDouyinCookiesStatus(data);
+      showDouyinCookiesMessage(data.configured
+        ? "Đã có cookie để thử tải. Chạy lại link Douyin để kiểm tra phiên còn dùng được."
+        : data.stored === true
+          ? "Nhập tệp mới hoặc xóa phiên cũ trước khi thử lại."
+          : "Chọn tệp cookie Douyin để nhập. Đăng nhập Chrome không tự cập nhật mục này.");
+    } catch (_) {
+      if (version === douyinCookiesVersion) {
+        showDouyinCookiesMessage("Không kiểm tra được trạng thái cookie. Bấm Kiểm tra trạng thái để thử lại.", true);
+      }
+    } finally {
+      if (version === douyinCookiesVersion) btnRefreshDouyinCookies.disabled = false;
+    }
+  }
+
+  async function mutateDouyinCookies(method, file) {
+    if (douyinCookiesBusy) return;
+    const version = ++douyinCookiesVersion;
+    setDouyinCookiesBusy(true);
+    const importing = method === "POST";
+    showDouyinCookiesMessage(importing ? "Đang nhập cookie Douyin…" : "Đang xóa bản cookie đã nhập…");
+    try {
+      const options = { method, headers: { "X-Studio-Request": "douyin-cookies" } };
+      if (importing) {
+        options.body = new FormData();
+        options.body.append("file", file, "douyin-cookies.txt");
+      }
+      const response = await fetch("/api/douyin/cookies", options);
+      if (!response.ok) {
+        showDouyinCookiesMessage(importing && [400, 413, 415, 422].includes(response.status)
+          ? "Không nhập được tệp. Chọn bản Netscape cookies .txt hợp lệ, chỉ xuất từ Douyin và không quá 1 MiB. Cookie đã lưu trước đó được giữ nguyên."
+          : importing
+            ? "Không nhập được cookie. Cookie đã lưu trước đó được giữ nguyên; hãy thử lại."
+            : "Chưa xác nhận xóa được cookie. Bấm Kiểm tra trạng thái trước khi thử lại.", true);
+        return;
+      }
+      const data = await response.json();
+      if (version !== douyinCookiesVersion) return;
+      applyDouyinCookiesStatus(data);
+      showDouyinCookiesMessage(importing
+        ? "Đã nhập cookie. Chạy lại link Douyin để kiểm tra tải video; phiên đăng nhập chưa được xác minh."
+        : "Đã xóa bản cookie khỏi Studio. Phiên đăng nhập trong Chrome vẫn giữ nguyên.");
+    } catch (_) {
+      showDouyinCookiesMessage(importing
+        ? "Chưa xác nhận nhập được cookie. Bấm Kiểm tra trạng thái rồi thử lại."
+        : "Chưa xác nhận xóa được cookie. Bấm Kiểm tra trạng thái rồi thử lại.", true);
+    } finally {
+      if (douyinCookiesFile) douyinCookiesFile.value = "";
+      if (version === douyinCookiesVersion) setDouyinCookiesBusy(false);
+    }
+  }
+
+  btnImportDouyinCookies?.addEventListener("click", () => {
+    if (!douyinCookiesBusy) douyinCookiesFile.click();
+  });
+  douyinCookiesFile?.addEventListener("change", async () => {
+    const file = douyinCookiesFile.files?.[0];
+    if (!file || douyinCookiesBusy) {
+      douyinCookiesFile.value = "";
+      return;
+    }
+    if (!/\.txt$/i.test(file.name) || file.size <= 0 || file.size > 1024 * 1024) {
+      ++douyinCookiesVersion;
+      btnRefreshDouyinCookies.disabled = false;
+      showDouyinCookiesMessage("Chọn tệp Netscape cookies .txt có nội dung, tối đa 1 MiB. Cookie đã lưu trước đó được giữ nguyên.", true);
+      douyinCookiesFile.value = "";
+      return;
+    }
+    await mutateDouyinCookies("POST", file);
+  });
+  btnRefreshDouyinCookies?.addEventListener("click", refreshDouyinCookies);
+  btnDeleteDouyinCookies?.addEventListener("click", async () => {
+    if (douyinCookiesConfigured) await mutateDouyinCookies("DELETE");
+  });
+
   async function loadSettingsForm() {
     refreshMuseStatus();
     try {
@@ -1676,4 +1800,5 @@ document.addEventListener("DOMContentLoaded", () => {
   });
 
   loadSettingsForm();
+  refreshDouyinCookies();
 });

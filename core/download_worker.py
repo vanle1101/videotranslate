@@ -8,6 +8,7 @@ from urllib.parse import urlsplit
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from core.downloader import friendly_download_error
+from core.douyin_cookies import DouyinCookieError, cookie_policy, is_douyin_url, load_douyin_cookiejar
 
 
 def progress_payload(data):
@@ -26,10 +27,19 @@ def progress_payload(data):
     return result
 
 
-def single_video_downloader(options):
+def single_video_downloader(options, url=None):
     import yt_dlp
 
+    use_douyin_cookies = is_douyin_url(url) if url else False
+
     class SingleVideoYoutubeDL(yt_dlp.YoutubeDL):
+        def build_request_director(self, handlers, preferences=None):
+            if use_douyin_cookies:
+                # Requests recreates cookie jars and drops host-only/HTTPS policy.
+                # Urllib keeps the same jar through every request and redirect.
+                handlers = [handler for handler in handlers if handler.RH_KEY == "Urllib"]
+            return super().build_request_director(handlers, preferences)
+
         def process_ie_result(self, ie_result, download=True, extra_info=None):
             # noplaylist only selects a video when the URL also names a playlist.
             # Reject pure playlists before yt-dlp enumerates or downloads entries,
@@ -38,7 +48,21 @@ def single_video_downloader(options):
                 raise ValueError("unsupported url: playlist")
             return super().process_ie_result(ie_result, download, extra_info)
 
-    return SingleVideoYoutubeDL(options)
+    if use_douyin_cookies:
+        # Session changes made by yt-dlp belong to this worker only. Never read
+        # Chrome or pass the private import file as yt-dlp's persistent cookiefile.
+        options = {**options, "cookiefile": None, "cookiesfrombrowser": None}
+    downloader = SingleVideoYoutubeDL(options)
+    if use_douyin_cookies:
+        try:
+            imported = load_douyin_cookiejar()
+            downloader.cookiejar.set_policy(cookie_policy())
+            for cookie in imported:
+                downloader.cookiejar.set_cookie(cookie)
+        except Exception:
+            downloader.close()
+            raise
+    return downloader
 
 
 def main():
@@ -73,7 +97,7 @@ def main():
         "http_headers": {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"},
     }
     try:
-        with single_video_downloader(options) as ydl:
+        with single_video_downloader(options, url) as ydl:
             info = ydl.extract_info(url, download=True)
             if not info or info.get("_type") in {"playlist", "multi_video"}:
                 raise ValueError("unsupported url")
@@ -84,6 +108,9 @@ def main():
                 raise ValueError("No completed video file")
         send({"kind": "result", "result": {"file_path": str(output), "title": info.get("title") or output.stem,
                                              "duration": info.get("duration")}})
+    except DouyinCookieError as error:
+        send({"kind": "error", "message": str(error)})
+        return 1
     except Exception as error:
         send({"kind": "error", "message": friendly_download_error(error, urlsplit(url).hostname)})
         return 1

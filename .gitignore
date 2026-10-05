@@ -4,6 +4,7 @@ workspace/cache/
 workspace/models/
 workspace/tools/
 workspace/muse-profile/
+workspace/private/
 workspace/inputs/*
 workspace/outputs/*
 workspace/logs/

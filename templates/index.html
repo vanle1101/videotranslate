@@ -458,6 +458,19 @@
       <p class="text-xs text-gray-400">Cấu hình API dịch thuật, mô hình giọng đọc và quy tắc lọc âm thanh.</p>
     </div>
 
+    <section id="douyin-cookies-panel" aria-labelledby="douyin-cookies-heading" class="bg-[#12151f] border border-gray-800 rounded-2xl p-5 shadow-xl space-y-3">
+      <h3 id="douyin-cookies-heading" class="text-sm font-bold text-cyan-300">Tải video Douyin</h3>
+      <p id="douyin-cookies-help" class="text-xs text-gray-400 leading-relaxed">Phiên đăng nhập Chrome không tự chuyển sang Studio. Chọn tệp Netscape cookies <span class="font-mono">.txt</span> chỉ xuất từ Douyin sau khi đăng nhập (tối đa 1 MiB). Bản sao được lưu trên máy và chỉ dùng để tải video Douyin.</p>
+      <p id="douyin-cookies-state" class="text-xs text-gray-300">Chưa kiểm tra cookie đã nhập.</p>
+      <div class="flex flex-wrap items-center gap-2">
+        <input id="douyin-cookies-file" type="file" accept=".txt,text/plain" aria-label="Chọn tệp cookie Douyin" aria-describedby="douyin-cookies-help" class="hidden">
+        <button id="btn-import-douyin-cookies" type="button" class="px-3 py-2 rounded-xl border border-cyan-500/50 hover:bg-cyan-600/20 text-cyan-300 text-xs font-semibold transition disabled:opacity-50 disabled:cursor-not-allowed">Nhập cookie từ tệp…</button>
+        <button id="btn-refresh-douyin-cookies" type="button" class="px-3 py-2 rounded-xl border border-gray-700 hover:bg-gray-800 text-gray-300 text-xs font-semibold transition disabled:opacity-50 disabled:cursor-not-allowed">Kiểm tra trạng thái</button>
+        <button id="btn-delete-douyin-cookies" type="button" disabled class="px-3 py-2 rounded-xl border border-gray-700 hover:bg-rose-900/20 text-rose-300 text-xs font-semibold transition disabled:opacity-50 disabled:cursor-not-allowed">Xóa cookie đã nhập</button>
+      </div>
+      <p id="douyin-cookies-status" role="status" aria-live="polite" aria-atomic="true" class="text-xs text-gray-400 leading-relaxed">Nhập cookie chưa xác nhận tải được video; cần chạy lại link Douyin để kiểm tra.</p>
+    </section>
+
     <div class="grid grid-cols-1 md:grid-cols-2 gap-6">
       
       <!-- AI Translation Settings -->
