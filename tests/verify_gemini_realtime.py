@@ -41,7 +41,7 @@ def verify_gemini_pipeline():
     if not input_video.exists():
         input_video = Path("workspace/inputs/real_chinese_1.mp4.webm")
 
-    temp_dir = Path("workspace/outputs/gemini_verification")
+    temp_dir = Path("workspace/temp/gemini-verification")
     temp_dir.mkdir(parents=True, exist_ok=True)
     seg_audio = temp_dir / "real_seg_slice.wav"
 

@@ -168,12 +168,13 @@ DEEPSEEK_API_KEY=sk-...
 ## 📁 Cấu Trúc Thư Mục
 
 ```
-e:/Dịch video/
+Dịch Video/
 ├── Start Douyin2TikTok AI Studio.bat   # Launcher Desktop chính thức (Zero terminal)
 ├── start.bat                           # Launcher tương thích chuyển hướng
 ├── desktop_app.py                      # Vỏ ứng dụng PySide6 Desktop & System Tray
 ├── config.py                           # Cấu hình hệ thống & luồng bảo vệ SafeStream
 ├── main.py                             # FastAPI Streaming Server & WebSocket Bus
+├── scripts/                            # Cài đặt, tạo shortcut, kiểm tra và tải model
 ├── core/
 │   ├── streaming/                      # Pipeline streaming thời gian thực, audio ducking & exporter
 │   ├── engines/
@@ -187,7 +188,14 @@ e:/Dịch video/
 ├── docs/                               # Tài liệu hướng dẫn & hình ảnh minh họa
 │   └── images/                         # Ảnh chụp màn hình giao diện & Banner chính thức
 ├── tests/                              # Bộ kiểm thử tự động (E2E, Port, Diagnostics)
-└── workspace/                          # Khu vực lưu trữ video đầu vào và thành phẩm
+└── workspace/                          # Dữ liệu cục bộ, không đưa lên Git
+    ├── inputs/                        # Video nguồn
+    ├── outputs/                       # Thành phẩm, phụ đề và báo cáo kiểm tra
+    ├── models/                        # Model đã tải
+    ├── tools/                         # Công cụ chạy tại máy
+    ├── cache/                         # Dữ liệu phiên xử lý
+    ├── logs/                          # Nhật ký chẩn đoán
+    └── temp/                          # File thử, trung gian và thư mục chờ xóa
 ```
 
 ---

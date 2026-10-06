@@ -1,10 +1,15 @@
 """Download and verify the optional five-voice Piper Vietnamese model (73.6 MiB)."""
 import argparse
+from pathlib import Path
+import sys
+
+if __package__ in (None, ""):
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from core.engines.tts.piper_engine import (
     PIPER_ASSETS, PIPER_REVISION, PIPER_SOURCE_URL, piper_model_dir,
 )
-from download_models import download
+from scripts.download_models import download
 
 
 def build_plan():

@@ -11,7 +11,7 @@ Reuse the project environment and its existing ONNX Runtime:
 
 ```powershell
 .\venv\Scripts\python.exe -m pip install -r requirements-piper.txt
-.\venv\Scripts\python.exe -B download_piper.py --download
+.\venv\Scripts\python.exe -B scripts/download_piper.py --download
 ```
 
 The Windows wheel is available for Python 3.9 and newer, including Python 3.12.

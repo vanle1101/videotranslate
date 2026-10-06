@@ -105,7 +105,7 @@ def test_instances_share_single_cpu_model_with_bounded_threads(monkeypatch, tmp_
 
 
 def test_acquisition_plan_is_pinned_and_matches_engine():
-    from download_piper import build_plan
+    from scripts.download_piper import build_plan
     plan = build_plan()
     assert len(plan) == 2
     assert sum(item["size"] for item in plan) == 77105908

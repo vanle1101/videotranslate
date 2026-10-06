@@ -4,11 +4,24 @@ Máy đã kiểm tra ngày 05/10/2026: Intel i5-13420H (8 nhân / 12 luồng), R
 
 ## Mở ứng dụng
 
-Nhấp đúp **Douyin2TikTok AI Studio.lnk** (logo Studio) hoặc **start.bat**, chọn video MP4, chọn giọng Hoài My hoặc Nam Minh, rồi bấm **Bắt đầu dịch & phát realtime**. Chờ xử lý xong trước khi bấm xuất MP4. Thành phẩm nằm trong `workspace/outputs`. Nếu chuyển thư mục, chạy `create_shortcut.ps1` để tạo lại lối mở; `setup.ps1` cũng tạo lối mở này sau cài đặt.
+Nhấp đúp **Douyin2TikTok AI Studio.lnk** (logo Studio) hoặc **start.bat**, chọn video MP4, chọn giọng Hoài My hoặc Nam Minh, rồi bấm **Bắt đầu dịch**. Chờ xử lý xong trước khi bấm **Xuất video MP4**. Thành phẩm nằm trong `workspace/outputs`. Nếu chuyển thư mục, chạy `scripts/create_shortcut.ps1` để tạo lại lối mở; `scripts/setup.ps1` cũng tạo lối mở này sau cài đặt.
 
 Bấm **X** chỉ ẩn cửa sổ xuống khay hệ thống; tác vụ tải, dịch, kiểm tra và xuất video tiếp tục chạy. Bấm biểu tượng Studio ở khay (có thể nằm trong nút **^**) hoặc mở lại shortcut để hiện cửa sổ. Chuột phải biểu tượng, chọn **Thoát hoàn toàn** để tắt; nếu còn tác vụ, Studio hỏi trước khi dừng. Khi máy không có khay hệ thống khả dụng, X sẽ đóng ứng dụng như bình thường.
 
 Môi trường `venv`, cấu hình `.env` và model Whisper Small đã được cài ở máy này. Sau khi khởi động lại Windows không cần cài lại. Nếu chuyển sang máy khác hoặc bị thiếu thư viện, chạy **setup.bat**. Script dùng Python 3.12, tái sử dụng package hệ thống phù hợp, chỉ bổ sung package thiếu vào venv và không sửa Python toàn cục. FFmpeg và FFprobe phải có trong PATH. Dung lượng cài mới khoảng 1–2 GB.
+
+## Thư mục làm việc
+
+Mã xử lý nằm trong `core`, giao diện trong `static` và `templates`, tài liệu trong `docs`, bộ kiểm thử trong `tests`. Các script cài đặt, tải model, kiểm tra runtime và tạo shortcut được gom vào `scripts`; `start.bat`, `setup.bat` và shortcut vẫn mở từ thư mục gốc.
+
+- `workspace/inputs`: video nguồn.
+- `workspace/outputs`: thành phẩm, phụ đề và báo cáo kiểm tra đi kèm.
+- `workspace/temp`: dữ liệu thử và file trung gian; các script benchmark không ghi vào outputs.
+- `workspace/cache`: dữ liệu xử lý của phiên; không dọn khi đang dịch, sửa thoại hoặc xuất video.
+- `workspace/logs`: nhật ký chẩn đoán.
+- `workspace/models`, `workspace/tools`, `venv`: model, công cụ và thư viện đang dùng.
+
+Đợt dọn ngày 06/10/2026 gom cache thử, bản xem trước hết phiên, ảnh kiểm tra và bản xuất đã được thay thế vào `workspace/temp/to-delete-2026-10-06`. Đây là các file đã chuyển, không tạo bản sao; có thể xóa cả thư mục này khi không cần nữa. Bản đã rà `douyin-7676801479801388282-vi-reviewed.mp4`, báo cáo đi kèm và các video mẫu được giữ trong outputs. `.env`, hồ sơ đăng nhập và dữ liệu workspace không đưa lên Git.
 
 ## Cấu hình đang dùng
 
@@ -21,7 +34,7 @@ Môi trường `venv`, cấu hình `.env` và model Whisper Small đã được 
 
 Cấu hình dựa trên tổng RAM 16 GB, không dựa trên RAM trống tại thời điểm cài đặt. RTX 2050 được nhận diện, nhưng pipeline mặc định chạy CPU. Chỉ đổi `DEVICE=cuda` sau khi kiểm tra driver và các thư viện CUDA/CuDNN tương thích. Models phân biệt **đã tải đủ tệp** và **thiếu runtime**; có checkpoint không đồng nghĩa model đã chạy được. VieNeu được cố định backend ONNX/CPU, 4 luồng, không tự chuyển sang Torch khi cài thêm thư viện.
 
-`venv\Scripts\python.exe -B download_models.py` hiển thị kế hoạch tải SenseVoice Int8, VieNeu v3 Turbo cùng MOSS codec, BS-RoFormer và ba checkpoint ProPainter/RAFT/Flow. Thêm `--download` để tải khoảng 1,60 GiB; script tái sử dụng cache, kiểm tra dung lượng/checksum được upstream cung cấp và lưu manifest tại `workspace/models/download_manifest.json`. Lệnh này không đổi engine mặc định. RoFormer cần `audio_separator`/Torch; ProPainter chưa có phần suy luận tích hợp trong app, nên che phụ đề hiện vẫn dùng blur.
+`venv\Scripts\python.exe -B scripts/download_models.py` hiển thị kế hoạch tải SenseVoice Int8, VieNeu v3 Turbo cùng MOSS codec, BS-RoFormer và ba checkpoint ProPainter/RAFT/Flow. Thêm `--download` để tải khoảng 1,60 GiB; script tái sử dụng cache, kiểm tra dung lượng/checksum được upstream cung cấp và lưu manifest tại `workspace/models/download_manifest.json`. Lệnh này không đổi engine mặc định. RoFormer cần `audio_separator`/Torch; ProPainter chưa có phần suy luận tích hợp trong app, nên che phụ đề hiện vẫn dùng blur.
 
 Nếu tải bị gián đoạn, chạy lại cùng lệnh để tiếp tục từ tệp `.download` đang có. Bộ tải kiểm tra chính xác từng khoảng byte máy chủ trả về, tải tối đa bốn đoạn 1 MiB đồng thời rồi ghi theo thứ tự; chỉ đổi tên thành model hoàn chỉnh sau khi kiểm tra dung lượng/checksum. Máy chủ không hỗ trợ tải tiếp sẽ báo lỗi và giữ phần đã tải, không tự xóa hoặc tải đè. VieNeu/MOSS dùng cơ chế cache của Hugging Face.
 
@@ -68,7 +81,7 @@ Bản Qt trên máy không giải mã H.264/AAC trực tiếp. Khi cần, ứng 
 
 Cài đặt buffer, giảm giọng và ducking đã được nối xuống pipeline; giọng đọc tiếp tục sau pause, timeline giữ con trỏ, Stop xóa trạng thái âm thanh đã hủy. Xuất MP4 ráp giọng tuần tự để tránh giới hạn dòng lệnh Windows. FFmpeg đang xuất có thể hủy; tác vụ AI trong thread kết thúc lượt đang chạy rồi giải phóng model. Chỉ chuyển video hoàn chỉnh vào outputs khi render thành công.
 
-Chạy `venv\Scripts\python.exe -B check_runtime.py` để kiểm tra cài đặt ngoại tuyến. Nếu lỗi khởi động, xem tab Diagnostics hoặc `workspace/logs`. Link Douyin/TikTok có thể bị yêu cầu đăng nhập/cookie theo nền tảng; có thể tải video hợp lệ về máy rồi chọn file MP4.
+Chạy `venv\Scripts\python.exe -B scripts/check_runtime.py` để kiểm tra cài đặt ngoại tuyến. Nếu lỗi khởi động, xem tab Diagnostics hoặc `workspace/logs`. Link Douyin/TikTok có thể bị yêu cầu đăng nhập/cookie theo nền tảng; có thể tải video hợp lệ về máy rồi chọn file MP4.
 
 Ô link tự trích URL từ nội dung Chia sẻ; các domain video được hỗ trợ có thể bỏ `https://`. Dán link mới bỏ lựa chọn file cũ. Bấm Bắt đầu tạo tác vụ ngay, rồi lần lượt hiện kết nối, tải, chuẩn bị, nhận giọng, dịch và tạo giọng. Phần trăm tải dựa trên số byte khi máy chủ cung cấp tổng dung lượng; phần trăm xử lý dựa trên số câu hoàn tất. Các bước chưa đo được hiện “Chưa có %”. Dừng hoạt động cả khi còn đang kết nối; Tạm dừng chỉ khả dụng sau khi chuẩn bị xong. Playlist bị từ chối trước khi tải các video.
 

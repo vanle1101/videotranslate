@@ -56,7 +56,7 @@ def _verify_assets(root: Path) -> None:
     for name, size, expected_digest in PIPER_ASSETS:
         path = root / name
         if not path.is_file() or path.stat().st_size != size:
-            raise RuntimeError("Thiếu model Piper. Chạy download_piper.py --download trước.")
+            raise RuntimeError("Thiếu model Piper. Chạy scripts/download_piper.py --download trước.")
         digest = hashlib.sha256()
         with path.open("rb") as source:
             for chunk in iter(lambda: source.read(1024 * 1024), b""):

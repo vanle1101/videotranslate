@@ -17,7 +17,7 @@ Nút **AI kiểm tra lại** dùng phiên hiện có và chỉ tạo lại giọ
 
 FFmpeg giải mã toàn bộ hình/tiếng không lỗi; đã xem khung hình render để kiểm tra giữ chữ Trung và đặt phụ đề Việt bên dưới. Studio mở lại với đủ 11 câu và đường dẫn MP4/báo cáo, hai đường dẫn trả HTTP 206 đúng loại media. Bộ kiểm tra tích hợp đạt **222 bài Python**, một bài bỏ qua do quyền symlink; **104 bài Node** đạt. Kiểm tra bổ sung đóng ứng dụng/xuất đạt **41 bài** (có trùng bộ trước), xác nhận đợi tác vụ xuất dừng trước khi dọn WAV. Các kiểm tra này không chứng minh mọi video đều dịch hoàn hảo.
 
-Lệnh xóa ảnh kiểm tra `reviewed_clip_frame.png` trong Windows Temp và script/kết quả trung gian `review_current_clip.py`, `automatic-review-result.json` bị bộ duyệt tự động từ chối (`blocked by policy`); không thử lại. Cache âm thanh và dữ liệu khởi tạo của phiên đang mở được giữ để xem/sửa kết quả. Media và file tạm không đưa lên Git.
+Theo yêu cầu gom file để người dùng tự xóa, ảnh kiểm tra `reviewed_clip_frame.png`, script `review_current_clip.py` và kết quả trung gian `automatic-review-result.json` đã chuyển vào `workspace/temp/to-delete-2026-10-06`. Media và file tạm không đưa lên Git.
 
 ## Thử lại khi dịch vụ giọng đọc gián đoạn
 
@@ -68,7 +68,7 @@ Rà độc lập đã sửa thêm việc reconnect giữ audio revision cũ, gi�
 
 Lượt kiểm tra cuối: **321 bài Python đạt, 19 subtest đạt**, một bài symlink bỏ qua do quyền Windows; **83 bài JavaScript đạt**. Qt desktop smoke đạt kiểm tra toàn câu/đổi lượt, nền vàng/trắng, giữ chữ nguồn, phát/tạm dừng/tua/nghe gốc, chỉnh transcript, lựa chọn xuất, dán link, tiến độ và danh sách 32 giọng. Smoke dùng dữ liệu kiểm soát, không phải chứng nhận chất lượng dịch tự động. Backend thử nghiệm đã dừng và media thử của smoke đã được dọn.
 
-Lệnh dọn các file tạm kiểm chứng `dialogue-*`, `caption-reference-*`, script render và cache `dialogue-validation` của lượt này bị bộ duyệt tự động từ chối (`blocked by policy`); chúng vẫn còn tại máy và không được đưa lên Git. Không thử lại bằng công cụ khác. Các tệp thành phẩm và media có sẵn được giữ nguyên.
+File tạm kiểm chứng `dialogue-*`, `caption-reference-*`, script render và cache `dialogue-validation` đã được gom vào `workspace/temp/to-delete-2026-10-06` theo yêu cầu người dùng; cache nằm trong thư mục con `cache`. Thành phẩm đoạn hội thoại và media nguồn vẫn giữ nguyên.
 
 ## Lượt trước: OpenRouter trực tiếp và phụ đề viền vàng
 
@@ -80,8 +80,8 @@ Rà mã sau lượt chạy còn phát hiện so khớp gần đúng có thể b�
 
 Thành phẩm cuối được rà và sửa cả mười câu qua luồng lưu transcript/tạo lại giọng Edge-TTS Hoài My, rồi xuất. Đây là bản có biên tập, không phải xác nhận model tự dịch đúng toàn bộ. Câu kết vẫn giữ dấu lửng vì video nguồn bị cắt. Không đưa câu mẫu thành quy tắc thay thế trong mã sản phẩm.
 
-- MP4: `workspace/outputs/douyin-7676801479801388282-vi-free.mp4`.
-- Phụ đề: `workspace/outputs/douyin-7676801479801388282-vi-free.srt`.
+- MP4 của lượt trước: `workspace/temp/to-delete-2026-10-06/drafts/douyin-7676801479801388282-vi-free.mp4`.
+- Phụ đề của lượt trước: `workspace/temp/to-delete-2026-10-06/drafts/douyin-7676801479801388282-vi-free.srt`.
 - H264/AAC stereo, 2160×3840, 32,633333 giây, 84.196.464 byte.
 - SHA-256: `639880a1a8e3545e3b01b6e7641b850bdc0f9a160cd4557e8e4499f5de88eae1`.
 - Chữ vàng đậm, viền đen, nền trong, tối đa hai dòng ở phía dưới. Bản này giữ nguyên chữ/hình nguồn, không có vùng che OCR.
@@ -97,7 +97,7 @@ Studio đang mở được giữ nguyên; cần mở lại để nạp mã mới
 - Nội dung chia sẻ: `做自媒体这些常见的谣言 你都信过哪些？`, tác giả `野生军师🧢`.
 - Link: https://v.douyin.com/FUSSxhVKiZw/ — video ID `7676801479801388282`.
 - Tệp nguồn có sẵn: H264/AAC, 2160×3840, 32,601667 giây, 102.286.058 byte. Đã đối chiếu dung lượng và các mẫu byte đầu/giữa/cuối với nguồn tải, không tải thêm bản sao.
-- Thành phẩm cục bộ: `workspace/outputs/douyin-7676801479801388282-vi.mp4` và `.srt` cùng tên; media không đưa lên Git.
+- Bản xuất của lượt trước: `workspace/temp/to-delete-2026-10-06/drafts/douyin-7676801479801388282-vi.mp4` và `.srt` cùng tên; media không đưa lên Git.
 - Thành phẩm: H264/AAC stereo, 2160×3840, 32,633333 giây, 79.077.222 byte.
 - SHA-256 MP4: `164724a234cb03f7b29b5fc3583bc2963765739d8706616c42c70e7612886771`.
 

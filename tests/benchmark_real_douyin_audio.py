@@ -14,7 +14,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from core.engines.separator.realtime_suppressor import RealtimeVocalSuppressor
 from core.engines.separator.roformer_engine import BSRoFormerSeparator
 
-COMPARISON_DIR = Path("workspace/outputs/comparisons")
+COMPARISON_DIR = Path("workspace/temp/comparisons")
 COMPARISON_DIR.mkdir(parents=True, exist_ok=True)
 
 VIDEOS = [

@@ -7,8 +7,8 @@ import pytest
 import requests
 
 import core.model_manager as manager
-import download_models as downloader
-from download_models import validate
+from scripts import download_models as downloader
+from scripts.download_models import validate
 
 
 def test_checkpoint_does_not_imply_runtime_ready():

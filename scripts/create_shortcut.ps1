@@ -1,5 +1,6 @@
 $ErrorActionPreference = 'Stop'
-$studioPython = Join-Path $PSScriptRoot 'venv\Scripts\pythonw.exe'
+$studioRoot = Split-Path -Parent $PSScriptRoot
+$studioPython = Join-Path $studioRoot 'venv\Scripts\pythonw.exe'
 if (-not (Test-Path -LiteralPath $studioPython)) {
     throw 'Run setup.bat before creating the Studio shortcut.'
 }
@@ -50,10 +51,10 @@ public static class StudioShortcut {
 '@
 }
 [StudioShortcut]::Create(
-    (Join-Path $PSScriptRoot 'Douyin2TikTok AI Studio.lnk'),
+    (Join-Path $studioRoot 'Douyin2TikTok AI Studio.lnk'),
     $studioPython,
-    ('-B "' + (Join-Path $PSScriptRoot 'desktop_app.py') + '"'),
-    $PSScriptRoot,
-    (Join-Path $PSScriptRoot 'docs\images\studio.ico')
+    ('-B "' + (Join-Path $studioRoot 'desktop_app.py') + '"'),
+    $studioRoot,
+    (Join-Path $studioRoot 'docs\images\studio.ico')
 )
 Write-Host 'Created Douyin2TikTok AI Studio shortcut in the application folder.'

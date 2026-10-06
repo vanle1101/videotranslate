@@ -8,7 +8,7 @@ if not exist "venv\Scripts\pythonw.exe" (
     pause
     exit /b 1
 )
-"venv\Scripts\python.exe" -B check_runtime.py
+"venv\Scripts\python.exe" -B "scripts\check_runtime.py"
 if errorlevel 1 (
     echo Please run setup.bat to repair the installation.
     pause
