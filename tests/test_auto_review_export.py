@@ -299,3 +299,40 @@ def test_stop_also_cancels_and_drains_automatic_export(session):
             await item.auto_export_task
 
     asyncio.run(run())
+
+
+def test_cancelling_export_coroutine_waits_for_its_real_worker(session):
+    item, exporter = session
+    release = threading.Event()
+
+    async def run():
+        loop = asyncio.get_running_loop()
+        started, cancellation_seen = asyncio.Event(), asyncio.Event()
+
+        def render(**kwargs):
+            loop.call_soon_threadsafe(started.set)
+            for _ in range(500):
+                if kwargs["cancel_check"]():
+                    loop.call_soon_threadsafe(cancellation_seen.set)
+                    break
+                release.wait(.01)
+            assert release.wait(5)
+            raise RuntimeError("cancelled")
+
+        exporter.export.side_effect = render
+        task = asyncio.create_task(main.export_hq(main.ExportHQRequest(task_id=item.task_id)))
+        try:
+            await asyncio.wait_for(started.wait(), 5)
+            task.cancel()
+            await asyncio.wait_for(cancellation_seen.wait(), 5)
+            assert not task.done()
+            assert item.export_task is task
+            assert main.active_export_tasks[f"export_{item.task_id}"]["status"] == "CANCELLING"
+        finally:
+            release.set()
+            with pytest.raises(asyncio.CancelledError):
+                await task
+        assert item.export_task is None
+        assert main.active_export_tasks[f"export_{item.task_id}"]["status"] == "CANCELLED"
+
+    asyncio.run(run())

@@ -9,7 +9,7 @@
   --studio-violet: #9a34fa;
   --studio-gradient: linear-gradient(112deg, #fa309f, #a326ef);
 }
-body { background: radial-gradient(ellipse at 0 0, #241840 0, transparent 38%), #080e1b !important; color: var(--studio-text); font-family: 'Segoe UI', sans-serif; }
+body { margin: 0; background: radial-gradient(ellipse at 0 0, #241840 0, transparent 38%), #080e1b !important; color: var(--studio-text); font-family: 'Segoe UI', sans-serif; }
 button, input, select, textarea { font: inherit; }
 button { cursor: pointer; }
 button:disabled { opacity: .45; cursor: not-allowed; }
@@ -56,7 +56,7 @@ html { scroll-padding-top: 106px; }
 .telemetry-workers > #worker-trans-badge::before { background: #c677f7; }
 .telemetry-workers > #worker-tts-badge::before { background: #7ab6ff; }
 .pipeline-warning { padding: 12px 26px 0; color: #fbd58d; font-size: 12px; }
-.studio-workspace { display: grid; gap: 14px; max-width: 2200px; margin: 0 auto; padding: 14px 25px 20px; align-items: stretch; }
+.studio-workspace { display: grid; box-sizing: border-box; width: 100%; gap: 14px; max-width: 2200px; margin: 0 auto; padding: 14px 25px 20px; align-items: stretch; }
 .studio-controls, .studio-preview, .studio-sidebar, .studio-card { min-width: 0; min-height: 0; }
 .studio-card { border: 1px solid var(--studio-border); border-radius: 15px; background: linear-gradient(132deg, #1c1e3f 0, #101c30 48%, #101a2c 100%); box-shadow: inset 0 1px #bcb2ff07, 0 10px 22px #0002; }
 .studio-controls { display: flex; flex-direction: column; gap: 14px; }

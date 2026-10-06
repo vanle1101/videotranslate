@@ -823,3 +823,113 @@ def test_invalid_timing_cannot_change_text_or_start_tts(session, duration):
     asyncio.run(run())
     session.tts_engine.synthesize.assert_not_called()
     assert session.segments[0].final_vi == "Lời thoại cũ"
+
+
+@pytest.mark.parametrize("changed, unresolved", [(False, False), (True, False), (True, True)])
+def test_automatic_review_only_regenerates_changed_audio_and_preserves_uncertainty(session, monkeypatch, changed, unresolved):
+    from core.translation_review import AutomaticTranslationReviewer
+    monkeypatch.setattr(settings, "LLM_PROVIDER", "opencode")
+    segment = session.segments[0]
+    segment.needs_review = True
+    row = dict(segment.to_dict(), final_vi="Lời đã kiểm tra" if changed else segment.final_vi,
+               needs_review=unresolved, review_reason="Nguồn bị cắt" if unresolved else None,
+               verification={"status": "unresolved" if unresolved else "corrected" if changed else "verified"})
+    monkeypatch.setattr(AutomaticTranslationReviewer, "review", lambda *a, **kw: {
+        "segments": {0: row}, "summary": {"checked": 1, "corrected": int(changed and not unresolved), "unresolved": int(unresolved)}})
+    async def run():
+        async with client() as api:
+            response = await api.post(f"/api/streaming/{session.task_id}/review")
+            assert response.status_code == 200 and response.json()["status"] == "reviewing"
+            task = session.review_task
+            assert task is not None
+            await task
+            assert session.get_progress()["can_review"]
+            assert session.get_progress()["status"] == "COMPLETED"
+    asyncio.run(run())
+    assert segment.final_vi == row["final_vi"]
+    assert segment.needs_review == unresolved
+    assert segment.verification == row["verification"]
+    assert session.tts_engine.synthesize.call_count == int(changed)
+    assert segment.revision == int(changed)
+    assert not session.is_running and not session.is_editing
+
+
+def test_automatic_review_reserves_task_blocks_edit_export_and_keeps_old_media_on_failure(session, monkeypatch):
+    from core.translation_review import AutomaticTranslationReviewer
+    monkeypatch.setattr(settings, "LLM_PROVIDER", "opencode")
+    entered, release = threading.Event(), threading.Event()
+    def review(*args, **kwargs):
+        entered.set()
+        assert release.wait(3)
+        raise RuntimeError("test service failure")
+    monkeypatch.setattr(AutomaticTranslationReviewer, "review", review)
+    segment = session.segments[0]
+    segment.needs_review = True
+    async def run():
+        async with client() as api:
+            assert (await api.post(f"/api/streaming/{session.task_id}/review")).status_code == 200
+            task = session.review_task
+            await wait_until(entered.is_set)
+            try:
+                assert (await api.post(f"/api/streaming/{session.task_id}/review")).status_code == 409
+                assert (await api.patch(route(session), json={"final_vi": "Ghi đè"})).status_code == 409
+                assert (await api.post('/api/streaming/export-hq', json={"task_id": session.task_id})).status_code == 409
+            finally:
+                release.set()
+                await task
+    asyncio.run(run())
+    assert segment.final_vi == "Lời thoại cũ" and segment.needs_review
+    assert Path(segment.audio_path).read_bytes() == b"old audio"
+    assert session.review_summary["status"] == "failed"
+    assert session.get_progress()["can_review"]
+
+
+def test_saved_edit_invalidates_previous_result_without_deleting_file_or_claiming_ai_verified_text(session):
+    final_file = session.cache_dir / "previous-final.mp4"
+    final_file.write_bytes(b"previous final")
+    session.output_video_url, session.output_filename = "/api/outputs/previous-final.mp4", final_file.name
+    session.auto_export_signature = "old revision"
+    session.segments[0].verification = {"status": "verified"}
+    session.review_summary = {"status": "completed", "checked": 1, "verified": 1, "corrected": 0, "unresolved": 0}
+
+    asyncio.run(session.edit_segment(0, "Lời tôi đã sửa"))
+
+    assert session.output_video_url == session.output_filename == ""
+    assert session.auto_export_signature is None
+    assert final_file.read_bytes() == b"previous final"
+    assert session.review_summary == {"status": "completed", "checked": 0, "verified": 0, "corrected": 0, "unresolved": 0, "manual": 1}
+    invalidated = next(data for event, data in session.events if event == "result_invalidated")
+    assert invalidated["reason"] == "transcript_changed"
+    assert invalidated["output_video_url"] == ""
+    assert session.events[-1][0] == "segment_update"
+
+
+def test_failed_edit_preserves_current_result_reference(session):
+    session.output_video_url, session.output_filename = "/api/outputs/current.mp4", "current.mp4"
+    session.auto_export_signature = "current revision"
+    session.tts_engine.synthesize.side_effect = RuntimeError("test TTS failure")
+    with pytest.raises(RuntimeError):
+        asyncio.run(session.edit_segment(0, "Chưa lưu được"))
+    assert session.output_video_url == "/api/outputs/current.mp4"
+    assert session.auto_export_signature == "current revision"
+    assert not any(event == "result_invalidated" for event, _ in session.events)
+
+
+def test_rechecking_invalidates_previous_result_even_when_service_fails(session, monkeypatch):
+    from core.translation_review import AutomaticTranslationReviewer
+    monkeypatch.setattr(settings, "LLM_PROVIDER", "opencode")
+    session.output_video_url, session.output_filename = "/api/outputs/old.mp4", "old.mp4"
+    session.auto_export_signature = "old revision"
+    monkeypatch.setattr(AutomaticTranslationReviewer, "review", Mock(side_effect=RuntimeError("test unavailable")))
+
+    async def run():
+        await session.start_automatic_review()
+        assert session.output_video_url == session.output_filename == ""
+        assert session.auto_export_signature is None
+        await session.review_task
+
+    asyncio.run(run())
+    assert session.review_summary["status"] == "failed"
+    assert session.output_video_url == ""
+    assert session.events[0][0] == "result_invalidated"
+    assert session.events[0][1]["reason"] == "review_started"

@@ -1,5 +1,13 @@
 # Kiểm tra dịch video — 06/10/2026
 
+## Tự kiểm tra và trả video kết quả
+
+Luồng OpenCode có bật phân tích hình ảnh nay rà lại mọi câu trước khi tạo giọng. Lượt rà mới đọc OCR dày hơn, kiểm tra ý nghĩa và chỉ xác nhận lời nguồn khi dẫn chứng khớp nội dung/thời điểm. Các câu chưa đủ chữ được đối chiếu thêm bằng SenseVoice và Faster-Whisper đã có trên máy, nạp tuần tự; không tải thêm model. Hai bộ nhận giọng không thống nhất thì giữ trạng thái chưa đủ căn cứ, không tự coi bản dịch là chính xác.
+
+Sau khi kiểm tra và tạo giọng xong, Studio tự xuất MP4 và hiển thị nút mở/lưu kết quả. Báo cáo `.review.json` cùng tên ghi lời nguồn, lời Việt và bằng chứng cho từng câu. Câu đã rà nhưng còn thiếu căn cứ vẫn có trong video kèm cảnh báo rõ; lỗi dịch vụ kiểm tra thì giữ bản nháp và cho thử lại. Không yêu cầu người dùng hiểu tiếng Trung để duyệt từng dòng. Sửa lời thoại hoặc bắt đầu rà lại sẽ bỏ liên kết kết quả cũ khỏi phiên đang xem.
+
+Nút **AI kiểm tra lại** dùng phiên hiện có và chỉ tạo lại giọng của những câu đổi lời, giữ các WAV còn phù hợp. Các mục ghi “bản nháp chưa được tự kiểm tra” bên dưới là kết quả lịch sử của những lượt trước.
+
 ## Thử lại khi dịch vụ giọng đọc gián đoạn
 
 Edge-TTS Hoài My từng dừng tại câu thứ năm của video `7676801479801388282`. Studio nay có nút **Thử lại câu lỗi**: giữ audio hoàn tất, dùng lại bản dịch, tiếp tục câu lỗi và các câu chờ. Hai lần thử tự động chờ 3 và 8 giây. Tác vụ lỗi nhận dạng/dịch không được gán thành lỗi giọng để thử lại sai bước. Khi thử lại, khóa nguồn và giọng; không tải lại video, không đặt vị trí phát về đầu khi websocket nối lại.

@@ -51,6 +51,8 @@ class SegmentItem:
         self.evidence_mode: Optional[str] = None
         self.needs_review = False
         self.review_reason: Optional[str] = None
+        self.asr_text = ""
+        self.verification: Optional[Dict[str, Any]] = None
         self.confirmed_silence = False
         self.subtitle_cues = []
         self.subtitle_timing_source = "pending"
@@ -82,6 +84,8 @@ class SegmentItem:
             "evidence_mode": self.evidence_mode,
             "needs_review": self.needs_review,
             "review_reason": self.review_reason,
+            "asr_text": self.asr_text,
+            "verification": self.verification,
             "preview_is_draft": bool(self.needs_review and self.status in ("READY", "PLAYED")),
             "confirmed_silence": self.confirmed_silence,
             "subtitle_cues": self.subtitle_cues,
@@ -125,6 +129,8 @@ class StreamingPipelineSession:
         self.visual_translation = bool(visual_translation)
         self.screen_texts: List[Dict[str, Any]] = []
         self.translation_sources: List[Dict[str, str]] = []
+        self.review_summary: Dict[str, Any] = {}
+        self.review_task: Optional[asyncio.Task] = None
         if self.visual_translation:
             from core.video_intelligence import validate_visual_provider, VideoIntelligenceError
             try:
@@ -184,7 +190,7 @@ class StreamingPipelineSession:
 
     @property
     def is_editing(self):
-        return bool(self.edit_tasks)
+        return bool(self.edit_tasks) or bool(self.review_task and not self.review_task.done())
 
     @property
     def can_retry(self):
@@ -241,7 +247,8 @@ class StreamingPipelineSession:
         self.worker_task.add_done_callback(lambda task: self._release_runtime() if task.cancelled() else None)
         return self.get_progress()
 
-    async def edit_segment(self, segment_id: int, text: str, *, confirm_silence: bool = False):
+    async def edit_segment(self, segment_id: int, text: str, *, confirm_silence: bool = False,
+                           _review_result: Optional[Dict[str, Any]] = None):
         """Publish text and fitted audio together only after synthesis succeeds."""
         if (not isinstance(confirm_silence, bool) or not isinstance(text, str)
                 or len(text) > 2000 or "\x00" in text
@@ -252,7 +259,8 @@ class StreamingPipelineSession:
             raise KeyError(segment_id)
         if self.is_stopped or seg.status not in ("READY", "PLAYED", "NEEDS_REVIEW"):
             raise SegmentEditConflict("Hãy chờ câu này dịch và tạo giọng xong trước khi sửa.")
-        if self.is_editing:
+        if self.is_editing and not (_review_result is not None and self.review_task is asyncio.current_task()
+                                    and not self.edit_tasks):
             raise SegmentEditConflict("Đang tạo lại giọng cho một câu. Hãy chờ lưu xong rồi sửa tiếp.")
         if not all(math.isfinite(value) for value in (seg.start, seg.end, seg.duration)) or seg.duration <= 0:
             raise ValueError("Thời lượng câu thoại không hợp lệ.")
@@ -264,7 +272,7 @@ class StreamingPipelineSession:
             if seg.confirmed_silence:
                 return seg.to_dict()
             raise SegmentEditConflict("Chỉ xác nhận im lặng cho câu đang cần kiểm tra.")
-        if text == seg.final_vi and not was_review:
+        if text == seg.final_vi and not was_review and _review_result is None:
             return seg.to_dict()
         task = asyncio.current_task()
         self.edit_tasks.add(task)
@@ -323,6 +331,18 @@ class StreamingPipelineSession:
                     self.total_processed_duration += seg.duration
                 if was_review_error:
                     self.error = None
+            if _review_result is not None:
+                self._apply_review_metadata(seg, _review_result)
+            else:
+                seg.verification = {"status": "manual", "reason": "Người dùng đã lưu lời thoại."}
+                if self.review_summary.get("status") == "completed":
+                    statuses = [(s.verification or {}).get("status") for s in self.segments.values()]
+                    self.review_summary = {**self.review_summary,
+                        "checked": sum(status in ("verified", "corrected", "unresolved") for status in statuses),
+                        **{status: statuses.count(status) for status in ("verified", "corrected", "unresolved", "manual")}}
+            # The file belongs to the old text/audio revision. Keep it on disk,
+            # but never expose it as this session's current final result.
+            self._invalidate_output()
             if self.visual_translation and not confirm_silence:
                 updated_screens = []
                 for screen in self.screen_texts:
@@ -351,6 +371,8 @@ class StreamingPipelineSession:
                     context["vi"] = text
             snapshot = seg.to_dict()
             try:
+                await self.emit("result_invalidated", {"reason": "transcript_changed",
+                    "output_video_url": "", "output_filename": "", "review_summary": dict(self.review_summary)})
                 await self.emit("segment_update", {**snapshot, "screen_texts": self.screen_texts})
             except Exception:
                 logging.getLogger("errors").warning("[%s] Không gửi được cập nhật câu %s", self.task_id, seg.id)
@@ -372,6 +394,74 @@ class StreamingPipelineSession:
             self.edit_tasks.discard(task)
             if self.is_stopped or not self.is_running:
                 self._release_runtime()
+
+    @staticmethod
+    def _apply_review_metadata(segment, row):
+        for field in ("text_zh", "literal_vi", "natural_vi", "final_vi", "needs_review", "review_reason", "verification"):
+            if field in row:
+                setattr(segment, field, row[field])
+
+    def _invalidate_output(self):
+        self.output_video_url = ""
+        self.output_filename = ""
+        self.output_review_url = ""
+        self.auto_export_signature = None
+
+    async def _review_translations(self, *, regenerate_audio=False):
+        from core.translation_review import AutomaticTranslationReviewer
+        await self.report_progress("review", "AI đang kiểm tra lại từng câu với nguồn…", 0)
+        loop = asyncio.get_running_loop()
+        def progress(percent):
+            if not self.is_stopped:
+                loop.call_soon_threadsafe(lambda: asyncio.create_task(self.report_progress(
+                    "review", "AI đang đối chiếu nguồn và sửa bản dịch…", percent)))
+        result = await self._run_blocking(
+            AutomaticTranslationReviewer().review, self.video_path, list(self.segments.values()),
+            self.screen_texts, cancel_check=lambda: self.is_stopped, progress_callback=progress)
+        for sid, row in result["segments"].items():
+            segment = self.segments[sid]
+            if regenerate_audio and row["final_vi"] != segment.final_vi:
+                await self.edit_segment(sid, row["final_vi"], _review_result=row)
+            else:
+                self._apply_review_metadata(segment, row)
+                if regenerate_audio:
+                    await self.emit("segment_update", segment.to_dict())
+        for source in result.get("translation_sources", []):
+            if source not in self.translation_sources:
+                self.translation_sources.append(source)
+        self.review_summary = dict(result["summary"], status="completed")
+        await self.emit("review_complete", {"review_summary": self.review_summary})
+
+    async def start_automatic_review(self):
+        if (not self.initialized or self.is_running or self.is_stopped or self.is_editing or self.error
+                or any(s.status not in ("READY", "PLAYED") for s in self.segments.values())):
+            raise SegmentEditConflict("Hãy chờ xử lý xong trước khi AI kiểm tra lại.")
+        if settings.LLM_PROVIDER != "opencode":
+            raise SegmentEditConflict("Kiểm tra lại miễn phí hiện dùng OpenCode trong Cài đặt.")
+        self.is_running = True
+        self.review_summary = {"status": "running"}
+        self._invalidate_output()
+        self.progress = {"phase": "review", "stage": "AI đang kiểm tra lại từng câu…", "progress_pct": 0, "status": "RUNNING"}
+        async def run_review():
+            try:
+                await self.emit("result_invalidated", {"reason": "review_started",
+                    "output_video_url": "", "output_filename": "", "review_summary": dict(self.review_summary)})
+                await self._review_translations(regenerate_audio=True)
+            except asyncio.CancelledError:
+                self.is_stopped = True
+                raise
+            except Exception:
+                self.review_summary = {"status": "failed"}
+                self.warnings.append("AI kiểm tra lại chưa hoàn tất. Các câu đã lưu và âm thanh sẵn có được giữ; có thể thử lại.")
+            finally:
+                self.is_running = False
+                self.review_task = None
+                if not self.is_stopped:
+                    await self.report_progress("complete", self._review_message(), 100)
+                    await self.emit("finished", self.get_telemetry())
+                self._release_runtime()
+        self.review_task = asyncio.create_task(run_review())
+        return self.get_progress()
 
     async def emit(self, event_type: str, data: Dict[str, Any]):
         if event_type == "segment_update":
@@ -400,7 +490,12 @@ class StreamingPipelineSession:
         snapshot = dict(self.progress)
         snapshot.update(self._review_metadata())
         snapshot["can_retry"] = self.can_retry
-        snapshot["can_pause"] = bool(self.initialized and self.is_running and not self.is_paused and not self.is_stopped and not self.error)
+        snapshot["review_summary"] = self.review_summary
+        snapshot["can_review"] = bool(self.initialized and not self.is_running and not self.is_stopped
+                                      and not self.is_editing and not self.error and settings.LLM_PROVIDER == "opencode"
+                                      and all(s.status in ("READY", "PLAYED") for s in self.segments.values()))
+        snapshot["can_pause"] = bool(self.initialized and self.is_running and not self.is_paused and not self.is_stopped and not self.error
+                                    and not (self.review_task and not self.review_task.done()))
         if self.is_stopped:
             snapshot.update(status="STOPPED", phase="stopped", stage="Đã dừng bởi người dùng")
         elif self.error:
@@ -607,6 +702,7 @@ class StreamingPipelineSession:
                 data = visual_result.get("segments", {}).get(item.id)
                 if not data:
                     raise ValueError("Phân tích hình ảnh thiếu câu thoại; không tự chuyển sang dịch âm thanh.")
+                item.asr_text = item.text_zh
                 item.text_zh = data.get("text_zh", "").strip()
                 item.literal_vi = data.get("literal_vi", "").strip()
                 item.natural_vi = data.get("natural_vi", "").strip()
@@ -638,6 +734,17 @@ class StreamingPipelineSession:
                     "cần duyệt lại lời thoại trước khi tạo giọng. "
                     "Chữ trên hình của phần dự phòng chưa được đối chiếu hình ảnh nên giữ nguyên khi xuất."
                 )
+
+        # The selected free provider performs a separate evidence/meaning pass
+        # before speech is generated, including rows the draft called clear.
+        if self.visual_translation and settings.LLM_PROVIDER == "opencode":
+            try:
+                await self._review_translations()
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                self.review_summary = {"status": "failed"}
+                self.warnings.append("AI kiểm tra lại chưa hoàn tất; giữ bản nháp và cho phép thử lại.")
 
         # 3. Enqueue all segments with initial priority based on time
         for item in self.segments.values():
@@ -846,6 +953,7 @@ class StreamingPipelineSession:
             "status": "cancelled" if self.is_stopped else ("failed" if self.error else ("running" if self.is_running else "finished")),
             "error": self.error,
             "warnings": list(self.warnings),
+            "review_summary": dict(self.review_summary),
             "translation_sources": list(self.translation_sources),
             **self._review_metadata(),
             "can_retry": self.can_retry,
@@ -895,7 +1003,7 @@ class StreamingPipelineSession:
         return result
 
     def _release_runtime(self):
-        if self.edit_tasks:
+        if self.edit_tasks or (self.review_task and not self.review_task.done()):
             return
         if self.is_stopped:
             try:
@@ -1069,7 +1177,14 @@ class StreamingPipelineSession:
 
     def _review_message(self):
         count = sum(s.needs_review for s in self.segments.values())
-        return f"Có {count} câu cần kiểm tra. Bạn có thể nghe bản nháp rồi sửa trực tiếp trong Transcript."
+        summary = self.review_summary
+        if summary.get("status") == "completed":
+            return (f"AI đã kiểm tra {summary.get('checked', 0)} câu, tự sửa {summary.get('corrected', 0)} câu. "
+                    + (f"{summary.get('manual')} câu do bạn sửa sau kiểm tra. " if summary.get("manual") else "")
+                    + (f"Còn {count} câu chưa đủ bằng chứng nguồn; xem lý do trong Transcript." if count else "Bản dịch đã sẵn sàng."))
+        if summary.get("status") == "failed":
+            return "AI kiểm tra lại chưa hoàn tất. Bản nháp được giữ; bấm AI kiểm tra lại để thử tiếp."
+        return f"Có {count} câu chưa đủ bằng chứng nguồn. AI có thể kiểm tra lại và tự sửa bản dịch."
 
     def _review_metadata(self):
         count = sum(s.needs_review for s in self.segments.values())
@@ -1115,7 +1230,7 @@ class StreamingPipelineSession:
             self.is_running = False
             self._release_runtime()
             if not self.is_stopped and not self.error:
-                stage = self._review_message() if any(s.needs_review for s in self.segments.values()) else "Dịch và lồng tiếng hoàn tất"
+                stage = self._review_message() if self.review_summary or any(s.needs_review for s in self.segments.values()) else "Dịch và lồng tiếng hoàn tất"
                 await self.report_progress("complete", stage, 100)
             else:
                 await self.emit("progress", self.get_progress())
@@ -1150,6 +1265,8 @@ class StreamingPipelineSession:
             self.start_task.cancel()
         if self.worker_task and not self.worker_task.done():
             self.worker_task.cancel()
+        if self.review_task and not self.review_task.done():
+            self.review_task.cancel()
         for task in tuple(self.edit_tasks):
             if not task.done():
                 task.cancel()

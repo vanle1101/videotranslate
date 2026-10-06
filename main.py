@@ -872,12 +872,13 @@ async def export_hq(req: ExportHQRequest):
     def _cancel_chk():
         return active_export_tasks.get(export_id, {}).get("cancelled", False)
 
+    render_worker = None
     try:
         await broadcast_session_event(req.task_id, "export_progress", {
             "progress": 5, "stage": "Đang tạo video kết quả từ bản dịch đã xử lý...",
         })
         exporter = HQExporter()
-        result = await asyncio.to_thread(
+        render_worker = asyncio.create_task(asyncio.to_thread(
             exporter.export,
             task_id=req.task_id,
             video_path=session.video_path,
@@ -889,20 +890,24 @@ async def export_hq(req: ExportHQRequest):
                 if getattr(session, "visual_translation", False) else None,
             progress_callback=_prog_cb,
             cancel_check=_cancel_chk
-        )
+        ))
+        result = await asyncio.shield(render_worker)
 
         active_export_tasks[export_id]["status"] = "COMPLETED"
         active_export_tasks[export_id]["progress"] = 100
         active_export_tasks[export_id]["stage"] = "Xuất video hoàn tất thành công!"
         active_export_tasks[export_id]["video_url"] = f"/api/outputs/{result['output_filename']}"
         active_export_tasks[export_id]["output_filename"] = result["output_filename"]
-        sidecar_name = f"{Path(result['output_filename']).stem}.review.json"
-        sidecar_path = settings.OUTPUT_DIR / sidecar_name
-        sidecar_path.write_text(json.dumps(review_sidecar_payload(session), ensure_ascii=False, indent=2), encoding="utf-8")
-        active_export_tasks[export_id]["review_url"] = f"/api/outputs/{sidecar_name}"
+        review_url = ""
+        if review_status == "completed":
+            sidecar_name = f"{Path(result['output_filename']).stem}.review.json"
+            sidecar_path = settings.OUTPUT_DIR / sidecar_name
+            sidecar_path.write_text(json.dumps(review_sidecar_payload(session), ensure_ascii=False, indent=2), encoding="utf-8")
+            review_url = f"/api/outputs/{sidecar_name}"
+        active_export_tasks[export_id]["review_url"] = review_url
         session.output_video_url = f"/api/outputs/{result['output_filename']}"
         session.output_filename = result["output_filename"]
-        session.output_review_url = f"/api/outputs/{sidecar_name}"
+        session.output_review_url = review_url
         await broadcast_session_event(req.task_id, "result_ready", session_output_details(session))
 
         return {
@@ -912,8 +917,22 @@ async def export_hq(req: ExportHQRequest):
             "video_url": f"/api/outputs/{result['output_filename']}",
             "elapsed_seconds": result["elapsed_seconds"],
             **session_output_details(session),
-            "review_url": f"/api/outputs/{sidecar_name}",
+            "review_url": review_url,
         }
+    except asyncio.CancelledError:
+        active_export_tasks[export_id].update(
+            cancelled=True, status="CANCELLING", stage="Đang dừng xuất video...")
+        # Cancelling an asyncio.to_thread waiter does not stop the media thread.
+        # Keep ownership until the exporter acknowledges its cancel callback.
+        while render_worker is not None and not render_worker.done():
+            try:
+                await asyncio.shield(render_worker)
+            except asyncio.CancelledError:
+                continue
+            except Exception:
+                break
+        active_export_tasks[export_id].update(status="CANCELLED", stage="Đã hủy xuất video")
+        raise
     except Exception:
         status_name = "CANCELLED" if active_export_tasks.get(export_id, {}).get("cancelled") else "FAILED"
         message = ("Đã hủy xuất video" if status_name == "CANCELLED" else

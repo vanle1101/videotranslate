@@ -1465,7 +1465,7 @@ test('uncertain transcript remains editable, shows review reason and can confirm
   const row = ui.el('seg-row-0'), warning = row.querySelector('.transcript-review');
   assert.equal(warning.hidden, false);
   assert.ok(warning.textContent.startsWith(segment.review_reason));
-  assert.match(warning.textContent, /giọng bản nháp để bạn nghe và sửa/);
+  assert.match(warning.textContent, /AI sẽ đối chiếu lại lời gốc và bản dịch/);
   assert.equal(warning.getAttribute('role'), 'status');
   assert.equal(row.dataset.needsReview, 'true');
   assert.equal(ui.el('seg-vi-0').disabled, false);
@@ -1496,7 +1496,7 @@ test('ready draft keeps review visible while playing its dub and captions, then 
   assert.equal(ui.el('seg-badge-0').textContent, 'Bản nháp · Cần kiểm tra');
   assert.equal(ui.el('btn-export-hq').disabled, true, 'Draft preview must not silently accept an unresolved final export');
   assert.equal(warning.hidden, false);
-  assert.match(warning.textContent, /Bản nháp đã có giọng: nghe thử/);
+  assert.match(warning.textContent, /AI kiểm tra lại/);
   assert.doesNotMatch(warning.textContent, /trước khi tạo giọng/);
   ui.sockets.at(-1).receive({ type: 'ready_to_play' });
   await video.play();
@@ -1532,7 +1532,8 @@ test('empty ready review draft continues video without claiming a generated voic
   ui.sockets.at(-1).receive({ type: 'segment_update', id: 0, start: 0, end: 10,
     status: 'READY', needs_review: true, final_vi: '', audio_url: null });
   const warning = ui.el('seg-row-0').querySelector('.transcript-review');
-  assert.match(warning.textContent, /Chưa có giọng Việt.*Video vẫn phát tiếp.*Nghe gốc.*nhập bản dịch/);
+  assert.match(warning.textContent, /Chưa có giọng Việt.*video vẫn phát tiếp/);
+  assert.match(warning.textContent, /AI kiểm tra lại/);
   assert.doesNotMatch(warning.textContent, /đã có giọng|Đang chuẩn bị giọng/);
   await video.play();
   assert.equal(video.paused, false);
@@ -1937,4 +1938,246 @@ test('failed attach restores idle source controls', async () => {
   await assert.rejects(ui.window.studioAttachTask('missing'),/Phiên dịch không còn tồn tại/);
   assertWorkerSourceBusy(ui,false);
   assert.equal(ui.sockets.length,0);
+});
+
+test('AI review uses the existing task and preserves playback while locking source, transcript and export', async () => {
+  const ui = studio(undefined, {catalog:voiceCatalog}); await ui.start();
+  const video = ui.el('video-player'), socket = ui.sockets.at(-1);
+  socket.receive({type:'progress',status:'COMPLETED',can_review:true,progress_pct:100});
+  await video.play(); video.currentTime=4.5;
+  const audio = ui.audio.find(item=>item.src==='/dub.wav');
+  assert.equal(ui.el('btn-review-worker').classList.contains('hidden'),false);
+  const starts = ui.requests.filter(item=>item.url.includes('/start-')).length;
+  let finish;
+  ui.replies.set('/api/streaming/fixture/review',()=>new Promise(resolve=>{finish=resolve;}));
+  const pending=ui.el('btn-review-worker').click();
+  assertWorkerSourceBusy(ui,true);
+  assert.equal(ui.el('btn-export-hq').disabled,true);
+  assert.equal(ui.el('seg-vi-0').disabled,true);
+  assert.equal(ui.el('btn-review-worker').disabled,true);
+  await ui.el('btn-review-worker').click();
+  await ui.el('btn-start').click();
+  ui.window.loadDroppedLocalVideo('D:/another.mp4');
+  assert.equal(ui.window.currentLocalFilePath,'D:/clip.mp4');
+  assert.equal(video.paused,false);
+  assert.equal(video.currentTime,4.5);
+  assert.equal(audio.paused,false);
+  assert.equal(ui.requests.filter(item=>item.url.endsWith('/review')).length,1);
+  finish({ok:true,json:async()=>({task_id:'fixture',status:'reviewing',progress:{status:'RUNNING',phase:'review',can_review:false,review_summary:{status:'running',checked:0}}})});
+  await pending;
+  assertWorkerSourceBusy(ui,true);
+  assert.equal(ui.el('btn-export-hq').disabled,true);
+  assert.equal(ui.el('seg-vi-0').disabled,true);
+  assert.equal(ui.sockets.length,1);
+  assert.equal(ui.requests.filter(item=>item.url.includes('/start-')).length,starts);
+  assert.match(ui.el('task-progress-detail').textContent,/AI đang đối chiếu và sửa bản dịch/);
+});
+
+test('AI review receives corrected audio revision at the current playhead and reports verified and unresolved results honestly', async () => {
+  const ui=studio(); await ui.start();
+  const socket=ui.sockets.at(-1), video=ui.el('video-player');
+  const segment={id:0,start:0,end:10,duration:10,status:'READY',final_vi:'Bản cũ',audio_url:'/dub.wav',revision:0,needs_review:true};
+  socket.receive({type:'segment_update',...segment});
+  socket.receive({type:'progress',status:'RUNNING',phase:'review',can_review:false,review_summary:{status:'running',checked:0}});
+  await video.play(); video.currentTime=2; await video.emit('timeupdate');
+  const original=ui.audio.find(item=>item.src==='/dub.wav');
+  const corrected={...segment,final_vi:'Bản đã sửa',needs_review:false,audio_url:'/corrected.wav?revision=1',revision:1,verification:{status:'corrected',reason:'Đối chiếu với câu gốc.'}};
+  socket.receive({type:'segment_update',...corrected});
+  assert.match(ui.el('seg-badge-0').textContent,/AI đã sửa/);
+  assert.equal(ui.el('seg-row-0').querySelector('.transcript-review').hidden,true);
+  assert.equal(original.paused,true);
+  assert.equal(ui.audio.find(item=>item.src===corrected.audio_url).currentTime,2);
+  assert.equal(ui.audio.find(item=>item.src===corrected.audio_url).paused,false);
+  socket.receive({type:'segment_update',...segment});
+  assert.equal(ui.el('seg-vi-0').textContent,'Bản đã sửa');
+  socket.receive({type:'review_complete',review_summary:{status:'completed',checked:1,verified:0,corrected:1,unresolved:0}});
+  socket.receive({type:'progress',status:'COMPLETED',phase:'complete',can_review:true,review_count:0,progress_pct:100});
+  assertWorkerSourceBusy(ui,false);
+  assert.equal(ui.el('btn-export-hq').disabled,false);
+  assert.equal(ui.el('seg-vi-0').disabled,false);
+  assert.match(ui.el('transcript-status').textContent,/AI đã kiểm tra 1 câu.*Đã sửa 1/);
+  socket.receive({type:'segment_update',...corrected,verification:{status:'verified'},revision:2});
+  assert.match(ui.el('seg-badge-0').textContent,/AI đã kiểm tra/);
+  socket.receive({type:'segment_update',...corrected,revision:3,needs_review:true,verification:{status:'unresolved',reason:'Tiếng bị nhạc che và chữ gốc bị cắt mất.'}});
+  socket.receive({type:'progress',status:'COMPLETED',can_review:true,review_count:1,review_summary:{status:'completed',checked:1,verified:0,corrected:0,unresolved:1}});
+  assert.match(ui.el('seg-badge-0').textContent,/AI chưa xác minh được/);
+  assert.match(ui.el('seg-row-0').querySelector('.transcript-review').textContent,/Tiếng bị nhạc che và chữ gốc bị cắt mất/);
+  assert.doesNotMatch(ui.el('seg-row-0').querySelector('.transcript-review').textContent,/nghe thử rồi|nghe và sửa/);
+  assert.match(ui.el('task-progress-detail').textContent,/Còn 1 câu nguồn chưa rõ/);
+  assert.match(ui.el('task-progress-detail').textContent,/Không cần xác nhận thủ công/);
+  assert.equal(ui.el('btn-export-hq').disabled,false, 'An explicitly audited unresolved source may export with its uncertainty retained');
+  assert.equal(ui.el('seg-row-0').dataset.needsReview,'true');
+  socket.receive({type:'segment_update',...corrected,revision:4,needs_review:true,verification:null});
+  assert.equal(ui.el('btn-export-hq').disabled,true, 'An unaudited uncertain row remains blocked');
+});
+
+test('rejected AI review restores completed controls without discarding its draft or audio', async () => {
+  const ui=studio(); await ui.start();
+  ui.sockets.at(-1).receive({type:'progress',status:'COMPLETED',can_review:true});
+  const video=ui.el('video-player'); video.currentTime=5;
+  ui.replies.set('/api/streaming/fixture/review',{failure:true,detail:'Dịch vụ AI đang bận.'});
+  await ui.el('btn-review-worker').click();
+  assert.equal(ui.alerts.at(-1),'Dịch vụ AI đang bận.');
+  assertWorkerSourceBusy(ui,false);
+  assert.equal(ui.el('seg-vi-0').disabled,false);
+  assert.equal(ui.el('btn-review-worker').disabled,false);
+  assert.equal(ui.el('btn-export-hq').disabled,false);
+  assert.equal(video.currentTime,5);
+  assert.equal(ui.el('seg-vi-0').textContent,'<b>Xin chào</b>');
+});
+
+test('AI review cannot overwrite unsaved transcript edits or run alongside an export', async () => {
+  const ui=studio(); await ui.start();
+  ui.sockets.at(-1).receive({type:'progress',status:'COMPLETED',can_review:true});
+  await ui.el('seg-vi-0').click();
+  ui.el('seg-input-0').value='Bản đang sửa'; await ui.el('seg-input-0').emit('input');
+  assert.equal(ui.el('btn-review-worker').disabled,true);
+  await ui.window.studioReview();
+  assert.equal(ui.requests.filter(item=>item.url.endsWith('/review')).length,0);
+  assert.equal(ui.el('seg-input-0').value,'Bản đang sửa');
+  await ui.el('seg-row-0').querySelector('.transcript-editor-actions').children[1].click();
+  let finish;
+  ui.replies.set('/api/streaming/export-hq',()=>new Promise(resolve=>{finish=resolve;}));
+  await ui.el('btn-export-hq').click();
+  const pending=ui.el('btn-confirm-export').click();
+  assert.equal(ui.el('btn-review-worker').disabled,true);
+  await ui.window.studioReview();
+  assert.equal(ui.requests.filter(item=>item.url.endsWith('/review')).length,0);
+  finish({ok:true,json:async()=>({video_url:'/result.mp4'})}); await pending;
+  assert.equal(ui.el('btn-review-worker').disabled,false);
+});
+
+test('late AI review response does not overwrite completed websocket review or reset its audio', async () => {
+  const ui=studio(); await ui.start();
+  const socket=ui.sockets.at(-1);
+  socket.receive({type:'progress',status:'COMPLETED',can_review:true});
+  let finish;
+  ui.replies.set('/api/streaming/fixture/review',()=>new Promise(resolve=>{finish=resolve;}));
+  const pending=ui.window.studioReview();
+  const summary={status:'completed',checked:1,verified:1,corrected:0,unresolved:0};
+  socket.receive({type:'review_complete',review_summary:summary});
+  socket.receive({type:'progress',status:'COMPLETED',phase:'complete',can_review:true,review_summary:summary});
+  finish({ok:true,json:async()=>({progress:{status:'RUNNING',phase:'review',review_summary:{status:'running',checked:0}}})});
+  await pending;
+  assert.equal(ui.el('task-progress').dataset.status,'COMPLETED');
+  assert.match(ui.el('task-progress-detail').textContent,/AI đã kiểm tra 1 câu/);
+  assertWorkerSourceBusy(ui,false);
+  assert.equal(ui.el('btn-export-hq').disabled,false);
+});
+
+test('AI review reconnect retains preview and existing audio and reports failed review without claiming verification', async () => {
+  const ui=studio(); await ui.start();
+  const socket=ui.sockets.at(-1), video=ui.el('video-player');
+  socket.receive({type:'progress',status:'COMPLETED',can_review:true});
+  video.currentTime=3.25; socket.close();
+  const loads=video.loadCount, audio=ui.audio.find(item=>item.src==='/dub.wav');
+  ui.replies.set('/api/streaming/fixture/review',{progress:{status:'RUNNING',phase:'review',review_summary:{status:'running',checked:0}}});
+  await ui.window.studioReview();
+  assert.equal(ui.sockets.length,2);
+  assert.equal(video.currentTime,3.25);
+  assert.equal(video.loadCount,loads);
+  assert.ok(ui.audio.includes(audio));
+  ui.sockets.at(-1).receive({type:'progress',status:'COMPLETED',phase:'complete',can_review:true,review_summary:{status:'failed',checked:0}});
+  assert.match(ui.el('task-progress-detail').textContent,/AI chưa hoàn tất kiểm tra/);
+  assert.equal(ui.el('btn-export-hq').disabled,true);
+  assert.equal(ui.el('btn-review-worker').disabled,false);
+  assertWorkerSourceBusy(ui,false);
+});
+
+test('backend automatic export locks edits and displays a final result without autoplay or posting a second export', async () => {
+  const ui=studio(); await ui.start();
+  const socket=ui.sockets.at(-1), video=ui.el('video-player');
+  socket.receive({type:'progress',status:'COMPLETED',can_review:true,review_summary:{status:'completed',checked:1,verified:1,corrected:0,unresolved:0}});
+  video.pause(); video.currentTime=3;
+  const plays=video.playCount, loads=video.loadCount;
+  socket.receive({type:'export_progress',progress:35,stage:'Đang ghép video và giọng đọc'});
+  assertWorkerSourceBusy(ui,true);
+  assert.equal(ui.el('btn-export-hq').disabled,true);
+  assert.equal(ui.el('seg-vi-0').disabled,true);
+  assert.equal(ui.el('btn-review-worker').disabled,true);
+  assert.equal(ui.el('task-progress-value').textContent,'35%');
+  assert.match(ui.el('task-progress-detail').textContent,/Đang tạo video kết quả/);
+  await ui.el('seg-vi-0').click();
+  assert.equal(ui.el('seg-row-0').querySelector('.transcript-editor').hidden,true);
+  socket.receive({type:'result_ready',output_video_url:'/api/outputs/reviewed.mp4',output_filename:'reviewed.mp4',review_summary:{status:'completed',checked:1,verified:1,corrected:0,unresolved:0}});
+  assertWorkerSourceBusy(ui,false);
+  assert.equal(ui.el('seg-vi-0').disabled,false);
+  assert.equal(ui.el('btn-export-hq').disabled,false);
+  assert.equal(ui.el('task-result').classList.contains('hidden'),false);
+  assert.equal(ui.el('task-result-link').href,'http://localhost/api/outputs/reviewed.mp4');
+  assert.match(ui.el('task-result-status').textContent,/reviewed\.mp4/);
+  assert.equal(ui.el('btn-save-result').classList.contains('hidden'),false);
+  assert.equal(video.src,'/fixture.mp4');
+  assert.equal(video.currentTime,3);
+  assert.equal(video.paused,true);
+  assert.equal(video.playCount,plays);
+  assert.equal(video.loadCount,loads);
+  assert.equal(ui.requests.filter(item=>item.url==='/api/streaming/export-hq').length,0);
+  const saved=[];
+  ui.window.desktopBridge={saveVideoAs:(name,callback)=>{saved.push(name);callback('D:/saved.mp4');}};
+  await ui.el('btn-save-result').click();
+  assert.deepEqual(saved,['reviewed.mp4']);
+});
+
+test('failed backend export releases controls and preserves playable reviewed transcript for retry', async () => {
+  const ui=studio(); await ui.start();
+  const socket=ui.sockets.at(-1);
+  socket.receive({type:'export_progress',progress:45});
+  socket.receive({type:'result_error',message:'Không đủ dung lượng trống để xuất.'});
+  assertWorkerSourceBusy(ui,false);
+  assert.equal(ui.el('btn-export-hq').disabled,false);
+  assert.equal(ui.el('seg-vi-0').disabled,false);
+  assert.equal(ui.el('seg-vi-0').textContent,'<b>Xin chào</b>');
+  assert.match(ui.el('task-result-status').textContent,/Không đủ dung lượng/);
+  assert.equal(ui.el('task-result-link').classList.contains('hidden'),true);
+  assert.equal(ui.requests.filter(item=>item.url==='/api/streaming/export-hq').length,0);
+});
+
+test('attached result restores the output link and selecting a different source removes the old result', async () => {
+  const ui=studio(); await ui.flush();
+  ui.replies.set('/api/streaming/recovered',{video_url:'/kept.mp4',output_video_url:'/api/outputs/final.mp4',output_filename:'final.mp4',progress:{status:'COMPLETED'}});
+  await ui.window.studioAttachTask('recovered');
+  assert.equal(ui.el('task-result-link').href,'http://localhost/api/outputs/final.mp4');
+  assert.equal(ui.el('video-player').playCount,0);
+  ui.window.loadDroppedLocalVideo('D:/another.mp4');
+  assert.equal(ui.el('task-result').classList.contains('hidden'),true);
+  assert.equal(ui.el('task-result-link').href,undefined);
+});
+
+test('task polling follows active auto export instead of resetting its progress to the finished translation', async () => {
+  const ui=studio(); await ui.start();
+  const socket=ui.sockets.at(-1);
+  socket.receive({type:'progress',status:'COMPLETED',can_review:true});
+  socket.receive({type:'export_progress',progress:25,stage:'Đang xuất 25%'});
+  const translation={task_id:'fixture',status:'COMPLETED',phase:'complete',stage:'Đã dịch xong',can_review:true,progress_pct:100};
+  ui.replies.set('/api/tasks',{tasks:[translation,{task_id:'export_fixture',status:'RUNNING',progress_pct:45,stage:'Đang xuất 45%'}]});
+  await ui.tickIntervals(2000);
+  assert.equal(ui.el('task-progress-value').textContent,'45%');
+  assertWorkerSourceBusy(ui,true);
+  assert.equal(ui.el('seg-vi-0').disabled,true);
+  ui.replies.set('/api/tasks',{tasks:[translation,{task_id:'export_fixture',status:'COMPLETED',output_video_url:'/api/outputs/polled.mp4',output_filename:'polled.mp4',progress_pct:100}]});
+  await ui.tickIntervals(2000);
+  assertWorkerSourceBusy(ui,false);
+  assert.equal(ui.el('seg-vi-0').disabled,false);
+  assert.equal(ui.el('task-result-link').href,'http://localhost/api/outputs/polled.mp4');
+});
+
+test('result invalidation removes old output and exposes manual changes without relabeling them AI verified', async () => {
+  const ui=studio(); await ui.start();
+  const socket=ui.sockets.at(-1), video=ui.el('video-player');
+  socket.receive({type:'result_ready',output_video_url:'/api/outputs/old.mp4',output_filename:'old.mp4'});
+  video.currentTime=2;
+  socket.receive({type:'result_invalidated',reason:'transcript_changed',output_video_url:'',output_filename:'',
+    review_summary:{status:'completed',checked:0,verified:0,corrected:0,unresolved:0,manual:1}});
+  assert.equal(ui.el('task-result').classList.contains('hidden'),true);
+  assert.equal(ui.el('task-result-link').href,undefined);
+  assert.match(ui.el('transcript-status').textContent,/1 câu do bạn sửa sau kiểm tra/);
+  assert.doesNotMatch(ui.el('transcript-status').textContent,/Bản dịch đã qua kiểm tra tự động/);
+  assert.equal(video.currentTime,2);
+  const saved=[]; ui.window.desktopBridge={saveVideoAs:name=>saved.push(name)};
+  await ui.el('btn-save-result').click();
+  assert.equal(saved.length,0);
+  socket.receive({type:'result_invalidated',reason:'review_started',review_summary:{status:'running'}});
+  assert.equal(ui.el('btn-export-hq').disabled,true);
+  assertWorkerSourceBusy(ui,true);
 });
