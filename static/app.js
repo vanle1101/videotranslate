@@ -738,7 +738,7 @@ document.addEventListener("DOMContentLoaded", () => {
     videoUrlStatus.classList.toggle("hidden", !input);
     videoUrlInput.setAttribute("aria-invalid", String(!!input && !valid));
     videoUrlStatus.textContent = !input ? "" : valid
-      ? `${/(^|\.)(?:douyin|iesdouyin)\.com$/i.test(parsed.hostname) ? "Đã nhận link Douyin" : `Đã nhận link từ ${parsed.hostname}`}: ${parsed.origin}${parsed.pathname} — bấm Bắt đầu để tải và dịch.`
+      ? `${/(^|\.)(?:douyin|iesdouyin)\.com$/i.test(parsed.hostname) ? "Đã nhận link Douyin" : `Đã nhận link từ ${parsed.hostname}`}: ${parsed.origin}${parsed.pathname}`
       : "Chưa nhận được link hợp lệ. Dán đường dẫn bắt đầu bằng https:// hoặc nội dung chia sẻ có link.";
     btnStart.disabled = !!input && !valid;
     if (valid) parsed.hash = "";
@@ -1753,7 +1753,7 @@ document.addEventListener("DOMContentLoaded", () => {
           taskResult.classList.remove("hidden");
           taskResultLink.classList.add("hidden");
           btnSaveResult.classList.add("hidden");
-          taskResultStatus.textContent = msg.message || "Chưa xuất được video. Bản dịch đã giữ lại; bấm Xuất Video Hoàn Chỉnh để thử lại.";
+          taskResultStatus.textContent = msg.message || "Chưa xuất được video. Bản dịch đã giữ lại; bấm Xuất video MP4 để thử lại.";
         }
         showTaskProgress({status: "COMPLETED", phase: "complete", stage: "Chưa xuất được video kết quả"});
       }

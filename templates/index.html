@@ -53,10 +53,10 @@
           <div id="source-url-panel">
             <div class="source-url-field">
               <i class="fa-solid fa-link" aria-hidden="true"></i>
-              <textarea id="video-url" rows="1" spellcheck="false" aria-label="Link video hoặc nội dung chia sẻ" aria-describedby="video-url-help video-url-status" placeholder="Dán link hoặc toàn bộ nội dung chia sẻ…"></textarea>
+              <textarea id="video-url" rows="1" wrap="off" spellcheck="false" aria-label="Link video hoặc nội dung chia sẻ" aria-describedby="video-url-help video-url-status" placeholder="Dán link video…"></textarea>
               <button id="clear-video-url" type="button" aria-label="Xóa link video" title="Xóa link"><i class="fa-solid fa-circle-xmark" aria-hidden="true"></i></button>
             </div>
-            <p id="video-url-help" class="source-help">Ứng dụng tự lấy link trong đoạn bạn dán. Không cần xóa chữ, hashtag hay mã chia sẻ.</p>
+            <p id="video-url-help" class="source-help">Tự nhận link từ nội dung chia sẻ.</p>
             <p id="video-url-status" role="status" aria-live="polite" class="hidden source-help"></p>
           </div>
           <div id="source-library-panel" class="hidden source-library-panel">
@@ -72,14 +72,15 @@
         </section>
         <section class="studio-action-card studio-card" aria-labelledby="action-heading">
           <h2 id="action-heading" class="studio-card-heading"><i class="fa-solid fa-sliders" aria-hidden="true"></i>2. DỊCH VÀ LỒNG TIẾNG</h2>
-          <label class="visual-translation-option"><input id="visual-translation" type="checkbox" {% if settings.LLM_PROVIDER in ('gemini', 'openrouter-free', 'opencode') %}checked{% endif %}><span>AI đọc chữ và kiểm chứng lời nói<small>Đối chiếu lời nhận dạng với chữ trên hình. OpenCode Muse Spark Free tự kiểm tra và sửa bản dịch lần hai trước khi tạo giọng; không cần mở Chrome.</small></span></label>
+          <label class="visual-translation-option" title="Đối chiếu lời nói với chữ trên video, rồi tự rà và sửa bản dịch trước khi tạo giọng."><input id="visual-translation" type="checkbox" aria-describedby="visual-translation-help" {% if settings.LLM_PROVIDER in ('gemini', 'openrouter-free', 'opencode') %}checked{% endif %}><span>AI kiểm tra bản dịch</span></label>
+          <span id="visual-translation-help" class="sr-only">Đối chiếu lời nói với chữ trên video, rồi tự rà và sửa bản dịch trước khi tạo giọng.</span>
           <div id="task-progress" class="hidden task-progress" aria-label="Tiến độ xử lý video">
             <div class="task-progress-heading" role="status" aria-live="polite"><span id="task-progress-stage">Đang gửi yêu cầu…</span><span id="task-progress-value">Chưa có %</span></div>
             <div id="task-progress-track" class="task-progress-track" role="progressbar" aria-label="Tiến độ bước hiện tại" aria-valuemin="0" aria-valuemax="100"><div id="task-progress-bar" class="task-progress-bar"></div></div>
             <p id="task-progress-detail" class="task-progress-detail">Phần trăm được tính riêng cho từng bước.</p>
             <p id="task-connection-status" role="status" class="hidden task-connection-status"></p>
           </div>
-          <button id="btn-start" class="studio-start-button"><i class="fa-solid fa-play" aria-hidden="true"></i>BẮT ĐẦU DỊCH & PHÁT REALTIME</button>
+          <button id="btn-start" class="studio-start-button"><i class="fa-solid fa-play" aria-hidden="true"></i>Bắt đầu dịch</button>
           <div class="worker-actions">
             <button id="btn-review-worker" class="hidden"><i class="fa-solid fa-check-double" aria-hidden="true"></i> AI kiểm tra lại</button>
             <button id="btn-retry-worker" class="hidden"><i class="fa-solid fa-rotate-right" aria-hidden="true"></i> Thử lại câu lỗi</button>
@@ -87,13 +88,13 @@
             <button id="btn-resume-worker" class="hidden"><i class="fa-solid fa-play" aria-hidden="true"></i> Tiếp tục</button>
             <button id="btn-stop-worker" class="hidden"><i class="fa-solid fa-stop" aria-hidden="true"></i> Dừng hẳn</button>
           </div>
-          <button id="btn-export-hq" disabled title="Hoàn tất các câu dịch trước khi xuất video" class="studio-export-button"><i class="fa-solid fa-arrow-up-from-bracket" aria-hidden="true"></i>Xuất Video Hoàn Chỉnh (MP4)</button>
+          <button id="btn-export-hq" disabled title="Hoàn tất các câu dịch trước khi xuất video" class="studio-export-button"><i class="fa-solid fa-arrow-up-from-bracket" aria-hidden="true"></i>Xuất video MP4</button>
           <div id="task-result" class="hidden" role="status">
             <p id="task-result-status" class="task-progress-detail"></p>
             <a id="task-result-link" class="studio-export-button hidden" target="_blank" rel="noopener">Mở video kết quả</a>
             <button id="btn-save-result" class="studio-export-button hidden">Lưu video kết quả</button>
           </div>
-          <div class="buffer-setting"><label for="buffer-select">Đệm trước phát (Initial Buffer):</label><select id="buffer-select"><option value="5">5 giây (Nhanh nhất)</option><option value="10" selected>10 giây (Khuyên dùng)</option><option value="15">15 giây (Ổn định)</option><option value="30">30 giây (An toàn)</option></select></div>
+          <div class="buffer-setting"><label for="buffer-select">Đệm trước khi phát</label><select id="buffer-select"><option value="5">5 giây (Nhanh nhất)</option><option value="10" selected>10 giây (Khuyên dùng)</option><option value="15">15 giây (Ổn định)</option><option value="30">30 giây (An toàn)</option></select></div>
         </section>
       </aside>
 
