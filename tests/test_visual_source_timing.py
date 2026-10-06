@@ -2,7 +2,7 @@
 import asyncio
 from copy import deepcopy
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, Mock
+from unittest.mock import ANY, AsyncMock, Mock
 
 import pytest
 
@@ -57,7 +57,8 @@ def test_visual_source_uses_whole_audio_words_and_exact_timestamps(visual_sessio
         await session.worker_task
 
     asyncio.run(run())
-    asr.assert_called_once_with(session.raw_audio_16k, language="zh")
+    asr.assert_called_once_with(session.raw_audio_16k, language="zh", progress_callback=ANY)
+    assert callable(asr.call_args.kwargs["progress_callback"])
     vad.assert_not_called()
     assert rows == original_rows
     assert len(received) == len(rows)
@@ -88,7 +89,8 @@ def test_audio_only_whisper_preserves_whole_audio_sentence_timing_without_visual
 
     asyncio.run(run())
     vad.assert_not_called()
-    asr.assert_called_once_with(session.raw_audio_16k, language="zh")
+    asr.assert_called_once_with(session.raw_audio_16k, language="zh", progress_callback=ANY)
+    assert callable(asr.call_args.kwargs["progress_callback"])
     visual.assert_not_called()
     assert [(segment.start, segment.end, segment.text_zh)
             for segment in session.segments.values()] == [

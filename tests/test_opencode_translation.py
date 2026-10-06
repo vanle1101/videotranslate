@@ -78,6 +78,8 @@ class OpenCodeTranslationTests(unittest.TestCase):
         invalid = [
             {}, {"results": []}, {"results": [{"id": 2, "final_vi": ""}]},
             {"results": [{"id": 2, **self.translation, "final_vi": "你好"}]},
+            {"results": [{"id": 2, **self.translation, "final_vi": "你好！"}]},
+            {"results": [{"id": 2, **self.translation, "final_vi": "Xin chào 你好"}]},
             {"results": [{"id": 2, **self.translation, "natural_vi": 42}]},
             {"results": [{"id": 2.5, **self.translation}]},
             {"results": [{"id": True, **self.translation}]},

@@ -58,6 +58,10 @@ document.addEventListener("DOMContentLoaded", () => {
   const taskResultStatus = document.getElementById("task-result-status");
   const taskResultLink = document.getElementById("task-result-link");
   const btnSaveResult = document.getElementById("btn-save-result");
+  const resultPreviewModal = document.getElementById("result-preview-modal");
+  const resultPreviewVideo = document.getElementById("result-preview-video");
+  const resultPreviewStatus = document.getElementById("result-preview-status");
+  const btnCloseResultPreview = document.getElementById("btn-close-result-preview");
 
   // Toggles & Volumes
   const toggleMaskChinese = document.getElementById("toggle-mask-chinese");
@@ -193,6 +197,9 @@ document.addEventListener("DOMContentLoaded", () => {
   let taskPollInFlight = false;
   let taskPollWarning = false;
   let streamDisconnected = false;
+  let streamEventRevision = 0;
+  let reconnectTimer = null;
+  let recoveryRequest = null;
   let masterVolume = 1;
   let masterMuted = false;
   let voiceCatalog = [];
@@ -513,10 +520,11 @@ document.addEventListener("DOMContentLoaded", () => {
     const items = Object.values(segments);
     btnExportHQ.disabled = !currentTaskId || !items.length ||
       reviewInProgress() || pendingTaskAction?.kind === "review" || automaticExportActive ||
-      currentProgress?.review_summary?.status === "failed" || (currentProgress?.phase === "export" && ["RUNNING", "CANCELLING"].includes(currentProgress?.status)) ||
+      ["failed", "incomplete"].includes(currentProgress?.review_summary?.status) || (currentProgress?.phase === "export" && ["RUNNING", "CANCELLING"].includes(currentProgress?.status)) ||
       transcriptDrafts.size > 0 || pendingTranscriptSaves > 0 ||
       items.some(segment => (segment.needs_review && !(currentProgress?.review_summary?.status === "completed" && segment.verification?.status === "unresolved")) || !["READY", "PLAYED"].includes(segment.status)) ||
-      ["FAILED", "STOPPED", "CANCELLED", "CANCELLING"].includes(currentProgress?.status);
+      (["FAILED", "STOPPED", "CANCELLED", "CANCELLING"].includes(currentProgress?.status)
+        && currentProgress?.phase !== "export_error");
     if (btnReviewWorker) btnReviewWorker.disabled = !!pendingTaskAction || reviewInProgress() || automaticExportActive ||
       !!exportingTaskId || transcriptDrafts.size > 0 || pendingTranscriptSaves > 0;
   }
@@ -531,7 +539,7 @@ document.addEventListener("DOMContentLoaded", () => {
     const count = key => Math.max(0, Number(summary[key]) || 0);
     if (summary.status === "running") return "AI đang đối chiếu và sửa bản dịch" +
       (summary.checked !== undefined ? ` · Đã kiểm tra ${count("checked")} câu.` : ". Các câu đã có giọng vẫn phát được trong lúc kiểm tra.");
-    if (summary.status === "failed") return "AI chưa hoàn tất kiểm tra. Bấm AI kiểm tra lại để tiếp tục với bản dịch đang có.";
+    if (["failed", "incomplete"].includes(summary.status)) return "AI chưa kiểm tra đủ nguồn. Bản nháp và giọng đã tạo vẫn được giữ; bấm AI kiểm tra lại để thử tiếp.";
     if (summary.status !== "completed") return "";
     return `AI đã kiểm tra ${count("checked")} câu · Giữ nguyên ${count("verified")} · Đã sửa ${count("corrected")}.` +
       (count("manual") ? ` Có ${count("manual")} câu do bạn sửa sau kiểm tra.` : "") +
@@ -557,7 +565,170 @@ document.addEventListener("DOMContentLoaded", () => {
     taskResultLink?.removeAttribute("href");
   }
 
+  let resultPreviewTrigger = null;
+  let resultPreviewActive = false;
+  let resultPreviewGeneration = 0;
+  let resultPreviewState = null;
+  const resultPreviewFailure = "Chưa phát được video kết quả. Bạn có thể lưu MP4 rồi mở bằng trình phát trên máy.";
+
+  function currentResultPreview(state) {
+    return resultPreviewActive && resultPreviewState === state && state.generation === resultPreviewGeneration;
+  }
+
+  function releaseResultPreviewRequest(state) {
+    if (!state) return;
+    clearTimeout(state.pollTimer);
+    clearTimeout(state.requestTimer);
+    state.controller?.abort();
+    state.controller = null;
+  }
+
+  function closeResultPreview(restoreFocus = true) {
+    resultPreviewActive = false;
+    resultPreviewGeneration++;
+    releaseResultPreviewRequest(resultPreviewState);
+    resultPreviewState = null;
+    resultPreviewVideo?.pause();
+    resultPreviewVideo?.removeAttribute("src");
+    resultPreviewVideo?.load();
+    resultPreviewModal?.classList.add("hidden");
+    if (restoreFocus) resultPreviewTrigger?.focus();
+    resultPreviewTrigger = null;
+  }
+
+  function failResultPreview(state, message = resultPreviewFailure) {
+    if (!currentResultPreview(state)) return;
+    state.phase = "failed";
+    releaseResultPreviewRequest(state);
+    resultPreviewVideo.pause();
+    resultPreviewStatus.textContent = message;
+  }
+
+  function playResultPreview(state) {
+    const mediaUrl = state.mediaUrl;
+    resultPreviewVideo.play().catch(error => {
+      if (!currentResultPreview(state) || state.mediaUrl !== mediaUrl || state.phase === "failed" || state.phase === "converting") return;
+      if (error?.name === "AbortError") return;
+      if (error?.name === "NotSupportedError" || [3, 4].includes(resultPreviewVideo.error?.code)) {
+        startResultCompatibility(state);
+      } else if (error?.name === "NotAllowedError" && !resultPreviewVideo.error) {
+        resultPreviewStatus.textContent = "Bấm Phát để xem video kết quả.";
+      } else {
+        failResultPreview(state);
+      }
+    });
+  }
+
+  async function requestResultCompatibility(state, previewId = null) {
+    if (!currentResultPreview(state) || state.phase !== "converting" || state.controller) return;
+    const controller = new AbortController();
+    state.controller = controller;
+    state.requestTimer = setTimeout(() => controller.abort(), 8000);
+    try {
+      const response = await fetch(previewId ? `/api/preview/${previewId}` : "/api/preview", {
+        signal: controller.signal,
+        ...(previewId ? {} : { method: "POST", headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ output_filename: state.filename }) }),
+      });
+      if (!response.ok) throw Error("preview unavailable");
+      const data = await response.json();
+      if (!currentResultPreview(state)) return;
+      if (controller.signal.aborted) throw Error("preview timed out");
+      if (!/^[a-zA-Z0-9_-]+$/.test(data.preview_id || "")) throw Error("invalid preview");
+      if (data.status === "READY") {
+        const origin = `${window.location.protocol}//${window.location.host}`;
+        const mediaUrl = new URL(data.video_url, origin);
+        if (mediaUrl.origin !== origin || mediaUrl.pathname !== `/api/preview/${data.preview_id}/media` || mediaUrl.search || mediaUrl.hash) throw Error("invalid preview media");
+        state.phase = "compatible";
+        state.mediaUrl = mediaUrl.href;
+        resultPreviewStatus.textContent = "Bản xem trước tương thích. Tệp MP4 giữ nguyên chất lượng xuất.";
+        resultPreviewVideo.src = state.mediaUrl;
+        resultPreviewVideo.load();
+        playResultPreview(state);
+      } else if (data.status === "PROCESSING" && Date.now() - state.startedAt < 600000) {
+        state.pollTimer = setTimeout(() => requestResultCompatibility(state, data.preview_id), 1000);
+      } else {
+        failResultPreview(state);
+      }
+    } catch (_) {
+      failResultPreview(state);
+    } finally {
+      clearTimeout(state.requestTimer);
+      if (state.controller === controller) state.controller = null;
+    }
+  }
+
+  function startResultCompatibility(state) {
+    if (!currentResultPreview(state) || state.phase === "converting" || state.phase === "failed") return;
+    if (state.phase === "compatible") { failResultPreview(state); return; }
+    state.phase = "converting";
+    state.startedAt = Date.now();
+    resultPreviewVideo.pause();
+    resultPreviewVideo.removeAttribute("src");
+    resultPreviewVideo.load();
+    resultPreviewStatus.textContent = "Đang tạo bản xem trước tương thích với trình phát...";
+    requestResultCompatibility(state);
+  }
+
+  function openResultPreview(rawUrl, trigger = taskResultLink) {
+    const origin = `${window.location.protocol}//${window.location.host}`;
+    let url;
+    try { url = new URL(rawUrl, origin); } catch (_) { return; }
+    if (url.origin !== origin || !/^\/api\/outputs\/[^/]+\.mp4$/i.test(url.pathname) || url.search || url.hash || !resultPreviewModal) return;
+    let filename;
+    try { filename = decodeURIComponent(url.pathname.split("/").pop()); } catch (_) { return; }
+    if (/[\\/:\x00-\x1f]/.test(filename)) return;
+    closeResultPreview(false);
+    stopVoicePreview();
+    stopSourceAudition();
+    resultPreviewActive = true;
+    isBufferingUnderrun = false;
+    playWhenPreviewReady = false;
+    videoPlayer.pause();
+    resultPreviewTrigger = trigger;
+    resultPreviewStatus.textContent = "";
+    resultPreviewModal.classList.remove("hidden");
+    const state = resultPreviewState = { generation: resultPreviewGeneration, filename, phase: "direct", mediaUrl: url.href };
+    resultPreviewVideo.volume = playbackVolume();
+    if (resultPreviewVideo.canPlayType?.('video/mp4; codecs="avc1.42E01E, mp4a.40.2"') === "") {
+      startResultCompatibility(state);
+    } else {
+      resultPreviewVideo.src = state.mediaUrl;
+      resultPreviewVideo.load();
+      playResultPreview(state);
+    }
+    btnCloseResultPreview.focus();
+  }
+
+  taskResultLink?.addEventListener("click", event => {
+    event.preventDefault();
+    openResultPreview(taskResultLink.href);
+  });
+  document.getElementById("tasks-table-body")?.addEventListener("click", event => {
+    const link = event.target.closest?.("a[data-result-preview]");
+    if (!link) return;
+    event.preventDefault();
+    openResultPreview(link.href, link);
+  });
+  btnCloseResultPreview?.addEventListener("click", () => closeResultPreview());
+  resultPreviewModal?.addEventListener("keydown", event => {
+    if (event.key === "Escape") { event.preventDefault(); closeResultPreview(); }
+    if (event.key === "Tab") {
+      const first = btnCloseResultPreview, last = resultPreviewVideo;
+      if (event.shiftKey && document.activeElement === first) { event.preventDefault(); last.focus(); }
+      else if (!event.shiftKey && document.activeElement === last) { event.preventDefault(); first.focus(); }
+    }
+  });
+  resultPreviewVideo?.addEventListener("error", () => {
+    const state = resultPreviewState;
+    if (!state || !currentResultPreview(state) || !resultPreviewVideo.error || state.phase === "converting") return;
+    if ([3, 4].includes(resultPreviewVideo.error.code)) startResultCompatibility(state);
+    else failResultPreview(state);
+  });
+  window.addEventListener("pagehide", () => closeResultPreview(false));
+
   function showTaskResult(data) {
+    if (["failed", "incomplete", "running"].includes((data.review_summary || currentProgress?.review_summary)?.status)) return;
     if (!data.output_video_url || !taskResult) return;
     const origin = `${window.location.protocol}//${window.location.host}`;
     let url;
@@ -576,6 +747,26 @@ document.addEventListener("DOMContentLoaded", () => {
       badge.className = "px-2 py-0.5 rounded bg-gray-800 text-gray-300";
       badge.textContent = `${label}: Idle`;
     }
+  }
+
+  function showExportFailure(message, status = "FAILED") {
+    automaticExportActive = false;
+    if (taskResult) {
+      taskResult.classList.remove("hidden");
+      taskResultLink.classList.add("hidden");
+      btnSaveResult.classList.add("hidden");
+      taskResultStatus.textContent = message || (status === "CANCELLED" ? "Đã hủy xuất video. Bản dịch vẫn được giữ." : "Chưa xuất được video. Bấm Xuất video MP4 để thử lại.");
+    }
+  }
+
+  function renderExportProgress(progress, stage) {
+    const pct = measuredProgress(progress);
+    if (exportProgressBar) {
+      exportProgressBar.style.width = pct === null ? "100%" : `${pct}%`;
+      exportProgressBar.style.opacity = pct === null ? "0.3" : "1";
+    }
+    if (exportProgressPct) exportProgressPct.textContent = pct === null ? "" : formatProgressPercent(pct);
+    if (exportStatusText && stage) exportStatusText.textContent = stage;
   }
 
   function clearStoppedSession(progress = currentProgress) {
@@ -657,6 +848,12 @@ document.addEventListener("DOMContentLoaded", () => {
     progressRevision++;
     taskPollWarning = false;
     currentProgress = { ...currentProgress, ...progress };
+    const incompleteReview = ["failed", "incomplete"].includes(currentProgress.review_summary?.status);
+    if (incompleteReview && (currentProgress.status === "COMPLETED" || (currentProgress.status === "FAILED" && currentProgress.phase === "review"))) {
+      currentProgress = {...currentProgress, status: "FAILED", phase: "review",
+        stage: reviewSummaryText(), progress_pct: null};
+      resetTaskResult();
+    }
     const status = currentProgress.status || "RUNNING";
     if (currentProgress.phase === "export") automaticExportActive = ["RUNNING", "CANCELLING"].includes(status);
     else if (["FAILED", "STOPPED", "CANCELLED"].includes(status)) automaticExportActive = false;
@@ -682,7 +879,7 @@ document.addEventListener("DOMContentLoaded", () => {
     else taskProgressTrack.setAttribute("aria-valuenow", String(pct));
     taskProgressBar.style.width = pct === null ? "100%" : `${pct}%`;
     taskProgressDetail.textContent = terminal
-      ? (status === "FAILED" ? "Mở Diagnostics để xem lỗi. Nếu có nút Thử lại câu lỗi, bạn có thể tiếp tục mà không dịch lại." : status === "COMPLETED" ? (reviewSummaryText() || (currentProgress.review_count ? "Bản dịch còn câu chưa chắc chắn. Bấm AI kiểm tra lại để tự đối chiếu và sửa." : "Các câu dịch đã xử lý xong. Có thể xuất video.")) : "Tác vụ đã dừng.")
+      ? (currentProgress.phase === "export_error" ? "Video kết quả chưa được tạo. Bản dịch và giọng đọc vẫn được giữ; bạn có thể xuất lại." : incompleteReview ? reviewSummaryText() : status === "FAILED" ? "Mở Diagnostics để xem lỗi. Nếu có nút Thử lại câu lỗi, bạn có thể tiếp tục mà không dịch lại." : status === "COMPLETED" ? (reviewSummaryText() || (currentProgress.review_count ? "Bản dịch còn câu chưa chắc chắn. Bấm AI kiểm tra lại để tự đối chiếu và sửa." : "Các câu dịch đã xử lý xong. Có thể xuất video.")) : "Tác vụ đã dừng.")
       : reviewInProgress() || currentProgress.phase === "review" ? (reviewSummaryText() || "AI đang đối chiếu từng câu với lời gốc và chữ trên hình, tự sửa lỗi trước khi tạo giọng.")
       : currentProgress.phase === "export" ? "Đang tạo video kết quả từ bản dịch đã được AI kiểm tra. Tiến độ xuất được cập nhật riêng."
       : currentProgress.phase === "download" ? (pct === null ? "Đang tải video; máy chủ chưa cung cấp tổng dung lượng." : "Tiến độ tải video nguồn. Bước xử lý câu thoại sẽ có tiến độ riêng.")
@@ -706,7 +903,12 @@ document.addEventListener("DOMContentLoaded", () => {
     if (terminal) {
       resetWorkerBadges();
       if (["STOPPED", "CANCELLED"].includes(status)) clearStoppedSession();
-      else if (status === "FAILED") {
+      else if (status === "FAILED" && currentProgress.phase === "review" && Object.values(segments).some(s => ["READY", "PLAYED"].includes(s.status))) {
+        // A review failure is independent of draft playback. Repeated status
+        // polls must not pause a draft the user explicitly chose to listen to.
+        isBufferingUnderrun = false;
+        bufferingAlert.classList.add("hidden");
+      } else if (status === "FAILED") {
         videoPlayer.pause();
         isBufferingUnderrun = false;
         bufferingText.textContent = taskProgressStage.textContent;
@@ -1069,7 +1271,7 @@ document.addEventListener("DOMContentLoaded", () => {
     previewPending = false;
     if (!currentTaskId || translationReady) bufferingAlert.classList.add("hidden");
     else bufferingText.textContent = "Đang chờ các câu dịch đầu tiên...";
-    if (playWhenPreviewReady) videoPlayer.play().catch(reportPlayFailure);
+    if (playWhenPreviewReady && !resultPreviewActive) videoPlayer.play().catch(reportPlayFailure);
   });
 
   function selectPreviewSource(source) {
@@ -1132,7 +1334,7 @@ document.addEventListener("DOMContentLoaded", () => {
     });
 
     if (targetViewId === "view-models") loadModelsTable();
-    if (targetViewId === "view-diagnostics") loadDiagnosticsLog(currentLogCategory);
+    setDiagnosticsVisible(targetViewId === "view-diagnostics");
     if (targetViewId === "view-tasks") updateTasksTable();
     if (targetViewId === "view-settings") loadSettingsForm();
   }
@@ -1397,6 +1599,7 @@ document.addEventListener("DOMContentLoaded", () => {
   });
 
   videoPlayer.addEventListener("play", () => {
+    if (resultPreviewActive) { videoPlayer.pause(); return; }
     if (!sourceAudition && bgmAudio) {
       bgmAudio.currentTime = videoPlayer.currentTime;
       bgmAudio.play().catch(reportPlayFailure);
@@ -1499,6 +1702,13 @@ document.addEventListener("DOMContentLoaded", () => {
 
     telTtfp.textContent = "--";
     telBuffer.textContent = "+0.0s";
+    telPlayable.textContent = "00:00";
+    telPlaying.textContent = "00:00";
+    telRtf.textContent = "0.0x";
+    barCurrentTime.textContent = "00:00";
+    barTotalTime.textContent = "00:00";
+    barBufferInfo.textContent = "Buffer: 0.0s";
+    document.getElementById("pipeline-warning")?.classList.add("hidden");
     bufferingAlert.classList.remove("hidden");
     showTaskProgress({ phase: "request", stage: "Đang gửi yêu cầu…", progress_pct: null, status: "RUNNING", can_pause: false });
 
@@ -1569,7 +1779,7 @@ document.addEventListener("DOMContentLoaded", () => {
       videoPlayer.volume = playbackVolume();
       showTaskProgress(data.progress || { phase: url ? "resolve" : "prepare", stage: url ? "Đang kiểm tra và lấy video từ link…" : "Đang chuẩn bị video…", progress_pct: null, status: "RUNNING", can_pause: false });
 
-      setupStreamingWebSocket(currentTaskId);
+      setupStreamingWebSocket(currentTaskId, { allowAutoPlay: true });
       updateTasksTable();
 
     } catch (e) {
@@ -1583,8 +1793,107 @@ document.addEventListener("DOMContentLoaded", () => {
   // =========================================================
   // 6. STREAMING WEBSOCKET & DUBBING SYNC
   // =========================================================
-  function setupStreamingWebSocket(taskId) {
-    if (currentWs) currentWs.close();
+  function applyStreamingSnapshot(msg) {
+    visualSession = msg.visual_translation === true || (msg.screen_texts || []).length > 0;
+    totalVideoDuration = msg.duration;
+    setScreenTexts(msg.screen_texts);
+    chineseSubMask.style.display = "none";
+    positionVideoOverlays();
+    barTotalTime.textContent = formatTime(totalVideoDuration);
+    segmentsCountBadge.textContent = `${msg.segments_count} câu`;
+
+    if (msg.bgm_url && (!bgmAudio || bgmUrl !== msg.bgm_url)) {
+      bgmUrl = msg.bgm_url;
+      if (bgmAudio) {
+        bgmAudio.pause();
+        bgmAudio = null;
+      }
+      bgmAudio = new Audio(bgmUrl);
+      if (playerBgmStatus) playerBgmStatus.textContent = "Đã lọc";
+      bgmAudio.addEventListener("error", () => showMediaError("Không phát được nhạc nền. Xem Diagnostics và thử lại phiên dịch."));
+      bgmAudio.volume = parseFloat(volBgmSlider.value) * playbackVolume();
+      if (sourceAudition) sourceAudition.muted = true;
+      else videoPlayer.muted = true; // Raw audio muted; BGM + Foley plays via bgmAudio!
+    }
+
+    if (msg.suppression_level) {
+      telSuppression.textContent = `≈ ${msg.suppression_level}`;
+      playerSuppressionBadge.textContent = `≈ ${msg.suppression_level}`;
+    }
+
+    const incomingSegments = Array.isArray(msg.segments) ? msg.segments : [];
+    const activeSnapshot = incomingSegments.find(s => s.id === activePlayingSegId);
+    if (activeAudio && (!activeSnapshot ||
+        activeSnapshot.audio_url !== segments[activePlayingSegId]?.audio_url)) {
+      activeAudio.pause();
+      activeAudio = null;
+      activePlayingSegId = null;
+    }
+    const previousSegments = segments;
+    segments = {};
+    incomingSegments.forEach(s => {
+      const previous = previousSegments[s.id];
+      segments[s.id] = previous && (previous.revision || 0) > (s.revision || 0) ? previous : s;
+    });
+    renderTimelineSlices();
+    renderSegmentsDrawer();
+    updateExportAvailability();
+    syncPlayback();
+  }
+
+  function queueStreamRecovery(taskId, socket) {
+    if (reconnectTimer || recoveryRequest || taskId !== currentTaskId || socket !== currentWs) return;
+    reconnectTimer = setTimeout(() => {
+      reconnectTimer = null;
+      recoverStreamingSession(taskId, socket);
+    }, 1500);
+  }
+
+  async function recoverStreamingSession(taskId, socket) {
+    if (recoveryRequest || taskId !== currentTaskId || socket !== currentWs || !streamDisconnected) return;
+    const controller = new AbortController();
+    recoveryRequest = controller;
+    const revision = streamEventRevision;
+    const timeout = setTimeout(() => controller.abort(), 8000);
+    try {
+      const response = await fetch(`/api/streaming/${encodeURIComponent(taskId)}`, {signal: controller.signal, cache: "no-store"});
+      if (!response.ok) throw new Error("Không đọc được phiên dịch");
+      const data = await response.json();
+      if (taskId !== currentTaskId || socket !== currentWs) return;
+      if (revision === streamEventRevision) {
+        if (data.video_url) setPreviewSource(data.video_url, {task_id: taskId});
+        showTaskProgress(data.progress || {});
+        if (taskId !== currentTaskId) return;
+        if (data.initialized && Array.isArray(data.segments)) applyStreamingSnapshot(data);
+        translationReady = data.telemetry?.ready_to_play === true || translationReady;
+        showTaskResult(data);
+      }
+      setupStreamingWebSocket(taskId);
+      updateTasksTable();
+    } catch (_) {
+      // Task polling retains the last measured progress while this retries.
+    } finally {
+      clearTimeout(timeout);
+      if (recoveryRequest === controller) recoveryRequest = null;
+      if (taskId === currentTaskId && socket === currentWs && streamDisconnected) queueStreamRecovery(taskId, socket);
+    }
+  }
+
+  window.addEventListener("pagehide", () => {
+    clearTimeout(reconnectTimer);
+    reconnectTimer = null;
+    recoveryRequest?.abort();
+    const socket = currentWs;
+    currentWs = null;
+    if (socket) socket.close();
+  });
+
+  function setupStreamingWebSocket(taskId, { allowAutoPlay = false } = {}) {
+    clearTimeout(reconnectTimer);
+    reconnectTimer = null;
+    const previousSocket = currentWs;
+    currentWs = null;
+    if (previousSocket) previousSocket.close();
 
     const proto = window.location.protocol === "https:" ? "wss:" : "ws:";
     currentWs = new WebSocket(`${proto}//${window.location.host}/ws/stream/${taskId}`);
@@ -1596,17 +1905,19 @@ document.addEventListener("DOMContentLoaded", () => {
       taskConnectionStatus.classList.add("hidden");
     };
     const reportDisconnect = () => {
-      if (socket !== currentWs || ["COMPLETED", "FAILED", "STOPPED", "CANCELLED"].includes(currentProgress?.status)) return;
+      if (socket !== currentWs || taskId !== currentTaskId) return;
       streamDisconnected = true;
       taskConnectionStatus.textContent = "Mất kết nối realtime. Đang kiểm tra trạng thái tác vụ qua máy chủ…";
       taskConnectionStatus.classList.remove("hidden");
       updateTasksTable();
+      queueStreamRecovery(taskId, socket);
     };
     socket.onclose = reportDisconnect;
     socket.onerror = reportDisconnect;
     currentWs.onmessage = (event) => {
       if (socket !== currentWs) return;
       const msg = JSON.parse(event.data);
+      streamEventRevision++;
 
       if (msg.type === "progress") {
         showTaskProgress(msg);
@@ -1615,50 +1926,7 @@ document.addEventListener("DOMContentLoaded", () => {
         if (msg.video_url) setPreviewSource(msg.video_url, { task_id: taskId });
       }
       else if (msg.type === "init") {
-        visualSession = msg.visual_translation === true || (msg.screen_texts || []).length > 0;
-        totalVideoDuration = msg.duration;
-        setScreenTexts(msg.screen_texts);
-        chineseSubMask.style.display = "none";
-        positionVideoOverlays();
-        barTotalTime.textContent = formatTime(totalVideoDuration);
-        segmentsCountBadge.textContent = `${msg.segments_count} câu`;
-
-        if (msg.bgm_url && (!bgmAudio || bgmUrl !== msg.bgm_url)) {
-          bgmUrl = msg.bgm_url;
-          if (bgmAudio) {
-            bgmAudio.pause();
-            bgmAudio = null;
-          }
-          bgmAudio = new Audio(bgmUrl);
-          if (playerBgmStatus) playerBgmStatus.textContent = "Đã lọc";
-          bgmAudio.addEventListener("error", () => showMediaError("Không phát được nhạc nền. Xem Diagnostics và thử lại phiên dịch."));
-          bgmAudio.volume = parseFloat(volBgmSlider.value) * playbackVolume();
-          if (sourceAudition) sourceAudition.muted = true;
-          else videoPlayer.muted = true; // Raw audio muted; BGM + Foley plays via bgmAudio!
-        }
-
-        if (msg.suppression_level) {
-          telSuppression.textContent = `≈ ${msg.suppression_level}`;
-          playerSuppressionBadge.textContent = `≈ ${msg.suppression_level}`;
-        }
-
-        const activeSnapshot = msg.segments.find(s => s.id === activePlayingSegId);
-        if (activeAudio && (!activeSnapshot ||
-            activeSnapshot.audio_url !== segments[activePlayingSegId]?.audio_url)) {
-          activeAudio.pause();
-          activeAudio = null;
-          activePlayingSegId = null;
-        }
-        msg.segments.forEach(s => {
-          segments[s.id] = s;
-        });
-        renderTimelineSlices();
-        renderSegmentsDrawer();
-        if (!currentProgress?.can_pause && currentProgress?.status === "RUNNING" && !reviewInProgress()) {
-          showTaskProgress({ phase: "processing", stage: "Đang xử lý câu thoại…", can_pause: true, can_stop: true });
-        }
-        updateExportAvailability();
-        syncPlayback();
+        applyStreamingSnapshot(msg);
       }
       else if (msg.type === "segment_update") {
         applySegmentUpdate(msg);
@@ -1714,8 +1982,11 @@ document.addEventListener("DOMContentLoaded", () => {
       }
       else if (msg.type === "ready_to_play") {
         translationReady = true;
-        if (!previewPending) {
-          bufferingAlert.classList.add("hidden");
+        if (resultPreviewActive) allowAutoPlay = false;
+        if (!allowAutoPlay) playWhenPreviewReady = false;
+        if (!previewPending) bufferingAlert.classList.add("hidden");
+        if (allowAutoPlay && !previewPending) {
+          allowAutoPlay = false;
           videoPlayer.play().catch(error => {
             if (error.name === "NotSupportedError") loadCompatiblePreview();
             else reportPlayFailure(error);
@@ -1732,9 +2003,7 @@ document.addEventListener("DOMContentLoaded", () => {
           automaticExportActive = true;
           showTaskProgress({status: "RUNNING", phase: "export", stage: msg.stage || "Đang xuất video kết quả…", progress_pct: msg.progress, can_review: false, can_pause: false});
         }
-        if (exportProgressBar) exportProgressBar.style.width = `${msg.progress}%`;
-        if (exportProgressPct) exportProgressPct.textContent = `${msg.progress}%`;
-        if (exportStatusText) exportStatusText.textContent = msg.stage;
+        renderExportProgress(msg.progress, msg.stage);
       }
       else if (msg.type === "result_ready") {
         automaticExportActive = false;
@@ -1748,14 +2017,8 @@ document.addEventListener("DOMContentLoaded", () => {
           ...(msg.review_summary ? {review_summary: msg.review_summary} : {})});
       }
       else if (msg.type === "result_error") {
-        automaticExportActive = false;
-        if (taskResult) {
-          taskResult.classList.remove("hidden");
-          taskResultLink.classList.add("hidden");
-          btnSaveResult.classList.add("hidden");
-          taskResultStatus.textContent = msg.message || "Chưa xuất được video. Bản dịch đã giữ lại; bấm Xuất video MP4 để thử lại.";
-        }
-        showTaskProgress({status: "COMPLETED", phase: "complete", stage: "Chưa xuất được video kết quả"});
+        showExportFailure(msg.message);
+        showTaskProgress({status: "FAILED", phase: "export_error", stage: msg.message || "Chưa xuất được video kết quả", progress_pct: null});
       }
       else if (msg.type === "error") {
         isBufferingUnderrun = false;
@@ -1768,11 +2031,13 @@ document.addEventListener("DOMContentLoaded", () => {
       else if (msg.type === "finished") {
         if (pendingTaskAction?.kind === "review") pendingTaskAction.progressSeen = true;
         const finishedStatus = String(msg.status || "").toUpperCase();
-        const failed = finishedStatus === "FAILED" || currentProgress?.status === "FAILED";
+        const reviewFailed = ["failed", "incomplete"].includes((msg.review_summary || currentProgress?.review_summary)?.status)
+          && !msg.error && !(currentProgress?.status === "FAILED" && currentProgress?.phase === "failed");
+        const failed = finishedStatus === "FAILED" || currentProgress?.status === "FAILED" || reviewFailed;
         const stopped = ["CANCELLED", "STOPPED"].includes(finishedStatus);
         showTaskProgress({ status: failed ? "FAILED" : stopped ? "STOPPED" : "COMPLETED",
           ...(msg.review_summary ? {review_summary: msg.review_summary} : {}),
-          phase: failed ? "failed" : stopped ? "stopped" : "complete",
+          phase: failed ? (reviewFailed ? "review" : "failed") : stopped ? "stopped" : "complete",
           stage: failed ? (currentProgress?.status === "FAILED" ? currentProgress.stage : msg.message || "Xử lý video thất bại") : stopped ? "Đã dừng tác vụ" : "Hoàn tất xử lý câu thoại",
           progress_pct: failed || stopped ? null : 100 });
         updateTasksTable();
@@ -1918,7 +2183,7 @@ document.addEventListener("DOMContentLoaded", () => {
 
   // Transcript rows retain their editors while background segment updates arrive.
   function segmentTranslation(segment) {
-    return segment.final_vi || segment.natural_vi || segment.literal_vi || "";
+    return typeof segment.final_vi === "string" ? segment.final_vi : segment.natural_vi || segment.literal_vi || "";
   }
 
   function segmentStatusLabel(status) {
@@ -2207,7 +2472,8 @@ document.addEventListener("DOMContentLoaded", () => {
     item.badge.dataset.ready = String(ready);
     item.row.dataset.needsReview = String(Boolean(segment.needs_review));
     item.original.textContent = segment.text_zh || (segment.confirmed_silence ? "Không có lời thoại" : "Đang nhận dạng lời thoại…");
-    item.translation.textContent = segment.confirmed_silence ? "Đã xác nhận không có lời thoại" : segmentTranslation(segment) || "Bản dịch sẽ xuất hiện sau khi xử lý.";
+    item.translation.textContent = segment.confirmed_silence ? "Đã xác nhận không có lời thoại" : segmentTranslation(segment)
+      || (ready && segment.needs_review ? "Chưa đủ căn cứ để dịch câu này." : "Bản dịch sẽ xuất hiện sau khi xử lý.");
     item.translation.disabled = reviewInProgress() || pendingTaskAction?.kind === "review" || automaticExportActive || !!exportingTaskId || !["READY", "PLAYED", "NEEDS_REVIEW"].includes(segment.status);
     item.review.hidden = !segment.needs_review;
     item.silence.hidden = !(segment.needs_review || segment.status === "NEEDS_REVIEW");
@@ -2265,6 +2531,7 @@ document.addEventListener("DOMContentLoaded", () => {
 
   async function controlTask(id, action) {
     if (!id) return;
+    const revision = progressRevision;
     try {
       const response = await fetch(`/api/tasks/${encodeURIComponent(id)}/${action}`, { method: "POST" });
       const data = await response.json();
@@ -2272,7 +2539,7 @@ document.addEventListener("DOMContentLoaded", () => {
       if (id === currentTaskId) {
         if (action === "stop") {
           showTaskProgress({ phase: "stopped", status: "STOPPED", stage: "Đã dừng tác vụ", progress_pct: null });
-        } else {
+        } else if (revision === progressRevision && !["COMPLETED", "FAILED", "STOPPED", "CANCELLED"].includes(currentProgress?.status)) {
           showTaskProgress({ status: action === "pause" ? "PAUSED" : "RUNNING", can_pause: action === "resume", can_resume: action === "pause" });
           btnPauseWorker.classList.toggle("hidden", action === "pause");
           btnResumeWorker.classList.toggle("hidden", action === "resume");
@@ -2312,14 +2579,31 @@ document.addEventListener("DOMContentLoaded", () => {
       segments = {}; resetScreenTexts(); renderSegmentsDrawer();
       translationReady = false; isBufferingUnderrun = false;
       if (data.video_url) setPreviewSource(data.video_url, {task_id: taskId});
+      else {
+        previewGeneration++;
+        previewDescriptor = {task_id: taskId};
+        previewPending = false;
+        previewResumeTime = null;
+        videoPlayer.removeAttribute("src");
+        videoPlayer.load();
+      }
       showTaskProgress(data.progress || {});
+      if (data.initialized && Array.isArray(data.segments)) applyStreamingSnapshot(data);
+      translationReady = data.telemetry?.ready_to_play === true;
       showTaskResult(data);
       setupStreamingWebSocket(taskId);
+      updateTasksTable();
       return true;
     } finally {
       pendingTaskAction = null;
       setWorkerSourceBusy(!!currentTaskId && !["COMPLETED", "FAILED", "STOPPED", "CANCELLED"].includes(currentProgress?.status));
     }
+  };
+  window.openTaskInStudio = async taskId => {
+    try {
+      if (await window.studioAttachTask(taskId)) switchTab("view-studio");
+      else alert("Hãy chờ thao tác hiện tại hoặc lưu lời thoại trước khi mở tác vụ.");
+    } catch (error) { alert(error.message); }
   };
   window.studioRetry = async () => {
     if (!currentTaskId || !currentProgress?.can_retry || pendingTaskAction || btnRetryWorker.disabled) return;
@@ -2422,6 +2706,11 @@ document.addEventListener("DOMContentLoaded", () => {
         if (activeTask && automaticExport.status === "COMPLETED") activeTask = {...activeTask,
           output_video_url: automaticExport.output_video_url || automaticExport.video_url, output_filename: automaticExport.output_filename};
       }
+      if (automaticExportActive && !automaticExport && activeTask && ["COMPLETED", "FAILED", "STOPPED", "CANCELLED"].includes(activeTask.status)) automaticExportActive = false;
+      if (activeTask?.status === "COMPLETED" && automaticExport && ["FAILED", "CANCELLED"].includes(automaticExport.status)) {
+        showExportFailure(automaticExport.stage, automaticExport.status);
+        activeTask = {...activeTask, status: "FAILED", phase: "export_error", stage: automaticExport.stage || "Chưa xuất được video kết quả", progress_pct: null};
+      }
       if (activeTask) {
         const statusChanged = activeTask.status !== currentProgress?.status;
         const progressChanged = ["phase", "stage", "progress_pct", "downloaded_bytes", "total_bytes", "speed", "eta", "can_review", "review_count", "output_video_url", "output_filename"]
@@ -2476,6 +2765,9 @@ document.addEventListener("DOMContentLoaded", () => {
         }
 
         let actionButtons = "";
+        if (/^[a-zA-Z0-9_-]{1,80}$/.test(t.task_id) && !t.task_id.startsWith("export_") && !["STOPPED", "CANCELLED"].includes(t.status)) {
+          actionButtons += `<button onclick="window.openTaskInStudio('${t.task_id}')" class="px-2 py-1 bg-pink-600/80 hover:bg-pink-600 text-white rounded text-[10px]">Mở trong Studio</button> `;
+        }
         if (t.can_pause) {
           actionButtons += `<button onclick="window.pauseTask('${t.task_id}')" class="px-2 py-1 bg-amber-600/80 hover:bg-amber-600 text-white rounded text-[10px]"><i class="fa-solid fa-pause mr-1"></i>Tạm dừng</button> `;
         }
@@ -2486,7 +2778,7 @@ document.addEventListener("DOMContentLoaded", () => {
           actionButtons += `<button onclick="window.stopTask('${t.task_id}')" class="px-2 py-1 bg-rose-700/80 hover:bg-rose-700 text-white rounded text-[10px]"><i class="fa-solid fa-stop mr-1"></i>Hủy</button> `;
         }
         if (t.status === "COMPLETED" && t.video_url) {
-          actionButtons += `<a href="${t.video_url}" target="_blank" class="px-2 py-1 bg-pink-600 hover:bg-pink-500 text-white rounded text-[10px] inline-flex items-center gap-1"><i class="fa-solid fa-circle-play"></i>Xem kết quả</a> `;
+          actionButtons += `<a href="${t.video_url}" data-result-preview class="px-2 py-1 bg-pink-600 hover:bg-pink-500 text-white rounded text-[10px] inline-flex items-center gap-1"><i class="fa-solid fa-circle-play"></i>Xem kết quả</a> `;
         }
 
         tr.innerHTML = `
@@ -2605,43 +2897,108 @@ document.addEventListener("DOMContentLoaded", () => {
   // =========================================================
   // 9. DIAGNOSTICS & LOG VIEWER
   // =========================================================
-  let currentLogCategory = "app";
+  let currentLogCategory = "pipeline";
+  const logCategoryLabels = { pipeline: "Tác vụ", app: "Ứng dụng", ai: "AI", errors: "Lỗi" };
   const logConsole = document.getElementById("log-console-output");
   const chkAutoScroll = document.getElementById("chk-auto-scroll-log");
   const logSummary = document.getElementById("log-summary");
   const logCopyStatus = document.getElementById("log-copy-status");
   let rawLogText = "";
   let logLoadSequence = 0;
+  let logRequestRunning = false;
+  let logRefreshQueued = false;
+  let logRequestController = null;
+  let logPollTimer = null;
+  let diagnosticsVisible = false;
+  let renderedLogText = null;
 
-  async function loadDiagnosticsLog(cat) {
+  function setDiagnosticsVisible(visible) {
+    diagnosticsVisible = visible;
+    clearInterval(logPollTimer);
+    logPollTimer = null;
+    if (visible && !document.hidden) {
+      loadDiagnosticsLog(currentLogCategory);
+      logPollTimer = setInterval(() => loadDiagnosticsLog(currentLogCategory, { background: true }), 3000);
+    } else {
+      logLoadSequence++;
+      logRefreshQueued = false;
+      logRequestController?.abort();
+    }
+  }
+
+  document.addEventListener("visibilitychange", () => setDiagnosticsVisible(diagnosticsVisible));
+  window.addEventListener("pagehide", () => setDiagnosticsVisible(false));
+
+  async function loadDiagnosticsLog(cat, { background = false } = {}) {
+    if (background && (!diagnosticsVisible || document.hidden)) return;
+    const categoryChanged = cat !== currentLogCategory;
     currentLogCategory = cat;
     if (!logConsole) return;
+    if (categoryChanged) {
+      logLoadSequence++;
+      rawLogText = "";
+      renderedLogText = null;
+      logConsole.textContent = "Đang tải nhật ký…";
+      logSummary.textContent = `Đang tải ${logCategoryLabels[cat]}…`;
+      logCopyStatus.textContent = "";
+      logRequestController?.abort();
+    }
+    // A slow local server must not accumulate polling requests. A category
+    // change queues only the newest choice and invalidates the older response.
+    if (logRequestRunning) {
+      if (!background) logRefreshQueued = true;
+      return;
+    }
+    logRequestRunning = true;
     const sequence = ++logLoadSequence;
-    rawLogText = "";
-    logSummary.textContent = `Đang tải log ${cat}…`;
-    logCopyStatus.textContent = "";
+    const controller = new AbortController();
+    logRequestController = controller;
+    const timeout = setTimeout(() => controller.abort(), 10000);
+    if (renderedLogText === null) logSummary.textContent = `Đang tải ${logCategoryLabels[cat]}…`;
     try {
-      const res = await fetch(`/api/diagnostics/logs?category=${cat}&lines=150`);
+      const res = await fetch(`/api/diagnostics/logs?category=${cat}&lines=150`, { signal: controller.signal });
       if (!res.ok) throw new Error("Máy chủ chưa trả nhật ký");
       const data = await res.json();
       if (sequence !== logLoadSequence) return;
-      rawLogText = String(data.logs || "");
+      const nextLogText = String(data.logs || "");
+      const selection = window.getSelection?.();
+      // Keep selected DOM nodes intact while the user reads or copies a line.
+      // The next poll applies the latest text after the selection is released.
+      if (!chkAutoScroll?.checked && selection && !selection.isCollapsed
+          && (logConsole.contains(selection.anchorNode) || logConsole.contains(selection.focusNode))) return;
+      rawLogText = nextLogText;
       const lines = rawLogText.split(/\r?\n/);
-      logConsole.innerHTML = rawLogText ? lines.map(line => {
-        const level = /\b(ERROR|CRITICAL|Exception|Traceback)\b/.test(line) ? "log-line-error" : /\bWARNING\b/.test(line) ? "log-line-warning" : "";
-        return `<span class="${level}">${escapeHtml(line)}</span>`;
-      }).join("\n") : "(Nhật ký rỗng)";
+      if (renderedLogText !== rawLogText) {
+        const scrollTop = logConsole.scrollTop;
+        const scrollLeft = logConsole.scrollLeft;
+        logConsole.innerHTML = rawLogText ? lines.map(line => {
+          const level = /\b(ERROR|CRITICAL|Exception|Traceback)\b/.test(line) ? "log-line-error" : /\bWARNING\b/.test(line) ? "log-line-warning" : "";
+          return `<span class="${level}">${escapeHtml(line)}</span>`;
+        }).join("\n") : (cat === "pipeline" ? "Chưa có nhật ký tác vụ. Nội dung sẽ cập nhật khi tải hoặc dịch video." : "Chưa có nhật ký trong mục này.");
+        renderedLogText = rawLogText;
+        if (!chkAutoScroll?.checked) {
+          logConsole.scrollTop = scrollTop;
+          logConsole.scrollLeft = scrollLeft;
+        }
+      }
       const errors = lines.filter(line => /\b(ERROR|CRITICAL)\b/.test(line)).length;
       const warnings = lines.filter(line => /\bWARNING\b/.test(line)).length;
-      logSummary.textContent = `${cat} · ${rawLogText ? lines.filter(Boolean).length : 0} dòng gần nhất · ${errors} lỗi · ${warnings} cảnh báo`;
+      logSummary.textContent = `${logCategoryLabels[cat]} · ${rawLogText ? lines.filter(Boolean).length : 0} dòng gần nhất · ${errors} lỗi · ${warnings} cảnh báo`;
       if (chkAutoScroll && chkAutoScroll.checked) {
         logConsole.scrollTop = logConsole.scrollHeight;
       }
     } catch (e) {
       if (sequence !== logLoadSequence) return;
-      rawLogText = "";
-      logConsole.textContent = `Lỗi đọc log: ${e.message}`;
-      logSummary.textContent = "Không tải được nhật ký. Bấm làm mới để thử lại.";
+      if (renderedLogText === null) logConsole.textContent = "Chưa đọc được nhật ký.";
+      logSummary.textContent = "Chưa cập nhật được nhật ký · đang thử lại.";
+    } finally {
+      clearTimeout(timeout);
+      logRequestRunning = false;
+      logRequestController = null;
+      if (logRefreshQueued) {
+        logRefreshQueued = false;
+        loadDiagnosticsLog(currentLogCategory);
+      }
     }
   }
 
@@ -2673,7 +3030,7 @@ document.addEventListener("DOMContentLoaded", () => {
         if (!navigator.clipboard?.writeText) throw new Error("Clipboard không sẵn sàng");
         await navigator.clipboard.writeText(copy);
       }
-      logCopyStatus.textContent = `Đã sao chép log ${category}.`;
+      logCopyStatus.textContent = `Đã sao chép log ${logCategoryLabels[category]}.`;
     } catch (_) {
       logCopyStatus.textContent = "Không truy cập được clipboard. Chọn nội dung trong khung nhật ký rồi nhấn Ctrl+C.";
       logConsole.focus();
@@ -3080,24 +3437,33 @@ document.addEventListener("DOMContentLoaded", () => {
     btnConfirmExport.classList.add("hidden");
     exportStatusBox.classList.remove("hidden");
     exportResultBox.classList.add("hidden");
-    if (exportProgressBar) exportProgressBar.style.width = "5%";
-    if (exportProgressPct) exportProgressPct.textContent = "5%";
-    exportStatusText.textContent = "Đang chuẩn bị âm thanh, phụ đề và xuất video...";
+    renderExportProgress(null, "Đang chuẩn bị âm thanh, phụ đề và xuất video...");
 
-    // Poll for status updates
+    // Ignore reads from a completed run, including responses already in flight.
+    let pollActive = true;
+    let pollController = null;
+    const stopExportPolling = () => {
+      pollActive = false;
+      clearInterval(pollInterval);
+      pollController?.abort();
+    };
     const pollInterval = setInterval(async () => {
+      if (!pollActive || pollController) return;
+      const controller = new AbortController();
+      pollController = controller;
+      const timeout = setTimeout(() => controller.abort(), 8000);
       try {
-        const sRes = await fetch(`/api/streaming/export-hq/status/${taskId}`);
+        const sRes = await fetch(`/api/streaming/export-hq/status/${taskId}`, {signal: controller.signal, cache: "no-store"});
         if (sRes.ok) {
           const sData = await sRes.json();
-          if (exportProgressBar) exportProgressBar.style.width = `${sData.progress}%`;
-          if (exportProgressPct) exportProgressPct.textContent = `${sData.progress}%`;
-          if (exportStatusText) exportStatusText.textContent = sData.stage;
-          if (sData.status === "COMPLETED" || sData.status === "FAILED" || sData.status === "CANCELLED") {
-            clearInterval(pollInterval);
-          }
+          if (!pollActive || taskId !== currentTaskId || exportingTaskId !== taskId) return;
+          renderExportProgress(sData.progress, sData.stage);
+          if (["COMPLETED", "FAILED", "CANCELLED"].includes(sData.status)) stopExportPolling();
         }
-      } catch (_) {}
+      } catch (_) {} finally {
+        clearTimeout(timeout);
+        if (pollController === controller) pollController = null;
+      }
     }, 1000);
 
     try {
@@ -3107,12 +3473,11 @@ document.addEventListener("DOMContentLoaded", () => {
         body: JSON.stringify({ task_id: taskId, mask_chinese: false,
           translate_screen_text: toggleScreenText.checked })
       });
-      clearInterval(pollInterval);
+      stopExportPolling();
       const data = await res.json();
       if (!res.ok) throw new Error(data.detail || "Lỗi xuất video");
 
-      if (exportProgressBar) exportProgressBar.style.width = "100%";
-      if (exportProgressPct) exportProgressPct.textContent = "100%";
+      renderExportProgress(100, "Xuất video hoàn tất");
       exportStatusBox.classList.add("hidden");
       exportResultBox.classList.remove("hidden");
       lastExportedFileUrl = data.video_url;
@@ -3127,7 +3492,7 @@ document.addEventListener("DOMContentLoaded", () => {
       }
 
     } catch (e) {
-      clearInterval(pollInterval);
+      stopExportPolling();
       exportStatusBox.classList.remove("hidden");
       exportStatusText.textContent = exportCancelled ? "Đã hủy xuất video." : `Lỗi xuất video: ${e.message}`;
       btnConfirmExport.classList.remove("hidden");

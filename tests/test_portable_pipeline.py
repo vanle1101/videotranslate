@@ -13,7 +13,7 @@ import unittest
 import wave
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, Mock, patch
+from unittest.mock import ANY, AsyncMock, Mock, patch
 
 from config import settings
 from core.asr import load_whisper_model
@@ -326,7 +326,8 @@ class PortablePipelineTests(unittest.TestCase):
         self.assertTrue(session.first_play_emitted)
         self.assertEqual([item.text_zh for item in session.segments.values()], ["第一句。", "第二句。"])
         self.assertEqual([(item.start, item.end) for item in session.segments.values()], [(0, 1), (1, 2)])
-        session.faster_whisper.transcribe.assert_called_once_with(session.raw_audio_16k, language="zh")
+        session.faster_whisper.transcribe.assert_called_once_with(session.raw_audio_16k, language="zh", progress_callback=ANY)
+        self.assertTrue(callable(session.faster_whisper.transcribe.call_args.kwargs["progress_callback"]))
         session.segmenter.segment_audio.assert_not_called()
         self.assertEqual([call.kwargs["text_zh"] for call in session.translator.translate_single_segment.call_args_list],
                          ["第一句。", "第二句。"])

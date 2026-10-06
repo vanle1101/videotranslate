@@ -9,6 +9,7 @@ writes credentials into this repository.
 from __future__ import annotations
 
 import json
+import logging
 import math
 import os
 from pathlib import Path
@@ -17,7 +18,9 @@ import subprocess
 import sys
 import tempfile
 import time
+import uuid
 from typing import Any, Mapping, Optional
+from core.runtime_context import current_execution_context
 
 
 OPENCODE_BASE_URL = "https://opencode.ai/zen/v1"
@@ -47,6 +50,61 @@ class OpenCodeModelError(OpenCodeClientError):
 
 class OpenCodeRequestError(OpenCodeClientError):
     pass
+
+
+class OpenCodeCancelledError(OpenCodeRequestError):
+    pass
+
+
+def _check_cancelled(context):
+    if context.cancel_check is not None and context.cancel_check():
+        raise OpenCodeCancelledError("Đã hủy yêu cầu dịch OpenCode.")
+
+
+def _communicate(process, request, timeout, context):
+    """Poll only owned CLI work, preserving one deadline and one stdin write."""
+    try:
+        if context.cancel_check is None:
+            return process.communicate(request, timeout=timeout)
+        deadline = time.monotonic() + timeout
+        pending_input = request
+        while True:
+            _check_cancelled(context)
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise subprocess.TimeoutExpired("opencode", timeout)
+            try:
+                result = process.communicate(pending_input, timeout=min(0.25, remaining))
+                _check_cancelled(context)
+                return result
+            except subprocess.TimeoutExpired:
+                pending_input = None
+                if time.monotonic() >= deadline:
+                    raise
+    except OpenCodeCancelledError:
+        _terminate_process_tree(process)
+        raise
+    except subprocess.TimeoutExpired:
+        _terminate_process_tree(process)
+        raise OpenCodeRequestError("OpenCode phản hồi quá lâu. Hãy thử lại hoặc chọn model khác.") from None
+    except BaseException:
+        # Pipe errors and caller interruptions must also reap the CLI before
+        # TemporaryDirectory removes the files still owned by that process.
+        _terminate_process_tree(process)
+        raise
+
+
+def _retry_delay(seconds, context):
+    if context.cancel_check is None:
+        time.sleep(seconds)
+        return
+    deadline = time.monotonic() + seconds
+    while True:
+        _check_cancelled(context)
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            return
+        time.sleep(min(0.25, remaining))
 
 
 def canonical_model_id(model: str) -> str:
@@ -286,6 +344,40 @@ class OpenCodeZenClient:
                   model: Optional[str] = None, temperature: Optional[float] = None,
                   max_tokens: Optional[int] = None) -> str:
         selected = self.validate_model(model)
+        context = current_execution_context()
+        request_id = uuid.uuid4().hex
+        trace = {"attempt": 1, "started": time.monotonic()}
+
+        def record(event, output_chars=0):
+            logging.getLogger("ai").info(
+                "%s run_id=%s request_id=%s model=%s attempt=%s elapsed_ms=%s output_chars=%s",
+                event, context.run_id, request_id, selected, trace["attempt"],
+                round((time.monotonic() - trace["started"]) * 1000), output_chars,
+            )
+
+        def retry(attempt):
+            record("PROVIDER_FAILED")
+            trace.update(attempt=attempt, started=time.monotonic())
+            record("PROVIDER_REQUEST")
+
+        record("PROVIDER_REQUEST")
+        try:
+            _check_cancelled(context)
+            answer = self._translate(prompt, selected, system, max_tokens, context, retry)
+            _check_cancelled(context)
+        except OpenCodeCancelledError:
+            record("PROVIDER_CANCELLED")
+            raise
+        except OpenCodeClientError:
+            record("PROVIDER_FAILED")
+            raise
+        except Exception:
+            record("PROVIDER_FAILED")
+            raise OpenCodeRequestError("OpenCode chưa hoàn tất yêu cầu dịch. Hãy thử lại.") from None
+        record("PROVIDER_COMPLETED", len(answer))
+        return answer
+
+    def _translate(self, prompt, selected, system, max_tokens, context, retry):
         if not isinstance(prompt, str) or not prompt.strip():
             raise OpenCodeRequestError("Nội dung gửi OpenCode đang trống.")
         if not self._api_key:
@@ -313,6 +405,7 @@ class OpenCodeZenClient:
                     f"opencode/{selected}", "--agent", _AGENT,
                     "--title", "Video translation", "--dir", str(work)]
             for attempt in range(self.max_retries + 1):
+                _check_cancelled(context)
                 try:
                     process = subprocess.Popen(
                         argv, cwd=work, env=env, shell=False,
@@ -320,16 +413,13 @@ class OpenCodeZenClient:
                         text=True, encoding="utf-8", errors="replace",
                         creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
                     )
-                    try:
-                        stdout, stderr = process.communicate(request, timeout=self.timeout)
-                    except subprocess.TimeoutExpired:
-                        _terminate_process_tree(process)
-                        raise OpenCodeRequestError("OpenCode phản hồi quá lâu. Hãy thử lại hoặc chọn model khác.") from None
+                    stdout, stderr = _communicate(process, request, self.timeout, context)
                 except OSError:
                     raise OpenCodeConfigurationError("Không khởi chạy được OpenCode CLI.") from None
                 if process.returncode:
                     if attempt < self.max_retries:
-                        time.sleep(min(2 ** attempt, 2))
+                        _retry_delay(min(2 ** attempt, 2), context)
+                        retry(attempt + 2)
                         continue
                     raise OpenCodeRequestError(_safe_failure(stdout + "\n" + stderr))
                 parts: list[str] = []

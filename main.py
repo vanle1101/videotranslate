@@ -362,6 +362,16 @@ async def update_settings(req: ConfigRequest):
             raise HTTPException(status_code=422, detail="Mức giảm BGM phải từ -60 đến 0 dB") from None
 
     def apply_settings():
+        # Session engines capture some settings while later stages read globals.
+        # Reject mutations until all consumers finish rather than mixing models
+        # or silently skipping the final review of an existing run.
+        changed = any(str(getattr(settings, name, "")) != str(value)
+                      for name, value in env_updates.items())
+        if changed and (any(getattr(sess, "is_running", False) or getattr(sess, "is_editing", False)
+                            for sess in active_streaming_sessions.values())
+                        or any(job.get("status") in {"RUNNING", "CANCELLING"}
+                               for job in active_export_tasks.values())):
+            raise HTTPException(status_code=409, detail="Đang có tác vụ xử lý. Hãy chờ xong hoặc dừng tác vụ trước khi đổi cấu hình.")
         try:
             update_env_file(env_updates)
         except OSError:
@@ -574,12 +584,19 @@ async def stop_task(task_id: str):
             export_worker = getattr(sess, "export_task", None) or getattr(sess, "auto_export_task", None)
             if export_worker is not None and not export_worker.done():
                 await asyncio.gather(export_worker, return_exceptions=True)
+        stopping = {
+            "task_id": task_id, "task_type": "Realtime Dubbing", "status": "CANCELLING",
+            "phase": "stopping", "stage": "Đang dừng xử lý; chờ bộ nhận giọng trả quyền điều khiển…",
+            "progress_pct": progress.get("progress_pct"), "duration": sess.total_duration,
+            "video_url": "", "can_pause": False, "can_resume": False, "can_stop": False,
+        }
+        task_history.append(stopping)
         sess.stop()
         # A Python download thread must acknowledge cancellation before this
         # endpoint reports a completed stop or any owned files are removed.
         if workers:
             await asyncio.gather(*workers, return_exceptions=True)
-        task_history.append({
+        stopping.update({
             "task_id": task_id,
             "task_type": "Realtime Dubbing",
             "status": "STOPPED",
@@ -825,7 +842,7 @@ async def export_hq(req: ExportHQRequest):
     if getattr(session, "is_editing", False):
         raise HTTPException(status_code=409, detail="Đang lưu lời thoại và tạo lại giọng đọc. Hãy chờ lưu xong trước khi xuất.")
     review_status = getattr(session, "review_summary", {}).get("status")
-    if review_status in {"failed", "running"}:
+    if review_status in {"failed", "running", "incomplete"}:
         raise HTTPException(status_code=409, detail="AI kiểm tra lại chưa hoàn tất. Bấm AI kiểm tra lại để tiếp tục trước khi xuất.")
     uncertain = [s for s in session.segments.values() if getattr(s, "needs_review", False)]
     if uncertain and not (review_status == "completed" and all(
@@ -847,7 +864,7 @@ async def export_hq(req: ExportHQRequest):
         "task_id": export_id,
         "parent_session_id": req.task_id,
         "status": "RUNNING",
-        "progress": 5,
+        "progress": None,
         "stage": "Khởi động xuất video HQ...",
         "start_time": time.time(),
         "duration": session.total_duration,
@@ -860,7 +877,7 @@ async def export_hq(req: ExportHQRequest):
 
     loop = asyncio.get_event_loop()
 
-    def _prog_cb(pct: int, stage: str):
+    def _prog_cb(pct, stage: str):
         if export_id in active_export_tasks:
             active_export_tasks[export_id]["progress"] = pct
             active_export_tasks[export_id]["stage"] = stage
@@ -872,10 +889,21 @@ async def export_hq(req: ExportHQRequest):
     def _cancel_chk():
         return active_export_tasks.get(export_id, {}).get("cancelled", False)
 
+    async def _commit_output(rendered, final):
+        # Same event loop as cancellation: no await between the decision,
+        # atomic publication and commit flag. Late Stop cannot undo this file.
+        if _cancel_chk() or getattr(session, "is_stopped", False):
+            raise RuntimeError("Export cancelled before publishing")
+        rendered.replace(final)
+        active_export_tasks[export_id]["published"] = True
+
+    def _publish_output(rendered, final):
+        asyncio.run_coroutine_threadsafe(_commit_output(rendered, final), loop).result()
+
     render_worker = None
     try:
         await broadcast_session_event(req.task_id, "export_progress", {
-            "progress": 5, "stage": "Đang tạo video kết quả từ bản dịch đã xử lý...",
+            "progress": None, "stage": "Đang tạo video kết quả từ bản dịch đã xử lý...",
         })
         exporter = HQExporter()
         render_worker = asyncio.create_task(asyncio.to_thread(
@@ -889,9 +917,25 @@ async def export_hq(req: ExportHQRequest):
             screen_texts=(getattr(session, "screen_texts", []) if req.translate_screen_text else [])
                 if getattr(session, "visual_translation", False) else None,
             progress_callback=_prog_cb,
-            cancel_check=_cancel_chk
+            cancel_check=_cancel_chk,
+            publish_callback=_publish_output,
         ))
-        result = await asyncio.shield(render_worker)
+        try:
+            result = await asyncio.shield(render_worker)
+        except asyncio.CancelledError:
+            if not active_export_tasks[export_id].get("published"):
+                raise
+            # Publication already committed before Stop. Drain the worker and
+            # publish its valid result rather than report a false cancellation.
+            while not render_worker.done():
+                try:
+                    await asyncio.shield(render_worker)
+                except asyncio.CancelledError:
+                    continue
+            result = render_worker.result()
+
+        if not active_export_tasks[export_id].get("published") and (_cancel_chk() or getattr(session, "is_stopped", False)):
+            raise RuntimeError("Export cancelled before publishing")
 
         active_export_tasks[export_id]["status"] = "COMPLETED"
         active_export_tasks[export_id]["progress"] = 100
@@ -955,7 +999,8 @@ async def get_export_hq_status(task_id: str):
 async def cancel_export_hq(task_id: str):
     export_id = task_id if task_id.startswith("export_") else f"export_{task_id}"
     if export_id in active_export_tasks:
-        if active_export_tasks[export_id]["status"] not in {"RUNNING", "CANCELLING"}:
+        if (active_export_tasks[export_id].get("published")
+                or active_export_tasks[export_id]["status"] not in {"RUNNING", "CANCELLING"}):
             raise HTTPException(status_code=409, detail="Tác vụ xuất đã kết thúc")
         active_export_tasks[export_id]["cancelled"] = True
         active_export_tasks[export_id]["status"] = "CANCELLING"
@@ -1030,12 +1075,31 @@ async def get_local_file(path: str):
 class PreviewRequest(BaseModel):
     file_path: Optional[str] = None
     task_id: Optional[str] = None
+    output_filename: Optional[str] = None
 
 
 @app.post("/api/preview")
 async def create_media_preview(req: PreviewRequest):
-    session = get_streaming_session(req.task_id) if req.task_id else None
-    source = session.video_path if session else req.file_path
+    if req.output_filename is not None:
+        name = req.output_filename
+        if (req.file_path is not None or req.task_id is not None or not name
+                or name != name.strip() or Path(name).suffix.lower() != ".mp4"
+                or any(ord(char) < 32 or char in '<>:"/\\|?*' for char in name)):
+            raise HTTPException(status_code=400, detail="Tên video kết quả không hợp lệ")
+        try:
+            root = settings.OUTPUT_DIR.resolve(strict=True)
+            candidate = root / name
+            info = candidate.lstat()
+            source = candidate.resolve(strict=True)
+            if (candidate.is_symlink() or candidate.is_junction()
+                    or getattr(info, "st_file_attributes", 0) & 0x400
+                    or source.parent != root or not source.is_file()):
+                raise ValueError("Invalid output")
+        except (OSError, RuntimeError, ValueError):
+            raise HTTPException(status_code=404, detail="Không tìm thấy video kết quả") from None
+    else:
+        session = get_streaming_session(req.task_id) if req.task_id else None
+        source = session.video_path if session else req.file_path
     if not source:
         raise HTTPException(status_code=404, detail="Không tìm thấy video cần xem trước")
     reject_private_media_path(source)
@@ -1119,17 +1183,30 @@ async def test_gemini_connection():
             http_options={"timeout": 20000, "retry_options": {"attempts": 1}},
         )
         try:
-            client.models.generate_content(
+            response = client.models.generate_content(
                 model=model,
                 contents="Trả về chữ OK.",
                 config={"temperature": 0.1, "max_output_tokens": 128},
             )
+            candidates = getattr(response, "candidates", None)
+            text = getattr(response, "text", None)
+            if not isinstance(text, str) or not text.strip():
+                return False
+            if candidates:
+                reason = getattr(candidates[0], "finish_reason", None)
+                reason = getattr(reason, "value", reason)
+                if reason not in (None, "STOP"):
+                    return False
+            return True
         finally:
             client.close()
 
     try:
         started = time.monotonic()
-        await asyncio.to_thread(ping)
+        usable = await asyncio.to_thread(ping)
+        if not usable:
+            return {"ok": False, "error_code": "invalid_response",
+                    "error": "Gemini đã phản hồi nhưng chưa trả được nội dung hoàn chỉnh. Kiểm tra model rồi thử lại."}
         return {
             "ok": True,
             "model": model,

@@ -266,6 +266,7 @@ def test_already_ocr_verified_rows_do_not_load_audio_models(review):
     review.audio_evidence = Mock()
     result = audio_result(segment(needs_review=False))
     result["segments"][0]["verification"].update(status="verified", source_supported=True)
+    result["summary"].update(verified=1, unresolved=0)
     assert review.resolve_audio_uncertainty("source.mp4", result) == result
     review.audio_evidence.collect.assert_not_called()
     review.client.translate.assert_not_called()
@@ -279,6 +280,34 @@ def test_audio_extraction_error_preserves_verified_ocr_results(review):
     assert result["segments"][0]["needs_review"] is True
     assert "private" not in result["segments"][0]["review_reason"]
     review.client.translate.assert_not_called()
+
+
+def test_old_spoken_placeholder_is_removed_even_when_audio_evidence_disagrees(review):
+    review.audio_evidence = Mock()
+    review.audio_evidence.collect.return_value = {0: {"sensevoice": "敲一他马。",
+                                                      "faster-whisper-small": "小一攤馬"}}
+    original = audio_result(segment(text_zh="小一滩马", literal_vi="nghe chưa rõ",
+                                    natural_vi="nghe chưa rõ", final_vi="nghe chưa rõ"))
+    result = review.resolve_audio_uncertainty("source.mp4", original)
+    row = result["segments"][0]
+    assert row["text_zh"] == "小一滩马"
+    assert row["final_vi"] == "" and row["needs_review"]
+    assert row["verification"]["status"] == "unresolved"
+    assert not row["verification"]["semantic_verified"]
+    assert row["verification"]["spoken_placeholder_removed"]
+    assert original["segments"][0]["final_vi"] == "nghe chưa rõ"
+    review.client.translate.assert_not_called()
+
+
+def test_review_may_not_approve_diagnostic_placeholder_even_with_matching_ocr(review):
+    review.client.translate.return_value = answer(literal_vi="nghe chưa rõ",
+        natural_vi="nghe chưa rõ", final_vi="nghe chưa rõ", semantic_verified=True)
+    result = run(review)
+    row = result["segments"][0]
+    assert row["final_vi"] == "" and row["needs_review"]
+    assert row["verification"]["status"] == "unresolved"
+    assert not row["verification"]["semantic_verified"]
+    assert result["summary"]["verified"] == 0
 
 
 def test_cancelled_audio_extraction_is_not_swallowed(review):
@@ -331,7 +360,33 @@ def test_audio_semantic_failure_keeps_completed_ocr_and_old_draft(review, invali
     assert result["segments"][0]["final_vi"] == original["segments"][0]["final_vi"]
     assert result["segments"][0]["needs_review"] is True
     assert result["segments"][0]["verification"]["audio_audit_status"] == "failed"
+    assert result["segments"][0]["verification"]["status"] == "incomplete"
+    assert result["summary"]["status"] == "incomplete"
     assert result["segments"][1] == verified
+
+
+@pytest.mark.parametrize("invalid", [RuntimeError("private-provider-details"), "not-json",
+    {"segments": []}, answer(semantic_verified="yes"), answer(verification_reason=None)])
+@pytest.mark.parametrize("path", ["ocr", "audio"])
+def test_second_semantic_pass_failure_never_approves_first_pass(review, invalid, path):
+    original = segment(final_vi="Bản nháp đang nghe.")
+    review.client.translate.side_effect = [answer(), invalid]
+    if path == "audio":
+        review.audio_evidence = Mock()
+        review.audio_evidence.collect.return_value = {0: {"sensevoice": segment()["text_zh"],
+                                                         "faster-whisper-small": segment()["text_zh"]}}
+        result = review.resolve_audio_uncertainty("source.mp4", audio_result(original))
+    else:
+        result = run(review, original)
+    row = result["segments"][0]
+    assert row["final_vi"] == original["final_vi"]
+    assert row["needs_review"] is True
+    assert row["verification"]["status"] == "incomplete"
+    assert row["verification"]["semantic_verified"] is False
+    assert result["summary"]["status"] == "incomplete"
+    assert result["summary"]["incomplete"] == 1
+    assert result["summary"]["verified"] == result["summary"]["corrected"] == 0
+    assert "private-provider-details" not in str(result)
 
 
 @pytest.mark.parametrize("failed", [False, True])

@@ -36,6 +36,7 @@ function studio(cookieReply = { configured: false, count: 0, message: '' }, voic
       await Promise.all(pending);
     }
     set innerHTML(value) {
+      this.htmlWrites = (this.htmlWrites || 0) + 1;
       this.html = value; this.children = [];
       for (const match of value.matchAll(/id="([^"]+)"/g)) elements.set(match[1], new Element(match[1]));
     }
@@ -78,6 +79,7 @@ function studio(cookieReply = { configured: false, count: 0, message: '' }, voic
       return selector === '*' ? descendants : descendants.filter(child => selector.split(',').some(part => child.matches(part.trim())));
     }
     querySelector(selector) { return this.querySelectorAll(selector)[0] || null; }
+    contains(node) { return node === this || this.children.some(child => child.contains(node)); }
     closest(selector) { return this.matches(selector) ? this : this.parentElement?.closest(selector) || null; }
     scrollIntoView() {}
     getClientRects() { return [1]; }
@@ -90,6 +92,12 @@ function studio(cookieReply = { configured: false, count: 0, message: '' }, voic
     elements.set(match[2], element);
   }
   const el = id => elements.get(id);
+  const diagnosticsButtons = [...template.matchAll(/<button data-cat="([^"]+)" class="([^"]+)"/g)].map(match => {
+    const button = new Element();
+    button.dataset.cat = match[1];
+    button.className = match[2];
+    return button;
+  });
   // Match these intentional image-preserving defaults in the actual template.
   // Server-provided caption_layout is the primary visual contract.  Position
   // mode is enabled by default; legacy masking remains an inaccessible stub.
@@ -104,11 +112,12 @@ function studio(cookieReply = { configured: false, count: 0, message: '' }, voic
   const document = {
     getElementById: el,
     createElement: tag => { const element = new Element(); element.tagName = tag.toUpperCase(); return element; },
-    querySelectorAll: selector => selector === '.source-tab' ? ['source-tab-url', 'source-tab-file', 'source-tab-library'].map(el) : [],
+    querySelectorAll: selector => selector === '.source-tab' ? ['source-tab-url', 'source-tab-file', 'source-tab-library'].map(el) : selector === '.diag-cat-btn' ? diagnosticsButtons : [],
     addEventListener: (event, callback) => {
       if (event === 'DOMContentLoaded') ready = callback;
       else (documentEvents[event] ||= []).push(callback);
     },
+    async emit(name) { for (const callback of documentEvents[name] || []) await callback(); },
     async exitFullscreen() { this.fullscreenElement = null; },
     body: new Element(), activeElement: null,
   };
@@ -179,6 +188,7 @@ function studio(cookieReply = { configured: false, count: 0, message: '' }, voic
     window.loadDroppedLocalVideo('D:/clip.mp4');
     replies.set('/api/streaming/start-local-file', { task_id: 'fixture', video_url: '/fixture.mp4' });
     await el('btn-start').click();
+    sockets.at(-1).receive({ type: 'progress', status: 'RUNNING', can_pause: true, can_stop: true });
     sockets.at(-1).receive({ type: 'init', duration: 10, segments_count: 1, bgm_url: '/bgm.m4a',
       segments: [{ id: 0, start: 0, end: 10, duration: 10, status: 'READY', audio_url: '/dub.wav', final_vi: '<b>Xin chào</b>' }] });
   }
@@ -1121,7 +1131,7 @@ test('terminal Tasks with no measured progress show their stage without a progre
 test('Diagnostics preserves log lines, safely highlights levels and copies exact raw text', async () => {
   const ui = studio(); await ui.flush();
   const raw = '2026-10-05 INFO first line\n2026-10-05 ERROR <script>unsafe</script>\n    traceback detail\n';
-  ui.replies.set('/api/diagnostics/logs?category=app&lines=150', { logs: raw });
+  ui.replies.set('/api/diagnostics/logs?category=pipeline&lines=150', { logs: raw });
   await ui.el('btn-refresh-log').click();
   assert.match(ui.el('log-console-output').innerHTML, /<\/span>\n<span/);
   assert.match(ui.el('log-console-output').innerHTML, /log-line-error/);
@@ -1135,7 +1145,7 @@ test('Diagnostics preserves log lines, safely highlights levels and copies exact
 
 test('Diagnostics uses native clipboard in desktop and reports a copying failure visibly', async () => {
   const ui = studio(); await ui.flush();
-  ui.replies.set('/api/diagnostics/logs?category=app&lines=150', { logs: 'native\nlog' });
+  ui.replies.set('/api/diagnostics/logs?category=pipeline&lines=150', { logs: 'native\nlog' });
   await ui.el('btn-refresh-log').click();
   let nativeText;
   ui.window.desktopBridge = { copyText(text, callback) { nativeText = text; callback(true); } };
@@ -1145,6 +1155,105 @@ test('Diagnostics uses native clipboard in desktop and reports a copying failure
   ui.window.desktopBridge.copyText = () => { throw new Error('clipboard denied'); };
   await ui.el('btn-copy-log').click();
   assert.match(ui.el('log-copy-status').textContent, /Không truy cập được clipboard/);
+});
+
+test('Diagnostics defaults to task logs and polls only while its view and document are visible', async () => {
+  const ui = studio(); await ui.flush();
+  const endpoint = '/api/diagnostics/logs?category=pipeline&lines=150';
+  const calls = () => ui.requests.filter(request => request.url === endpoint).length;
+  await ui.tickIntervals(3000);
+  assert.equal(calls(), 0);
+  assert.equal(ui.document.querySelectorAll('.diag-cat-btn')[0].dataset.cat, 'pipeline');
+  await ui.el('tab-diagnostics').click(); await ui.flush();
+  assert.equal(calls(), 1);
+  assert.match(ui.el('log-console-output').innerHTML, /Chưa có nhật ký tác vụ/);
+  ui.replies.set(endpoint, { logs: 'INFO Đang tải video 27.5%' });
+  await ui.tickIntervals(3000);
+  assert.equal(calls(), 2);
+  assert.match(ui.el('log-console-output').innerHTML, /27.5%/);
+  ui.document.hidden = true; await ui.document.emit('visibilitychange');
+  await ui.tickIntervals(3000);
+  assert.equal(calls(), 2);
+  ui.document.hidden = false; await ui.document.emit('visibilitychange'); await ui.flush();
+  assert.equal(calls(), 3);
+  await ui.el('tab-studio').click();
+  await ui.tickIntervals(3000);
+  assert.equal(calls(), 3);
+});
+
+test('Diagnostics serializes slow requests and discards stale categories when switching quickly', async () => {
+  const ui = studio(); await ui.flush();
+  let resolveTaskLog;
+  ui.replies.set('/api/diagnostics/logs?category=pipeline&lines=150', () => new Promise(resolve => { resolveTaskLog = resolve; }));
+  ui.replies.set('/api/diagnostics/logs?category=errors&lines=150', { logs: 'ERROR Nguồn video đóng kết nối' });
+  await ui.el('tab-diagnostics').click(); await ui.flush();
+  await ui.tickIntervals(3000);
+  await ui.tickIntervals(3000);
+  const diagnosticsCalls = () => ui.requests.filter(request => request.url.startsWith('/api/diagnostics/logs?'));
+  assert.equal(diagnosticsCalls().length, 1, 'polling must not overlap a pending read');
+  await ui.document.querySelectorAll('.diag-cat-btn').find(button => button.dataset.cat === 'ai').click();
+  await ui.document.querySelectorAll('.diag-cat-btn').find(button => button.dataset.cat === 'errors').click();
+  assert.equal(diagnosticsCalls().length, 1);
+  resolveTaskLog({ ok: true, json: async () => ({ logs: 'INFO stale pipeline response' }) });
+  await ui.flush();
+  assert.equal(diagnosticsCalls().length, 2, 'only the most recent category gets fetched next');
+  assert.match(diagnosticsCalls()[1].url, /category=errors/);
+  assert.match(ui.el('log-console-output').innerHTML, /Nguồn video đóng kết nối/);
+  assert.doesNotMatch(ui.el('log-console-output').innerHTML, /stale/);
+  await ui.el('btn-copy-log').click();
+  assert.equal(ui.copied.at(-1), 'ERROR Nguồn video đóng kết nối');
+});
+
+test('Diagnostics preserves selected text and reading position with follow disabled', async () => {
+  const ui = studio(); await ui.flush();
+  const endpoint = '/api/diagnostics/logs?category=pipeline&lines=150';
+  ui.replies.set(endpoint, { logs: 'INFO first\nWARNING retry\n' });
+  await ui.el('tab-diagnostics').click(); await ui.flush();
+  const output = ui.el('log-console-output');
+  const originalHtml = output.innerHTML;
+  const originalWrites = output.htmlWrites;
+  ui.el('chk-auto-scroll-log').checked = false;
+  output.scrollTop = 80; output.scrollLeft = 15;
+  ui.window.getSelection = () => ({ isCollapsed: false, anchorNode: output, focusNode: output });
+  ui.replies.set(endpoint, { logs: 'INFO first\nWARNING retry\nINFO 30%\n' });
+  await ui.tickIntervals(3000);
+  assert.equal(output.innerHTML, originalHtml);
+  assert.equal(output.htmlWrites, originalWrites, 'selected DOM must remain intact');
+  await ui.el('btn-copy-log').click();
+  assert.equal(ui.copied.at(-1), 'INFO first\nWARNING retry\n', 'copy matches the visible log');
+  ui.window.getSelection = () => ({ isCollapsed: true });
+  await ui.tickIntervals(3000);
+  assert.match(output.innerHTML, /30%/);
+  assert.equal(output.scrollTop, 80);
+  assert.equal(output.scrollLeft, 15);
+  const updatedWrites = output.htmlWrites;
+  await ui.tickIntervals(3000);
+  assert.equal(output.htmlWrites, updatedWrites, 'identical polls should not rebuild the DOM');
+  ui.el('chk-auto-scroll-log').checked = true;
+  output.scrollHeight = 500;
+  await ui.tickIntervals(3000);
+  assert.equal(output.scrollTop, 500);
+});
+
+test('Diagnostics retains useful logs across refresh failures and retries automatically', async () => {
+  const ui = studio(); await ui.flush();
+  const endpoint = '/api/diagnostics/logs?category=pipeline&lines=150';
+  ui.replies.set(endpoint, { logs: 'WARNING Đang thử lại nguồn tải' });
+  await ui.el('tab-diagnostics').click(); await ui.flush();
+  ui.replies.set(endpoint, { failure: true });
+  await ui.tickIntervals(3000);
+  assert.match(ui.el('log-console-output').innerHTML, /Đang thử lại nguồn tải/);
+  assert.match(ui.el('log-summary').textContent, /đang thử lại/);
+  await ui.el('btn-copy-log').click();
+  assert.equal(ui.copied.at(-1), 'WARNING Đang thử lại nguồn tải');
+  ui.replies.set(endpoint, { logs: 'INFO Đã tải tiếp' });
+  await ui.tickIntervals(3000);
+  assert.match(ui.el('log-console-output').innerHTML, /Đã tải tiếp/);
+  assert.match(ui.el('log-summary').textContent, /Tác vụ · 1 dòng/);
+  await ui.window.emit('pagehide');
+  const calls = ui.requests.length;
+  await ui.tickIntervals(3000);
+  assert.equal(ui.requests.length, calls);
 });
 
 test('transcript timestamp seeks its sentence, highlights playback and text opens an editable draft', async () => {
@@ -2078,7 +2187,7 @@ test('AI review reconnect retains preview and existing audio and reports failed 
   assert.equal(video.loadCount,loads);
   assert.ok(ui.audio.includes(audio));
   ui.sockets.at(-1).receive({type:'progress',status:'COMPLETED',phase:'complete',can_review:true,review_summary:{status:'failed',checked:0}});
-  assert.match(ui.el('task-progress-detail').textContent,/AI chưa hoàn tất kiểm tra/);
+  assert.match(ui.el('task-progress-detail').textContent,/AI chưa kiểm tra đủ nguồn/);
   assert.equal(ui.el('btn-export-hq').disabled,true);
   assert.equal(ui.el('btn-review-worker').disabled,false);
   assertWorkerSourceBusy(ui,false);
@@ -2180,4 +2289,431 @@ test('result invalidation removes old output and exposes manual changes without 
   socket.receive({type:'result_invalidated',reason:'review_started',review_summary:{status:'running'}});
   assert.equal(ui.el('btn-export-hq').disabled,true);
   assertWorkerSourceBusy(ui,true);
+});
+
+function recoverySnapshot(overrides = {}) {
+  return {
+    task_id: 'fixture', initialized: true, video_url: '/fixture.mp4',
+    progress: {status: 'COMPLETED', phase: 'complete', stage: 'Đã dịch xong', progress_pct: 100, can_pause: false},
+    duration: 10, segments_count: 1, initial_buffer_seconds: 10,
+    segments: [{id: 0, start: 0, end: 10, duration: 10, status: 'READY', revision: 2,
+      audio_url: '/dub.wav?rev=2', final_vi: 'Lời thoại mới sau kết nối lại'}],
+    telemetry: {status: 'finished', ready_to_play: true, playable_until: 10, buffer_ahead: 10, warnings: []},
+    bgm_url: '/bgm.m4a', screen_texts: [], visual_translation: false,
+    ...overrides,
+  };
+}
+
+test('disconnected stream restores a full backend snapshot and replay stays paused at the same position', async () => {
+  const ui = studio(); await ui.start();
+  const video = ui.el('video-player'); video.currentTime = 4;
+  const snapshot = recoverySnapshot({output_video_url: '/api/outputs/recovered.mp4', output_filename: 'recovered.mp4'});
+  ui.replies.set('/api/streaming/fixture', snapshot);
+  const oldSocket = ui.sockets.at(-1);
+  oldSocket.close(); oldSocket.onclose();
+  await ui.tickTimeouts(1500);
+  assert.equal(ui.sockets.length, 2);
+  assert.equal(ui.requests.filter(request => request.url === '/api/streaming/fixture').length, 1);
+  assert.equal(ui.el('seg-vi-0').textContent, snapshot.segments[0].final_vi);
+  assert.equal(ui.el('task-result-link').href, 'http://localhost/api/outputs/recovered.mp4');
+  assert.equal(video.currentTime, 4);
+  assert.equal(video.paused, true);
+  const plays = video.playCount;
+  const socket = ui.sockets.at(-1); socket.onopen();
+  // Match main.websocket_stream: progress, source, init, telemetry, ready replay.
+  socket.receive({type: 'progress', ...snapshot.progress});
+  socket.receive({type: 'source_ready', video_url: snapshot.video_url});
+  socket.receive({type: 'init', ...snapshot});
+  socket.receive({type: 'telemetry', ...snapshot.telemetry});
+  socket.receive({type: 'ready_to_play'});
+  assert.equal(video.playCount, plays);
+  assert.equal(video.paused, true);
+  assert.equal(video.currentTime, 4);
+  assert.equal(ui.el('task-connection-status').classList.contains('hidden'), true);
+  assert.equal(ui.requests.filter(request => request.url.includes('/start-')).length, 1);
+});
+
+test('recovery rejects late snapshots after newer events or selecting another source', async () => {
+  for (const newSource of [false, true]) {
+    const ui = studio(); await ui.start();
+    const socket = ui.sockets.at(-1);
+    let finish;
+    ui.replies.set('/api/streaming/fixture', () => new Promise(resolve => { finish = resolve; }));
+    socket.close(); socket.onclose();
+    await ui.tickTimeouts(1500);
+    socket.receive({type: 'progress', status: 'COMPLETED', phase: 'complete', stage: 'Newer event'});
+    if (newSource) ui.window.loadDroppedLocalVideo('D:/new-source.mp4');
+    else socket.receive({type: 'segment_update', id: 0, start: 0, end: 10, status: 'READY', revision: 3, final_vi: 'Newer words'});
+    finish({ok: true, json: async () => recoverySnapshot()}); await ui.flush();
+    if (newSource) {
+      assert.match(ui.el('video-player').src, /new-source/);
+      assert.equal(ui.sockets.length, 1);
+    } else {
+      assert.equal(ui.el('seg-vi-0').textContent, 'Newer words');
+      assert.equal(ui.el('task-progress-stage').textContent, 'Newer event');
+    }
+    assert.equal(ui.el('video-player').playCount, 0);
+  }
+});
+
+test('failed recovery retries without overlapping reads and pagehide abandons its late response', async () => {
+  const ui = studio(); await ui.start();
+  const socket = ui.sockets.at(-1);
+  ui.replies.set('/api/streaming/fixture', {failure: true});
+  socket.close(); socket.onclose();
+  await ui.tickTimeouts(1500);
+  assert.equal(ui.sockets.length, 1);
+  let finish;
+  ui.replies.set('/api/streaming/fixture', () => new Promise(resolve => {finish = resolve;}));
+  await ui.tickTimeouts(1500);
+  socket.onclose(); await ui.tickTimeouts(1500);
+  assert.equal(ui.requests.filter(request => request.url === '/api/streaming/fixture').length, 2);
+  await ui.window.emit('pagehide');
+  finish({ok: true, json: async () => recoverySnapshot()}); await ui.flush();
+  await ui.tickTimeouts(1500);
+  assert.equal(ui.sockets.length, 1);
+});
+
+test('Tasks can reopen an existing session after page reload without rerunning or autoplay', async () => {
+  const ui = studio(); await ui.flush();
+  const snapshot = recoverySnapshot();
+  ui.replies.set('/api/streaming/fixture', snapshot);
+  ui.replies.set('/api/tasks', {tasks: [{task_id: 'fixture', task_type: 'Realtime Dubbing', ...snapshot.progress},
+    {task_id: 'export_fixture', task_type: 'HQ Export', status: 'COMPLETED', progress_pct: 100}]});
+  await ui.el('tab-tasks').click(); await ui.flush();
+  assert.match(ui.el('tasks-table-body').children[0].innerHTML, /window.openTaskInStudio\('fixture'\)/);
+  assert.doesNotMatch(ui.el('tasks-table-body').children[1].innerHTML, /openTaskInStudio/);
+  await ui.window.openTaskInStudio('fixture');
+  assert.equal(ui.el('view-studio').classList.contains('hidden'), false);
+  assert.equal(ui.el('seg-vi-0').textContent, snapshot.segments[0].final_vi);
+  const socket = ui.sockets.at(-1);
+  socket.receive({type: 'progress', ...snapshot.progress});
+  socket.receive({type: 'source_ready', video_url: snapshot.video_url});
+  socket.receive({type: 'init', ...snapshot});
+  socket.receive({type: 'telemetry', ...snapshot.telemetry});
+  socket.receive({type: 'ready_to_play'});
+  assert.equal(ui.el('video-player').playCount, 0);
+  assert.equal(ui.requests.filter(request => request.url.includes('/start-')).length, 0);
+});
+
+test('fresh explicit start still autoplays once but duplicate ready events never restart playback', async () => {
+  const ui = studio(); await ui.start();
+  const socket = ui.sockets.at(-1);
+  socket.receive({type: 'ready_to_play'});
+  assert.equal(ui.el('video-player').playCount, 1);
+  ui.el('video-player').pause();
+  socket.receive({type: 'ready_to_play'});
+  assert.equal(ui.el('video-player').playCount, 1);
+  assert.equal(ui.el('video-player').paused, true);
+});
+
+test('late pause or resume acknowledgements cannot overwrite newer terminal progress', async () => {
+  for (const action of ['pause', 'resume']) {
+    const ui = studio(); await ui.start();
+    const socket = ui.sockets.at(-1);
+    if (action === 'resume') socket.receive({type: 'progress', status: 'PAUSED', can_resume: true});
+    let finish;
+    ui.replies.set(`/api/tasks/fixture/${action}`, () => new Promise(resolve => { finish = resolve; }));
+    const pending = ui.window[action === 'pause' ? 'studioPause' : 'studioResume']();
+    socket.receive({type: 'finished', status: 'finished'});
+    finish({ok: true, json: async () => ({status: 'ok', action: `${action}d`})}); await pending;
+    assert.equal(ui.el('task-progress').dataset.status, 'COMPLETED');
+    assert.equal(ui.el('btn-start').classList.contains('hidden'), false);
+    assert.equal(ui.el('btn-resume-worker').classList.contains('hidden'), true);
+  }
+});
+
+test('task polling exposes missed export failure and cancellation while allowing export retry', async () => {
+  for (const status of ['FAILED', 'CANCELLED']) {
+    const ui = studio(); await ui.start();
+    const socket = ui.sockets.at(-1);
+    socket.receive({type: 'progress', status: 'COMPLETED', phase: 'complete'});
+    socket.receive({type: 'export_progress', progress: null, stage: 'Đang tạo video'});
+    const message = status === 'FAILED' ? 'Chưa xuất được video.' : 'Đã hủy xuất video';
+    ui.replies.set('/api/tasks', {tasks: [
+      {task_id: 'fixture', status: 'COMPLETED', phase: 'complete', stage: 'Dịch xong', progress_pct: 100},
+      {task_id: 'export_fixture', status, progress_pct: null, stage: message},
+    ]});
+    await ui.tickIntervals(2000); await ui.tickIntervals(2000);
+    assert.equal(ui.el('task-result').classList.contains('hidden'), false);
+    assert.equal(ui.el('task-result-status').textContent, message);
+    assert.equal(ui.el('task-progress-stage').textContent, message);
+    assert.equal(ui.el('task-result-link').classList.contains('hidden'), true);
+    assert.equal(ui.el('btn-export-hq').disabled, false);
+    assert.equal(ui.el('task-progress-value').textContent, '');
+  }
+});
+
+test('manual export polling is serial and ignores an in-flight read after successful export', async () => {
+  const ui = studio(); await ui.start();
+  ui.sockets.at(-1).receive({type: 'progress', status: 'COMPLETED', phase: 'complete'});
+  let finishExport, finishPoll;
+  ui.replies.set('/api/streaming/export-hq', () => new Promise(resolve => { finishExport = resolve; }));
+  ui.replies.set('/api/streaming/export-hq/status/fixture', () => new Promise(resolve => { finishPoll = resolve; }));
+  const exporting = ui.el('btn-confirm-export').click(); await ui.flush();
+  assert.equal(ui.el('export-progress-pct').textContent, '');
+  const polling = ui.tickIntervals(1000); await ui.flush();
+  await ui.tickIntervals(1000);
+  assert.equal(ui.requests.filter(request => request.url.includes('/export-hq/status/')).length, 1);
+  finishExport({ok: true, json: async () => ({video_url: '/api/outputs/done.mp4', output_filename: 'done.mp4'})});
+  await exporting;
+  finishPoll({ok: true, json: async () => ({status: 'RUNNING', progress: 35, stage: 'Old progress'})});
+  await polling;
+  assert.equal(ui.el('export-progress-pct').textContent, '100%');
+  assert.doesNotMatch(ui.el('export-status-text').textContent, /Old/);
+  assert.equal(ui.el('export-result-box').classList.contains('hidden'), false);
+});
+
+test('null export stage progress never appears as a fabricated percentage in modal or Studio', async () => {
+  const ui = studio(); await ui.start();
+  ui.sockets.at(-1).receive({type: 'export_progress', progress: null, stage: 'Đang lọc âm thanh'});
+  assert.equal(ui.el('export-progress-pct').textContent, '');
+  assert.equal(ui.el('export-progress-bar').style.opacity, '0.3');
+  assert.equal(ui.el('export-status-text').textContent, 'Đang lọc âm thanh');
+  assert.equal(ui.el('task-progress-track').dataset.indeterminate, 'true');
+  assert.doesNotMatch(ui.el('task-progress-value').textContent, /null|5%|NaN/);
+});
+
+test('incomplete automatic review stays playable, exposes retry, and blocks export without showing a false success', async () => {
+  const ui = studio(); await ui.start();
+  const socket = ui.sockets.at(-1);
+  socket.receive({type:'progress', status:'FAILED', phase:'review', stage:'AI kiểm tra lại chưa hoàn tất.',
+    can_review:true, can_retry:false, can_pause:false, can_stop:false,
+    review_summary:{status:'incomplete', checked:2, verified:1, corrected:0, unresolved:0, incomplete:1}});
+  assert.equal(ui.el('task-progress').dataset.status, 'FAILED');
+  assert.match(ui.el('task-progress-detail').textContent, /chưa kiểm tra đủ nguồn/i);
+  assert.match(ui.el('transcript-status').textContent, /chưa kiểm tra đủ nguồn/i);
+  assert.equal(ui.el('btn-review-worker').classList.contains('hidden'), false);
+  assert.equal(ui.el('btn-review-worker').disabled, false);
+  assert.equal(ui.el('btn-export-hq').disabled, true);
+  assertWorkerSourceBusy(ui, false);
+  assert.equal(ui.el('video-player').paused, true);
+});
+
+test('incomplete review survives finished telemetry and polling without stopping explicitly played draft, then retries the same task', async () => {
+  const ui = studio(); await ui.start();
+  const socket = ui.sockets.at(-1);
+  const summary = {status:'incomplete', checked:1, verified:0, corrected:0, unresolved:0, incomplete:1};
+  const progress = {status:'FAILED', phase:'review', stage:'AI kiểm tra lại chưa hoàn tất.', can_review:true, review_summary:summary};
+  socket.receive({type:'progress', ...progress});
+  socket.receive({type:'finished', status:'finished', error:null, review_summary:summary});
+  assert.equal(ui.el('task-progress').dataset.status, 'FAILED');
+  assert.equal(ui.el('buffering-alert').classList.contains('hidden'), true);
+  await ui.el('video-player').play();
+  ui.replies.set('/api/tasks', {tasks:[{task_id:'fixture', task_type:'Realtime Dubbing', ...progress}]});
+  await ui.tickIntervals(2000); await ui.tickIntervals(2000);
+  assert.equal(ui.el('video-player').paused, false);
+  assert.equal(ui.el('btn-export-hq').disabled, true);
+  assertWorkerSourceBusy(ui, false);
+  socket.receive({type:'result_ready', output_video_url:'/api/outputs/stale.mp4', review_summary:summary});
+  assert.equal(ui.el('task-result').classList.contains('hidden'), true);
+  assert.equal(ui.el('task-progress').dataset.status, 'FAILED');
+  ui.replies.set('/api/streaming/fixture/review', {progress:{status:'RUNNING',phase:'review',review_summary:{status:'running'}}});
+  await ui.el('btn-review-worker').click();
+  assert.equal(ui.requests.filter(request => request.url === '/api/streaming/fixture/review').length, 1);
+  assert.equal(ui.requests.filter(request => request.url.includes('/start-')).length, 1);
+  assertWorkerSourceBusy(ui, true);
+  socket.receive({type:'progress',status:'COMPLETED',phase:'complete',can_review:true,review_summary:{status:'completed',checked:1,verified:1}});
+  assertWorkerSourceBusy(ui, false);
+  assert.equal(ui.el('btn-export-hq').disabled, false);
+});
+
+test('completion snapshot without an export worker releases a stale automatic export lock', async () => {
+  const ui = studio(); await ui.start();
+  ui.sockets.at(-1).receive({type:'export_progress',progress:null,stage:'Đang xuất'});
+  assert.equal(ui.el('visual-translation').disabled, true);
+  ui.replies.set('/api/tasks', {tasks:[{task_id:'fixture',task_type:'Realtime Dubbing',status:'COMPLETED',phase:'complete',stage:'Hoàn tất',progress_pct:100}]});
+  await ui.tickIntervals(2000);
+  assertWorkerSourceBusy(ui, false);
+  assert.equal(ui.el('visual-translation').disabled, false);
+});
+
+test('opening the result uses an in-app player, preserves transcript and source, and closing releases playback', async () => {
+  const ui = studio(); await ui.start();
+  ui.sockets.at(-1).receive({type:'result_ready',output_video_url:'/api/outputs/final.mp4',output_filename:'final.mp4'});
+  const source = ui.el('video-player');
+  source.currentTime = 3;
+  await source.play();
+  const transcript = ui.el('seg-vi-0').textContent;
+  const requestsBeforeOpen = ui.requests.length;
+  await ui.el('task-result-link').click();
+  assert.equal(ui.el('result-preview-modal').classList.contains('hidden'), false);
+  assert.equal(ui.el('result-preview-video').src, 'http://localhost/api/outputs/final.mp4');
+  assert.equal(ui.el('result-preview-video').playCount, 1);
+  assert.equal(source.paused, true);
+  assert.equal(source.src, '/fixture.mp4');
+  assert.equal(source.currentTime, 3);
+  assert.equal(ui.el('seg-vi-0').textContent, transcript);
+  assert.equal(ui.requests.length, requestsBeforeOpen);
+  assert.doesNotMatch(template.match(/<a id="task-result-link"[^>]*>/)[0], /target="_blank"/);
+  await ui.el('btn-close-result-preview').click();
+  assert.equal(ui.el('result-preview-video').paused, true);
+  assert.equal(ui.el('result-preview-video').getAttribute('src'), undefined);
+  assert.equal(ui.el('result-preview-modal').classList.contains('hidden'), true);
+  assert.equal(source.paused, true);
+  assert.equal(ui.document.activeElement, ui.el('task-result-link'));
+});
+
+test('result preview surfaces playback failure and closes with Escape or pagehide', async () => {
+  const ui = studio(); await ui.start();
+  ui.sockets.at(-1).receive({type:'result_ready',output_video_url:'/api/outputs/final.mp4'});
+  await ui.el('task-result-link').click();
+  ui.el('result-preview-video').error = {code:2};
+  await ui.el('result-preview-video').emit('error');
+  assert.match(ui.el('result-preview-status').textContent, /Chưa phát được/);
+  await ui.el('result-preview-modal').emit('keydown', {key:'Escape'});
+  assert.equal(ui.el('result-preview-modal').classList.contains('hidden'), true);
+  await ui.el('task-result-link').click();
+  await ui.window.emit('pagehide');
+  assert.equal(ui.el('result-preview-video').paused, true);
+  assert.equal(ui.el('result-preview-video').getAttribute('src'), undefined);
+});
+
+test('an intentionally empty reviewed translation does not revive a discarded draft', async () => {
+  const ui = studio(); await ui.start();
+  ui.sockets.at(-1).receive({type:'segment_update',id:0,start:0,end:3,duration:3,status:'READY',
+    final_vi:'',natural_vi:'nghe chưa rõ',literal_vi:'bản nháp cũ',text_zh:'原文',needs_review:true,
+    verification:{status:'unresolved'},audio_url:null,revision:1});
+  assert.equal(ui.el('seg-vi-0').textContent, 'Chưa đủ căn cứ để dịch câu này.');
+});
+
+test('a new run clears previous warnings and playable duration while resolving its source', async () => {
+  const ui = studio(); await ui.start();
+  ui.sockets.at(-1).receive({type:'progress',status:'COMPLETED',phase:'complete'});
+  ui.el('pipeline-warning').classList.remove('hidden');
+  ui.el('tel-playable').textContent = '00:15';
+  ui.el('bar-total-time').textContent = '00:15';
+  ui.el('bar-buffer-info').textContent = 'Buffer: +7.4s';
+  await ui.el('btn-start').click();
+  assert.equal(ui.el('pipeline-warning').classList.contains('hidden'), true);
+  assert.equal(ui.el('tel-playable').textContent, '00:00');
+  assert.equal(ui.el('bar-total-time').textContent, '00:00');
+  assert.equal(ui.el('bar-buffer-info').textContent, 'Buffer: 0.0s');
+});
+
+test('unsupported result codecs use a local WebM preview without uploading the MP4 or changing source transcript', async () => {
+  const ui = studio(); await ui.start();
+  const source = ui.el('video-player'), result = ui.el('result-preview-video');
+  source.currentTime = 4;
+  result.canPlayType = () => '';
+  ui.sockets.at(-1).receive({type:'result_ready',output_video_url:'/api/outputs/final%20vi.mp4'});
+  const transcript = ui.el('seg-vi-0').textContent;
+  ui.replies.set('/api/preview', {preview_id:'result-webm',status:'READY',video_url:'/api/preview/result-webm/media'});
+  await ui.el('task-result-link').click(); await ui.flush();
+  const request = ui.requests.find(item => item.url === '/api/preview');
+  assert.deepEqual(JSON.parse(request.options.body), {output_filename:'final vi.mp4'});
+  assert.equal(result.src, 'http://localhost/api/preview/result-webm/media');
+  assert.equal(result.playCount, 1);
+  assert.match(ui.el('result-preview-status').textContent, /MP4 giữ nguyên chất lượng/);
+  assert.equal(source.src, '/fixture.mp4');
+  assert.equal(source.currentTime, 4);
+  assert.equal(source.paused, true);
+  assert.equal(ui.el('seg-vi-0').textContent, transcript);
+  assert.equal(ui.requests.some(item => /outputs|preview\/upload/.test(item.url)), false);
+});
+
+test('result codec error and delayed MP4 rejection share one conversion and never overwrite its state', async () => {
+  const ui = studio(); await ui.start();
+  const result = ui.el('result-preview-video');
+  let rejectDirect;
+  const normalPlay = result.play.bind(result);
+  result.play = () => new Promise((_, reject) => { rejectDirect = reject; });
+  ui.sockets.at(-1).receive({type:'result_ready',output_video_url:'/api/outputs/final.mp4'});
+  ui.replies.set('/api/preview', {preview_id:'converted',status:'PROCESSING'});
+  await ui.el('task-result-link').click();
+  result.error = {code:4};
+  await result.emit('error'); await ui.flush();
+  await result.emit('error');
+  assert.equal(ui.requests.filter(item => item.url === '/api/preview').length, 1);
+  assert.match(ui.el('result-preview-status').textContent, /Đang tạo/);
+  result.error = null;
+  result.play = normalPlay;
+  ui.replies.set('/api/preview/converted', {preview_id:'converted',status:'READY',video_url:'/api/preview/converted/media'});
+  await ui.tickTimeouts(1000);
+  rejectDirect(Object.assign(Error('old codec failure'), {name:'NotSupportedError'})); await ui.flush();
+  assert.equal(result.src, 'http://localhost/api/preview/converted/media');
+  assert.match(ui.el('result-preview-status').textContent, /Bản xem trước tương thích/);
+  result.error = {code:3};
+  await result.emit('error');
+  assert.match(ui.el('result-preview-status').textContent, /Chưa phát được/);
+  assert.equal(ui.requests.filter(item => item.url === '/api/preview').length, 1);
+});
+
+test('closing or switching result aborts conversion reads and ignores late responses from previous output', async () => {
+  const ui = studio(); await ui.start();
+  const result = ui.el('result-preview-video');
+  result.canPlayType = () => '';
+  let finishFirst;
+  ui.replies.set('/api/preview', () => new Promise(resolve => { finishFirst = resolve; }));
+  ui.sockets.at(-1).receive({type:'result_ready',output_video_url:'/api/outputs/first.mp4'});
+  await ui.el('task-result-link').click(); await ui.flush();
+  const request = ui.requests.find(item => item.url === '/api/preview');
+  await ui.el('btn-close-result-preview').click();
+  assert.equal(request.options.signal.aborted, true);
+  ui.replies.set('/api/preview', {preview_id:'second',status:'READY',video_url:'/api/preview/second/media'});
+  ui.sockets.at(-1).receive({type:'result_ready',output_video_url:'/api/outputs/second.mp4'});
+  await ui.el('task-result-link').click(); await ui.flush();
+  finishFirst({ok:true,json:async () => ({preview_id:'first',status:'READY',video_url:'/api/preview/first/media'})});
+  await ui.flush();
+  assert.equal(result.src, 'http://localhost/api/preview/second/media');
+  assert.equal(result.playCount, 1);
+  await ui.window.emit('pagehide');
+  assert.equal(result.getAttribute('src'), undefined);
+});
+
+test('result preview polls serially and pagehide aborts a pending status read without late playback', async () => {
+  const ui = studio(); await ui.start();
+  const result = ui.el('result-preview-video');
+  result.canPlayType = () => '';
+  ui.sockets.at(-1).receive({type:'result_ready',output_video_url:'/api/outputs/final.mp4'});
+  ui.replies.set('/api/preview', {preview_id:'polling',status:'PROCESSING'});
+  let finish;
+  ui.replies.set('/api/preview/polling', () => new Promise(resolve => { finish = resolve; }));
+  await ui.el('task-result-link').click(); await ui.flush();
+  await ui.tickTimeouts(1000); await ui.tickTimeouts(1000);
+  const reads = ui.requests.filter(item => item.url === '/api/preview/polling');
+  assert.equal(reads.length, 1);
+  await ui.window.emit('pagehide');
+  assert.equal(reads[0].options.signal.aborted, true);
+  finish({ok:true,json:async () => ({preview_id:'polling',status:'READY',video_url:'/api/preview/polling/media'})});
+  await ui.flush();
+  assert.equal(result.getAttribute('src'), undefined);
+  assert.equal(result.playCount, 0);
+});
+
+test('result preview rejects failed conversions and unexpected media locations without leaking provider text', async () => {
+  for (const reply of [
+    {failure:true,error:'private-path'},
+    {preview_id:'bad',status:'FAILED',error:'private-path'},
+    {preview_id:'bad',status:'READY',video_url:'https://foreign.example/api/preview/bad/media'},
+    {preview_id:'bad',status:'READY',video_url:'/api/outputs/private.mp4'},
+  ]) {
+    const ui = studio(); await ui.start();
+    const result = ui.el('result-preview-video');
+    result.canPlayType = () => '';
+    ui.sockets.at(-1).receive({type:'result_ready',output_video_url:'/api/outputs/final.mp4'});
+    ui.replies.set('/api/preview', reply);
+    await ui.el('task-result-link').click(); await ui.flush();
+    assert.match(ui.el('result-preview-status').textContent, /Chưa phát được/);
+    assert.doesNotMatch(ui.el('result-preview-status').textContent, /private/);
+    assert.equal(result.playCount, 0);
+  }
+});
+
+test('result conversion requests time out and genuine autoplay denial alone offers the Play hint', async () => {
+  const ui = studio(); await ui.start();
+  const result = ui.el('result-preview-video');
+  result.canPlayType = () => '';
+  ui.sockets.at(-1).receive({type:'result_ready',output_video_url:'/api/outputs/final.mp4'});
+  ui.replies.set('/api/preview', options => new Promise((_, reject) => {
+    options.signal.addEventListener('abort', () => reject(Object.assign(Error('abort'), {name:'AbortError'})));
+  }));
+  await ui.el('task-result-link').click(); await ui.flush();
+  await ui.tickTimeouts(8000);
+  assert.match(ui.el('result-preview-status').textContent, /Chưa phát được/);
+  assert.equal(result.playCount, 0);
+  result.canPlayType = () => 'probably';
+  result.play = async () => { throw Object.assign(Error('policy'), {name:'NotAllowedError'}); };
+  await ui.el('task-result-link').click(); await ui.flush();
+  assert.match(ui.el('result-preview-status').textContent, /Bấm Phát/);
 });

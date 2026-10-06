@@ -1,6 +1,13 @@
 """Free-only OpenCode CLI adapter regression tests (never call the network)."""
 import json
+import asyncio
+import logging
 import subprocess
+import asyncio
+import contextvars
+import logging
+import re
+import threading
 from pathlib import Path
 from unittest.mock import Mock
 
@@ -8,6 +15,8 @@ import pytest
 
 from core.engines.translation import opencode_client as oc
 from config import settings
+from core.runtime_context import execution_context, current_execution_context
+from core.runtime_context import current_execution_context, execution_context, ExecutionContext
 
 
 @pytest.fixture
@@ -335,3 +344,271 @@ def test_guard_failure_prevents_cli_launch_and_cleans_request(isolated, monkeypa
         oc.OpenCodeZenClient(api_key="fixture-key").translate("hello")
     start.assert_not_called()
     assert len(seen) == 1 and not seen[0].exists()
+
+
+def test_execution_context_propagates_to_thread_and_resets_without_raw_identifier():
+    async def read_in_thread():
+        return await asyncio.to_thread(current_execution_context)
+
+    with execution_context("run_42", lambda: True):
+        context = asyncio.run(read_in_thread())
+        assert context.run_id == "run_42" and context.cancel_check()
+        with execution_context("https://private.test/?token=secret"):
+            assert current_execution_context().run_id == "unscoped"
+        assert current_execution_context().run_id == "run_42"
+    assert current_execution_context().run_id == "unscoped"
+    assert current_execution_context().cancel_check is None
+
+
+def test_provider_lifecycle_logs_correlate_safe_ids_without_content(isolated, monkeypatch, caplog):
+    secret = "private-prompt-key-stdout"
+    process = make_process(json.dumps({"type": "text", "part": {"text": secret}}))
+    monkeypatch.setattr(oc.subprocess, "Popen", Mock(return_value=process))
+    caplog.set_level(logging.INFO, logger="ai")
+    with execution_context("run_42"):
+        assert oc.OpenCodeZenClient(api_key=secret).translate(secret, system=secret) == secret
+    records = [record.getMessage() for record in caplog.records if record.name == "ai"]
+    assert len(records) == 2
+    assert records[0].startswith("PROVIDER_REQUEST ")
+    assert records[1].startswith("PROVIDER_COMPLETED ")
+    assert all("run_id=run_42" in record and "attempt=1" in record for record in records)
+    request_ids = [record.split("request_id=")[1].split()[0] for record in records]
+    assert len(set(request_ids)) == 1 and len(request_ids[0]) == 32
+    assert f"output_chars={len(secret)}" in records[1]
+    assert secret not in caplog.text
+
+
+def test_cancellation_polls_and_terminates_only_owned_request_without_retry(isolated, monkeypatch, caplog):
+    state = {"cancelled": False}
+    process = make_process()
+    def communicate(request, timeout):
+        assert timeout <= .25
+        state["cancelled"] = True
+        raise subprocess.TimeoutExpired("private-command", timeout, output="private-stdout")
+    process.communicate.side_effect = communicate
+    start = Mock(return_value=process)
+    terminate = Mock()
+    monkeypatch.setattr(oc.subprocess, "Popen", start)
+    monkeypatch.setattr(oc, "_terminate_process_tree", terminate)
+    caplog.set_level(logging.INFO, logger="ai")
+    with execution_context("run_cancel", lambda: state["cancelled"]):
+        with pytest.raises(oc.OpenCodeCancelledError, match="Đã hủy") as caught:
+            oc.OpenCodeZenClient(api_key="private-key", timeout=120, max_retries=2).translate("private-prompt")
+    terminate.assert_called_once_with(process)
+    start.assert_called_once()
+    assert "PROVIDER_CANCELLED run_id=run_cancel" in caplog.text
+    assert "PROVIDER_COMPLETED" not in caplog.text and "private-" not in caplog.text
+    assert "private-" not in str(caught.value)
+    assert not Path(start.call_args.kwargs["cwd"]).exists()
+
+
+def test_already_cancelled_task_never_launches_provider(isolated, monkeypatch, caplog):
+    start = Mock()
+    monkeypatch.setattr(oc.subprocess, "Popen", start)
+    caplog.set_level(logging.INFO, logger="ai")
+    with execution_context("run_cancel", lambda: True):
+        with pytest.raises(oc.OpenCodeCancelledError):
+            oc.OpenCodeZenClient(api_key="test").translate("hello")
+    start.assert_not_called()
+    assert "PROVIDER_CANCELLED" in caplog.text
+
+
+def test_polling_submits_stdin_once_and_returns_whole_response(isolated, monkeypatch):
+    process = make_process()
+    answer = process.communicate.return_value
+    process.communicate.side_effect = [subprocess.TimeoutExpired("opencode", .25),
+                                       subprocess.TimeoutExpired("opencode", .25), answer]
+    monkeypatch.setattr(oc.subprocess, "Popen", Mock(return_value=process))
+    with execution_context("run_wait", lambda: False):
+        assert oc.OpenCodeZenClient(api_key="test", timeout=30).translate("hello") == "Xin chào"
+    calls = process.communicate.call_args_list
+    assert json.loads(calls[0].args[0])["input"] == "hello"
+    assert calls[1].args == calls[2].args == (None,)
+    assert all(0 < call.kwargs["timeout"] <= .25 for call in calls)
+
+
+def test_poll_timeouts_preserve_one_total_deadline_and_safe_failure_log(isolated, monkeypatch, caplog):
+    now = [0.0]
+    monkeypatch.setattr(oc.time, "monotonic", lambda: now[0])
+    process = make_process()
+    def communicate(request, timeout):
+        now[0] += timeout
+        raise subprocess.TimeoutExpired("private-command", timeout, output="private-token")
+    process.communicate.side_effect = communicate
+    start = Mock(return_value=process)
+    terminate = Mock()
+    monkeypatch.setattr(oc.subprocess, "Popen", start)
+    monkeypatch.setattr(oc, "_terminate_process_tree", terminate)
+    caplog.set_level(logging.INFO, logger="ai")
+    with execution_context("run_timeout", lambda: False):
+        with pytest.raises(oc.OpenCodeRequestError, match="quá lâu"):
+            oc.OpenCodeZenClient(api_key="test", timeout=1).translate("private-prompt")
+    assert now[0] == 1.0 and process.communicate.call_count == 4
+    terminate.assert_called_once_with(process)
+    assert "PROVIDER_FAILED run_id=run_timeout" in caplog.text
+    assert "private-" not in caplog.text
+
+
+def test_retry_lifecycle_records_separate_attempts(isolated, monkeypatch, caplog):
+    processes = [make_process("private-output", "private-key", 1), make_process()]
+    monkeypatch.setattr(oc.subprocess, "Popen", Mock(side_effect=processes))
+    monkeypatch.setattr(oc.time, "sleep", lambda duration: None)
+    caplog.set_level(logging.INFO, logger="ai")
+    with execution_context("run_retry"):
+        assert oc.OpenCodeZenClient(api_key="test", max_retries=1).translate("hello") == "Xin chào"
+    records = [record.getMessage() for record in caplog.records if record.name == "ai"]
+    assert [record.split()[0] for record in records] == ["PROVIDER_REQUEST", "PROVIDER_FAILED", "PROVIDER_REQUEST", "PROVIDER_COMPLETED"]
+    assert "attempt=1" in records[1] and "attempt=2" in records[2] and "attempt=2" in records[3]
+    assert "private-" not in caplog.text
+
+
+def test_provider_logs_correlate_request_without_prompt_key_or_output(isolated, monkeypatch, caplog):
+    process = make_process(json.dumps({"type": "text", "part": {"text": "private-output"}}))
+    monkeypatch.setattr(oc.subprocess, "Popen", Mock(return_value=process))
+    with caplog.at_level(logging.INFO, logger="ai"), execution_context("run-42"):
+        assert oc.OpenCodeZenClient(api_key="private-key").translate("private-prompt") == "private-output"
+    lines = [record.getMessage() for record in caplog.records if "PROVIDER_" in record.getMessage()]
+    assert len(lines) == 2 and lines[0].startswith("PROVIDER_REQUEST") and lines[1].startswith("PROVIDER_COMPLETED")
+    assert all("run_id=run-42" in line and "attempt=1" in line for line in lines)
+    assert len({re.search(r"request_id=([a-f0-9]{32})", line).group(1) for line in lines}) == 1
+    assert "output_chars=14" in lines[-1]
+    assert not any(secret in caplog.text for secret in ("private-key", "private-prompt", "private-output"))
+    assert current_execution_context().run_id == "unscoped"
+
+
+def test_retry_logs_each_attempt_with_same_request_id(isolated, monkeypatch, caplog):
+    failed, completed = make_process(returncode=1), make_process()
+    monkeypatch.setattr(oc.subprocess, "Popen", Mock(side_effect=[failed, completed]))
+    monkeypatch.setattr(oc.time, "sleep", lambda seconds: None)
+    with caplog.at_level(logging.INFO, logger="ai"), execution_context("run-retry"):
+        assert oc.OpenCodeZenClient(api_key="fixture-key", max_retries=1).translate("hello") == "Xin chào"
+    lines = [record.getMessage() for record in caplog.records if "PROVIDER_" in record.getMessage()]
+    assert [line.split()[0] for line in lines] == ["PROVIDER_REQUEST", "PROVIDER_FAILED", "PROVIDER_REQUEST", "PROVIDER_COMPLETED"]
+    assert [re.search(r"attempt=(\d)", line).group(1) for line in lines] == ["1", "1", "2", "2"]
+    assert len({re.search(r"request_id=([a-f0-9]{32})", line).group(1) for line in lines}) == 1
+
+
+def test_cancel_before_start_logs_cancellation_without_launching(isolated, monkeypatch, caplog):
+    start = Mock()
+    monkeypatch.setattr(oc.subprocess, "Popen", start)
+    with caplog.at_level(logging.INFO, logger="ai"), execution_context("run-stop", lambda: True):
+        with pytest.raises(oc.OpenCodeCancelledError):
+            oc.OpenCodeZenClient(api_key="fixture-key").translate("private-prompt")
+    start.assert_not_called()
+    assert "PROVIDER_CANCELLED" in caplog.text and "PROVIDER_COMPLETED" not in caplog.text
+    assert "private-prompt" not in caplog.text
+
+
+def test_cancel_while_cli_is_waiting_terminates_and_cleans(isolated, monkeypatch, caplog):
+    cancelled = threading.Event()
+    process = make_process()
+    def wait(request, timeout):
+        cancelled.set()
+        raise subprocess.TimeoutExpired("private-command", timeout)
+    process.communicate.side_effect = wait
+    terminate, start = Mock(), Mock(return_value=process)
+    monkeypatch.setattr(oc, "_terminate_process_tree", terminate)
+    monkeypatch.setattr(oc.subprocess, "Popen", start)
+    with caplog.at_level(logging.INFO, logger="ai"), execution_context("run-stop", cancelled.is_set):
+        with pytest.raises(oc.OpenCodeCancelledError):
+            oc.OpenCodeZenClient(api_key="fixture-key").translate("private-prompt")
+    terminate.assert_called_once_with(process)
+    assert process.communicate.call_args.kwargs["timeout"] <= 0.25
+    assert not Path(start.call_args.kwargs["cwd"]).exists()
+    assert "PROVIDER_CANCELLED" in caplog.text and "PROVIDER_COMPLETED" not in caplog.text
+
+
+def test_polling_communicate_sends_stdin_exactly_once(monkeypatch):
+    process = make_process()
+    process.communicate.side_effect = [subprocess.TimeoutExpired("opencode", 0.25), ("answer", "")]
+    assert oc._communicate(process, "request", 5, ExecutionContext("run", lambda: False)) == ("answer", "")
+    assert [call.args[0] for call in process.communicate.call_args_list] == ["request", None]
+
+
+def test_polling_timeout_keeps_single_deadline(monkeypatch):
+    clock = [0.0]
+    process = make_process()
+    def wait(request, timeout):
+        clock[0] += timeout
+        raise subprocess.TimeoutExpired("private-command", timeout)
+    process.communicate.side_effect = wait
+    terminate = Mock()
+    monkeypatch.setattr(oc.time, "monotonic", lambda: clock[0])
+    monkeypatch.setattr(oc, "_terminate_process_tree", terminate)
+    with pytest.raises(oc.OpenCodeRequestError, match="quá lâu"):
+        oc._communicate(process, "request", 1, ExecutionContext("run", lambda: False))
+    assert clock[0] == 1 and process.communicate.call_count == 4
+    terminate.assert_called_once_with(process)
+
+
+def test_pipe_error_terminates_owned_cli_before_raising(monkeypatch):
+    process = make_process()
+    process.communicate.side_effect = BrokenPipeError("private-path")
+    terminate = Mock()
+    monkeypatch.setattr(oc, "_terminate_process_tree", terminate)
+    with pytest.raises(BrokenPipeError):
+        oc._communicate(process, "request", 1, ExecutionContext())
+    terminate.assert_called_once_with(process)
+
+
+def test_cancellation_during_retry_backoff_prevents_next_process(isolated, monkeypatch):
+    cancelled = threading.Event()
+    process = make_process(returncode=1)
+    start = Mock(return_value=process)
+    monkeypatch.setattr(oc.subprocess, "Popen", start)
+    monkeypatch.setattr(oc.time, "sleep", lambda seconds: cancelled.set())
+    with execution_context("run-retry", cancelled.is_set), pytest.raises(oc.OpenCodeCancelledError):
+        oc.OpenCodeZenClient(api_key="fixture-key", max_retries=1).translate("hello")
+    assert start.call_count == 1
+
+
+def test_execution_context_restores_parent_and_sanitizes_log_identity():
+    initial = current_execution_context()
+    with execution_context("parent") as parent:
+        with pytest.raises(ValueError):
+            with execution_context("injected\nprivate-key") as nested:
+                assert nested.run_id == "unscoped"
+                raise ValueError
+        assert current_execution_context() is parent
+    assert current_execution_context() is initial
+    with pytest.raises(TypeError):
+        with execution_context("run", cancel_check=True):
+            pass
+
+
+def test_pipeline_blocking_context_propagates_and_cancellation_reaches_adapter():
+    from types import SimpleNamespace
+    from core.streaming.pipeline import StreamingPipelineSession
+    marker = contextvars.ContextVar("pipeline-test-marker", default="missing")
+    entered, exited = threading.Event(), threading.Event()
+    session = SimpleNamespace(task_id="pipeline-run", is_stopped=False)
+
+    def blocking():
+        context = current_execution_context()
+        assert context.run_id == "pipeline-run" and marker.get() == "parent-marker"
+        entered.set()
+        while not context.cancel_check():
+            if exited.wait(0.01):
+                raise AssertionError("Cancelled task did not signal adapter")
+        exited.set()
+        raise oc.OpenCodeCancelledError("stopped")
+
+    async def run():
+        marker.set("parent-marker")
+        task = asyncio.create_task(StreamingPipelineSession._run_blocking(session, blocking))
+        try:
+            for _ in range(100):
+                if entered.is_set():
+                    break
+                await asyncio.sleep(0.01)
+            assert entered.is_set()
+            task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await asyncio.wait_for(task, timeout=2)
+            assert exited.is_set()
+            assert current_execution_context().run_id == "unscoped"
+            assert (await asyncio.to_thread(current_execution_context)).run_id == "unscoped"
+        finally:
+            exited.set()
+            await asyncio.gather(task, return_exceptions=True)
+    asyncio.run(run())

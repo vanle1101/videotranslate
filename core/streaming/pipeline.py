@@ -1,4 +1,5 @@
 import asyncio
+import contextvars
 import time
 import subprocess
 import functools
@@ -6,9 +7,11 @@ import logging
 import math
 import uuid
 import os
+import threading
 from pathlib import Path
 from typing import Dict, Any, Optional, List, Callable
 from config import settings
+from core.runtime_context import execution_context
 
 from core.streaming.segmenter import AudioSegmenter
 from core.engines.asr.sensevoice_engine import SenseVoiceEngine
@@ -250,9 +253,12 @@ class StreamingPipelineSession:
     async def edit_segment(self, segment_id: int, text: str, *, confirm_silence: bool = False,
                            _review_result: Optional[Dict[str, Any]] = None):
         """Publish text and fitted audio together only after synthesis succeeds."""
+        review_empty = (isinstance(_review_result, dict) and isinstance(text, str) and not text.strip()
+                        and _review_result.get("final_vi") == "" and _review_result.get("needs_review") is True)
+        without_audio = confirm_silence or review_empty
         if (not isinstance(confirm_silence, bool) or not isinstance(text, str)
                 or len(text) > 2000 or "\x00" in text
-                or (confirm_silence and text.strip()) or (not confirm_silence and not text.strip())):
+                or (confirm_silence and text.strip()) or (not without_audio and not text.strip())):
             raise ValueError("Nội dung tiếng Việt phải có từ 1 đến 2.000 ký tự và không chứa ký tự NUL.")
         seg = self.segments.get(segment_id)
         if seg is None:
@@ -280,9 +286,9 @@ class StreamingPipelineSession:
         raw_path = self.cache_dir / f"{stem}_raw.wav"
         fitted_path = self.segments_dir / f"{stem}.wav"
         try:
-            if confirm_silence:
+            if without_audio:
                 tts_duration, ratio = 0.0, 1.0
-                timing = {"subtitle_cues": [], "subtitle_timing_source": "silence",
+                timing = {"subtitle_cues": [], "subtitle_timing_source": "silence" if confirm_silence else "unresolved",
                           "speech_start": None, "speech_end": None}
             else:
                 async with self._tts_lock:
@@ -304,9 +310,9 @@ class StreamingPipelineSession:
                 raise asyncio.CancelledError
             final_path = self.segments_dir / f"seg_{seg.id}.wav"
             # No await between atomic file replacement and metadata publication.
-            if confirm_silence:
-                # Delete only this segment's generated audio, before approving
-                # silence. A locked file leaves the previous state intact.
+            if without_audio:
+                # Remove stale speech before publishing silence or an uncertain
+                # empty review. A locked file leaves the previous state intact.
                 final_path.unlink(missing_ok=True)
             else:
                 fitted_path.replace(final_path)
@@ -317,11 +323,11 @@ class StreamingPipelineSession:
                 seg.literal_vi = seg.natural_vi = ""
             seg.tts_duration = tts_duration
             seg.speed_ratio = round(ratio, 2)
-            seg.audio_path = None if confirm_silence else str(final_path.resolve())
+            seg.audio_path = None if without_audio else str(final_path.resolve())
             for key, value in timing.items():
                 setattr(seg, key, value)
             seg.revision += 1
-            seg.audio_url = None if confirm_silence else f"/api/streaming/audio/{self.task_id}/{seg.id}?rev={seg.revision}"
+            seg.audio_url = None if without_audio else f"/api/streaming/audio/{self.task_id}/{seg.id}?rev={seg.revision}"
             if was_review:
                 seg.needs_review = False
                 seg.review_reason = None
@@ -343,7 +349,7 @@ class StreamingPipelineSession:
             # The file belongs to the old text/audio revision. Keep it on disk,
             # but never expose it as this session's current final result.
             self._invalidate_output()
-            if self.visual_translation and not confirm_silence:
+            if self.visual_translation and not without_audio:
                 updated_screens = []
                 for screen in self.screen_texts:
                     if (screen.get("kind") == "subtitle" and screen.get("start", 0) < seg.end
@@ -429,7 +435,7 @@ class StreamingPipelineSession:
         for source in result.get("translation_sources", []):
             if source not in self.translation_sources:
                 self.translation_sources.append(source)
-        self.review_summary = dict(result["summary"], status="completed")
+        self.review_summary = {"status": "completed", **result["summary"]}
         await self.emit("review_complete", {"review_summary": self.review_summary})
 
     async def start_automatic_review(self):
@@ -502,6 +508,8 @@ class StreamingPipelineSession:
             snapshot.update(status="FAILED", phase="failed", stage=self.error)
         elif self.is_paused and self.is_running:
             snapshot["status"] = "PAUSED"
+        elif not self.is_running and self.review_summary.get("status") in {"failed", "incomplete"}:
+            snapshot.update(status="FAILED", phase="review", stage=self._review_message())
         snapshot["can_resume"] = bool(self.initialized and self.is_running and snapshot["status"] == "PAUSED")
         snapshot["can_stop"] = snapshot["status"] in {"RUNNING", "PAUSED"}
         return snapshot
@@ -644,8 +652,14 @@ class StreamingPipelineSession:
             self.bgm_url = f"/api/streaming/bgm/{self.task_id}"
             if self.visual_translation or self.asr_engine is self.faster_whisper:
                 await self.report_progress("asr", "Đang nhận diện lời nói và mốc thời gian bằng Faster-Whisper...")
+                asr_loop = asyncio.get_running_loop()
+                def asr_progress(end):
+                    if not self.is_stopped and self.total_duration > 0:
+                        pct = round(min(99.9, max(0, end / self.total_duration * 100)), 1)
+                        asr_loop.call_soon_threadsafe(lambda: asyncio.create_task(self.report_progress(
+                            "asr", f"Đang nhận diện lời nói · {end:.0f}/{self.total_duration:.0f} giây", pct)))
                 recognized = await self._run_blocking(
-                    self.faster_whisper.transcribe, self.raw_audio_16k, language="zh",
+                    self.faster_whisper.transcribe, self.raw_audio_16k, language="zh", progress_callback=asr_progress,
                 )
                 raw_segs = await self._run_blocking(self._grounded_visual_segments, recognized)
             else:
@@ -981,8 +995,14 @@ class StreamingPipelineSession:
         """Cancellation cannot kill a Python worker thread; wait before removing its files."""
         if self.is_stopped:
             raise asyncio.CancelledError
+        cancellation = threading.Event()
+
+        def invoke():
+            with execution_context(self.task_id, lambda: self.is_stopped or cancellation.is_set()):
+                return function(*args, **kwargs)
+
         work = asyncio.get_running_loop().run_in_executor(
-            None, functools.partial(function, *args, **kwargs),
+            None, contextvars.copy_context().run, invoke,
         )
         cancelled = False
         while True:
@@ -990,7 +1010,11 @@ class StreamingPipelineSession:
                 result = await asyncio.shield(work)
                 break
             except asyncio.CancelledError:
-                if work.cancelled():
+                cancellation.set()
+                # A worker may raise CancelledError itself. Its executor future
+                # is then done with an exception, not marked cancelled; awaiting
+                # it repeatedly would spin forever and block the event loop.
+                if work.done():
                     raise
                 cancelled = True
                 continue
@@ -1182,7 +1206,7 @@ class StreamingPipelineSession:
             return (f"AI đã kiểm tra {summary.get('checked', 0)} câu, tự sửa {summary.get('corrected', 0)} câu. "
                     + (f"{summary.get('manual')} câu do bạn sửa sau kiểm tra. " if summary.get("manual") else "")
                     + (f"Còn {count} câu chưa đủ bằng chứng nguồn; xem lý do trong Transcript." if count else "Bản dịch đã sẵn sàng."))
-        if summary.get("status") == "failed":
+        if summary.get("status") in {"failed", "incomplete"}:
             return "AI kiểm tra lại chưa hoàn tất. Bản nháp được giữ; bấm AI kiểm tra lại để thử tiếp."
         return f"Có {count} câu chưa đủ bằng chứng nguồn. AI có thể kiểm tra lại và tự sửa bản dịch."
 

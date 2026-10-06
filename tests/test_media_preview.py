@@ -24,7 +24,8 @@ def preview(tmp_path):
         '-f', 'lavfi', '-i', 'sine=frequency=440:duration=0.5', '-c:v', 'libx264', '-c:a', 'aac',
         '-pix_fmt', 'yuv420p', '-shortest', str(video),
     ], check=True, capture_output=True, timeout=30)
-    with patch.object(settings, 'TEMP_DIR', tmp_path), patch.object(main, 'preview_manager', manager):
+    with patch.object(settings, 'TEMP_DIR', tmp_path), patch.object(settings, 'OUTPUT_DIR', tmp_path), \
+            patch.object(main, 'preview_manager', manager):
         with TestClient(main.app) as client:
             yield client, manager, video
         manager.shutdown()
@@ -66,6 +67,65 @@ def test_session_source_covers_downloaded_url_and_uploaded_video(preview):
         response = client.post('/api/preview', json={'task_id': 'download-or-upload'})
     ready = wait_ready(client, response.json())
     assert client.get(ready['video_url']).status_code == 200
+
+
+def test_exported_result_preview_uses_existing_output_and_preserves_final_mp4(preview):
+    client, manager, source = preview
+    original = source.read_bytes()
+    response = client.post('/api/preview', json={'output_filename': source.name})
+    assert response.status_code == 200
+    ready = wait_ready(client, response.json())
+    media = client.get(ready['video_url'], headers={'Range': 'bytes=0-99'})
+    assert media.status_code == 206 and media.headers['content-type'] == 'video/webm'
+    assert source.read_bytes() == original
+    repeated = client.post('/api/preview', json={'output_filename': source.name}).json()
+    assert repeated['preview_id'] == ready['preview_id']
+    assert not list(manager._root.glob('source-*')), 'Output previews must not upload or copy the MP4'
+
+
+@pytest.mark.parametrize('name', [
+    '', '../source.mp4', '..\\source.mp4', '/source.mp4', 'D:\\source.mp4',
+    'nested/source.mp4', 'nested\\source.mp4', 'source.mp4:private.mp4', ' source.mp4',
+    'source.mp4 ', 'source.webm', 'source\x00.mp4', 'source?.mp4',
+])
+def test_output_preview_rejects_invalid_filename_before_start(tmp_path, monkeypatch, name):
+    monkeypatch.setattr(settings, 'OUTPUT_DIR', tmp_path)
+    with TestClient(main.app) as client, patch.object(main.preview_manager, 'start') as start:
+        response = client.post('/api/preview', json={'output_filename': name})
+    assert response.status_code == 400
+    start.assert_not_called()
+
+
+@pytest.mark.parametrize('other', ['file_path', 'task_id'])
+def test_output_preview_rejects_ambiguous_source(preview, other):
+    client, manager, source = preview
+    with patch.object(manager, 'start') as start:
+        response = client.post('/api/preview', json={'output_filename': source.name, other: str(source)})
+    assert response.status_code == 400
+    start.assert_not_called()
+
+
+@pytest.mark.parametrize('kind', ['missing', 'directory', 'symlink', 'junction', 'reparse'])
+def test_output_preview_rejects_missing_or_redirected_file(tmp_path, monkeypatch, kind):
+    monkeypatch.setattr(settings, 'OUTPUT_DIR', tmp_path)
+    source = tmp_path / 'result.mp4'
+    if kind == 'directory':
+        source.mkdir()
+    elif kind != 'missing':
+        source.write_bytes(b'existing result')
+    if kind == 'symlink':
+        monkeypatch.setattr(Path, 'is_symlink', lambda path: path == source)
+    elif kind == 'junction':
+        monkeypatch.setattr(Path, 'is_junction', lambda path: path == source)
+    elif kind == 'reparse':
+        original_lstat = Path.lstat
+        monkeypatch.setattr(Path, 'lstat', lambda path: SimpleNamespace(
+            st_file_attributes=0x400, st_mode=original_lstat(path).st_mode,
+        ) if path == source else original_lstat(path))
+    with TestClient(main.app) as client, patch.object(main.preview_manager, 'start') as start:
+        response = client.post('/api/preview', json={'output_filename': source.name})
+    assert response.status_code == 404
+    start.assert_not_called()
 
 
 def test_browser_file_preview_upload_is_owned_and_cleaned(preview):

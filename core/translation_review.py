@@ -112,11 +112,15 @@ class AutomaticTranslationReviewer:
     @staticmethod
     def _summarize(result):
         summary = {"checked": 0, "verified": 0, "corrected": 0, "unresolved": 0}
-        for row in result["segments"].values():
+        for sid, existing in list(result["segments"].items()):
+            row = VideoIntelligence.suppress_diagnostic_placeholder(existing)
+            result["segments"][sid] = row
             status = (row.get("verification") or {}).get("status")
-            if status in {"verified", "corrected", "unresolved"}:
+            if status in {"verified", "corrected", "unresolved", "incomplete"}:
                 summary["checked"] += 1
-                summary[status] += 1
+                summary[status] = summary.get(status, 0) + 1
+        if summary.get("incomplete"):
+            summary["status"] = "incomplete"
         result["summary"] = summary
         return result
 
@@ -167,7 +171,7 @@ class AutomaticTranslationReviewer:
         if not targets or self.audio_evidence is False:
             if progress_callback:
                 progress_callback(100.0)
-            return result
+            return self._summarize(result)
         if str(getattr(settings, "LLM_PROVIDER", "")).strip().lower() != "opencode":
             raise VideoIntelligenceError("Kiểm tra lại miễn phí dùng OpenCode; hãy chọn OpenCode trong Cài đặt.")
         client = self.client or OpenCodeZenClient(model=settings.OPENCODE_MODEL, timeout=120)
@@ -222,6 +226,8 @@ class AutomaticTranslationReviewer:
                 "Đối chiếu độc lập từng mệnh đề, chủ thể và thực thể (ai làm gì với ai), không chấp thuận chỉ vì bản nháp trôi chảy. "
                 "text_zh phải đúng nguyên agreed_audio_transcript. Nếu câu chưa trọn ý hoặc vẫn không chắc, "
                 "giữ phần có căn cứ, needs_review=true và giải thích tiếng Việt. "
+                "Không đọc ghi chú 'nghe chưa rõ' hay '[không rõ]': chỉ đưa lý do vào review_reason; "
+                "nếu không có phần dịch có căn cứ, để final_vi rỗng, không tự nhận là nguồn im lặng. "
                 "Trả duy nhất JSON {\"segments\":[{\"id\":0,\"start\":0,\"end\":2,\"text_zh\":\"nguồn\","
                 "\"literal_vi\":\"dịch sát\",\"natural_vi\":\"tự nhiên\",\"final_vi\":\"lời đọc\","
                 "\"needs_review\":false,\"review_reason\":\"\",\"semantic_verified\":true,"
@@ -244,25 +250,22 @@ class AutomaticTranslationReviewer:
                     "đặc biệt mức độ/không tuyệt đối, @mention, số và chủ thể. Nếu bản đầu sai, sửa theo nguồn; "
                     "nếu chưa đủ chắc, giữ needs_review=true. Trả đúng cùng JSON schema và ID.\n"
                     + json.dumps(data["segments"], ensure_ascii=False))
-                try:
-                    checked = VideoIntelligence._parse_json(client.translate(recheck, max_tokens=10000))
-                    check()
-                    checked_validated = VideoIntelligence.validate_result(checked, sources, observed_screens=[])
-                    checked_audits = {row["id"]: row for row in checked["segments"]}
-                    if all(isinstance(row.get("semantic_verified"), bool)
-                           and isinstance(row.get("verification_reason"), str)
-                           for row in checked_audits.values()):
-                        data, validated, audits = checked, checked_validated, checked_audits
-                except Exception:
-                    # Keep the first valid pass; a transient second request
-                    # must never discard a playable, grounded draft.
-                    check()
+                checked = VideoIntelligence._parse_json(client.translate(recheck, max_tokens=10000))
+                check()
+                checked_validated = VideoIntelligence.validate_result(checked, sources, observed_screens=[])
+                checked_audits = {row["id"]: row for row in checked["segments"]}
+                if any(not isinstance(row.get("semantic_verified"), bool)
+                       or not isinstance(row.get("verification_reason"), str)
+                       for row in checked_audits.values()):
+                    raise VideoIntelligenceError("Lượt kiểm định thứ hai thiếu kết luận ngữ nghĩa hợp lệ.")
+                data, validated, audits = checked, checked_validated, checked_audits
             except Exception:
                 check()
                 for source in sources:
                     reason = "Hai bộ nhận giọng đã thống nhất nguồn, nhưng AI chưa hoàn tất kiểm định nghĩa; giữ bản nháp đang có."
                     source.update(needs_review=True, review_reason=reason)
-                    source["verification"].update(status="unresolved", reason=reason, audio_audit_status="failed")
+                    source["verification"].update(status="incomplete", reason=reason,
+                                                  semantic_verified=False, audio_audit_status="failed")
                 continue
             completed_audits += 1
             for source, transcript in batch:
@@ -277,7 +280,8 @@ class AutomaticTranslationReviewer:
                 status = ("corrected" if changed or source["verification"].get("translation_changed") else "verified") if verified else "unresolved"
                 target.update(needs_review=not verified, review_reason=None if verified else reason)
                 target["verification"] = {**source["verification"], **provenance,
-                    "status": status, "source_supported": supported, "semantic_verified": audit["semantic_verified"],
+                    "status": status, "source_supported": supported,
+                    "semantic_verified": bool(audit["semantic_verified"] and proposed["final_vi"].strip()),
                     "reason": reason, "translation_changed": target.get("final_vi") != source.get("final_vi"),
                     "audio_consensus": True}
                 result["segments"][sid] = target
@@ -389,6 +393,10 @@ class AutomaticTranslationReviewer:
             "Nếu thiếu bằng chứng, giữ bản nháp có căn cứ, needs_review=true, lý do tiếng Việt cụ thể. "
             "semantic_verified=true CHỈ khi đã kiểm tra nghĩa của mọi mệnh đề; không bảo đảm nguồn nếu OCR thiếu. "
             "Giữ lời Việt ngắn, tự nhiên nhưng đầy đủ phủ định/ý chính, không có chữ Hán.\n"
+            "final_vi chỉ có lời dịch để đọc; ghi chú như 'nghe chưa rõ', '[không rõ]' phải ở review_reason. "
+            "Không sao chép ghi chú nhận dạng thành lời nhân vật. Nếu chưa có bản dịch có căn cứ, "
+            "giữ nguồn, để final_vi rỗng và needs_review=true. Lời dẫn chuyện cũng là lời nói; không tự "
+            "biến chữ title thành thoại nếu chưa có bằng chứng cùng thời điểm.\n"
             "Trả duy nhất JSON {\"segments\":[{\"id\":0,\"start\":0.0,\"end\":2.0,"
             "\"text_zh\":\"câu nguồn\",\"literal_vi\":\"dịch sát nghĩa\","
             "\"natural_vi\":\"dịch tự nhiên\",\"final_vi\":\"lời đọc\","
@@ -472,6 +480,7 @@ class AutomaticTranslationReviewer:
             # Run a separate semantic pass over the same measured evidence.
             # This catches fluent but over-broad translations (quantifiers,
             # handles and entities) without another OCR scan or audio request.
+            second_pass_complete = False
             try:
                 recheck_prompt = (self._prompt(prompt_rows, relevant, context)
                     + "\nĐÂY LÀ LƯỢT KIỂM TRA NGỮ NGHĨA THỨ HAI, ĐỘC LẬP. "
@@ -486,6 +495,7 @@ class AutomaticTranslationReviewer:
                        and isinstance(row.get("verification_reason"), str)
                        for row in checked_rows.values()):
                     data, validated, audit_rows = checked_data, checked_validated, checked_rows
+                    second_pass_complete = True
             except Exception:
                 check()
             for source in batch:
@@ -504,9 +514,11 @@ class AutomaticTranslationReviewer:
                 usable = [item for item in cited if self._speech_evidence(item, source, screen_texts, changed_source=changed_source)]
                 coverage = self._coverage_evidence(usable, source, proposed["text_zh"])
                 supported = not invalid_refs and VideoIntelligence._ocr_supports_text(proposed["text_zh"], coverage)
-                verified = bool(supported and audit["semantic_verified"] and not proposed["needs_review"])
+                verified = bool(second_pass_complete and supported and audit["semantic_verified"] and not proposed["needs_review"])
                 reason = audit["verification_reason"].strip()[:500]
-                if invalid_refs:
+                if not second_pass_complete:
+                    reason = "Lượt kiểm tra ngữ nghĩa thứ hai chưa hoàn tất; giữ bản nháp và thử AI kiểm tra lại."
+                elif invalid_refs:
                     reason = "AI dẫn chứng sai ID hoặc sai thời điểm; giữ bản nháp trước khi kiểm tra."
                 elif changed_source and not supported:
                     reason = "Chưa đủ chữ OCR cùng thời điểm xác nhận câu nguồn sửa; giữ bản nháp trước khi kiểm tra."
@@ -516,14 +528,16 @@ class AutomaticTranslationReviewer:
                     reason = proposed.get("review_reason") or reason or "AI chưa xác minh chắc chắn nghĩa của câu."
                 # Unsupported source rewrites would detach the translation
                 # from the measured speech; keep both original texts together.
-                accepted = not invalid_refs and (not changed_source or supported)
+                accepted = second_pass_complete and not invalid_refs and (not changed_source or supported)
                 target = {**source, **proposed} if accepted else dict(source)
                 changed_translation = target.get("final_vi", "") != source.get("final_vi", "")
-                status = ("corrected" if changed_translation or changed_source else "verified") if verified else "unresolved"
+                status = (("corrected" if changed_translation or changed_source else "verified") if verified
+                          else "unresolved" if second_pass_complete else "incomplete")
                 target.update(needs_review=not verified, review_reason=None if verified else reason)
                 target["verification"] = {
                     "status": status, **provenance, "source_supported": bool(supported),
-                    "semantic_verified": audit["semantic_verified"],
+                    "semantic_verified": bool(second_pass_complete and audit["semantic_verified"] and proposed["final_vi"].strip()),
+                    "second_pass_status": "completed" if second_pass_complete else "failed",
                     "evidence_ids": [item["id"] for item in usable],
                     "evidence": [{key: item[key] for key in ("id", "start", "end", "text_zh", "confidence", "bbox")
                                   if key in item} for item in usable],
@@ -532,7 +546,7 @@ class AutomaticTranslationReviewer:
                 }
                 output[sid] = target
                 summary["checked"] += 1
-                summary[status] += 1
+                summary[status] = summary.get(status, 0) + 1
             if progress_callback:
                 progress_callback(round(30 + 45 * (index + 1) / batches, 1))
         result["translation_sources"].append(provenance)

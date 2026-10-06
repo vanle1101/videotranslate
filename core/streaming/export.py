@@ -37,15 +37,16 @@ class HQExporter:
         progress_callback: Optional[Any] = None,
         cancel_check: Optional[Any] = None,
         screen_texts: Optional[List[Dict[str, Any]]] = None,
+        publish_callback: Optional[Any] = None,
     ) -> Dict[str, Any]:
         with tempfile.TemporaryDirectory(prefix=f"hq_export_{task_id}_", dir=settings.TEMP_DIR) as temp_dir:
             return self._export(
                 task_id, Path(video_path), segments, total_duration, Path(temp_dir),
-                mask_chinese, progress_callback, cancel_check, screen_texts,
+                mask_chinese, progress_callback, cancel_check, screen_texts, publish_callback,
             )
 
     def _export(self, task_id, video_path, segments, total_duration, task_dir,
-                mask_chinese, progress_callback, cancel_check, screen_texts=None):
+                mask_chinese, progress_callback, cancel_check, screen_texts=None, publish_callback=None):
         if not math.isfinite(total_duration) or total_duration <= 0:
             raise ValueError("Thời lượng video phải lớn hơn 0.")
         t0 = time.time()
@@ -62,14 +63,14 @@ class HQExporter:
                 raise RuntimeError("Tác vụ xuất video HQ đã bị hủy bởi người dùng.")
 
         # 1. Extract Master Audio
-        _report(10, "1/6 Trích xuất âm thanh gốc (Master Audio)...")
+        _report(None, "1/6 Trích xuất âm thanh gốc...")
         _check_cancel()
         raw_audio = task_dir / "raw_audio.wav"
         cmd = ["ffmpeg", "-v", "error", "-nostdin", "-y", "-i", str(video_path), "-vn", "-acodec", "pcm_s16le", "-ar", "44100", "-ac", "2", str(raw_audio)]
         run_media(cmd, cancel_check)
 
         # 2. Use the configured separator; the CPU profile needs no large AI model.
-        _report(35, "2/6 Xử lý giọng gốc và âm thanh nền...")
+        _report(None, "2/6 Xử lý giọng gốc và âm thanh nền...")
         _check_cancel()
         sep_dir = task_dir / "separated"
         separation_engine = settings.SEPARATION_ENGINE
@@ -93,13 +94,13 @@ class HQExporter:
             separation_engine = "dsp"
 
         # 3. Assemble Voice Timeline
-        _report(55, "3/6 Ráp timeline giọng đọc tiếng Việt...")
+        _report(None, "3/6 Ráp timeline giọng đọc tiếng Việt...")
         _check_cancel()
         voice_wav = task_dir / "voice_timeline.wav"
         self._assemble_voice_timeline(segments, total_duration, voice_wav, cancel_check)
 
         # 4. Sidechain Audio Ducking
-        _report(70, "4/6 Dynamic Sidechain Ducking & Foley Master...")
+        _report(None, "4/6 Trộn giọng đọc và âm thanh nền...")
         _check_cancel()
         master_audio = task_dir / "master_audio_ducked.wav"
         self.mixer.mix(
@@ -111,7 +112,7 @@ class HQExporter:
         )
 
         # 5. Subtitles
-        _report(85, "5/6 Tạo phụ đề tiếng Việt ASS & Masking Hardsub...")
+        _report(None, "5/6 Tạo phụ đề tiếng Việt...")
         _check_cancel()
         srt_path = task_dir / "subtitles.srt"
         ass_path = task_dir / "subtitles.ass"
@@ -125,7 +126,7 @@ class HQExporter:
         )
 
         # 6. Render final video at its original dimensions.
-        _report(95, "6/6 Render MP4 với phụ đề và âm thanh tiếng Việt...")
+        _report(None, "6/6 Render MP4 với phụ đề và âm thanh tiếng Việt...")
         _check_cancel()
         output_filename = f"douyin_translated_{task_id}_hq.mp4"
         final_video_path = settings.OUTPUT_DIR / output_filename
@@ -144,7 +145,13 @@ class HQExporter:
             cancel_check=cancel_check,
         )
         _check_cancel()
-        rendered_video.replace(final_video_path)
+        _report(None, "Đang kiểm tra hình ảnh, âm thanh và thời lượng video kết quả...")
+        self.validate_output(rendered_video, total_duration, cancel_check)
+        _check_cancel()
+        if publish_callback:
+            publish_callback(rendered_video, final_video_path)
+        else:
+            rendered_video.replace(final_video_path)
 
         elapsed = round(time.time() - t0, 1)
         _report(100, "Xuất video hoàn tất thành công!")
@@ -156,6 +163,31 @@ class HQExporter:
             "separation_engine": separation_engine,
             "warnings": warnings
         }
+
+    @staticmethod
+    def validate_output(path, expected_duration, cancel_check=None):
+        path = Path(path)
+        if not path.is_file() or path.stat().st_size <= 0:
+            raise ValueError("Chưa tạo được tệp video kết quả.")
+        raw = run_media(["ffprobe", "-v", "error", "-show_entries",
+                         "format=duration:stream=codec_type,width,height", "-of", "json", str(path)],
+                        cancel_check, capture_output=True)
+        try:
+            metadata = json.loads(raw)
+            duration = float(metadata["format"]["duration"])
+            streams = metadata["streams"]
+            video = next(item for item in streams if item.get("codec_type") == "video")
+            valid = (math.isfinite(duration) and duration > 0
+                     and abs(duration - expected_duration) <= max(0.5, expected_duration * 0.01)
+                     and video.get("width", 0) > 0 and video.get("height", 0) > 0
+                     and any(item.get("codec_type") == "audio" for item in streams))
+        except (ValueError, TypeError, KeyError, StopIteration):
+            valid = False
+        if not valid:
+            raise ValueError("Video kết quả thiếu hình, âm thanh hoặc thời lượng không khớp nguồn.")
+        # Confirm that both media streams can actually be decoded before publishing.
+        run_media(["ffmpeg", "-v", "error", "-xerror", "-nostdin", "-i", str(path),
+                   "-t", "1", "-map", "0:v:0", "-map", "0:a:0", "-f", "null", "-"], cancel_check)
 
     @staticmethod
     def _video_size(video_path, cancel_check=None):

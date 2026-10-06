@@ -1,4 +1,5 @@
 import time
+import tempfile
 from pathlib import Path
 from typing import List, Dict, Any, Optional
 from config import settings
@@ -74,36 +75,33 @@ class SenseVoiceEngine(ASREngine):
         if progress_callback:
             progress_callback(10, f"SenseVoice: Đang đọc và chuẩn hóa âm thanh {audio_path.name}...")
 
-        # Convert to 16kHz mono WAV for optimal SenseVoice inference
-        temp_16k = settings.TEMP_DIR / f"sensevoice_input_{int(time.time())}.wav"
-        cmd = [
-            "ffmpeg", "-y", "-i", str(audio_path),
-            "-ar", "16000", "-ac", "1",
-            str(temp_16k)
-        ]
-        subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-                       check=True, creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+        # Each inference owns its PCM even when multiple sessions start in the
+        # same second. Clean it after conversion, decoding or callback errors.
+        with tempfile.TemporaryDirectory(prefix="sensevoice-", dir=settings.TEMP_DIR) as directory:
+            temp_16k = Path(directory) / "input.wav"
+            cmd = [
+                "ffmpeg", "-y", "-i", str(audio_path),
+                "-ar", "16000", "-ac", "1",
+                str(temp_16k)
+            ]
+            subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                           check=True, creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
 
-        samples, sample_rate = sf.read(str(temp_16k))
-        duration = len(samples) / sample_rate
+            samples, sample_rate = sf.read(str(temp_16k))
+            duration = len(samples) / sample_rate
 
-        if progress_callback:
-            progress_callback(40, f"SenseVoice: Đang nhận dạng tiếng Trung và cảm xúc...")
+            if progress_callback:
+                progress_callback(40, f"SenseVoice: Đang nhận dạng tiếng Trung và cảm xúc...")
 
-        t0 = time.time()
-        stream = self.recognizer.create_stream()
-        stream.accept_waveform(sample_rate, samples)
-        self.recognizer.decode_stream(stream)
-        res = stream.result
-        elapsed = time.time() - t0
+            t0 = time.time()
+            stream = self.recognizer.create_stream()
+            stream.accept_waveform(sample_rate, samples)
+            self.recognizer.decode_stream(stream)
+            res = stream.result
+            elapsed = time.time() - t0
 
-        raw_text = res.text.strip()
-        emotion = getattr(res, "emotion", "<|NEUTRAL|>")
-        timestamps = getattr(res, "timestamps", [])
-
-        # Clean temp
-        if temp_16k.exists():
-            temp_16k.unlink()
+            raw_text = res.text.strip()
+            emotion = getattr(res, "emotion", "<|NEUTRAL|>")
         try:
             print(f"[+] SenseVoice decoded in {elapsed:.2f}s: {raw_text} (Emotion: {emotion})")
         except Exception:

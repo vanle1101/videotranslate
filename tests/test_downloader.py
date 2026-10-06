@@ -3,6 +3,7 @@ import functools
 import http.server
 import io
 import json
+import logging
 import queue
 import socket
 import subprocess
@@ -175,6 +176,8 @@ def test_real_http_worker_download_and_cancel_without_leftovers():
         thread.start()
         destination = root / 'downloads'
         downloader = VideoDownloader(destination)
+        cancel = threading.Event()
+        worker = None
         try:
             events = []
             result = downloader.download(f'http://127.0.0.1:{server.server_port}/sample.mp4', events.append)
@@ -183,7 +186,6 @@ def test_real_http_worker_download_and_cancel_without_leftovers():
             assert result['owned_prefix'] and result['owned_paths'] == [result['file_path']]
             existing = set(destination.iterdir())
             errors = []
-            cancel = threading.Event()
 
             def slow_download():
                 try:
@@ -193,7 +195,9 @@ def test_real_http_worker_download_and_cancel_without_leftovers():
 
             worker = threading.Thread(target=slow_download)
             worker.start()
-            assert entered.wait(10)
+            # Interpreter/yt-dlp startup may compete with real local ASR; the
+            # cancellation deadline below begins only after the request exists.
+            assert entered.wait(30), f'worker did not reach server: {errors!r}'
             started = time.monotonic()
             cancel.set()
             worker.join(timeout=5)
@@ -202,7 +206,130 @@ def test_real_http_worker_download_and_cancel_without_leftovers():
             assert len(errors) == 1 and isinstance(errors[0], VideoDownloadError)
             assert set(destination.iterdir()) == existing
         finally:
+            cancel.set()
             release.set()
+            if worker is not None:
+                worker.join(timeout=5)
             server.shutdown()
             server.server_close()
             thread.join(timeout=2)
+
+
+def test_resume_index_reuses_owned_partial_then_cleans_index_on_success(tmp_path, monkeypatch):
+    from core import downloader as module
+    prefixes = []
+
+    def worker(arguments, **kwargs):
+        prefix = arguments[-1]
+        prefixes.append(prefix)
+        if len(prefixes) == 1:
+            Path(prefix + '.mp4.part').write_bytes(b'partial')
+            Path(prefix + '.resume.json').write_text('{}')
+            event = {'kind': 'error', 'message': 'Retry later', 'resumable': True}
+        else:
+            assert Path(prefix + '.mp4.part').read_bytes() == b'partial'
+            Path(prefix + '.mp4.part').replace(prefix + '.mp4')
+            Path(prefix + '.resume.json').unlink()
+            event = {'kind': 'result', 'result': {'file_path': prefix + '.mp4'}}
+        return SimpleNamespace(stdout=io.StringIO(json.dumps(event)), poll=lambda: 0)
+
+    monkeypatch.setattr(module.subprocess, 'Popen', worker)
+    downloader = VideoDownloader(tmp_path)
+    with pytest.raises(VideoDownloadError, match='Retry later'):
+        downloader.download('https://v.douyin.com/retry/')
+    assert len(list(tmp_path.glob('.download-*.json'))) == 1
+    result = downloader.download('https://v.douyin.com/retry/')
+    assert prefixes[0] == prefixes[1]
+    assert set(tmp_path.iterdir()) == {Path(result['file_path'])}
+
+
+def test_invalid_resume_index_cannot_own_another_file(tmp_path, monkeypatch):
+    import hashlib
+    from core import downloader as module
+    url = 'https://v.douyin.com/retry/'
+    unrelated = tmp_path / 'user.mp4'
+    unrelated.write_bytes(b'user data')
+    index = tmp_path / ('.download-' + hashlib.sha256(url.encode()).hexdigest() + '.json')
+    index.write_text(json.dumps({'prefix': '../user'}))
+    monkeypatch.setattr(module.subprocess, 'Popen', lambda *a, **kw: SimpleNamespace(
+        stdout=io.StringIO(json.dumps({'kind': 'error', 'message': 'failed'})), poll=lambda: 0))
+    with pytest.raises(VideoDownloadError):
+        VideoDownloader(tmp_path).download(url)
+    assert unrelated.read_bytes() == b'user data'
+
+
+def test_concurrent_same_source_does_not_touch_existing_worker(tmp_path):
+    import hashlib
+    url = 'https://v.douyin.com/retry/'
+    key = (str(tmp_path.resolve()), hashlib.sha256(url.encode()).hexdigest())
+    VideoDownloader._active_sources.add(key)
+    try:
+        with pytest.raises(VideoDownloadError, match='đang được tải'):
+            VideoDownloader(tmp_path).download(url)
+    finally:
+        VideoDownloader._active_sources.discard(key)
+    assert not list(tmp_path.iterdir())
+
+
+@pytest.mark.parametrize('failure', ['eof', 'error', 'timeout'])
+def test_resume_candidate_is_not_retained_until_worker_validates_it(tmp_path, monkeypatch, caplog, failure):
+    import hashlib
+    from core import downloader as module
+    url = 'https://v.douyin.com/retry/'
+    prefix = tmp_path / ('video_' + 'a' * 32)
+    partial, checkpoint = Path(str(prefix) + '.mp4.part'), Path(str(prefix) + '.resume.json')
+    partial.write_bytes(b'not yet verified')
+    checkpoint.write_text('{}')
+    index = tmp_path / ('.download-' + hashlib.sha256(url.encode()).hexdigest() + '.json')
+    index.write_text(json.dumps({'prefix': prefix.name}))
+    user_file = tmp_path / 'user-video.mp4'
+    user_file.write_bytes(b'keep user file')
+    clock = SimpleNamespace(now=0)
+
+    def worker(arguments, **kwargs):
+        assert arguments[-1] == str(prefix)
+        if failure == 'timeout':
+            clock.now = 100
+        event = {'kind': 'error', 'message': 'worker failed'} if failure == 'error' else None
+        return SimpleNamespace(stdout=io.StringIO(json.dumps(event) if event else ''), poll=lambda: 0)
+
+    monkeypatch.setattr(module.subprocess, 'Popen', worker)
+    monkeypatch.setattr(module, 'time', SimpleNamespace(monotonic=lambda: clock.now))
+    with caplog.at_level(logging.INFO, logger='pipeline'), pytest.raises(VideoDownloadError):
+        VideoDownloader(tmp_path).download(url)
+    assert set(tmp_path.iterdir()) == {user_file}
+    assert 'Đã giữ' not in caplog.text
+    assert 'Kiểm tra phần video đã giữ' in caplog.text
+
+
+def test_diagnostic_log_preserves_safe_status_cause_and_exact_byte_count(tmp_path, monkeypatch, caplog):
+    from core import downloader as module
+    events = [
+        {'kind': 'diagnostic', 'code': 'read_timeout', 'error_type': 'TimeoutError',
+         'status_code': 206, 'downloaded_bytes': 87654321, 'attempt': 3},
+        {'kind': 'diagnostic', 'code': 'http_error', 'error_type': 'HTTPError',
+         'status_code': 503, 'downloaded_bytes': 87654321, 'attempt': 4},
+        {'kind': 'diagnostic', 'code': 'https://private-code', 'error_type': 'private-url-token',
+         'status_code': 'private-url-token', 'downloaded_bytes': -1, 'attempt': True},
+        {'kind': 'error', 'message': 'Retry later'},
+    ]
+    monkeypatch.setattr(module.subprocess, 'Popen', lambda *args, **kwargs: SimpleNamespace(
+        stdout=io.StringIO('\n'.join(json.dumps(event) for event in events)), poll=lambda: 0))
+    with caplog.at_level(logging.WARNING, logger='pipeline'), pytest.raises(VideoDownloadError):
+        VideoDownloader(tmp_path).download('https://v.douyin.com/retry/')
+    assert 'read_timeout; loại lỗi TimeoutError; HTTP 206; đã nhận 87654321 byte; lần thử 3' in caplog.text
+    assert 'http_error; loại lỗi HTTPError; HTTP 503; đã nhận 87654321 byte; lần thử 4' in caplog.text
+    assert 'loại lỗi unknown; HTTP unknown; đã nhận unknown byte; lần thử unknown' in caplog.text
+    assert 'private-url-token' not in caplog.text and 'private-code' not in caplog.text
+
+
+def test_download_logs_safe_run_id_mapping(tmp_path, monkeypatch, caplog):
+    from core import downloader as module
+    event = {'kind': 'error', 'message': 'failed'}
+    monkeypatch.setattr(module.subprocess, 'Popen', lambda *args, **kwargs: SimpleNamespace(
+        stdout=io.StringIO(json.dumps(event)), poll=lambda: 0))
+    from core.runtime_context import execution_context
+    with caplog.at_level(logging.INFO, logger='pipeline'), execution_context('pipeline-run-42'):
+        with pytest.raises(VideoDownloadError):
+            VideoDownloader(tmp_path).download('https://v.douyin.com/retry/')
+    assert 'run_id=pipeline-run-42' in caplog.text

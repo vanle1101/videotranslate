@@ -35,6 +35,38 @@ def response(seg, **changes):
     return {"segments": [row(seg)], "screen_texts": [], "summary": "Hai người gặp nhau", **changes}
 
 
+@pytest.mark.parametrize("placeholder", ["nghe chưa rõ", "[Không nghe rõ]", "(không rõ)",
+                                         "INAUDIBLE", "Lời thoại không rõ."])
+def test_diagnostic_filler_is_never_spoken_as_translation(placeholder):
+    seg = SegmentItem(0, 10.36, 11.20, .84)
+    seg.text_zh = "小一滩马"
+    raw = {"segments": [row(seg, text_zh=seg.text_zh, literal_vi=placeholder,
+                            natural_vi=placeholder, final_vi=placeholder)],
+           "screen_texts": [], "summary": ""}
+    checked = VideoIntelligence.validate_result(raw, [seg])["segments"][0]
+    assert checked["text_zh"] == seg.text_zh
+    assert checked["literal_vi"] == checked["natural_vi"] == checked["final_vi"] == ""
+    assert checked["needs_review"] is True
+    assert "giọng đọc" in checked["review_reason"]
+    assert raw["segments"][0]["final_vi"] == placeholder
+
+
+def test_real_dialogue_about_unclear_hearing_remains_translatable():
+    seg = SegmentItem(0, 0, 1, 1)
+    raw = {"segments": [row(seg, text_zh="我听不清", literal_vi="Tôi không nghe rõ",
+                            natural_vi="Nghe chưa rõ", final_vi="Nghe chưa rõ")],
+           "screen_texts": [], "summary": ""}
+    checked = VideoIntelligence.validate_result(raw, [seg])["segments"][0]
+    assert checked["final_vi"] == "Nghe chưa rõ"
+    assert not checked["needs_review"]
+
+
+def test_source_recognition_note_is_not_dialogue_about_hearing():
+    guarded = VideoIntelligence.suppress_diagnostic_placeholder({
+        "text_zh": "（听不清）", "final_vi": "Nghe chưa rõ", "needs_review": True})
+    assert guarded["final_vi"] == "" and guarded["needs_review"]
+
+
 def measured_screen(identifier="o0", **changes):
     return {"id": identifier, "start": 3.333333, "end": 4.666667,
             "text_zh": "连赞会限流", "bbox": [.183, .537, .289, .04], "confidence": .981,

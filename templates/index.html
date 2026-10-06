@@ -91,7 +91,7 @@
           <button id="btn-export-hq" disabled title="Hoàn tất các câu dịch trước khi xuất video" class="studio-export-button"><i class="fa-solid fa-arrow-up-from-bracket" aria-hidden="true"></i>Xuất video MP4</button>
           <div id="task-result" class="hidden" role="status">
             <p id="task-result-status" class="task-progress-detail"></p>
-            <a id="task-result-link" class="studio-export-button hidden" target="_blank" rel="noopener">Mở video kết quả</a>
+            <a id="task-result-link" class="studio-export-button hidden">Mở video kết quả</a>
             <button id="btn-save-result" class="studio-export-button hidden">Lưu video kết quả</button>
           </div>
           <div class="buffer-setting"><label for="buffer-select">Đệm trước khi phát</label><select id="buffer-select"><option value="5">5 giây (Nhanh nhất)</option><option value="10" selected>10 giây (Khuyên dùng)</option><option value="15">15 giây (Ổn định)</option><option value="30">30 giây (An toàn)</option></select></div>
@@ -258,7 +258,7 @@
         <h2 class="text-base font-bold text-white flex items-center gap-2">
           <i class="fa-solid fa-terminal text-yellow-400"></i> Nhật Ký & Chẩn Đoán (Diagnostics)
         </h2>
-        <p class="text-xs text-gray-400">Xem log hệ thống, theo dõi tiến trình AI và chẩn đoán lỗi trong workspace/logs/.</p>
+        <p class="text-xs text-gray-400">Theo dõi tải và dịch video · tự cập nhật mỗi 3 giây.</p>
       </div>
       <div class="flex items-center gap-2">
         <button id="btn-copy-log" class="px-3 py-1.5 rounded-lg border border-gray-700 bg-gray-800 hover:bg-gray-700 text-xs text-gray-200 flex items-center gap-1.5">
@@ -275,16 +275,16 @@
 
     <!-- Log Category Tabs -->
     <div class="flex items-center gap-2 border-b border-gray-800 pb-2">
-      <button data-cat="app" class="diag-cat-btn px-3 py-1 rounded-lg text-xs font-mono font-bold bg-pink-600/80 text-white">Application Log</button>
-      <button data-cat="ai" class="diag-cat-btn px-3 py-1 rounded-lg text-xs font-mono text-gray-400 hover:text-white">AI Log</button>
-      <button data-cat="pipeline" class="diag-cat-btn px-3 py-1 rounded-lg text-xs font-mono text-gray-400 hover:text-white">Pipeline Log</button>
-      <button data-cat="errors" class="diag-cat-btn px-3 py-1 rounded-lg text-xs font-mono text-gray-400 hover:text-white">Errors Log</button>
+      <button data-cat="pipeline" class="diag-cat-btn px-3 py-1 rounded-lg text-xs font-mono font-bold bg-pink-600/80 text-white">Tác vụ</button>
+      <button data-cat="ai" class="diag-cat-btn px-3 py-1 rounded-lg text-xs font-mono text-gray-400 hover:text-white">AI</button>
+      <button data-cat="errors" class="diag-cat-btn px-3 py-1 rounded-lg text-xs font-mono text-gray-400 hover:text-white">Lỗi</button>
+      <button data-cat="app" class="diag-cat-btn px-3 py-1 rounded-lg text-xs font-mono text-gray-400 hover:text-white">Ứng dụng</button>
       <div class="ml-auto flex items-center gap-2">
         <label class="text-[11px] text-gray-400 flex items-center gap-1 cursor-pointer">
           <input type="checkbox" id="chk-auto-scroll-log" checked class="rounded border-gray-700 text-pink-600">
-          Auto Scroll
+          Theo dòng mới
         </label>
-        <button id="btn-refresh-log" class="text-xs text-gray-400 hover:text-white p-1">
+        <button id="btn-refresh-log" aria-label="Làm mới nhật ký" title="Làm mới nhật ký" class="text-xs text-gray-400 hover:text-white p-1">
           <i class="fa-solid fa-arrows-rotate"></i>
         </button>
       </div>
@@ -535,6 +535,17 @@
           </button>
         </div>
       </div>
+    </div>
+  </div>
+
+  <div id="result-preview-modal" role="dialog" aria-modal="true" aria-labelledby="result-preview-title" class="fixed inset-0 bg-black/85 z-50 flex items-center justify-center p-4 hidden">
+    <div class="bg-[#161922] border border-gray-800 rounded-2xl max-w-4xl w-full p-4 space-y-3 shadow-2xl">
+      <div class="flex items-center justify-between gap-3">
+        <h3 id="result-preview-title" class="text-sm font-bold text-white">Video kết quả</h3>
+        <button id="btn-close-result-preview" class="text-xs text-gray-300 px-3 py-1.5 rounded-lg border border-gray-700">Đóng</button>
+      </div>
+      <video id="result-preview-video" controls playsinline preload="metadata" class="w-full bg-black rounded-lg" style="max-height: 75vh;"></video>
+      <p id="result-preview-status" role="status" class="text-xs text-rose-300"></p>
     </div>
   </div>
 

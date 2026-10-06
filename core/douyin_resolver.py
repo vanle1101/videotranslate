@@ -16,6 +16,7 @@ from urllib.parse import parse_qs, urlencode, urljoin, urlsplit, urlunsplit
 
 
 TIMEOUT = 6
+MEDIA_READ_TIMEOUT = 30
 MAX_JSON_BYTES = 2 * 1024 * 1024
 MAX_REDIRECTS = 4
 SHARE_HOSTS = frozenset({"douyin.com", "www.douyin.com", "v.douyin.com",
@@ -37,6 +38,41 @@ _SAFE_HEADERS = frozenset({"accept", "user-agent", "range", "if-range"})
 class DouyinResolveError(RuntimeError):
     """A sanitized message that can be shown in Studio."""
 
+    def __init__(self, message, *, code="resolve_failed", status_code=None,
+                 error_type=None, stage=None):
+        super().__init__(message)
+        # Only fixed diagnostic labels are supplied here, never a raw upstream
+        # exception, response body, or signed media URL.
+        self.code = code
+        self.status_code = status_code
+        self.error_type = error_type
+        self.stage = stage
+
+
+def _transport_error(error, stage):
+    """Keep the useful cause without serializing upstream exception text."""
+    if isinstance(error, TimeoutError):
+        code = "read_timeout" if stage == "read" else "connection_timeout"
+        message = ("Máy chủ video Douyin phản hồi quá chậm khi tải. Hãy thử lại."
+                   if stage == "read" else "Hết thời gian chờ kết nối máy chủ Douyin. Hãy thử lại.")
+        error_type = "TimeoutError"
+    elif isinstance(error, http.client.RemoteDisconnected):
+        code, error_type = "connection_closed", "RemoteDisconnected"
+        message = "Máy chủ video Douyin đóng kết nối trước khi trả dữ liệu. Hãy thử lại."
+    elif isinstance(error, ConnectionResetError):
+        code, error_type = "connection_reset", "ConnectionResetError"
+        message = "Kết nối đến máy chủ video Douyin bị đặt lại khi tải. Hãy thử lại."
+    elif isinstance(error, http.client.IncompleteRead):
+        code, error_type = "incomplete_read", "IncompleteRead"
+        message = "Máy chủ video Douyin ngắt luồng trước khi tải đủ tệp. Hãy thử lại."
+    elif isinstance(error, ssl.SSLError):
+        code, error_type = "tls_error", "SSLError"
+        message = "Không thiết lập được kết nối bảo mật tới máy chủ Douyin. Hãy thử lại."
+    else:
+        code, error_type = "transport_error", "TransportError"
+        message = "Kết nối đến máy chủ video Douyin bị gián đoạn. Hãy thử lại."
+    return DouyinResolveError(message, code=code, error_type=error_type, stage=stage)
+
 
 class PublicResponse:
     """Streaming response owning its connection, without an ambient cookie jar."""
@@ -51,8 +87,21 @@ class PublicResponse:
     def read(self, size=-1):
         try:
             return self._response.read(size)
-        except (OSError, http.client.HTTPException):
-            raise DouyinResolveError("Kết nối tải Douyin bị gián đoạn. Hãy thử lại.") from None
+        except (OSError, http.client.HTTPException) as error:
+            raise _transport_error(error, "read") from None
+
+    def set_read_timeout(self, timeout):
+        # With Connection: close, HTTPConnection may already have detached its
+        # socket; the response's buffered reader still owns it until EOF.
+        sock = getattr(self._connection, "sock", None)
+        if sock is None:
+            reader = getattr(self._response, "fp", None)
+            sock = getattr(getattr(reader, "raw", None), "_sock", None)
+        if sock is not None:
+            try:
+                sock.settimeout(timeout)
+            except OSError as error:
+                raise _transport_error(error, "read") from None
 
     def iter_content(self, chunk_size=64 * 1024):
         while chunk := self.read(chunk_size):
@@ -117,9 +166,9 @@ def _request_once(url, headers):
         target = urlunsplit(("", "", parsed.path or "/", parsed.query, ""))
         connection.request("GET", target, headers={**headers, "Connection": "close", "Accept-Encoding": "identity"})
         return PublicResponse(connection.getresponse(), connection, url)
-    except (OSError, http.client.HTTPException, UnicodeError, ValueError):
+    except (OSError, http.client.HTTPException, UnicodeError, ValueError) as error:
         connection.close()
-        raise DouyinResolveError("Không kết nối được máy chủ Douyin. Kiểm tra mạng rồi thử lại.") from None
+        raise _transport_error(error, "connect") from None
 
 
 def _open_url(url, allowed_hosts, allowed_roots=(), headers=None, follow_redirects=True):
@@ -133,8 +182,8 @@ def _open_url(url, allowed_hosts, allowed_roots=(), headers=None, follow_redirec
         url = _validated_url(url, allowed_hosts, allowed_roots)
         try:
             response = _request_once(url, safe_headers)
-        except (OSError, http.client.HTTPException):
-            raise DouyinResolveError("Không kết nối được máy chủ Douyin. Kiểm tra mạng rồi thử lại.") from None
+        except (OSError, http.client.HTTPException) as error:
+            raise _transport_error(error, "connect") from None
         if response.status not in (301, 302, 303, 307, 308) or not follow_redirects:
             return response
         location = response.headers.get("Location")
@@ -155,7 +204,15 @@ def open_public_media(url, headers=None):
     response = _open_url(url, MEDIA_HOSTS, MEDIA_ROOTS, headers=headers)
     if response.status not in (200, 206):
         response.close()
-        raise DouyinResolveError("Máy chủ video Douyin chưa trả tệp tải. Hãy thử lại.")
+        raise DouyinResolveError(
+            f"Máy chủ video Douyin trả HTTP {response.status}, chưa tải được tệp. Hãy thử lại.",
+            code="http_error", status_code=response.status, error_type="HTTPError", stage="http")
+    if isinstance(response, PublicResponse):
+        try:
+            response.set_read_timeout(MEDIA_READ_TIMEOUT)
+        except DouyinResolveError:
+            response.close()
+            raise
     return response
 
 

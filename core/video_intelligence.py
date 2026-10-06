@@ -12,6 +12,7 @@ import math
 import os
 import re
 import tempfile
+import unicodedata
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional
 
@@ -54,12 +55,18 @@ phải tách câu Đúng/Sai khỏi lời giải thích, tránh làm phủ đị
 Ví dụ dạng '假的，反而…' -> 'Sai. Ngược lại, …', không ghép 'Không đúng là…'.
 Nếu chắc chắn không có lời nói, trả các trường chữ rỗng; nếu thiếu căn cứ đánh dấu
 needs_review=true. Dùng ngữ cảnh để hiểu xưng hô, không hoàn thiện câu bị cắt.
+Các trường literal_vi/natural_vi/final_vi CHỈ chứa lời dịch có căn cứ để đọc.
+Không chèn ghi chú như 'nghe chưa rõ', '[không rõ]' hay 'inaudible' vào lời đọc.
+Nếu chưa dịch được, giữ text_zh, để trường dịch chưa có căn cứ rỗng và giải thích
+ở review_reason; không tự biến lời chưa rõ thành im lặng đã xác nhận.
 
 screen_texts: trả đúng MỖI ID trong danh sách OCR; CHỈ dịch và phân loại, KHÔNG
 thêm ID/chữ/tọa độ/thời gian. Chữ OCR là dữ liệu quan sát tại thời gian đã cấp.
 Nếu chữ nhận nhầm hoặc thiếu căn cứ, needs_review=true. kind=title cho tiêu đề,
 câu hỏi, nhận định được trình bày để người nói bình luận; kind=subtitle CHỈ cho
 chữ lặp đúng câu đang nói. Câu hỏi/nhận định phải giữ dạng câu hỏi/nhận định,
+Lời kể của người dẫn chuyện cũng là lời nói; không coi phụ đề là title chỉ vì
+câu kể tên nhân vật hoặc hành động ở ngôi thứ ba. Vẫn phải đối chiếu ASR cùng lúc.
 không gộp câu trả lời vào bản dịch của nó. Nhãn Đúng/Sai đứng riêng là title để
 không làm mất phụ đề câu giải thích. Logo/nhãn áo/watermark dùng kind=ignore và
 text_vi rỗng. Không bỏ qua câu hỏi hay chữ Trung liên quan chủ đề. Dịch ngắn vừa
@@ -90,6 +97,48 @@ class VideoIntelligence:
     # Base64 expansion stays below the 20 MB inline request budget.
     MAX_INLINE_BYTES = 14_000_000
     MAX_WIDTH = 720
+
+    @staticmethod
+    def suppress_diagnostic_placeholder(row):
+        """Keep uncertainty in metadata, never synthesize it as dialogue.
+
+        Exact diagnostic fillers are not translations. Genuine speech about
+        not hearing/understanding remains valid when the source says so.
+        """
+        result = dict(row)
+        placeholders = {"nghe chưa rõ", "nghe không rõ", "không nghe rõ", "không rõ",
+                        "chưa nghe rõ", "không nghe được", "lời thoại không rõ",
+                        "chưa rõ lời thoại", "không rõ lời thoại", "âm thanh không rõ",
+                        "inaudible", "unintelligible", "unclear speech"}
+
+        def is_placeholder(value):
+            if not isinstance(value, str):
+                return False
+            text = unicodedata.normalize("NFKC", value).casefold()
+            text = re.sub(r"[^\w\s]", " ", text, flags=re.UNICODE)
+            return " ".join(text.split()) in placeholders
+
+        if not is_placeholder(result.get("final_vi")):
+            return result
+        source = result.get("text_zh", "")
+        source_is_note = isinstance(source, str) and source.strip().startswith(("[", "(", "【", "（"))
+        if isinstance(source, str) and not source_is_note and re.search(
+                r"听(?:得)?不(?:太)?(?:清|懂|明白)|(?:没|未)(?:有)?听清|不清楚|不知道|不明白|不确定", source):
+            return result
+        for field in ("literal_vi", "natural_vi", "final_vi"):
+            if is_placeholder(result.get(field)):
+                result[field] = ""
+        result["needs_review"] = True
+        explanation = "Chưa có lời dịch có căn cứ; đã bỏ ghi chú nhận dạng khỏi giọng đọc."
+        previous = result.get("review_reason")
+        result["review_reason"] = (explanation + (" " + previous if isinstance(previous, str) and previous else ""))[:500]
+        if isinstance(result.get("verification"), dict):
+            audit = dict(result["verification"])
+            audit.update(status="incomplete" if audit.get("status") == "incomplete" else "unresolved",
+                         semantic_verified=False, spoken_placeholder_removed=True,
+                         reason=result["review_reason"])
+            result["verification"] = audit
+        return result
 
     def __init__(self, client: Optional[GeminiClient] = None):
         self.provider = validate_visual_provider()
@@ -183,10 +232,10 @@ class VideoIntelligence:
                 reason = reason or "ASR có nhận dạng lời thoại nhưng bản dịch trả trống; cần kiểm tra, không tự coi là im lặng."
             if review and not reason:
                 reason = "Nội dung chưa chắc chắn; hãy nghe lại và sửa câu tiếng Việt trước khi tạo giọng."
-            parsed[sid] = {
+            parsed[sid] = cls.suppress_diagnostic_placeholder({
                 "id": sid, "start": start, "end": end,
                 **values, "needs_review": review, "review_reason": reason,
-            }
+            })
         if set(parsed) != set(source):
             raise VideoIntelligenceError("Bộ dịch trả thiếu câu thoại; không thể tự điền phần còn thiếu.")
         screens: List[Dict[str, Any]] = []

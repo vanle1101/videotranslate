@@ -153,7 +153,10 @@ def test_export_and_legacy_composer_never_invent_a_blur_strip(tmp_path, monkeypa
     def compose(**kwargs):
         observed.update(kwargs)
         kwargs["output_path"].write_bytes(b"fixture")
-    with patch("core.streaming.export.run_media", return_value=json.dumps({"streams": [{"width": 360, "height": 640}]}).encode()), \
+    metadata = json.dumps({"format": {"duration": "3"}, "streams": [
+        {"codec_type": "video", "width": 360, "height": 640}, {"codec_type": "audio"},
+    ]}).encode()
+    with patch("core.streaming.export.run_media", return_value=metadata), \
             patch.object(exporter, "_assemble_voice_timeline"), patch.object(exporter.mixer, "mix"), \
             patch.object(exporter.composer, "compose", side_effect=compose):
         exporter.export("auto-layout", tmp_path / "source.mp4", [speech()], 3, mask_chinese=True, screen_texts=None)

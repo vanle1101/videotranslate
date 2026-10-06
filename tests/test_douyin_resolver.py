@@ -1,7 +1,9 @@
 """Offline acceptance for guest Douyin resolution and public-media guards."""
 import io
+import http.client
 import json
 import socket
+from types import SimpleNamespace
 from email.message import Message
 from urllib.parse import parse_qs, urlsplit
 
@@ -200,6 +202,80 @@ def test_transport_failure_does_not_expose_signed_url_or_raw_exception(monkeypat
     monkeypatch.setattr(resolver, "_request_once", request)
     with pytest.raises(resolver.DouyinResolveError) as captured:
         resolver.resolve_douyin(VIDEO_URL)
+    assert SECRET not in str(captured.value)
+
+
+@pytest.mark.parametrize("failure,code,error_type", [
+    (TimeoutError(SECRET), "read_timeout", "TimeoutError"),
+    (ConnectionResetError(SECRET), "connection_reset", "ConnectionResetError"),
+    (http.client.IncompleteRead(SECRET.encode(), 100), "incomplete_read", "IncompleteRead"),
+    (http.client.RemoteDisconnected(SECRET), "connection_closed", "RemoteDisconnected"),
+    (OSError(SECRET), "transport_error", "TransportError"),
+])
+def test_stream_failure_reports_safe_specific_cause(failure, code, error_type):
+    class FailingResponse(Response):
+        def read(self, size=-1):
+            raise failure
+
+    response = resolver.PublicResponse(FailingResponse(), SimpleNamespace(), MEDIA_URL)
+    with pytest.raises(resolver.DouyinResolveError) as captured:
+        response.read(1024)
+    error = captured.value
+    assert (error.code, error.error_type, error.stage) == (code, error_type, "read")
+    assert error.status_code is None
+    diagnostic = str(error) + repr(vars(error))
+    assert SECRET not in diagnostic and MEDIA_URL not in diagnostic and "token=" not in diagnostic
+    assert error.__suppress_context__
+
+
+@pytest.mark.parametrize("status", [403, 416, 429, 500, 503])
+def test_media_http_failure_reports_status_without_signed_url_or_response(monkeypatch, status):
+    response = Response(SECRET.encode(), status=status, url=MEDIA_URL)
+    monkeypatch.setattr(resolver, "_request_once", lambda *args: response)
+    with pytest.raises(resolver.DouyinResolveError) as captured:
+        resolver.open_public_media(MEDIA_URL)
+    error = captured.value
+    assert response.closed
+    assert (error.code, error.status_code, error.stage) == ("http_error", status, "http")
+    assert f"HTTP {status}" in str(error)
+    assert SECRET not in str(error) + repr(vars(error))
+    assert MEDIA_URL not in str(error) + repr(vars(error))
+
+
+@pytest.mark.parametrize("detached", [False, True])
+def test_media_body_timeout_is_longer_even_when_connection_detaches_socket(monkeypatch, detached):
+    timeouts = []
+    sock = SimpleNamespace(settimeout=timeouts.append)
+    raw = Response(b"media", url=MEDIA_URL)
+    raw.fp = SimpleNamespace(raw=SimpleNamespace(_sock=sock))
+    connection = SimpleNamespace(sock=None if detached else sock, close=lambda: None)
+    response = resolver.PublicResponse(raw, connection, MEDIA_URL)
+    monkeypatch.setattr(resolver, "_request_once", lambda *args: response)
+    with resolver.open_public_media(MEDIA_URL) as opened:
+        assert opened.read() == b"media"
+        assert timeouts == [30]
+    assert resolver.TIMEOUT == 6
+
+
+def test_metadata_does_not_extend_read_timeout(monkeypatch):
+    timeouts = []
+    connection = SimpleNamespace(sock=SimpleNamespace(settimeout=timeouts.append), close=lambda: None)
+    raw = Response(b'{"aweme_list":[]}')
+    response = resolver.PublicResponse(raw, connection, VIDEO_URL)
+    monkeypatch.setattr(resolver, "_request_once", lambda *args: response)
+    assert resolver._read_json(resolver._open_url(VIDEO_URL, resolver.SHARE_HOSTS)) == {"aweme_list": []}
+    assert not timeouts and resolver.TIMEOUT == 6
+
+
+def test_connect_timeout_is_distinct_from_body_timeout(monkeypatch):
+    def request(*args):
+        raise TimeoutError(SECRET)
+
+    monkeypatch.setattr(resolver, "_request_once", request)
+    with pytest.raises(resolver.DouyinResolveError) as captured:
+        resolver.open_public_media(MEDIA_URL)
+    assert captured.value.code == "connection_timeout"
+    assert captured.value.stage == "connect"
     assert SECRET not in str(captured.value)
 
 

@@ -3,6 +3,8 @@ from typing import List, Dict, Any, Optional
 from config import settings
 from core.engines.asr.base import ASREngine
 from core.dialogue_segments import split_dialogue_segments
+from core.runtime_context import current_execution_context
+import asyncio
 
 class FasterWhisperFallbackEngine(ASREngine):
     """
@@ -44,7 +46,13 @@ class FasterWhisperFallbackEngine(ASREngine):
         language: str = "zh",
         progress_callback: Optional[callable] = None
     ) -> List[Dict[str, Any]]:
+        context = current_execution_context()
+        def check_cancelled():
+            if context.cancel_check and context.cancel_check():
+                raise asyncio.CancelledError("Speech recognition cancelled")
+        check_cancelled()
         self._ensure_loaded()
+        check_cancelled()
         segments_gen, _ = self.model.transcribe(
             str(audio_path),
             language=language,
@@ -56,6 +64,7 @@ class FasterWhisperFallbackEngine(ASREngine):
 
         results = []
         for idx, seg in enumerate(segments_gen):
+            check_cancelled()
             words = []
             for word in (getattr(seg, "words", None) or []):
                 word_text = getattr(word, "word", "")
@@ -78,6 +87,9 @@ class FasterWhisperFallbackEngine(ASREngine):
                 "emotion": "<|NEUTRAL|>",
                 "speaker": getattr(seg, "speaker", None)
             })
+            if progress_callback:
+                progress_callback(float(seg.end))
+        check_cancelled()
         # Return complete utterances instead of Whisper's sometimes long VAD
         # chunks.  The helper uses only measured word timestamps and leaves a
         # row intact when Whisper did not provide usable word timing.

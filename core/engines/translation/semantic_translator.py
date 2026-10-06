@@ -150,9 +150,8 @@ class SemanticTranslator(TranslationEngine):
             values = {field: item.get(field) for field in fields}
             if not all(self._nonempty_string(v) for v in values.values()):
                 raise self._translation_error("trả về bản dịch thiếu nội dung.")
-            source = expected.get(item_id, "").strip()
-            if re.search(r"[\u3400-\u9fff]", source) and any(v.strip() == source for v in values.values()):
-                raise self._translation_error("trả lại nguyên văn tiếng Trung.")
+            if any(re.search(r"[\u3400-\u9fff]", value) for value in values.values()):
+                raise self._translation_error("trả về bản dịch còn chữ Trung chưa chuyển ngữ.")
             result[item_id] = {field: values[field].strip() for field in fields}
             if "needs_review" in item:
                 if not isinstance(item["needs_review"], bool):
@@ -237,7 +236,7 @@ class SemanticTranslator(TranslationEngine):
         merged = []
         for seg in segments:
             seg_copy = dict(seg)
-            lookup_id = int(seg["id"]) if self.provider in self.STRICT_PROVIDERS else seg["id"]
+            lookup_id = int(seg["id"])
             res = results_map.get(lookup_id, {})
             text_zh = seg.get("text_zh", seg.get("text", ""))
             seg_copy["text_zh"] = text_zh
@@ -316,20 +315,13 @@ class SemanticTranslator(TranslationEngine):
                 clean = raw_response.strip()
                 if clean.startswith("```json"): clean = clean[7:]
                 if clean.endswith("```"): clean = clean[:-3]
-                data = json.loads(clean)
-                items = data if isinstance(data, list) else data.get("results", [])
-                for it in items:
-                    res_map[int(it["id"])] = {
-                        "literal_vi": it.get("literal_vi", ""),
-                        "natural_vi": it.get("natural_vi", ""),
-                        "final_vi": it.get("final_vi", "")
-                    }
+                res_map = self._parse_opencode_results(clean, payload)
             except Exception as e:
                 print(f"[!] JSON parsing error in 3-tier translation: {e}")
 
         # Fallback for missing ids or empty results
         for item in payload:
-            i = item["id"]
+            i = int(item["id"])
             if i not in res_map or not res_map[i].get("final_vi"):
                 trans = self._fallback_translate(item["text_zh"])
                 res_map[i] = {
@@ -352,7 +344,7 @@ class SemanticTranslator(TranslationEngine):
             with urllib.request.urlopen(req, timeout=5) as resp:
                 data = json.loads(resp.read().decode("utf-8"))
                 res = "".join([part[0] for part in data[0] if part and part[0]])
-                if res.strip():
+                if res.strip() and not re.search(r"[\u3400-\u9fff]", res):
                     return res
         except Exception:
             pass
@@ -366,7 +358,7 @@ class SemanticTranslator(TranslationEngine):
             with urllib.request.urlopen(req, timeout=5) as resp:
                 data = json.loads(resp.read().decode("utf-8"))
                 trans = data.get("responseData", {}).get("translatedText", "")
-                if trans and "MYMEMORY WARNING" not in trans:
+                if isinstance(trans, str) and trans.strip() and "MYMEMORY WARNING" not in trans and not re.search(r"[\u3400-\u9fff]", trans):
                     return trans
         except Exception as e:
             print(f"[!] MyMemory fallback error: {e}")
@@ -436,12 +428,9 @@ Quy tắc bắt buộc:
                         messages=[{"role": "system", "content": sys_instruction}, {"role": "user", "content": f"Dịch: {clean_zh}"}],
                         response_format={"type": "json_object"}
                     )
-                    data = json.loads(resp.choices[0].message.content)
-                    return {
-                        "literal_vi": data.get("literal_vi", clean_zh),
-                        "natural_vi": data.get("natural_vi", clean_zh),
-                        "final_vi": data.get("final_vi", data.get("natural_vi", clean_zh))
-                    }
+                    return self._parse_opencode_results(
+                        resp.choices[0].message.content,
+                        [{"id": 0, "text_zh": clean_zh}], single=True)[0]
                 except Exception as e:
                     print(f"[!] DeepSeek single translate error: {e}")
 

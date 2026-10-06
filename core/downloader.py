@@ -1,4 +1,5 @@
 """Video URL validation and a cancellable, progress-reporting yt-dlp worker."""
+import hashlib
 import json
 import logging
 import os
@@ -15,6 +16,8 @@ from typing import Any, Dict, Optional
 from urllib.parse import urlsplit, urlunsplit
 
 from config import settings
+from core.douyin_cookies import is_douyin_url
+from core.runtime_context import current_execution_context
 
 logger = logging.getLogger("pipeline")
 
@@ -26,7 +29,7 @@ class VideoDownloadError(RuntimeError):
 def friendly_download_error(error, host="trang video"):
     detail = str(error).lower()
     if any(word in detail for word in ("timed out", "timeout", "connection refused", "name resolution", "getaddrinfo", "unable to connect")):
-        return f"Không kết nối được {host}. Kiểm tra mạng rồi thử lại hoặc chọn video đã tải về máy."
+        return f"Không kết nối được {host} hoặc máy chủ phản hồi quá chậm. Hãy thử lại hoặc chọn video đã tải về máy."
     if any(word in detail for word in ("fresh cookies", "cookies are needed", "login", "sign in", "403", "captcha", "verify you")):
         if re.fullmatch(r"(?:[a-z0-9-]+\.)*(?:douyin|iesdouyin)\.com", str(host).lower()):
             return ("Douyin từ chối tải trực tiếp hoặc yêu cầu xác minh. Đăng nhập Chrome không tự chuyển phiên sang Studio. "
@@ -40,6 +43,9 @@ def friendly_download_error(error, host="trang video"):
 
 
 class VideoDownloader:
+    _active_guard = threading.Lock()
+    _active_sources = set()
+
     def __init__(self, output_dir: Optional[Path] = None):
         self.output_dir = Path(output_dir or settings.INPUT_DIR)
         self.output_dir.mkdir(parents=True, exist_ok=True)
@@ -102,9 +108,40 @@ class VideoDownloader:
                 return {"id": uuid.uuid4().hex, "file_path": str(local_path.resolve()),
                         "title": local_path.stem, "duration": None, "is_local": True}
         clean_url = self.normalize_url(url_or_path)
+        source_key = (str(self.output_dir.resolve()), hashlib.sha256(clean_url.encode("utf-8")).hexdigest())
+        with self._active_guard:
+            if source_key in self._active_sources:
+                raise VideoDownloadError("Video này đang được tải. Xem tiến độ trong tab Tác vụ.")
+            self._active_sources.add(source_key)
+        try:
+            return self._download_remote(clean_url, source_key[1], progress_callback, cancel_check)
+        finally:
+            with self._active_guard:
+                self._active_sources.discard(source_key)
+
+    def _download_remote(self, clean_url, source_hash, progress_callback, cancel_check):
         host = urlsplit(clean_url).hostname
         task_id = uuid.uuid4().hex
         prefix = self.output_dir.resolve() / f"video_{task_id}"
+        resume_index = prefix.parent / f".download-{source_hash}.json" if is_douyin_url(clean_url) else None
+        resumable = False
+        resume_candidate = False
+        if resume_index and resume_index.is_file() and not resume_index.is_symlink():
+            try:
+                if resume_index.stat().st_size > 512:
+                    raise ValueError
+                name = json.loads(resume_index.read_text(encoding="utf-8")).get("prefix", "")
+                if not isinstance(name, str) or not re.fullmatch(r"video_[a-f0-9]{32}", name):
+                    raise ValueError
+                candidate = prefix.parent / name
+                partial = candidate.with_suffix(".mp4.part")
+                checkpoint = candidate.with_suffix(".resume.json")
+                if (partial.is_file() and not partial.is_symlink() and partial.stat().st_size > 0
+                        and checkpoint.is_file() and not checkpoint.is_symlink()
+                        and not candidate.with_suffix(".mp4").exists()):
+                    prefix, task_id, resume_candidate = candidate, name[6:], True
+            except (OSError, ValueError, AttributeError):
+                pass
         worker = Path(__file__).with_name("download_worker.py")
         process = None
         reader = None
@@ -113,6 +150,9 @@ class VideoDownloader:
         phase = "resolve"
         last_activity = time.monotonic()
         last_marker = None
+        last_log_time = 0
+        last_log_stage = None
+        run_id = current_execution_context().run_id
 
         def emit(data):
             if progress_callback:
@@ -122,7 +162,8 @@ class VideoDownloader:
             if cancel_check and cancel_check():
                 raise VideoDownloadError("Đã hủy tải video.")
             emit({"phase": "resolve", "stage": f"Đang kết nối {host} và kiểm tra video…", "progress_pct": None})
-            logger.info("Bắt đầu tải video từ %s; đang kiểm tra link.", host)
+            logger.info("[%s] run_id=%s %s từ %s; đang kiểm tra link.", task_id[:8], run_id,
+                        "Kiểm tra phần video đã giữ" if resume_candidate else "Bắt đầu tải video", host)
             kwargs = {"creationflags": subprocess.CREATE_NO_WINDOW} if os.name == "nt" else {"start_new_session": True}
             process = subprocess.Popen([sys.executable, "-B", "-u", str(worker), clean_url, str(prefix)],
                                        stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
@@ -160,7 +201,29 @@ class VideoDownloader:
                         last_activity = time.monotonic()
                         last_marker = marker
                     phase = event.get("phase", phase)
+                    stage = event.get("stage", "")
+                    now = time.monotonic()
+                    if stage != last_log_stage or now - last_log_time >= 10:
+                        downloaded = event.get("downloaded_bytes") or 0
+                        total = event.get("total_bytes") or 0
+                        logger.info("[%s] run_id=%s %s%s", task_id[:8], run_id, stage,
+                                    f" · {downloaded / 1024**2:.1f}/{total / 1024**2:.1f} MB" if total else "")
+                        last_log_time, last_log_stage = now, stage
                     emit(event)
+                elif kind == "diagnostic":
+                    # Only typed codes/counts, never raw exception strings or CDN URLs.
+                    code = event.get("code", event.get("reason", "unknown"))
+                    code = code if isinstance(code, str) and re.fullmatch(r"[a-zA-Z0-9_-]{1,48}", code) else "unknown"
+                    error_type = event.get("error_type")
+                    allowed_types = {"TimeoutError", "ConnectionResetError", "IncompleteRead", "RemoteDisconnected",
+                                     "SSLError", "TransportError", "HTTPError", "OSError", "DouyinResolveError", "MediaResponseError"}
+                    error_type = error_type if isinstance(error_type, str) and error_type in allowed_types else "unknown"
+                    status, count, attempt = event.get("status_code"), event.get("downloaded_bytes"), event.get("attempt")
+                    status = status if type(status) is int and 100 <= status <= 599 else "unknown"
+                    count = count if type(count) is int and count >= 0 else "unknown"
+                    attempt = attempt if type(attempt) is int and 1 <= attempt <= 100 else "unknown"
+                    logger.warning("[%s] run_id=%s Tải video: %s; loại lỗi %s; HTTP %s; đã nhận %s byte; lần thử %s.",
+                                   task_id[:8], run_id, code, error_type, status, count, attempt)
                 elif kind == "result":
                     result = event["result"]
                     output = Path(result["file_path"]).resolve()
@@ -174,6 +237,7 @@ class VideoDownloader:
                     logger.info("Đã tải video thành công (%s).", task_id[:8])
                     return result
                 elif kind == "error":
+                    resumable = event.get("resumable") is True
                     raise VideoDownloadError(event.get("message") or friendly_download_error("", host))
                 elif kind == "eof":
                     raise VideoDownloadError("Trình tải video đã dừng trước khi hoàn tất. Hãy thử lại.")
@@ -189,8 +253,29 @@ class VideoDownloader:
                     reader.join(timeout=2)
                 if process and process.stdout and not (reader and reader.is_alive()):
                     process.stdout.close()
-                if not succeeded:
+                retained = False
+                if not succeeded and resumable and resume_index and not (cancel_check and cancel_check()):
+                    partial, checkpoint = prefix.with_suffix(".mp4.part"), prefix.with_suffix(".resume.json")
+                    if (partial.is_file() and not partial.is_symlink() and partial.stat().st_size > 0
+                            and checkpoint.is_file() and not checkpoint.is_symlink()
+                            and not resume_index.is_symlink()):
+                        try:
+                            resume_index.write_text(json.dumps({"prefix": prefix.name}), encoding="utf-8")
+                            retained = True
+                            logger.info("[%s] Đã giữ %.1f MB để lần Bắt đầu dịch tiếp theo tải tiếp.",
+                                        task_id[:8], partial.stat().st_size / 1024**2)
+                        except OSError:
+                            logger.warning("[%s] Không lưu được thông tin tải tiếp.", task_id[:8])
+                if not retained and resume_index and not resume_index.is_symlink():
+                    try:
+                        resume_index.unlink(missing_ok=True)
+                    except OSError:
+                        logger.warning("[%s] Không xóa được chỉ mục tải tiếp.", task_id[:8])
+                if not succeeded and not retained:
                     # Only this call's random basename, including .part/merge files.
                     for artifact in prefix.parent.glob(prefix.name + ".*"):
                         if artifact.is_file():
-                            artifact.unlink(missing_ok=True)
+                            try:
+                                artifact.unlink(missing_ok=True)
+                            except OSError:
+                                logger.warning("[%s] Không xóa được tệp tải dở.", task_id[:8])

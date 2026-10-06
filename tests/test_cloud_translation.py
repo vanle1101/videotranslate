@@ -2,6 +2,7 @@
 
 import json
 import unittest
+from types import SimpleNamespace
 from unittest.mock import patch
 
 from core.engines.translation.gemini_client import GeminiError
@@ -120,6 +121,37 @@ class CloudTranslationTests(unittest.TestCase):
             info = SemanticTranslator("muse").get_info()
         self.assertEqual(info["provider"], "muse")
         self.assertTrue(info["has_llm_key"])
+
+    def test_legacy_provider_invalid_single_response_uses_valid_fallback_not_source(self):
+        for provider in ("deepseek", "openai"):
+            translator = SemanticTranslator(provider)
+            for content in ({}, {**self.translation, "final_vi": "你好。"},
+                            {**self.translation, "natural_vi": None}):
+                with self.subTest(provider=provider, content=content), \
+                        patch.object(translator, "_api_keys", return_value=(None, "test" if provider == "deepseek" else None, "test" if provider == "openai" else None)), \
+                        patch("openai.OpenAI") as client, \
+                        patch.object(translator, "_fallback_translate", return_value="Chào bạn") as fallback:
+                    client.return_value.chat.completions.create.return_value = SimpleNamespace(
+                        choices=[SimpleNamespace(message=SimpleNamespace(content=json.dumps(content)))])
+                    result = translator.translate_single_segment("你好", 2)
+                assert result["final_vi"] == "Chào bạn"
+                fallback.assert_called_once_with("你好")
+
+    def test_legacy_batch_rejects_invalid_tiers_and_preserves_numeric_string_ids(self):
+        translator = SemanticTranslator("deepseek")
+        for result_row in ({"id": 2, **self.translation},
+                           {"id": 2, **self.translation, "literal_vi": "你好。"}):
+            with self.subTest(result_row=result_row), \
+                    patch.object(translator, "_api_keys", return_value=(None, "test", None)), \
+                    patch("openai.OpenAI") as client, \
+                    patch.object(translator, "_fallback_translate", return_value="Chào bạn") as fallback:
+                client.return_value.chat.completions.create.return_value = SimpleNamespace(
+                    choices=[SimpleNamespace(message=SimpleNamespace(content=json.dumps({"results": [result_row]})))])
+                result = translator.translate([self.segment])[0]
+            assert result["final_vi"] == "Chào bạn"
+            assert result["id"] == "2" and result["speaker"] == "A"
+            assert "你" not in result["literal_vi"]
+            assert fallback.call_count == (1 if "你" in result_row["literal_vi"] else 0)
 
 
 if __name__ == "__main__":

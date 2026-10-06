@@ -4,6 +4,7 @@ import os
 import threading
 import unittest
 from unittest.mock import Mock, patch
+from types import SimpleNamespace
 
 from google.genai.errors import ClientError
 
@@ -14,7 +15,7 @@ class GeminiConnectionTests(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
         self.test_key = "fixture-private-key-do-not-return"
         self.client = Mock()
-        self.client.models.generate_content.return_value = Mock(text=self.test_key)
+        self.client.models.generate_content.return_value = SimpleNamespace(text=self.test_key, candidates=[])
         self.patches = [
             patch.object(main.settings, "GEMINI_API_KEY", self.test_key),
             patch.object(main.settings, "GEMINI_MODEL", "gemini-fixture"),
@@ -47,12 +48,23 @@ class GeminiConnectionTests(unittest.IsolatedAsyncioTestCase):
 
         def generate(**kwargs):
             request_threads.append(threading.get_ident())
+            return SimpleNamespace(text="OK", candidates=[])
 
         self.client.models.generate_content.side_effect = generate
         result = await main.test_gemini_connection()
         self.assertTrue(result["ok"])
         self.assertEqual(len(request_threads), 1)
         self.assertNotEqual(request_threads[0], event_loop_thread)
+
+    async def test_unusable_provider_response_is_not_connection_success(self):
+        for response in (None, SimpleNamespace(text="", candidates=[]),
+                         SimpleNamespace(text="partial", candidates=[SimpleNamespace(finish_reason="MAX_TOKENS")]),
+                         SimpleNamespace(text="blocked", candidates=[SimpleNamespace(finish_reason="SAFETY")])):
+            with self.subTest(response=response):
+                self.client.models.generate_content.return_value = response
+                result = await main.test_gemini_connection()
+                self.assertFalse(result["ok"])
+                self.assertEqual(result["error_code"], "invalid_response")
 
     async def test_missing_key_does_not_create_client(self):
         with patch.object(main.settings, "GEMINI_API_KEY", ""), \

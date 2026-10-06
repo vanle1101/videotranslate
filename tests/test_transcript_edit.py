@@ -854,6 +854,42 @@ def test_automatic_review_only_regenerates_changed_audio_and_preserves_uncertain
     assert not session.is_running and not session.is_editing
 
 
+def test_review_removes_old_placeholder_audio_without_claiming_source_silence(session, monkeypatch):
+    from core.translation_review import AutomaticTranslationReviewer
+    monkeypatch.setattr(settings, "LLM_PROVIDER", "opencode")
+    segment = session.segments[0]
+    segment.final_vi = "nghe chưa rõ"
+    segment.needs_review = True
+    segment.subtitle_cues = [{"start": 2, "end": 5, "text": segment.final_vi}]
+    old_audio = Path(segment.audio_path)
+    session.visual_translation = True
+    session.screen_texts = [{"start": 2, "end": 5, "kind": "subtitle", "text_vi": "Chữ nguồn",
+                             "bbox": [.1, .8, .8, .1]}]
+    screens_before = [dict(row) for row in session.screen_texts]
+    row = dict(segment.to_dict(), final_vi="", literal_vi="", natural_vi="", needs_review=True,
+               review_reason="Nguồn chưa đủ rõ", verification={"status": "unresolved"})
+    monkeypatch.setattr(AutomaticTranslationReviewer, "review", lambda *a, **kw: {
+        "segments": {0: row}, "summary": {"checked": 1, "unresolved": 1}})
+
+    async def run():
+        await session.start_automatic_review()
+        await session.review_task
+        async with client() as api:
+            assert (await api.get("/api/streaming/audio/transcript-test/0")).status_code == 404
+            assert (await api.patch(route(session), json={"final_vi": ""})).status_code == 422
+
+    asyncio.run(run())
+    assert not old_audio.exists()
+    assert segment.final_vi == "" and segment.text_zh == "原文"
+    assert segment.needs_review and not segment.confirmed_silence
+    assert segment.verification == {"status": "unresolved"}
+    assert segment.audio_path is None and segment.audio_url is None
+    assert segment.subtitle_cues == [] and segment.subtitle_timing_source == "unresolved"
+    assert segment.speech_start is None and segment.speech_end is None
+    assert segment.revision == 1 and session.screen_texts == screens_before
+    session.tts_engine.synthesize.assert_not_called()
+
+
 def test_automatic_review_reserves_task_blocks_edit_export_and_keeps_old_media_on_failure(session, monkeypatch):
     from core.translation_review import AutomaticTranslationReviewer
     monkeypatch.setattr(settings, "LLM_PROVIDER", "opencode")
@@ -913,6 +949,26 @@ def test_failed_edit_preserves_current_result_reference(session):
     assert session.output_video_url == "/api/outputs/current.mp4"
     assert session.auto_export_signature == "current revision"
     assert not any(event == "result_invalidated" for event, _ in session.events)
+
+
+def test_incomplete_second_review_is_not_completed_and_blocks_export(session, monkeypatch):
+    from core.translation_review import AutomaticTranslationReviewer
+    monkeypatch.setattr(settings, "LLM_PROVIDER", "opencode")
+    row = dict(session.segments[0].to_dict(), needs_review=True,
+               verification={"status": "incomplete"}, review_reason="Second pass unavailable")
+    monkeypatch.setattr(AutomaticTranslationReviewer, "review", lambda *a, **kw: {
+        "segments": {0: row}, "summary": {"status": "incomplete", "checked": 1, "incomplete": 1}})
+
+    async def run():
+        await session.start_automatic_review()
+        await session.review_task
+        progress = session.get_progress()
+        assert progress["review_summary"]["status"] == "incomplete"
+        assert progress["status"] == "FAILED" and progress["can_review"]
+        async with client() as api:
+            result = await api.post('/api/streaming/export-hq', json={"task_id": session.task_id})
+            assert result.status_code == 409
+    asyncio.run(run())
 
 
 def test_rechecking_invalidates_previous_result_even_when_service_fails(session, monkeypatch):

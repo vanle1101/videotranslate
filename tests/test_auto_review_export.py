@@ -336,3 +336,49 @@ def test_cancelling_export_coroutine_waits_for_its_real_worker(session):
         assert main.active_export_tasks[f"export_{item.task_id}"]["status"] == "CANCELLED"
 
     asyncio.run(run())
+
+
+@pytest.mark.parametrize("cancel_before_commit", [True, False])
+def test_export_publication_and_cancel_share_one_commit_boundary(session, tmp_path, cancel_before_commit):
+    item, exporter = session
+    rendered, final = tmp_path / "rendered.mp4", tmp_path / "reviewed.mp4"
+    rendered.write_bytes(b"validated new media")
+    final.write_bytes(b"previous output")
+    ready, release = threading.Event(), threading.Event()
+
+    def render(**kwargs):
+        if not cancel_before_commit:
+            kwargs["publish_callback"](rendered, final)
+        ready.set()
+        assert release.wait(5)
+        if cancel_before_commit:
+            kwargs["publish_callback"](rendered, final)
+        return {"output_filename": final.name, "elapsed_seconds": 1}
+
+    exporter.export.side_effect = render
+
+    async def run():
+        task = asyncio.create_task(main.export_hq(main.ExportHQRequest(task_id=item.task_id)))
+        try:
+            assert await asyncio.to_thread(ready.wait, 5)
+            if cancel_before_commit:
+                await main.cancel_export_hq(item.task_id)
+                release.set()
+                with pytest.raises(HTTPException):
+                    await task
+                assert final.read_bytes() == b"previous output"
+                assert main.active_export_tasks[f"export_{item.task_id}"]["status"] == "CANCELLED"
+            else:
+                with pytest.raises(HTTPException) as error:
+                    await main.cancel_export_hq(item.task_id)
+                assert error.value.status_code == 409
+                task.cancel()
+                release.set()
+                result = await task
+                assert result["status"] == "ok"
+                assert final.read_bytes() == b"validated new media"
+                assert main.active_export_tasks[f"export_{item.task_id}"]["status"] == "COMPLETED"
+        finally:
+            release.set()
+
+    asyncio.run(run())

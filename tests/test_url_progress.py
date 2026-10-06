@@ -95,6 +95,33 @@ def test_download_failure_is_persisted_for_task_and_late_websocket(isolated, mon
         assert error["type"] == "error" and error["message"] == session.error
 
 
+def test_stopping_native_worker_stays_visible_until_it_acknowledges(isolated):
+    entered, release = threading.Event(), threading.Event()
+
+    async def run():
+        session = main.create_streaming_session("slow-native", isolated / "input.mp4")
+        session.is_running = True
+        def native_work():
+            entered.set()
+            assert release.wait(5)
+        session.start_task = asyncio.create_task(session._run_blocking(native_work))
+        await wait_for(entered.is_set)
+        stopping = asyncio.create_task(main.stop_task(session.task_id))
+        try:
+            await wait_for(lambda: session.is_stopped)
+            tasks = (await main.list_tasks())["tasks"]
+            current = next(row for row in tasks if row["task_id"] == session.task_id)
+            assert current["status"] == "CANCELLING"
+            assert not current["can_stop"] and not stopping.done()
+        finally:
+            release.set()
+        await stopping
+        tasks = (await main.list_tasks())["tasks"]
+        assert next(row for row in tasks if row["task_id"] == session.task_id)["status"] == "STOPPED"
+
+    asyncio.run(run())
+
+
 def test_late_websocket_replays_source_and_unknown_preparation_percentage(isolated):
     session = main.create_streaming_session("source-test", isolated / "download.mp4")
     session.source_video_url = "/api/inputs/download.mp4"
