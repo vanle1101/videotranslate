@@ -608,6 +608,8 @@ async def start_streaming_upload(
 
     asyncio.create_task(run_session(session))
 
+    session.source_video_url = f"/api/inputs/{saved_path.name}"
+
     return {
         "task_id": task_id,
         "video_url": f"/api/inputs/{saved_path.name}",
@@ -621,6 +623,41 @@ async def get_segment_audio(task_id: str, seg_id: int):
     if not wav_path.exists():
         raise HTTPException(status_code=404, detail="Segment audio not found or not yet synthesized")
     return FileResponse(wav_path, media_type="audio/wav", headers={"Cache-Control": "no-store"})
+
+
+@app.get("/api/streaming/{task_id}")
+async def streaming_snapshot(task_id: str):
+    session = get_streaming_session(task_id)
+    if not session:
+        raise HTTPException(status_code=404, detail="Phiên dịch không còn tồn tại.")
+    return {
+        "task_id": task_id, "initialized": session.initialized,
+        "video_url": session.source_video_url,
+        "progress": session.get_progress(), "telemetry": session.get_telemetry(),
+        "duration": session.total_duration, "initial_buffer_seconds": session.initial_buffer_seconds,
+        "segments": [session.segment_snapshot(segment) for segment in session.segments.values()],
+        "segments_count": len(session.segments), "screen_texts": session.screen_texts,
+        "bgm_url": session.bgm_url, "visual_translation": session.visual_translation,
+        "translation_sources": session.translation_sources, "warnings": list(session.warnings),
+        "asr_engine": session.source_processing_label(),
+        "vocal_removal_engine": session.vocal_suppressor.name,
+        "suppression_level": f"{session.vocal_suppressor.suppression_level_db:.1f} dB",
+        "suppression_rtf": session.suppression_stats.get("throughput_rtf", "0.0x"),
+    }
+
+
+@app.post("/api/streaming/{task_id}/retry")
+async def retry_streaming_synthesis(task_id: str):
+    session = get_streaming_session(task_id)
+    if not session:
+        raise HTTPException(status_code=404, detail="Phiên dịch không còn tồn tại.")
+    if active_export_tasks.get(f"export_{task_id}", {}).get("status") in {"RUNNING", "CANCELLING"}:
+        raise HTTPException(status_code=409, detail="Hãy chờ tác vụ xuất video kết thúc trước khi thử lại.")
+    try:
+        progress = await session.retry_failed_synthesis()
+    except SegmentEditConflict as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from None
+    return {"task_id": task_id, "status": "retrying", "progress": progress}
 
 @app.patch("/api/streaming/{task_id}/segments/{segment_id}")
 async def edit_streaming_segment(task_id: str, segment_id: int, req: SegmentEditRequest):
@@ -806,11 +843,12 @@ async def start_streaming_local_file(req: StreamLocalFileRequest):
         visual_translation=req.visual_translation,
         event_callback=lambda event_type, data: broadcast_session_event(task_id, event_type, data)
     )
+    session.source_video_url = f"/api/local-file?path={quote(p.as_posix(), safe='')}"
     asyncio.create_task(run_session(session))
 
     return {
         "task_id": task_id,
-        "video_url": f"/api/local-file?path={quote(p.as_posix(), safe='')}",
+        "video_url": session.source_video_url,
         "initial_buffer_seconds": session.initial_buffer_seconds,
         "status": "started"
     }

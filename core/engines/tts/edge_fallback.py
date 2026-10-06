@@ -93,7 +93,7 @@ class EdgeTTSFallbackEngine(TTSEngine):
                                 "Edge-TTS chưa trả về âm thanh sau 3 lần thử. "
                                 "Hãy thử lại hoặc chọn giọng đọc khác."
                             ) from None
-                        await asyncio.sleep(0.5 * (attempt + 1))
+                        await asyncio.sleep((3.0, 8.0)[attempt])
 
             try:
                 asyncio.get_running_loop()

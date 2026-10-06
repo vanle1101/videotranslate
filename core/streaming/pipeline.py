@@ -42,6 +42,8 @@ class SegmentItem:
         self.audio_path: Optional[str] = None
         self.audio_url: Optional[str] = None
         self.error: Optional[str] = None
+        self.failed_stage: Optional[str] = None
+        self._retry_synthesis = False
         self.revision = 0
         self.source_method = "audio"
         self.translation_provider: Optional[str] = None
@@ -72,6 +74,7 @@ class SegmentItem:
             "speed_ratio": self.speed_ratio,
             "audio_url": self.audio_url,
             "error": self.error,
+            "failed_stage": self.failed_stage,
             "revision": self.revision,
             "source_method": self.source_method,
             "translation_provider": self.translation_provider,
@@ -182,6 +185,61 @@ class StreamingPipelineSession:
     @property
     def is_editing(self):
         return bool(self.edit_tasks)
+
+    @property
+    def can_retry(self):
+        failed = [segment for segment in self.segments.values() if segment.status == "FAILED"]
+        return bool(self.initialized and not self.is_stopped and not self.is_running
+                    and not self.is_editing and self.error and failed
+                    and all(segment.failed_stage in ("TTS", "ALIGNING") for segment in failed)
+                    and all(segment.status in ("READY", "PLAYED", "FAILED", "WAITING")
+                            for segment in self.segments.values()))
+
+    async def retry_failed_synthesis(self):
+        """Resume saved translations after a TTS failure, retaining ready audio."""
+        if (not self.can_retry or (self.worker_task and not self.worker_task.done())
+                or (self.start_task and not self.start_task.done())):
+            raise SegmentEditConflict("Chỉ thử lại khi phiên đã dừng do lỗi tạo giọng hoặc khớp thời lượng.")
+        # There is no await before reservation and worker creation, so concurrent
+        # API requests cannot start two workers for the same saved session.
+        self.is_running = True
+        self.is_paused = False
+        self.pause_event.set()
+        self.error = None
+        while not self.queue.empty():
+            self.queue.get_nowait()
+            self.queue.task_done()
+        retried = []
+        for segment in self.segments.values():
+            if segment.status == "FAILED":
+                segment.status = "WAITING"
+                segment.error = None
+                segment._retry_synthesis = True
+                retried.append(segment)
+            if segment.status == "WAITING":
+                self.queue.put_nowait((segment.start, segment.id))
+        ready = sum(segment.status in ("READY", "PLAYED") for segment in self.segments.values())
+        self.progress = {"phase": "tts", "stage": "Đang thử lại tạo giọng, giữ nguyên các câu đã xong…",
+                         "progress_pct": round(ready * 100 / len(self.segments), 1), "status": "RUNNING",
+                         "completed_segments": ready, "total_segments": len(self.segments)}
+
+        async def resumed_worker():
+            try:
+                await self.emit("progress", self.get_progress())
+                for segment in retried:
+                    await self.emit("segment_update", segment.to_dict())
+            except asyncio.CancelledError:
+                self.is_stopped = True
+                self.is_running = False
+                self._release_runtime()
+                raise
+            except Exception:
+                logging.getLogger("errors").warning("[%s] Không gửi được trạng thái thử lại tạo giọng", self.task_id)
+            await self._worker_loop()
+
+        self.worker_task = asyncio.create_task(resumed_worker())
+        self.worker_task.add_done_callback(lambda task: self._release_runtime() if task.cancelled() else None)
+        return self.get_progress()
 
     async def edit_segment(self, segment_id: int, text: str, *, confirm_silence: bool = False):
         """Publish text and fitted audio together only after synthesis succeeds."""
@@ -341,6 +399,7 @@ class StreamingPipelineSession:
     def get_progress(self) -> Dict[str, Any]:
         snapshot = dict(self.progress)
         snapshot.update(self._review_metadata())
+        snapshot["can_retry"] = self.can_retry
         snapshot["can_pause"] = bool(self.initialized and self.is_running and not self.is_paused and not self.is_stopped and not self.error)
         if self.is_stopped:
             snapshot.update(status="STOPPED", phase="stopped", stage="Đã dừng bởi người dùng")
@@ -789,6 +848,7 @@ class StreamingPipelineSession:
             "warnings": list(self.warnings),
             "translation_sources": list(self.translation_sources),
             **self._review_metadata(),
+            "can_retry": self.can_retry,
             "vocal_removal_engine": self.vocal_suppressor.name,
             "suppression_level": f"{self.vocal_suppressor.suppression_level_db:.1f} dB",
             "suppression_rtf": self.suppression_stats.get("throughput_rtf", "0.0x")
@@ -861,7 +921,10 @@ class StreamingPipelineSession:
                 pass
 
         raw_audio = getattr(self, "raw_audio_16k", None)
-        if raw_audio:
+        needs_remaining_asr = (self.can_retry and not self.visual_translation and any(
+            segment.status == "WAITING" and not getattr(segment, "asr_pretranscribed", False)
+            for segment in self.segments.values()))
+        if raw_audio and not needs_remaining_asr:
             remove_generated(raw_audio)
         if self.is_stopped and self._owns_cache:
             # A stopped session is removed from the registry, so its generated
@@ -959,6 +1022,8 @@ class StreamingPipelineSession:
                 # An empty uncertain draft has nothing defensible to read.
                 # Keep its review flag, but allow playback past its time span.
                 seg.status = "READY"
+                seg.failed_stage = None
+                seg._retry_synthesis = False
                 self.total_processed_duration += seg.duration
                 await self.emit("segment_update", seg.to_dict())
                 await self._update_ready()
@@ -994,6 +1059,8 @@ class StreamingPipelineSession:
                 setattr(seg, key, value)
             seg.audio_url = f"/api/streaming/audio/{self.task_id}/{seg.id}"
             seg.status = "READY"
+            seg.failed_stage = None
+            seg._retry_synthesis = False
             self.total_processed_duration += seg.duration
             await self.emit("segment_update", seg.to_dict())
             await self._update_ready()
@@ -1020,7 +1087,10 @@ class StreamingPipelineSession:
                 seg = self.segments.get(seg_id)
                 try:
                     if seg and seg.status not in ("READY", "PLAYED"):
-                        await self._process_segment(seg)
+                        if seg._retry_synthesis:
+                            await self._synthesize_segment(seg)
+                        else:
+                            await self._process_segment(seg)
                 except Exception as exc:
                     self.error = str(exc)
                     # SDK exception strings can contain prompts or credentials.
@@ -1030,6 +1100,7 @@ class StreamingPipelineSession:
                         seg.status if seg else "UNKNOWN", type(exc).__name__,
                     )
                     if seg:
+                        seg.failed_stage = seg.status
                         seg.status = "FAILED"
                         seg.error = self.error
                         await self.emit("segment_update", seg.to_dict())

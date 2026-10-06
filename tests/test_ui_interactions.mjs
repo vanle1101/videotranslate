@@ -55,7 +55,7 @@ function studio(cookieReply = { configured: false, count: 0, message: '' }, voic
     async click() { await this.emit('click'); }
     focus() { document.activeElement = this; }
     setSelectionRange(start, end) { this.selectionStart = start; this.selectionEnd = end; }
-    load() { this.currentTime = 0; }
+    load() { this.currentTime = 0; this.loadCount = (this.loadCount || 0) + 1; }
     pause() { this.paused = true; this.emit('pause'); }
     async play() { this.paused = false; this.playCount++; await this.emit('play'); }
     async requestFullscreen() { this.fullscreenCount = (this.fullscreenCount || 0) + 1; document.fullscreenElement = this; }
@@ -1786,4 +1786,155 @@ test('reconnect snapshot replaces an edited audio revision at the current paused
   await video.play();
   assert.equal(revised.paused, false);
   assert.equal(original.paused, true);
+});
+
+
+test('retry resumes failed speech without starting or translating the video again', async () => {
+  const ui = studio(); await ui.start();
+  const socket = ui.sockets.at(-1);
+  const video = ui.el('video-player');
+  socket.receive({type:'ready_to_play'});
+  video.currentTime = 4.5;
+  socket.receive({type:'progress',status:'FAILED',can_retry:true,stage:'TTS unavailable',progress_pct:36.4});
+  assert.equal(ui.el('btn-retry-worker').classList.contains('hidden'), false);
+  const before = ui.requests.filter(r=>r.url.includes('/start-')).length;
+  ui.replies.set('/api/streaming/fixture/retry', {task_id:'fixture',status:'retrying',progress:{status:'RUNNING',phase:'tts',can_retry:false,progress_pct:36.4}});
+  await ui.el('btn-retry-worker').click();
+  assert.equal(ui.requests.filter(r=>r.url.includes('/start-')).length,before);
+  assert.equal(ui.requests.find(r=>r.url.endsWith('/retry')).options.method,'POST');
+  assert.equal(ui.el('btn-retry-worker').classList.contains('hidden'),true);
+  assert.equal(ui.sockets.length,1);
+  assert.equal(video.currentTime,4.5);
+  assert.equal(video.paused,false);
+  assertWorkerSourceBusy(ui,true);
+  assert.equal(ui.el('task-progress').dataset.status,'RUNNING');
+});
+
+function assertWorkerSourceBusy(ui, busy) {
+  assert.equal(ui.el('btn-start').classList.contains('hidden'),busy);
+  assert.equal(ui.el('video-url').disabled,busy);
+  assert.equal(ui.el('video-file').disabled,busy);
+  assert.equal(ui.el('drop-zone').getAttribute('aria-disabled'),String(busy));
+  assert.equal(ui.el('voice-select').disabled,busy);
+  assert.equal(ui.el('visual-translation').disabled,busy);
+  for (const row of ui.el('voice-list').querySelectorAll('.voice-row')) {
+    if (row.dataset.voiceId === 'vieneu:Unavailable') continue;
+    assert.equal(row.querySelector('.voice-choose-button').disabled,busy);
+    if (busy) assert.equal(row.querySelector('.voice-preview-button').disabled,true);
+  }
+}
+
+test('retry locks source and voice during its request and restores them on rejection', async () => {
+  const ui = studio(undefined,{catalog:voiceCatalog}); await ui.start();
+  ui.sockets.at(-1).receive({type:'progress',status:'FAILED',can_retry:true,stage:'TTS unavailable'});
+  let finish;
+  ui.replies.set('/api/streaming/fixture/retry',()=>new Promise(resolve=>{finish=resolve;}));
+  const pending = ui.el('btn-retry-worker').click();
+  assertWorkerSourceBusy(ui,true);
+  const starts = ui.requests.filter(item=>item.url.includes('/start-')).length;
+  await ui.el('btn-start').click();
+  ui.window.loadDroppedLocalVideo('D:/another.mp4');
+  assert.equal(ui.window.currentLocalFilePath,'D:/clip.mp4');
+  assert.equal(ui.requests.filter(item=>item.url.includes('/start-')).length,starts);
+  // A task poll during the pending request must not unlock the controls.
+  ui.sockets.at(-1).receive({type:'progress',status:'FAILED',can_retry:true});
+  assertWorkerSourceBusy(ui,true);
+  finish({ok:false,json:async()=>({detail:'Đang lưu câu thoại.'})});
+  await pending;
+  assertWorkerSourceBusy(ui,false);
+  assert.equal(ui.el('btn-retry-worker').disabled,false);
+  assert.equal(ui.alerts.at(-1),'Đang lưu câu thoại.');
+});
+
+test('retry reconnect preserves compatible preview, playhead and existing background audio', async () => {
+  const ui = studio(); await ui.start();
+  const video = ui.el('video-player');
+  const oldSocket = ui.sockets.at(-1);
+  ui.replies.set('/api/preview',{status:'READY',video_url:'/api/preview/compatible.mp4'});
+  video.error = {code:4};
+  await video.emit('error'); await ui.flush();
+  await video.emit('loadedmetadata'); await video.emit('canplay');
+  video.currentTime = 4.5;
+  oldSocket.receive({type:'progress',status:'FAILED',can_retry:true,stage:'TTS unavailable'});
+  oldSocket.close();
+  ui.replies.set('/api/streaming/fixture/retry',{progress:{status:'RUNNING',can_retry:false}});
+  const loads = video.loadCount;
+  const bgm = ui.audio.find(item=>item.src==='/bgm.m4a');
+  await ui.el('btn-retry-worker').click();
+  assert.equal(ui.sockets.length,2);
+  const socket = ui.sockets.at(-1);
+  socket.receive({type:'source_ready',video_url:'/fixture.mp4'});
+  socket.receive({type:'init',duration:10,segments_count:1,bgm_url:'/bgm.m4a',segments:[
+    {id:0,start:0,end:10,duration:10,status:'READY',audio_url:'/dub.wav',final_vi:'Xin chào'}]});
+  assert.equal(video.src,'/api/preview/compatible.mp4');
+  assert.equal(video.currentTime,4.5);
+  assert.equal(video.loadCount,loads);
+  assert.equal(ui.audio.filter(item=>item.src==='/bgm.m4a').length,1);
+  assert.ok(ui.audio.includes(bgm));
+});
+
+test('late retry response cannot overwrite a terminal result already delivered by its live socket', async () => {
+  for (const status of ['COMPLETED','FAILED']) {
+    const ui = studio(); await ui.start();
+    const socket = ui.sockets.at(-1);
+    socket.receive({type:'progress',status:'FAILED',can_retry:true});
+    let finish;
+    ui.replies.set('/api/streaming/fixture/retry',()=>new Promise(resolve=>{finish=resolve;}));
+    const pending = ui.el('btn-retry-worker').click();
+    socket.receive({type:'progress',status:'RUNNING',can_retry:false});
+    socket.receive({type:'progress',status,can_retry:status==='FAILED',progress_pct:100});
+    finish({ok:true,json:async()=>({progress:{status:'RUNNING',can_retry:false}})});
+    await pending;
+    assert.equal(ui.el('task-progress').dataset.status,status);
+    assertWorkerSourceBusy(ui,false);
+  }
+});
+
+test('an old failure snapshot during retry does not suppress its successful response', async () => {
+  const ui = studio(); await ui.start();
+  const socket = ui.sockets.at(-1);
+  socket.receive({type:'progress',status:'FAILED',can_retry:true});
+  let finish;
+  ui.replies.set('/api/streaming/fixture/retry',()=>new Promise(resolve=>{finish=resolve;}));
+  const pending = ui.el('btn-retry-worker').click();
+  socket.receive({type:'progress',status:'FAILED',can_retry:true});
+  finish({ok:true,json:async()=>({progress:{status:'RUNNING',can_retry:false}})});
+  await pending;
+  assert.equal(ui.el('task-progress').dataset.status,'RUNNING');
+  assertWorkerSourceBusy(ui,true);
+});
+
+test('attach restores an existing task without source download or model requests', async () => {
+  const ui = studio(); await ui.flush();
+  ui.replies.set('/api/streaming/recovered', {video_url:'/kept.mp4',progress:{status:'FAILED',can_retry:true}});
+  assert.equal(await ui.window.studioAttachTask('recovered'),true);
+  assert.equal(ui.el('video-player').src,'/kept.mp4');
+  assert.equal(ui.requests.filter(r=>r.url.includes('/start-')).length,0);
+  assert.equal(ui.sockets.length,1);
+  assert.equal(ui.el('btn-retry-worker').classList.contains('hidden'),false);
+  assertWorkerSourceBusy(ui,false);
+});
+
+test('attach locks controls while loading and keeps active sessions locked', async () => {
+  const ui = studio(undefined,{catalog:voiceCatalog}); await ui.flush();
+  let finish;
+  ui.replies.set('/api/streaming/recovered',()=>new Promise(resolve=>{finish=resolve;}));
+  const pending = ui.window.studioAttachTask('recovered');
+  assertWorkerSourceBusy(ui,true);
+  finish({ok:true,json:async()=>({video_url:'/kept.mp4',progress:{status:'RUNNING'}})});
+  assert.equal(await pending,true);
+  assertWorkerSourceBusy(ui,true);
+  const video = ui.el('video-player'); video.currentTime=3;
+  ui.sockets.at(-1).receive({type:'source_ready',video_url:'/kept.mp4'});
+  assert.equal(video.currentTime,3);
+  ui.sockets.at(-1).receive({type:'progress',status:'COMPLETED',progress_pct:100});
+  assertWorkerSourceBusy(ui,false);
+});
+
+test('failed attach restores idle source controls', async () => {
+  const ui = studio(undefined,{catalog:voiceCatalog}); await ui.flush();
+  ui.replies.set('/api/streaming/missing',{failure:true});
+  await assert.rejects(ui.window.studioAttachTask('missing'),/Phiên dịch không còn tồn tại/);
+  assertWorkerSourceBusy(ui,false);
+  assert.equal(ui.sockets.length,0);
 });

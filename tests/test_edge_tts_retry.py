@@ -32,7 +32,7 @@ def test_empty_service_responses_retry_fresh_stream_and_discard_partial_audio(tm
     assert output.read_bytes() == b"complete audio"
     assert len(attempts) == 3
     assert all(args == ("Xin chào", "vi-VN-NamMinhNeural") for args, _ in attempts)
-    assert [call.args[0] for call in sleep.await_args_list] == [0.5, 1.0]
+    assert [call.args[0] for call in sleep.await_args_list] == [3.0, 8.0]
     assert not list(tmp_path.glob("edge_tts_*"))
 
 

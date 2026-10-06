@@ -43,6 +43,7 @@ document.addEventListener("DOMContentLoaded", () => {
   const btnPauseWorker = document.getElementById("btn-pause-worker");
   const btnResumeWorker = document.getElementById("btn-resume-worker");
   const btnStopWorker = document.getElementById("btn-stop-worker");
+  const btnRetryWorker = document.getElementById("btn-retry-worker");
   const btnExportHQ = document.getElementById("btn-export-hq");
   const videoUrlStatus = document.getElementById("video-url-status");
   const taskProgress = document.getElementById("task-progress");
@@ -172,6 +173,7 @@ document.addEventListener("DOMContentLoaded", () => {
   let duckingLevel = -14;
   let previewGeneration = 0;
   let previewDescriptor = null;
+  let previewSource = null;
   let previewFallbackTried = false;
   let previewPending = false;
   let previewResumeTime = null;
@@ -179,6 +181,7 @@ document.addEventListener("DOMContentLoaded", () => {
   let translationReady = false;
   let audioPermissionNeeded = false;
   let pendingStart = null;
+  let pendingTaskAction = null;
   let currentProgress = null;
   let progressRevision = 0;
   let taskPollInFlight = false;
@@ -595,7 +598,9 @@ document.addEventListener("DOMContentLoaded", () => {
     taskPollWarning = false;
     currentProgress = { ...currentProgress, ...progress };
     const status = currentProgress.status || "RUNNING";
+    if (pendingTaskAction?.kind === "retry" && status !== "FAILED") pendingTaskAction.progressSeen = true;
     const terminal = ["COMPLETED", "FAILED", "STOPPED", "CANCELLED"].includes(status);
+    setWorkerSourceBusy(!terminal || !!pendingTaskAction);
     const pct = measuredProgress(currentProgress.progress_pct);
     updatePlayerDownloadProgress(currentProgress, pct, terminal);
     updatePlayerTaskStatus(currentProgress, terminal);
@@ -612,13 +617,14 @@ document.addEventListener("DOMContentLoaded", () => {
     else taskProgressTrack.setAttribute("aria-valuenow", String(pct));
     taskProgressBar.style.width = pct === null ? "100%" : `${pct}%`;
     taskProgressDetail.textContent = terminal
-      ? (status === "FAILED" ? "Mở Diagnostics → Errors Log để xem chi tiết, hoặc thử lại nguồn video." : status === "COMPLETED" ? "Các câu dịch đã xử lý xong. Có thể xuất video." : "Tác vụ đã dừng.")
+      ? (status === "FAILED" ? "Mở Diagnostics để xem lỗi. Nếu có nút Thử lại câu lỗi, bạn có thể tiếp tục mà không dịch lại." : status === "COMPLETED" ? (currentProgress.review_count ? "Nghe bản nháp, kiểm tra các câu được đánh dấu trước khi xuất." : "Các câu dịch đã xử lý xong. Có thể xuất video.") : "Tác vụ đã dừng.")
       : currentProgress.phase === "download" ? (pct === null ? "Đang tải video; máy chủ chưa cung cấp tổng dung lượng." : "Tiến độ tải video nguồn. Bước xử lý câu thoại sẽ có tiến độ riêng.")
       : currentProgress.phase === "visual" ? (pct === null ? "Đang đối chiếu lời nhận dạng với chữ trên hình. Đang chờ kết quả phân tích đầu tiên." : "Tiến độ thời lượng video đã đối chiếu lời nói và chữ trên hình / tổng thời lượng. Bước tạo giọng sẽ có tiến độ riêng.")
       : pct !== null ? "Tiến độ xử lý câu thoại: số câu hoàn tất / tổng số câu."
       : "Bước này chưa có số liệu phần trăm. Trạng thái sẽ cập nhật khi có kết quả.";
     btnPauseWorker.classList.toggle("hidden", !currentProgress.can_pause || terminal);
     btnResumeWorker.classList.toggle("hidden", !currentProgress.can_resume || terminal);
+    btnRetryWorker?.classList.toggle("hidden", !currentProgress.can_retry);
     btnStopWorker.classList.toggle("hidden", terminal || currentProgress.can_stop === false);
     btnStopWorker.disabled = status === "CANCELLING";
     if (!terminal && !translationReady && !previewPending) {
@@ -685,6 +691,9 @@ document.addEventListener("DOMContentLoaded", () => {
   }
 
   function setPreviewSource(source, descriptor = null) {
+    // A reconnect sends the source again. Keep the current playhead and any
+    // compatible preview already prepared for this exact task and source.
+    if (descriptor?.task_id && descriptor.task_id === previewDescriptor?.task_id && source === previewSource) return;
     const canReuse = previewFallbackTried && !previewPending && videoPlayer.readyState >= 2 &&
       videoPlayer.currentSrc?.includes("/api/preview/") && descriptor?.task_id &&
       ((previewDescriptor?.file_path && previewDescriptor.file_path === window.currentLocalFilePath) ||
@@ -692,6 +701,7 @@ document.addEventListener("DOMContentLoaded", () => {
     stopPreviewAudio();
     previewGeneration++;
     previewDescriptor = descriptor || (typeof source === "string" ? { file_path: window.currentLocalFilePath } : { file: source });
+    previewSource = source;
     previewFallbackTried = !!canReuse;
     previewPending = false;
     audioPermissionNeeded = false;
@@ -1541,7 +1551,7 @@ document.addEventListener("DOMContentLoaded", () => {
         barTotalTime.textContent = formatTime(totalVideoDuration);
         segmentsCountBadge.textContent = `${msg.segments_count} câu`;
 
-        if (msg.bgm_url) {
+        if (msg.bgm_url && (!bgmAudio || bgmUrl !== msg.bgm_url)) {
           bgmUrl = msg.bgm_url;
           if (bgmAudio) {
             bgmAudio.pause();
@@ -2124,13 +2134,17 @@ document.addEventListener("DOMContentLoaded", () => {
   });
 
   // Worker controls
-  function resetWorkerControls() {
-    if (visualTranslation) visualTranslation.disabled = false;
-    videoUrlInput.disabled = false;
-    fileInput.disabled = false;
-    dropZone.setAttribute("aria-disabled", "false");
-    btnStart.classList.remove("hidden");
+  function setWorkerSourceBusy(busy) {
+    if (visualTranslation) visualTranslation.disabled = busy;
+    videoUrlInput.disabled = busy;
+    fileInput.disabled = busy;
+    dropZone.setAttribute("aria-disabled", String(busy));
+    btnStart.classList.toggle("hidden", busy);
     updateVoiceControls();
+  }
+
+  function resetWorkerControls() {
+    setWorkerSourceBusy(!!pendingTaskAction);
     btnPauseWorker.classList.add("hidden");
     btnResumeWorker.classList.add("hidden");
     btnStopWorker.classList.add("hidden");
@@ -2171,6 +2185,63 @@ document.addEventListener("DOMContentLoaded", () => {
   btnPauseWorker.addEventListener("click", window.studioPause);
   btnResumeWorker.addEventListener("click", window.studioResume);
   btnStopWorker.addEventListener("click", window.studioStop);
+  window.studioAttachTask = async taskId => {
+    if (!/^[a-zA-Z0-9_-]{1,80}$/.test(taskId) || pendingStart || pendingTaskAction || exportingTaskId || transcriptDrafts.size || pendingTranscriptSaves) return false;
+    pendingTaskAction = {kind: "attach"};
+    stopVoicePreview();
+    setWorkerSourceBusy(true);
+    try {
+      const response = await fetch(`/api/streaming/${encodeURIComponent(taskId)}`);
+      if (!response.ok) throw new Error("Phiên dịch không còn tồn tại.");
+      const data = await response.json();
+      stopPreviewAudio();
+      if (currentWs) currentWs.close();
+      currentWs = null; currentTaskId = taskId; currentProgress = null;
+      segments = {}; resetScreenTexts(); renderSegmentsDrawer();
+      translationReady = false; isBufferingUnderrun = false;
+      if (data.video_url) setPreviewSource(data.video_url, {task_id: taskId});
+      showTaskProgress(data.progress || {});
+      setupStreamingWebSocket(taskId);
+      return true;
+    } finally {
+      pendingTaskAction = null;
+      setWorkerSourceBusy(!!currentTaskId && !["COMPLETED", "FAILED", "STOPPED", "CANCELLED"].includes(currentProgress?.status));
+    }
+  };
+  window.studioRetry = async () => {
+    if (!currentTaskId || !currentProgress?.can_retry || pendingTaskAction || btnRetryWorker.disabled) return;
+    const taskId = currentTaskId;
+    const request = {kind: "retry", progressSeen: false};
+    pendingTaskAction = request;
+    btnRetryWorker.disabled = true;
+    stopVoicePreview();
+    setWorkerSourceBusy(true);
+    try {
+      const response = await fetch(`/api/streaming/${encodeURIComponent(taskId)}/retry`, {method: "POST"});
+      const data = await response.json();
+      if (!response.ok) throw new Error(data.detail || "Chưa thử lại được câu lỗi.");
+      if (currentTaskId !== taskId) return;
+      // The live socket may already have delivered newer worker progress.
+      if (!request.progressSeen) {
+        currentProgress = null;
+        showTaskProgress(data.progress);
+      }
+      if (!["COMPLETED", "FAILED", "STOPPED", "CANCELLED"].includes(currentProgress?.status)) {
+        isBufferingUnderrun = true;
+        bufferingText.textContent = "Đang tạo lại giọng từ câu lỗi…";
+        bufferingAlert.classList.remove("hidden");
+        if (translationReady && !previewPending) videoPlayer.play().catch(reportPlayFailure);
+      }
+      if (!currentWs || currentWs.readyState !== WebSocket.OPEN) setupStreamingWebSocket(taskId);
+    } catch (error) { alert(error.message); }
+    finally {
+      pendingTaskAction = null;
+      btnRetryWorker.disabled = false;
+      setWorkerSourceBusy(!!currentTaskId && !["COMPLETED", "FAILED", "STOPPED", "CANCELLED"].includes(currentProgress?.status));
+    }
+  };
+  btnRetryWorker?.addEventListener("click", window.studioRetry);
+
 
   // =========================================================
   // 7. TASK MANAGER VIEW

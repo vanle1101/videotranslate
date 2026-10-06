@@ -250,6 +250,143 @@ def test_editing_one_draft_keeps_other_drafts_playable_and_does_not_fail_the_ses
     assert session.playable_until == session.total_duration
 
 
+@pytest.mark.parametrize("failed_stage", ["TTS", "ALIGNING"])
+def test_retry_synthesis_preserves_ready_audio_and_translation_and_resumes_waiting_rows(session, failed_stage):
+    ready = session.segments[0]
+    before = ready.to_dict()
+    original_audio = Path(ready.audio_path).read_bytes()
+    session.total_processed_duration = ready.duration
+    session.visual_translation = True
+    session.source_video_url = "/api/inputs/original.mp4"
+    for index in (1, 2):
+        segment = SegmentItem(index, 2 + 3 * index, 5 + 3 * index, 3)
+        segment.source_method = "text-ai"
+        segment.final_vi = f"Bản nháp câu {index}"
+        segment.text_zh = f"原文{index}"
+        segment.needs_review = True
+        segment.review_reason = "Từ nguồn chưa rõ"
+        segment.translation_provider = "opencode"
+        segment.translation_model = "muse-spark-1.3-contributor-free"
+        segment.evidence_mode = "asr-ocr-text"
+        session.segments[index] = segment
+    session.asr_engine = Mock()
+    session.translator = Mock()
+    target = session.tts_engine.synthesize if failed_stage == "TTS" else session.aligner.apply_atempo
+    normal_call = target.side_effect
+    attempts = 0
+
+    def fail_once(*args, **kwargs):
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            raise RuntimeError("Lỗi mạng tạm thời")
+        return normal_call(*args, **kwargs)
+
+    target.side_effect = fail_once
+
+    async def run():
+        session.is_running = True
+        for index in (1, 2):
+            session.queue.put_nowait((session.segments[index].start, index))
+        session.worker_task = asyncio.create_task(session._worker_loop())
+        await session.worker_task
+        assert session.segments[1].failed_stage == failed_stage
+        assert session.segments[1].status == "FAILED" and session.segments[2].status == "WAITING"
+        assert session.can_retry
+        async with client() as api:
+            snapshot = (await api.get(f"/api/streaming/{session.task_id}")).json()
+            assert snapshot["initialized"] and snapshot["video_url"] == session.source_video_url
+            assert snapshot["progress"]["can_retry"] and snapshot["telemetry"]["can_retry"]
+            assert snapshot["segments"][1]["failed_stage"] == failed_stage
+            tasks = (await api.get("/api/tasks")).json()["tasks"]
+            assert tasks[0]["can_retry"] and tasks[0]["status"] == "FAILED"
+            results = await asyncio.gather(*[
+                api.post(f"/api/streaming/{session.task_id}/retry") for _ in range(2)])
+            assert sorted(response.status_code for response in results) == [200, 409]
+            accepted = next(response.json() for response in results if response.status_code == 200)
+            assert accepted["status"] == "retrying" and accepted["progress"]["status"] == "RUNNING"
+            await session.worker_task
+        assert session.error is None and not session.can_retry
+        assert session.total_processed_duration == 9
+        assert session.queue.empty()
+        assert ready.to_dict() == before and Path(ready.audio_path).read_bytes() == original_audio
+        for segment in list(session.segments.values())[1:]:
+            assert segment.status == "READY" and segment.failed_stage is None
+            assert segment.needs_review and segment.review_reason == "Từ nguồn chưa rõ"
+            assert segment.translation_provider == "opencode"
+            assert segment.translation_model == "muse-spark-1.3-contributor-free"
+            assert segment.evidence_mode == "asr-ocr-text"
+            assert Path(segment.audio_path).read_bytes() == f"Bản nháp câu {segment.id} aligned".encode()
+        session.asr_engine.transcribe.assert_not_called()
+        session.translator.translate_single_segment.assert_not_called()
+        assert session.get_progress()["status"] == "COMPLETED"
+
+    asyncio.run(run())
+    assert attempts == 3
+
+
+@pytest.mark.parametrize("blocked", ["ASR", "TRANSLATING", "active", "stopped", "uninitialized", "editing", "export"])
+def test_retry_refuses_non_synthesis_failures_and_conflicting_lifecycle(session, blocked):
+    segment = session.segments[0]
+    segment.status = "FAILED"
+    segment.failed_stage = blocked if blocked in {"ASR", "TRANSLATING"} else "TTS"
+    segment.error = session.error = "Lỗi cần xử lý"
+    session.is_running = blocked == "active"
+    session.is_stopped = blocked == "stopped"
+    session.initialized = blocked != "uninitialized"
+    if blocked == "export":
+        main.active_export_tasks[f"export_{session.task_id}"] = {"status": "RUNNING"}
+
+    async def run():
+        if blocked == "editing":
+            session.edit_tasks.add(asyncio.current_task())
+        before = segment.to_dict()
+        async with client() as api:
+            response = await api.post(f"/api/streaming/{session.task_id}/retry")
+            assert response.status_code == 409
+            assert (await api.post("/api/streaming/not-found/retry")).status_code == 404
+            assert (await api.get("/api/streaming/not-found")).status_code == 404
+        assert segment.to_dict() == before and session.error == "Lỗi cần xử lý"
+        assert session.worker_task is None
+        session.edit_tasks.clear()
+
+    asyncio.run(run())
+    session.tts_engine.synthesize.assert_not_called()
+
+
+def test_retry_audio_translation_does_not_translate_failed_sentence_again(session):
+    segment = session.segments[0]
+    segment.status, segment.failed_stage = "FAILED", "TTS"
+    segment.error = session.error = "Tạm lỗi tạo giọng"
+    session.asr_engine = Mock()
+    session.translator = Mock()
+
+    async def run():
+        await session.retry_failed_synthesis()
+        await session.worker_task
+        assert segment.status == "READY" and segment.final_vi == "Lời thoại cũ"
+        assert session.error is None and segment.failed_stage is None
+
+    asyncio.run(run())
+    session.asr_engine.transcribe.assert_not_called()
+    session.translator.translate_single_segment.assert_not_called()
+    session.tts_engine.synthesize.assert_called_once()
+
+
+def test_retry_keeps_raw_audio_only_while_remaining_legacy_asr_needs_it(session):
+    failed = session.segments[0]
+    failed.status, failed.failed_stage = "FAILED", "TTS"
+    session.error = "Tạm lỗi tạo giọng"
+    session.segments[1] = SegmentItem(1, 5, 8, 3)
+    session.raw_audio_16k = session.cache_dir / "raw_audio_16k.wav"
+    session.raw_audio_16k.write_bytes(b"retained source audio")
+    session._release_runtime()
+    assert session.raw_audio_16k.exists()
+    session.segments[1].asr_pretranscribed = True
+    session._release_runtime()
+    assert not session.raw_audio_16k.exists()
+
+
 @pytest.mark.parametrize("draft", ["", "Lời nhận dạng nhầm"])
 def test_explicit_silence_approves_review_without_tts_and_exports_silent_timeline(session, monkeypatch, draft):
     from core.streaming.export import HQExporter

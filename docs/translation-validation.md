@@ -1,5 +1,13 @@
 # Kiểm tra dịch video — 06/10/2026
 
+## Thử lại khi dịch vụ giọng đọc gián đoạn
+
+Edge-TTS Hoài My từng dừng tại câu thứ năm của video `7676801479801388282`. Studio nay có nút **Thử lại câu lỗi**: giữ audio hoàn tất, dùng lại bản dịch, tiếp tục câu lỗi và các câu chờ. Hai lần thử tự động chờ 3 và 8 giây. Tác vụ lỗi nhận dạng/dịch không được gán thành lỗi giọng để thử lại sai bước. Khi thử lại, khóa nguồn và giọng; không tải lại video, không đặt vị trí phát về đầu khi websocket nối lại.
+
+Đã kiểm tra 90 bài Python và 15 subtest, một bài symlink bỏ qua do quyền Windows; 93 bài JavaScript đạt. Trong kiểm tra thực tế, phiên cũ đã đóng và audio tạm không còn, nên dùng lại đúng 11 câu dịch từ snapshot, tạo lại giọng Hoài My mà không gọi lại Muse. Toàn bộ 11 đoạn WAV được phát trong Qt cùng phụ đề đến 32,607 giây, không có lỗi tải audio. Mười câu vẫn giữ cờ cần rà; đây là bản nháp để nghe/sửa, không phải xác nhận bản dịch đã đúng hoặc MP4 thành phẩm mới. Backend kiểm tra và preview tương thích của lượt thử đã dừng, tự dọn.
+
+Lệnh dọn `pytest-177` của lượt trước cũng bị bộ duyệt tự động từ chối (`blocked by policy`); không thử lại lệnh xóa này.
+
 ## Nghe bản nháp trước khi sửa transcript
 
 Câu có cờ `needs_review` nay vẫn được tổng hợp tiếng Việt, căn thời gian và phát phụ đề. Cờ này chỉ nhắc rà nội dung, không làm tác vụ thất bại hoặc dừng video. Nhãn **Bản nháp · Cần kiểm tra** được giữ đến khi lưu xác nhận/sửa câu; thao tác lưu tạo lại tiếng và phụ đề trong đúng thời gian cũ. Nếu chưa có lời Việt để đọc, video tiếp tục qua khoảng câu và hướng dẫn nghe gốc, nhập lời dịch. Xuất MP4 cuối cùng vẫn yêu cầu các câu được xác nhận.

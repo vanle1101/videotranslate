@@ -194,6 +194,7 @@ class LocalAPITests(unittest.TestCase):
         self.assertEqual(params["video_path"], self.video)
         session.start.assert_called_once()
         source_url = response.json()["video_url"]
+        self.assertEqual(session.source_video_url, source_url)
         self.assertEqual(parse_qs(urlparse(source_url).query)["path"], [self.video.as_posix()])
         self.assertEqual(self.client.get(source_url).content, self.video.read_bytes())
 
