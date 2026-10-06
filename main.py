@@ -403,9 +403,29 @@ def review_result_details(session):
             if findings and summary.get("status") == "completed" else ""}
 
 
+def review_sidecar_payload(session):
+    """Persist an auditable row for every spoken segment beside the MP4."""
+    rows = []
+    for segment in session.segments.values():
+        verification = getattr(segment, "verification", None) or {}
+        rows.append({
+            "segment_id": segment.id, "start": segment.start, "end": segment.end,
+            "source_text": segment.text_zh, "translation": segment.final_vi,
+            "needs_review": bool(getattr(segment, "needs_review", False)),
+            "review_reason": segment.review_reason or "",
+            "verification": verification,
+            "source_method": getattr(segment, "source_method", ""),
+            "translation_provider": getattr(segment, "translation_provider", None),
+        })
+    return {"task_id": session.task_id, "review_summary": dict(getattr(session, "review_summary", {}) or {}),
+            "segments": rows,
+            **review_result_details(session)}
+
+
 def session_output_details(session):
     return {"output_video_url": getattr(session, "output_video_url", ""),
             "output_filename": getattr(session, "output_filename", ""),
+            "review_url": getattr(session, "output_review_url", ""),
             **review_result_details(session)}
 
 
@@ -499,6 +519,7 @@ async def list_tasks():
             "review_summary": exp.get("review_summary", {}),
             "review_warning": exp.get("review_warning", ""),
             "review_report": exp.get("review_report", []),
+            "review_url": exp.get("review_url", ""),
             "can_pause": False,
             "can_resume": False,
             "can_stop": exp.get("status") == "RUNNING"
@@ -875,8 +896,13 @@ async def export_hq(req: ExportHQRequest):
         active_export_tasks[export_id]["stage"] = "Xuất video hoàn tất thành công!"
         active_export_tasks[export_id]["video_url"] = f"/api/outputs/{result['output_filename']}"
         active_export_tasks[export_id]["output_filename"] = result["output_filename"]
+        sidecar_name = f"{Path(result['output_filename']).stem}.review.json"
+        sidecar_path = settings.OUTPUT_DIR / sidecar_name
+        sidecar_path.write_text(json.dumps(review_sidecar_payload(session), ensure_ascii=False, indent=2), encoding="utf-8")
+        active_export_tasks[export_id]["review_url"] = f"/api/outputs/{sidecar_name}"
         session.output_video_url = f"/api/outputs/{result['output_filename']}"
         session.output_filename = result["output_filename"]
+        session.output_review_url = f"/api/outputs/{sidecar_name}"
         await broadcast_session_event(req.task_id, "result_ready", session_output_details(session))
 
         return {
@@ -886,6 +912,7 @@ async def export_hq(req: ExportHQRequest):
             "video_url": f"/api/outputs/{result['output_filename']}",
             "elapsed_seconds": result["elapsed_seconds"],
             **session_output_details(session),
+            "review_url": f"/api/outputs/{sidecar_name}",
         }
     except Exception:
         status_name = "CANCELLED" if active_export_tasks.get(export_id, {}).get("cancelled") else "FAILED"

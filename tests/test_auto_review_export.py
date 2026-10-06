@@ -15,7 +15,7 @@ from core.streaming.pipeline import SegmentItem
 
 
 @pytest.fixture
-def session(monkeypatch):
+def session(monkeypatch, tmp_path):
     segment = SegmentItem(0, 0, 2, 2)
     segment.status = "READY"
     segment.text_zh = "假的"
@@ -43,6 +43,7 @@ def session(monkeypatch):
     monkeypatch.setattr(main, "active_export_tasks", {})
     monkeypatch.setattr(main, "task_history", [])
     monkeypatch.setattr(main, "stream_sockets", {})
+    monkeypatch.setattr(main.settings, "OUTPUT_DIR", tmp_path)
     exporter = Mock()
     exporter.export.return_value = {"output_filename": "reviewed.mp4", "elapsed_seconds": 1}
     monkeypatch.setattr(main, "HQExporter", Mock(return_value=exporter))
@@ -53,6 +54,7 @@ def test_completed_review_exports_unresolved_with_warning_and_captions(session):
     item, exporter = session
     result = asyncio.run(main.export_hq(main.ExportHQRequest(task_id=item.task_id)))
     assert result["output_video_url"] == "/api/outputs/reviewed.mp4"
+    assert result["review_url"] == "/api/outputs/reviewed.review.json"
     assert result["review_summary"]["unresolved"] == 1
     assert result["review_warning"] and result["review_report"][0]["segment_id"] == 0
     assert item.segments[0].needs_review is True
@@ -196,10 +198,12 @@ def test_final_output_and_audit_report_survive_snapshot_and_task_poll(session):
     snapshot, tasks = asyncio.run(run())
     assert snapshot["video_url"] == item.source_video_url
     assert snapshot["output_video_url"] == "/api/outputs/reviewed.mp4"
+    assert snapshot["review_url"] == "/api/outputs/reviewed.review.json"
     assert snapshot["review_report"][0]["verification"]["status"] == "unresolved"
     for task in tasks["tasks"]:
         assert task["video_url"] == task["output_video_url"] == "/api/outputs/reviewed.mp4"
         assert task["output_filename"] == "reviewed.mp4" and task["review_warning"]
+        assert task["review_url"] == "/api/outputs/reviewed.review.json"
 
 
 @pytest.mark.parametrize("provider,visual,expected", [("opencode", True, True), ("opencode", False, False), ("gemini", True, False)])
