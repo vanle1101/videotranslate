@@ -8,6 +8,8 @@ Edge-TTS Hoài My từng dừng tại câu thứ năm của video `7676801479801
 
 Lệnh dọn `pytest-177` của lượt trước cũng bị bộ duyệt tự động từ chối (`blocked by policy`); không thử lại lệnh xóa này.
 
+Lượt này bộ duyệt cũng từ chối lệnh dọn script/snapshot phục hồi trong `workspace/temp` và `pytest-179`/`pytest-180`/`pytest-181`; các file đó được giữ nguyên, không đưa lên Git. Audio và preview đang dùng được giữ cho cửa sổ Studio mở để nghe/sửa. Phiên desktop đã phục hồi đủ 11 câu, preview READY và phát qua giây 25.
+
 ## Nghe bản nháp trước khi sửa transcript
 
 Câu có cờ `needs_review` nay vẫn được tổng hợp tiếng Việt, căn thời gian và phát phụ đề. Cờ này chỉ nhắc rà nội dung, không làm tác vụ thất bại hoặc dừng video. Nhãn **Bản nháp · Cần kiểm tra** được giữ đến khi lưu xác nhận/sửa câu; thao tác lưu tạo lại tiếng và phụ đề trong đúng thời gian cũ. Nếu chưa có lời Việt để đọc, video tiếp tục qua khoảng câu và hướng dẫn nghe gốc, nhập lời dịch. Xuất MP4 cuối cùng vẫn yêu cầu các câu được xác nhận.
