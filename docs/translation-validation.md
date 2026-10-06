@@ -8,6 +8,17 @@ Sau khi kiểm tra và tạo giọng xong, Studio tự xuất MP4 và hiển th�
 
 Nút **AI kiểm tra lại** dùng phiên hiện có và chỉ tạo lại giọng của những câu đổi lời, giữ các WAV còn phù hợp. Các mục ghi “bản nháp chưa được tự kiểm tra” bên dưới là kết quả lịch sử của những lượt trước.
 
+Đã chạy thực tế trên video `7676801479801388282` bằng Muse Spark Free qua OpenCode, dùng lại nguồn và các WAV còn phù hợp. Lượt kiểm tra OCR mới rồi kiểm định nghĩa từ bằng chứng lưu sẵn đã rà **11 câu: 3 câu giữ nguyên, 7 câu sửa, 1 câu chưa đủ căn cứ**. Ví dụ câu `基本上都是用手机拍的` được sửa từ “Đều quay bằng điện thoại” thành “Hầu hết đều quay bằng điện thoại”. Câu cuối có OCR thiếu và hai bộ nhận giọng trả khác nhau, nên vẫn ghi `unresolved`; đây không phải xác nhận bản dịch đúng tuyệt đối.
+
+- MP4: `workspace/outputs/douyin-7676801479801388282-vi-reviewed.mp4`.
+- Báo cáo: `workspace/outputs/douyin-7676801479801388282-vi-reviewed.review.json`.
+- H264/AAC, 2160×3840, 32,633333 giây, 82.646.953 byte.
+- SHA-256: `494dc4f7b67b795ec8b299ac5f13b122948020be9a47a7430cf99905c8d481cd`.
+
+FFmpeg giải mã toàn bộ hình/tiếng không lỗi; đã xem khung hình render để kiểm tra giữ chữ Trung và đặt phụ đề Việt bên dưới. Studio mở lại với đủ 11 câu và đường dẫn MP4/báo cáo, hai đường dẫn trả HTTP 206 đúng loại media. Bộ kiểm tra tích hợp đạt **222 bài Python**, một bài bỏ qua do quyền symlink; **104 bài Node** đạt. Kiểm tra bổ sung đóng ứng dụng/xuất đạt **41 bài** (có trùng bộ trước), xác nhận đợi tác vụ xuất dừng trước khi dọn WAV. Các kiểm tra này không chứng minh mọi video đều dịch hoàn hảo.
+
+Lệnh xóa ảnh kiểm tra `reviewed_clip_frame.png` trong Windows Temp và script/kết quả trung gian `review_current_clip.py`, `automatic-review-result.json` bị bộ duyệt tự động từ chối (`blocked by policy`); không thử lại. Cache âm thanh và dữ liệu khởi tạo của phiên đang mở được giữ để xem/sửa kết quả. Media và file tạm không đưa lên Git.
+
 ## Thử lại khi dịch vụ giọng đọc gián đoạn
 
 Edge-TTS Hoài My từng dừng tại câu thứ năm của video `7676801479801388282`. Studio nay có nút **Thử lại câu lỗi**: giữ audio hoàn tất, dùng lại bản dịch, tiếp tục câu lỗi và các câu chờ. Hai lần thử tự động chờ 3 và 8 giây. Tác vụ lỗi nhận dạng/dịch không được gán thành lỗi giọng để thử lại sai bước. Khi thử lại, khóa nguồn và giọng; không tải lại video, không đặt vị trí phát về đầu khi websocket nối lại.

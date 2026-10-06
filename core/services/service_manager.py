@@ -1,4 +1,5 @@
 import os
+import asyncio
 import sys
 import time
 import socket
@@ -272,23 +273,49 @@ class ServiceManager:
                 task["status"] = "CANCELLING"
                 task["stage"] = "Đang dừng xuất video..."
 
-        # 1. Cancel and stop all streaming sessions
+        # 1. Drain export owners before session.stop removes their source WAVs.
+        # The desktop thread must hand this work to the owning asyncio loop.
+        pending_stops = []
+
+        async def stop_after_export(session):
+            owners = {task for task in (getattr(session, "export_task", None),
+                                        getattr(session, "auto_export_task", None))
+                      if task is not None and not task.done()}
+            for owner in owners:
+                owner.cancel()
+            if owners:
+                await asyncio.gather(*owners, return_exceptions=True)
+            session.stop()
+
         try:
             pipeline = sys.modules.get("core.streaming.pipeline")
             active_streaming_sessions = getattr(pipeline, "active_streaming_sessions", {})
             for task_id, session in list(active_streaming_sessions.items()):
                 try:
                     logger.info(f"Stopping active streaming session: {task_id}")
-                    worker = getattr(session, "worker_task", None) or getattr(session, "start_task", None)
+                    worker = (getattr(session, "export_task", None) or getattr(session, "auto_export_task", None)
+                              or getattr(session, "review_task", None) or getattr(session, "worker_task", None)
+                              or getattr(session, "start_task", None))
                     loop = worker.get_loop() if worker is not None else None
                     if loop is not None and loop.is_running():
-                        loop.call_soon_threadsafe(session.stop)
+                        pending_stops.append(asyncio.run_coroutine_threadsafe(stop_after_export(session), loop))
                     else:
                         session.stop()
                 except Exception as exc:
                     logger.warning(f"Could not stop streaming session {task_id}: {exc}")
         except Exception as e:
             logger.warning(f"Session cancellation error: {e}")
+
+        deadline = time.monotonic() + 10
+        for pending in pending_stops:
+            try:
+                pending.result(timeout=max(0, deadline - time.monotonic()))
+            except TimeoutError:
+                # Keep media owned until the worker acknowledges cancellation.
+                # Never force session.stop while an export thread still reads it.
+                logger.warning("Export is still stopping; its source media is retained until cleanup completes.")
+            except Exception as exc:
+                logger.warning(f"Could not finish session shutdown: {type(exc).__name__}")
 
         preview_module = sys.modules.get("core.media_preview")
         if preview_module is not None:

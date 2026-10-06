@@ -190,6 +190,77 @@ class ServiceStartupTests(unittest.TestCase):
         self.assertEqual(active["status"], "CANCELLING")
         self.assertEqual(complete, {"status": "COMPLETED", "cancelled": False})
 
+    def test_shutdown_drains_real_export_coroutine_before_removing_its_audio(self):
+        import main
+        from core.streaming.pipeline import SegmentItem
+
+        loop = asyncio.new_event_loop()
+        ready, rendering = threading.Event(), threading.Event()
+        emergency_exit = threading.Event()
+        events = []
+        thread_ids = []
+
+        def run_loop():
+            asyncio.set_event_loop(loop)
+            loop.call_soon(ready.set)
+            loop.run_forever()
+
+        thread = threading.Thread(target=run_loop)
+        thread.start()
+        try:
+            self.assertTrue(ready.wait(2))
+            with tempfile.TemporaryDirectory(prefix="shutdown_export_") as temporary:
+                audio = Path(temporary) / "seg_0.wav"
+                audio.write_bytes(b"voice still owned by export")
+                segment = SegmentItem(0, 0, 1, 1)
+                segment.status = "READY"
+                segment.final_vi = "Xin chào"
+                segment.audio_path = str(audio)
+                session = SimpleNamespace(task_id="shutdown-fixture", segments={0: segment},
+                    video_path=Path(temporary) / "input.mp4", total_duration=1,
+                    is_running=False, error=None, visual_translation=False, screen_texts=[])
+
+                def stop():
+                    thread_ids.append(threading.get_ident())
+                    self.assertIn("export_finished", events)
+                    self.assertTrue(audio.exists())
+                    audio.unlink()
+                    events.append("session_stopped")
+
+                def render(**kwargs):
+                    rendering.set()
+                    for _ in range(500):
+                        if kwargs["cancel_check"]() or emergency_exit.wait(.01):
+                            break
+                    self.assertTrue(kwargs["cancel_check"]())
+                    self.assertEqual(audio.read_bytes(), b"voice still owned by export")
+                    events.append("read_after_cancel")
+                    events.append("export_finished")
+                    raise RuntimeError("cancel acknowledged")
+
+                session.stop = stop
+                exporter = Mock(export=Mock(side_effect=render))
+                with patch.object(main, "get_streaming_session", return_value=session), \
+                        patch.object(main, "active_export_tasks", {}), \
+                        patch.object(main, "stream_sockets", {}), \
+                        patch.object(main, "HQExporter", return_value=exporter), \
+                        patch.dict(sys.modules, {"core.streaming.pipeline": SimpleNamespace(
+                            active_streaming_sessions={session.task_id: session})}):
+                    future = asyncio.run_coroutine_threadsafe(main.export_hq(main.ExportHQRequest(task_id=session.task_id)), loop)
+                    self.assertTrue(rendering.wait(3))
+                    self.manager.shutdown_all()
+                    self.assertTrue(future.done())
+                    self.assertEqual(events, ["read_after_cancel", "export_finished", "session_stopped"])
+                    self.assertEqual(thread_ids, [thread.ident])
+                    self.assertFalse(audio.exists())
+                    self.assertIsNone(session.export_task)
+                    self.assertEqual(main.active_export_tasks["export_shutdown-fixture"]["status"], "CANCELLED")
+        finally:
+            emergency_exit.set()
+            loop.call_soon_threadsafe(loop.stop)
+            thread.join(timeout=3)
+            loop.close()
+
 
 if __name__ == "__main__":
     unittest.main()
