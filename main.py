@@ -1,4 +1,6 @@
 import asyncio
+import hashlib
+import json
 import os
 import shutil
 import stat
@@ -386,6 +388,71 @@ async def update_settings(req: ConfigRequest):
 active_export_tasks: Dict[str, Dict[str, Any]] = {}
 task_history: List[Dict[str, Any]] = []
 
+
+def review_result_details(session):
+    """Keep unresolved findings visible even when the user receives a final file."""
+    summary = dict(getattr(session, "review_summary", {}) or {})
+    findings = [{"segment_id": s.id, "start": s.start, "end": s.end,
+                 "text_zh": s.text_zh, "final_vi": s.final_vi,
+                 "reason": s.review_reason or "Nguồn chưa đủ rõ để xác minh chắc chắn.",
+                 "verification": getattr(s, "verification", None)}
+                for s in session.segments.values() if getattr(s, "needs_review", False)]
+    return {"review_summary": summary, "review_report": findings,
+            "review_warning": (f"AI đã kiểm tra toàn bộ; {len(findings)} câu còn thiếu bằng chứng rõ từ nguồn. "
+                               "Video giữ bản dịch tốt nhất hiện có; chi tiết nằm trong báo cáo kiểm tra.")
+            if findings and summary.get("status") == "completed" else ""}
+
+
+def session_output_details(session):
+    return {"output_video_url": getattr(session, "output_video_url", ""),
+            "output_filename": getattr(session, "output_filename", ""),
+            **review_result_details(session)}
+
+
+def export_revision_signature(session):
+    content = {"segments": [{"id": s.id, "revision": getattr(s, "revision", 0),
+                             "start": s.start, "end": s.end, "final_vi": s.final_vi,
+                             "verification": getattr(s, "verification", None)}
+                            for s in session.segments.values()],
+               "screen_texts": getattr(session, "screen_texts", [])}
+    return hashlib.sha256(json.dumps(content, ensure_ascii=False, sort_keys=True).encode("utf-8")).hexdigest()
+
+
+def schedule_reviewed_export(task_id):
+    session = get_streaming_session(task_id)
+    if (session is None or getattr(session, "auto_export_result", False) is not True
+            or getattr(session, "review_summary", {}).get("status") != "completed"
+            or session.is_running or session.error or getattr(session, "is_stopped", False)
+            or getattr(session, "is_editing", False) or not session.segments
+            or any(s.status not in ("READY", "PLAYED") for s in session.segments.values())):
+        return
+    if active_export_tasks.get(f"export_{task_id}", {}).get("status") in {"RUNNING", "CANCELLING"}:
+        return
+    signature = export_revision_signature(session)
+    if getattr(session, "auto_export_signature", None) == signature:
+        return
+    session.auto_export_signature = signature
+    session.output_video_url = ""
+    session.output_filename = ""
+
+    async def generate_result():
+        try:
+            if getattr(session, "is_stopped", False):
+                return
+            await export_hq(ExportHQRequest(task_id=task_id))
+        except asyncio.CancelledError:
+            task = active_export_tasks.get(f"export_{task_id}")
+            if task and task.get("status") in {"RUNNING", "CANCELLING"}:
+                task.update(cancelled=True, status="CANCELLING", stage="Đang dừng xuất video...")
+            raise
+        except Exception:
+            await broadcast_session_event(task_id, "result_error", {
+                "message": "Chưa tạo được video kết quả. Bản dịch và giọng đọc đã được giữ; bấm Xuất video để thử lại.",
+                **review_result_details(session),
+            })
+
+    session.auto_export_task = asyncio.create_task(generate_result())
+
 @app.get("/api/tasks")
 async def list_tasks():
     tasks = []
@@ -410,7 +477,8 @@ async def list_tasks():
             **progress,
             "duration": sess.total_duration,
             "elapsed_seconds": round(time.time() - sess.start_wall_time, 1) if sess.start_wall_time else 0,
-            "video_url": "",  # A completed translation is not an exported dubbed video.
+            "video_url": getattr(sess, "output_video_url", ""),
+            **session_output_details(sess),
             "can_resume": status_str == "PAUSED",
             "can_stop": status_str in ["RUNNING", "PAUSED"]
         })
@@ -427,6 +495,10 @@ async def list_tasks():
             "elapsed_seconds": round(time.time() - exp.get("start_time", time.time()), 1),
             "video_url": exp.get("video_url", ""),
             "output_filename": exp.get("output_filename", ""),
+            "output_video_url": exp.get("video_url", ""),
+            "review_summary": exp.get("review_summary", {}),
+            "review_warning": exp.get("review_warning", ""),
+            "review_report": exp.get("review_report", []),
             "can_pause": False,
             "can_resume": False,
             "can_stop": exp.get("status") == "RUNNING"
@@ -469,10 +541,18 @@ async def resume_task(task_id: str):
 async def stop_task(task_id: str):
     sess = get_streaming_session(task_id)
     if sess:
-        workers = [worker for worker in (getattr(sess, "start_task", None), getattr(sess, "worker_task", None))
+        workers = [worker for worker in (getattr(sess, "start_task", None), getattr(sess, "worker_task", None),
+                                        getattr(sess, "review_task", None), getattr(sess, "auto_export_task", None))
                    if worker is not None and not worker.done()]
         workers.extend(task for task in getattr(sess, "edit_tasks", ()) if not task.done())
         progress = sess.get_progress() if hasattr(sess, "get_progress") else {}
+        if active_export_tasks.get(f"export_{task_id}", {}).get("status") in {"RUNNING", "CANCELLING"}:
+            await cancel_export_hq(task_id)
+            # Export threads may still hold the session's WAVs. Drain them before
+            # session.stop removes that owned media from its cache.
+            export_worker = getattr(sess, "export_task", None) or getattr(sess, "auto_export_task", None)
+            if export_worker is not None and not export_worker.done():
+                await asyncio.gather(export_worker, return_exceptions=True)
         sess.stop()
         # A Python download thread must acknowledge cancellation before this
         # endpoint reports a completed stop or any owned files are removed.
@@ -512,6 +592,8 @@ async def broadcast_session_event(task_id: str, event_type: str, data: Dict[str,
                 dead_conns.append(ws)
         for ws in dead_conns:
             stream_sockets[task_id].remove(ws)
+    if event_type == "finished":
+        schedule_reviewed_export(task_id)
 
 async def run_session(session):
     try:
@@ -545,6 +627,7 @@ async def start_streaming_url(req: StreamUrlRequest):
         visual_translation=req.visual_translation,
         event_callback=lambda event_type, data: broadcast_session_event(task_id, event_type, data)
     )
+    session.auto_export_result = bool(req.visual_translation and settings.LLM_PROVIDER == "opencode")
 
     async def start_source():
         try:
@@ -605,6 +688,7 @@ async def start_streaming_upload(
         ref_audio=ref_audio_path,
         event_callback=lambda event_type, data: broadcast_session_event(task_id, event_type, data)
     )
+    session.auto_export_result = bool(visual_translation and settings.LLM_PROVIDER == "opencode")
 
     asyncio.create_task(run_session(session))
 
@@ -633,6 +717,7 @@ async def streaming_snapshot(task_id: str):
     return {
         "task_id": task_id, "initialized": session.initialized,
         "video_url": session.source_video_url,
+        **session_output_details(session),
         "progress": session.get_progress(), "telemetry": session.get_telemetry(),
         "duration": session.total_duration, "initial_buffer_seconds": session.initial_buffer_seconds,
         "segments": [session.segment_snapshot(segment) for segment in session.segments.values()],
@@ -658,6 +743,21 @@ async def retry_streaming_synthesis(task_id: str):
     except SegmentEditConflict as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from None
     return {"task_id": task_id, "status": "retrying", "progress": progress}
+
+@app.post("/api/streaming/{task_id}/review")
+async def review_streaming_translation(task_id: str):
+    session = get_streaming_session(task_id)
+    if not session:
+        raise HTTPException(status_code=404, detail="Phiên dịch không còn tồn tại.")
+    if active_export_tasks.get(f"export_{task_id}", {}).get("status") in {"RUNNING", "CANCELLING"}:
+        raise HTTPException(status_code=409, detail="Hãy chờ xuất xong trước khi AI kiểm tra lại.")
+    try:
+        progress = await session.start_automatic_review()
+    except SegmentEditConflict as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from None
+    session.auto_export_result = True
+    return {"task_id": task_id, "status": "reviewing", "progress": progress}
+
 
 @app.patch("/api/streaming/{task_id}/segments/{segment_id}")
 async def edit_streaming_segment(task_id: str, segment_id: int, req: SegmentEditRequest):
@@ -703,8 +803,13 @@ async def export_hq(req: ExportHQRequest):
 
     if getattr(session, "is_editing", False):
         raise HTTPException(status_code=409, detail="Đang lưu lời thoại và tạo lại giọng đọc. Hãy chờ lưu xong trước khi xuất.")
-    if any(getattr(s, "needs_review", False) for s in session.segments.values()):
-        raise HTTPException(status_code=409, detail="Bản nháp đã nghe được. Hãy kiểm tra và lưu các câu được đánh dấu trong Transcript trước khi xuất.")
+    review_status = getattr(session, "review_summary", {}).get("status")
+    if review_status in {"failed", "running"}:
+        raise HTTPException(status_code=409, detail="AI kiểm tra lại chưa hoàn tất. Bấm AI kiểm tra lại để tiếp tục trước khi xuất.")
+    uncertain = [s for s in session.segments.values() if getattr(s, "needs_review", False)]
+    if uncertain and not (review_status == "completed" and all(
+            (getattr(s, "verification", None) or {}).get("status") == "unresolved" for s in uncertain)):
+        raise HTTPException(status_code=409, detail="Bản dịch chưa được AI kiểm tra đầy đủ. Bấm AI kiểm tra lại trước khi xuất.")
     if session.is_running or session.error or any(
         s.status not in ("READY", "PLAYED") for s in session.segments.values()
     ):
@@ -727,8 +832,10 @@ async def export_hq(req: ExportHQRequest):
         "duration": session.total_duration,
         "video_url": "",
         "output_filename": "",
+        **review_result_details(session),
         "cancelled": False
     }
+    session.export_task = asyncio.current_task()
 
     loop = asyncio.get_event_loop()
 
@@ -745,6 +852,9 @@ async def export_hq(req: ExportHQRequest):
         return active_export_tasks.get(export_id, {}).get("cancelled", False)
 
     try:
+        await broadcast_session_event(req.task_id, "export_progress", {
+            "progress": 5, "stage": "Đang tạo video kết quả từ bản dịch đã xử lý...",
+        })
         exporter = HQExporter()
         result = await asyncio.to_thread(
             exporter.export,
@@ -765,20 +875,28 @@ async def export_hq(req: ExportHQRequest):
         active_export_tasks[export_id]["stage"] = "Xuất video hoàn tất thành công!"
         active_export_tasks[export_id]["video_url"] = f"/api/outputs/{result['output_filename']}"
         active_export_tasks[export_id]["output_filename"] = result["output_filename"]
+        session.output_video_url = f"/api/outputs/{result['output_filename']}"
+        session.output_filename = result["output_filename"]
+        await broadcast_session_event(req.task_id, "result_ready", session_output_details(session))
 
         return {
             "status": "ok",
             "export_id": export_id,
             "output_filename": result["output_filename"],
             "video_url": f"/api/outputs/{result['output_filename']}",
-            "elapsed_seconds": result["elapsed_seconds"]
+            "elapsed_seconds": result["elapsed_seconds"],
+            **session_output_details(session),
         }
-    except Exception as e:
+    except Exception:
         status_name = "CANCELLED" if active_export_tasks.get(export_id, {}).get("cancelled") else "FAILED"
+        message = ("Đã hủy xuất video" if status_name == "CANCELLED" else
+                   "Chưa xuất được video. Bản dịch và giọng đọc vẫn được giữ; hãy thử xuất lại.")
         if export_id in active_export_tasks:
             active_export_tasks[export_id]["status"] = status_name
-            active_export_tasks[export_id]["stage"] = "Đã hủy bởi người dùng" if status_name == "CANCELLED" else f"Lỗi: {e}"
-        raise HTTPException(status_code=409 if status_name == "CANCELLED" else 500, detail="Đã hủy xuất video" if status_name == "CANCELLED" else str(e))
+            active_export_tasks[export_id]["stage"] = message
+        raise HTTPException(status_code=409 if status_name == "CANCELLED" else 500, detail=message) from None
+    finally:
+        session.export_task = None
 
 @app.get("/api/streaming/export-hq/status/{task_id}")
 async def get_export_hq_status(task_id: str):
@@ -844,6 +962,7 @@ async def start_streaming_local_file(req: StreamLocalFileRequest):
         event_callback=lambda event_type, data: broadcast_session_event(task_id, event_type, data)
     )
     session.source_video_url = f"/api/local-file?path={quote(p.as_posix(), safe='')}"
+    session.auto_export_result = bool(req.visual_translation and settings.LLM_PROVIDER == "opencode")
     asyncio.create_task(run_session(session))
 
     return {
