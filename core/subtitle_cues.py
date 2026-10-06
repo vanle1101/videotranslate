@@ -35,8 +35,9 @@ def fit_title_text(text, box_width, box_height, font_size):
 def build_subtitle_cues(text, start, end, *, max_chars=60, line_chars=32):
     """Split long speech into small pages, with proportional estimated timing.
 
-    Manual line breaks are retained for edited subtitles. Automatic pages use
-    at most two lines, prefer punctuation near the end, and retain every word.
+    Manual line breaks are retained and paged in pairs for edited subtitles.
+    Automatic pages use at most two lines, prefer punctuation near the end,
+    and retain every word.
     This is display pagination, not forced alignment or measured word timing.
     """
     try:
@@ -50,7 +51,16 @@ def build_subtitle_cues(text, start, end, *, max_chars=60, line_chars=32):
     if not text:
         return []
     if "\n" in text:
-        return [{"start": start, "end": end, "text": text}]
+        lines = text.split("\n")
+        pages = ["\n".join(lines[i:i + 2]) for i in range(0, len(lines), 2)]
+        weight = sum(max(1, len(page)) for page in pages)
+        elapsed, cues = 0, []
+        for index, page in enumerate(pages):
+            cue_start = start + (end - start) * elapsed / weight
+            elapsed += max(1, len(page))
+            cue_end = end if index == len(pages) - 1 else start + (end - start) * elapsed / weight
+            cues.append({"start": cue_start, "end": cue_end, "text": page})
+        return cues
 
     words = text.split()
     pages = []

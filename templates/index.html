@@ -72,7 +72,7 @@
         </section>
         <section class="studio-action-card studio-card" aria-labelledby="action-heading">
           <h2 id="action-heading" class="studio-card-heading"><i class="fa-solid fa-sliders" aria-hidden="true"></i>2. DỊCH VÀ LỒNG TIẾNG</h2>
-          <label class="visual-translation-option"><input id="visual-translation" type="checkbox" {% if settings.LLM_PROVIDER == 'gemini' %}checked{% endif %}><span>AI đọc chữ và kiểm chứng lời nói<small>Gemini xem hình + nghe tiếng để dịch theo ngữ cảnh. Dùng API key của bạn, xử lý lâu hơn.</small></span></label>
+          <label class="visual-translation-option"><input id="visual-translation" type="checkbox" {% if settings.LLM_PROVIDER in ('gemini', 'openrouter-free') %}checked{% endif %}><span>AI đọc chữ và kiểm chứng lời nói<small>OpenRouter miễn phí đối chiếu lời nhận dạng với chữ trên hình; không cần Gemini. Có thể tắt nếu chỉ muốn dịch tiếng nói.</small></span></label>
           <div id="task-progress" class="hidden task-progress" aria-label="Tiến độ xử lý video">
             <div class="task-progress-heading" role="status" aria-live="polite"><span id="task-progress-stage">Đang gửi yêu cầu…</span><span id="task-progress-value">Chưa có %</span></div>
             <div id="task-progress-track" class="task-progress-track" role="progressbar" aria-label="Tiến độ bước hiện tại" aria-valuemin="0" aria-valuemax="100"><div id="task-progress-bar" class="task-progress-bar"></div></div>
@@ -94,7 +94,11 @@
         <div class="studio-player-card">
           <div class="studio-player-heading">
             <h2 class="studio-card-heading"><i class="fa-solid fa-video" aria-hidden="true"></i>XEM TRƯỚC VIDEO</h2>
-            <div class="player-options"><label><input type="checkbox" id="toggle-mask-chinese" checked> Che phụ đề Trung</label><label><input type="checkbox" id="toggle-subtitles" checked> Hiện Sub Việt</label></div>
+            <div class="player-options">
+              <label title="Hiện phụ đề lời thoại tiếng Việt ở dưới video."><input type="checkbox" id="toggle-subtitles" checked> Hiện Sub Việt</label>
+              <label title="Dịch và thay chữ ở đúng vị trí trên hình. Tắt để giữ nguyên hình gốc; AI vẫn có thể đọc chữ để kiểm chứng lời thoại."><input type="checkbox" id="toggle-screen-text" aria-label="Dịch chữ trên hình; tắt để giữ nguyên chữ và hình gốc"> Dịch chữ trên hình</label>
+              <label title="Che vùng chữ Trung khi bật dịch chữ trên hình. Mặc định tắt để giữ nguyên hình gốc."><input type="checkbox" id="toggle-mask-chinese"> Che phụ đề Trung</label>
+            </div>
           </div>
           <div class="player-surface">
             <div class="studio-video-stage">
@@ -330,8 +334,8 @@
         <div>
           <label class="text-xs text-gray-300 block mb-1">Nhà cung cấp (LLM Provider):</label>
           <select id="settings-llm-provider" class="w-full bg-[#08090d] border border-gray-700 rounded-xl px-3 py-2 text-xs text-gray-100 focus:outline-none focus:border-pink-500">
-            <option value="gemini" {% if settings.LLM_PROVIDER == 'gemini' %}selected{% endif %}>Google Gemini (ưu tiên khi có key)</option>
-            <option value="openrouter-free" {% if settings.LLM_PROVIDER == 'openrouter-free' %}selected{% endif %}>OpenRouter Free (key từ OpenCode)</option>
+            <option value="openrouter-free" {% if settings.LLM_PROVIDER == 'openrouter-free' %}selected{% endif %}>OpenRouter Free (miễn phí)</option>
+            <option value="gemini" {% if settings.LLM_PROVIDER == 'gemini' %}selected{% endif %}>Google Gemini (tùy chọn, cần key)</option>
             <option value="deepseek">DeepSeek AI (Văn phong kịch tính)</option>
             <option value="openai">OpenAI Compatible API</option>
             <option value="free">Google / MyMemory miễn phí</option>
@@ -488,6 +492,7 @@
 
       <div id="export-modal-body" class="space-y-4 text-xs text-gray-300">
         <p>Xuất MP4 với giọng Việt và phụ đề, giữ tỉ lệ video gốc. Chế độ DSP giảm giọng gốc có thể ảnh hưởng nhạc nền; mức tách giọng tùy từng video.</p>
+        <p id="export-screen-text-summary" class="export-screen-text-summary" role="status"></p>
         
         <div id="export-status-box" class="hidden bg-[#08090d] p-3.5 rounded-xl border border-gray-800 space-y-3">
           <div class="flex items-center justify-between text-xs">

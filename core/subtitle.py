@@ -57,7 +57,8 @@ class SubtitleGenerator:
         width, height = video_size or (1080, 1920)
         width, height = max(16, int(width)), max(16, int(height))
         font_size = max(8, round(min(width * 0.045, height * 0.043)))
-        outline = max(1, round(font_size * 0.065, 1))
+        outline = max(1, round(font_size * 0.10, 1))
+        shadow = max(0, round(font_size * 0.055, 1))
         margin_x, margin_y = round(width * 0.07), round(height * 0.08)
         screen_texts = normalize_screen_texts(screen_texts)
         ass_header = f"""[Script Info]
@@ -71,7 +72,7 @@ PlayResY: {height}
 
 [V4+ Styles]
 Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding
-Style: TikTokStyle,{self.font},{font_size},{self.primary_color},&H000000FF,{self.outline_color},&H80000000,-1,0,0,0,100,100,0,0,1,{outline},0,2,{margin_x},{margin_x},{margin_y},1
+Style: TikTokStyle,{self.font},{font_size},{self.primary_color},&H000000FF,{self.outline_color},&H80000000,-1,0,0,0,100,100,0,0,1,{outline},{shadow},2,{margin_x},{margin_x},{round(height * 0.12)},1
 Style: ScreenText,{self.font},{font_size},&H00FFFFFF,&H000000FF,&H00000000,&H00000000,-1,0,0,0,100,100,0,0,1,1,0,5,0,0,0,1
 
 [Events]

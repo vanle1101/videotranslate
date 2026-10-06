@@ -53,7 +53,7 @@ class PortablePipelineTests(unittest.TestCase):
     def session(self, **kwargs):
         return StreamingPipelineSession("regression", self.root / "video.mp4", **kwargs)
 
-    def test_ass_user_lines_and_literal_commands_stay_in_one_event(self):
+    def test_ass_user_lines_page_in_pairs_and_literal_commands_stay_literal(self):
         path = self.root / "edited.ass"
         SubtitleGenerator().generate_ass([
             {"start": 0, "end": 3, "vi_text": "Xin chào\r\nMọi người\rNhé"},
@@ -61,9 +61,10 @@ class PortablePipelineTests(unittest.TestCase):
         ], path)
         rows = path.read_text(encoding="utf-8").splitlines()
         dialogue = [row for row in rows if row.startswith("Dialogue:")]
-        self.assertEqual(len(dialogue), 2)
-        self.assertTrue(dialogue[0].endswith(r"Xin chào\NMọi người\NNhé"))
-        self.assertTrue(dialogue[1].endswith("\\{\\\u2060alpha&HFF&\\}A\\\u2060NB"))
+        self.assertEqual(len(dialogue), 3)
+        self.assertTrue(dialogue[0].endswith(r"Xin chào\NMọi người"))
+        self.assertTrue(dialogue[1].endswith("Nhé"))
+        self.assertTrue(dialogue[2].endswith("\\{\\\u2060alpha&HFF&\\}A\\\u2060NB"))
         self.assertFalse(any(row == "Mọi người" for row in rows))
 
     def test_ass_wraps_long_sentence_without_changing_words(self):

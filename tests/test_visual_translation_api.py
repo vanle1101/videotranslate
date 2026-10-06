@@ -79,7 +79,7 @@ def test_visual_choice_reaches_session_for_every_source(source_api, route, enabl
 @pytest.mark.parametrize("invalid", ["provider", "missing_key", "blank_key"])
 def test_visual_configuration_rejected_before_source_work(source_api, monkeypatch, route, invalid):
     if invalid == "provider":
-        monkeypatch.setattr(settings, "LLM_PROVIDER", "openrouter-free")
+        monkeypatch.setattr(settings, "LLM_PROVIDER", "muse")
     else:
         monkeypatch.setattr(settings, "GEMINI_API_KEY", "  " if invalid == "blank_key" else "")
     response = post_source(source_api, route, True)
@@ -90,6 +90,26 @@ def test_visual_configuration_rejected_before_source_work(source_api, monkeypatc
     source_api.session.start.assert_not_awaited()
     source_api.session.start_from_url.assert_not_awaited()
     assert not list(source_api.inputs.iterdir())
+
+
+@pytest.mark.parametrize("route", ["url", "local", "upload"])
+def test_explicit_openrouter_visual_mode_accepts_every_source_without_gemini_key(source_api, monkeypatch, route):
+    monkeypatch.setattr(settings, "LLM_PROVIDER", "openrouter-free")
+    monkeypatch.setattr(settings, "GEMINI_API_KEY", "")
+    monkeypatch.delenv("GEMINI_API_KEY", raising=False)
+    response = post_source(source_api, route, True)
+    assert response.status_code == 200, response.text
+    assert response.json()["status"] == "started"
+    source_api.factory.assert_called_once()
+    args = source_api.factory.call_args.kwargs
+    assert args["visual_translation"] is True
+    if route == "url":
+        assert args["video_path"] is None
+        source_api.session.start_from_url.assert_awaited_once_with(main.downloader, source_api.normalize.return_value)
+    else:
+        assert args["video_path"].read_bytes() == (b"local video fixture" if route == "local" else b"uploaded video fixture")
+        source_api.session.start.assert_awaited_once()
+    assert "fixture-key" not in response.text
 
 
 def test_visual_configuration_accepts_environment_key(source_api, monkeypatch):

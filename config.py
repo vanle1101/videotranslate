@@ -138,7 +138,8 @@ class Settings(BaseSettings):
     # Subtitle & Video layout
     SUBTITLE_FONT: str = "Arial"
     SUBTITLE_FONT_SIZE: int = 18
-    SUBTITLE_PRIMARY_COLOR: str = "&H0000FFFF" # Yellow BGR
+    # ASS uses BBGGRR; this is the bright yellow used by the preview.
+    SUBTITLE_PRIMARY_COLOR: str = "&H0000EBFF"
     SUBTITLE_OUTLINE_COLOR: str = "&H00000000" # Black outline
     MASK_CHINESE_SUBTITLE: bool = True # Apply sleek blurred glass banner to cover Chinese hard sub
 

@@ -426,6 +426,36 @@ def test_inflight_edit_blocks_other_edits_and_export_but_keeps_existing_audio(se
     asyncio.run(run())
 
 
+@pytest.mark.parametrize("show_screen_text", [False, True])
+@pytest.mark.parametrize("visual_translation", [False, True])
+def test_export_screen_text_choice_keeps_spoken_captions_and_original_evidence(
+        session, monkeypatch, show_screen_text, visual_translation):
+    session.visual_translation = visual_translation
+    session.screen_texts = [{"id": "o0", "start": 2, "end": 5, "kind": "title",
+                             "text_vi": "Tiêu đề", "bbox": [.1, .1, .8, .1], "needs_review": False}]
+    captured = {}
+
+    def export(**kwargs):
+        captured.update(kwargs)
+        return {"output_filename": "final.mp4", "elapsed_seconds": .1}
+
+    monkeypatch.setattr(main, "HQExporter", lambda: SimpleNamespace(export=export))
+
+    async def run():
+        async with client() as api:
+            response = await api.post("/api/streaming/export-hq", json={
+                "task_id": session.task_id, "mask_chinese": True,
+                "translate_screen_text": show_screen_text})
+            assert response.status_code == 200, response.text
+
+    asyncio.run(run())
+    expected_screens = (session.screen_texts if show_screen_text else []) if visual_translation else None
+    assert captured["screen_texts"] == expected_screens
+    assert captured["mask_chinese"] is show_screen_text
+    assert captured["segments"][0]["final_vi"] == session.segments[0].final_vi
+    assert len(session.screen_texts) == 1
+
+
 def test_export_uses_revised_text_and_audio_and_blocks_edits_until_done(session, monkeypatch):
     entered, release = threading.Event(), threading.Event()
     seen = {}

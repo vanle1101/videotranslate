@@ -49,6 +49,21 @@ def video_state(page):
     })())'''))
 
 
+def check_caption_defaults(page):
+    state = json.loads(javascript(page, '''JSON.stringify((() => {
+        const caption = getComputedStyle(document.getElementById('subtitle-text'));
+        return {screenText: document.getElementById('toggle-screen-text').checked,
+            mask: document.getElementById('toggle-mask-chinese').checked,
+            maskDisplay: getComputedStyle(document.getElementById('chinese-sub-mask')).display,
+            color: caption.color, weight: caption.fontWeight,
+            background: caption.backgroundColor, stroke: caption.webkitTextStrokeColor};
+    })())'''))
+    assert not state['screenText'] and not state['mask'] and state['maskDisplay'] == 'none', state
+    assert state['color'] == 'rgb(255, 235, 0)' and int(state['weight']) >= 700, state
+    assert state['background'] == 'rgba(0, 0, 0, 0)' and state['stroke'] == 'rgb(0, 0, 0)', state
+    return state
+
+
 def check_media_playback(page, folder):
     """Play actual H264/AAC source via automatic WebM fallback when needed."""
     video = Path(folder) / 'video thử H264 & AAC.mp4'
@@ -71,6 +86,13 @@ def check_media_playback(page, folder):
     assert (state['width'], state['height']) == (180, 320), state
     assert 7.9 <= state['duration'] <= 8.2, state
     assert '/api/preview/' in state['source'] or '/api/local-file?path=' in state['source'], state
+    # The mask is intentionally off by default. Enable its two independent
+    # controls before measuring its position against the contained video.
+    javascript(page, '''
+        document.getElementById('toggle-screen-text').click();
+        document.getElementById('toggle-mask-chinese').click();
+    ''')
+    assert javascript(page, "getComputedStyle(document.getElementById('chinese-sub-mask')).display") == 'block'
     overlay = json.loads(javascript(page, '''JSON.stringify((() => {
         const video = document.getElementById('video-player');
         const frame = document.getElementById('player-container').getBoundingClientRect();
@@ -84,6 +106,11 @@ def check_media_playback(page, folder):
     })())'''))
     for key in ('left', 'top', 'width', 'height'):
         assert abs(overlay[key] - overlay['expected' + key.title()]) < 1, overlay
+    javascript(page, '''
+        document.getElementById('toggle-screen-text').click();
+        document.getElementById('toggle-mask-chinese').click();
+    ''')
+    assert javascript(page, "getComputedStyle(document.getElementById('chinese-sub-mask')).display") == 'none'
     javascript(page, '''
         window.__smokePlayError = null;
         document.getElementById('video-player').muted = true;
@@ -599,6 +626,7 @@ def check_transcript_editor(window, screenshot_path=None):
     javascript(page, """
         window.__transcriptFetch = window.fetch;
         window.__transcriptSocket = window.WebSocket;
+        window.__captionExportRequests = [];
         window.__transcriptErrors = [];
         window.__transcriptErrorHandler = event => window.__transcriptErrors.push({message:event.message, file:event.filename, line:event.lineno, stack:event.error?.stack});
         window.addEventListener('error', window.__transcriptErrorHandler);
@@ -608,6 +636,10 @@ def check_transcript_editor(window, screenshot_path=None):
             if (url === '/api/streaming/start-url') return new Response(JSON.stringify({task_id: 'qt-transcript'}));
             if (url === '/api/tasks') return new Response(JSON.stringify({tasks: []}));
             if (url === '/api/tasks/qt-transcript/stop') return new Response(JSON.stringify({status: 'ok'}));
+            if (url === '/api/streaming/export-hq') {
+                window.__captionExportRequests.push(JSON.parse(options.body));
+                return new Response(JSON.stringify({detail: 'SMOKE_EXPORT_CAPTURED'}), {status: 400});
+            }
             if (url === '/api/streaming/qt-transcript/segments/0') {
                 window.__transcriptSegment = {...window.__transcriptSegment, ...JSON.parse(options.body), revision: 1};
                 return new Response(JSON.stringify({segment: window.__transcriptSegment}));
@@ -706,7 +738,31 @@ def check_transcript_editor(window, screenshot_path=None):
             errors:window.__transcriptErrors})"""))
         assert saved['hidden'] and saved['text'] == saved['subtitle'] == 'Đã sửa trực tiếp cạnh video.', saved
         assert not saved['exportDisabled'] and not saved['errors'], saved
-        return {'caret_edit':True, 'server_save':True, 'subtitle_sync':True, 'layouts':geometry}
+        for enabled in (False, True):
+            if enabled:
+                javascript(page, '''
+                    document.getElementById('toggle-screen-text').click();
+                    document.getElementById('toggle-mask-chinese').click();
+                ''')
+            javascript(page, "document.getElementById('btn-export-hq').click()")
+            modal = json.loads(javascript(page, '''JSON.stringify({
+                visible: !document.getElementById('export-modal').classList.contains('hidden'),
+                summary: document.getElementById('export-screen-text-summary').textContent
+            })'''))
+            assert modal['visible'], modal
+            assert ('bật' if enabled else 'tắt') in modal['summary'], modal
+            javascript(page, "document.getElementById('btn-confirm-export').click()")
+            wait(200)
+            requests = json.loads(javascript(page, 'JSON.stringify(window.__captionExportRequests)'))
+            assert requests[-1] == {'task_id': 'qt-transcript', 'mask_chinese': enabled,
+                                    'translate_screen_text': enabled}, requests
+            javascript(page, "document.getElementById('btn-close-export-modal').click()")
+        javascript(page, '''
+            document.getElementById('toggle-screen-text').click();
+            document.getElementById('toggle-mask-chinese').click();
+        ''')
+        return {'caret_edit':True, 'server_save':True, 'subtitle_sync':True,
+                'screen_text_export_options': requests, 'layouts':geometry}
     finally:
         javascript(page, 'window.studioStop();')
         wait(200)
@@ -739,6 +795,7 @@ def main():
             wait(200)
         assert loaded and loaded[-1], 'Desktop page did not load'
         wait(500)
+        caption_defaults = check_caption_defaults(window.web_view.page())
         voice_smoke = check_voice_catalog_and_preview(window.web_view.page(), media_folder.name)
         result = json.loads(javascript(window.web_view.page(), '''JSON.stringify({
             asr: document.body.dataset.asrEngine,
@@ -864,6 +921,7 @@ def main():
         javascript(window.web_view.page(), "document.getElementById('tab-studio').click()")
         wait(200)
         print(json.dumps({'result': 'PASS', 'desktop': result, 'upload': upload['requests'][0],
+                          'caption_defaults': caption_defaults,
                           'playback': playback, 'bgm': bgm, 'layout_1024': layout,
                           'original_segment_playback': original_playback,
                           'progress_and_logs': progress_logs, 'voices': voice_smoke, 'transcript': transcript_smoke}, ensure_ascii=False))

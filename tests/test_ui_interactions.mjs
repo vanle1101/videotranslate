@@ -5,6 +5,7 @@ import assert from 'node:assert/strict';
 
 const source = readFileSync(new URL('../static/app.js', import.meta.url), 'utf8');
 const template = readFileSync(new URL('../templates/index.html', import.meta.url), 'utf8');
+const stylesheet = readFileSync(new URL('../static/style.css', import.meta.url), 'utf8');
 
 function studio(cookieReply = { configured: false, count: 0, message: '' }, voiceConfig = {}) {
   const elements = new Map(), audio = [], sockets = [], requests = [], alerts = [], copied = [];
@@ -89,6 +90,9 @@ function studio(cookieReply = { configured: false, count: 0, message: '' }, voic
     elements.set(match[2], element);
   }
   const el = id => elements.get(id);
+  // Match these intentional image-preserving defaults in the actual template.
+  el('toggle-mask-chinese').checked = false;
+  el('toggle-screen-text').checked = false;
   const playerSurface = new Element();
   playerSurface.className = 'player-surface';
   playerSurface.appendChild(el('player-container'));
@@ -1241,7 +1245,7 @@ test('subtitle mask stays on the contained image for landscape and portrait sour
     assert.equal(parseFloat(mask.right), (600 - actualWidth) / 2);
     assert.ok(Math.abs(parseFloat(mask.bottom) - ((500 - actualHeight) / 2 + actualHeight * 0.14)) < 0.01);
     assert.ok(Math.abs(parseFloat(mask.height) - actualHeight * 0.14) < 0.01);
-    assert.ok(Math.abs(parseFloat(ui.el('subtitle-overlay').style.bottom) - ((500 - actualHeight) / 2 + actualHeight * 0.08)) < 0.01);
+    assert.ok(Math.abs(parseFloat(ui.el('subtitle-overlay').style.bottom) - ((500 - actualHeight) / 2 + actualHeight * 0.12)) < 0.01);
     assert.ok(Math.abs(parseFloat(ui.el('subtitle-overlay').style.left) - ((600 - actualWidth) / 2 + actualWidth * 0.07)) < 0.01);
   }
 });
@@ -1368,7 +1372,7 @@ test('visual analysis progress describes analyzed duration separately from gener
   ui.sockets.at(-1).receive({ type: 'progress', phase: 'visual', status: 'RUNNING', progress_pct: 40,
     stage: 'Đang đối chiếu lời thoại, phụ đề và tiêu đề' });
   assert.equal(ui.el('task-progress-value').textContent, '40%');
-  assert.match(ui.el('task-progress-detail').textContent, /thời lượng video đã phân tích/);
+  assert.match(ui.el('task-progress-detail').textContent, /thời lượng video đã đối chiếu lời nói và chữ trên hình/);
   assert.doesNotMatch(ui.el('task-progress-detail').textContent, /số câu/);
   ui.sockets.at(-1).receive({ type: 'progress', phase: 'processing', status: 'RUNNING', progress_pct: 10 });
   assert.match(ui.el('task-progress-detail').textContent, /số câu/);
@@ -1399,6 +1403,8 @@ test('long translation appears as compact sequential pages with every word and s
 });
 
 function visualFixture(ui, screenTexts) {
+  ui.el('toggle-screen-text').checked = true;
+  ui.el('toggle-mask-chinese').checked = true;
   const segment = { id: 0, start: 0, end: 10, status: 'READY', final_vi: 'Lời thoại ngắn', audio_url: '/dub.wav' };
   ui.sockets.at(-1).receive({ type: 'init', duration: 10, segments_count: 1, visual_translation: true,
     screen_texts: screenTexts, segments: [segment] });
@@ -1752,4 +1758,136 @@ test('failed explicit silence confirmation preserves a typed draft and keeps the
   assert.match(row.querySelector('.transcript-edit-message').textContent, /Đang xuất video/);
   assert.equal(ui.el('seg-vi-0').textContent, 'Nghi nhận nhầm');
   assert.equal(ui.el('btn-export-hq').disabled, true);
+});
+
+test('original audition exposes original on-screen text and restores translated overlays according to toggles', async () => {
+  const ui = studio(); await ui.start();
+  visualFixture(ui, [
+    { start: 0, end: 10, text_vi: 'Tiêu đề dịch', bbox: [.1, .1, .8, .08], kind: 'title' },
+    { start: 0, end: 10, text_vi: 'Phụ đề dịch', bbox: [.1, .7, .8, .05], kind: 'subtitle' },
+  ]);
+  const overlay = ui.el('screen-text-overlay'), button = ui.el('seg-row-0').querySelector('.transcript-listen-original');
+  assert.equal(overlay.children.length, 2);
+  await button.click();
+  assert.equal(overlay.children.length, 0);
+  assert.equal(ui.el('subtitle-text').textContent, '');
+  assert.equal(ui.el('chinese-sub-mask').style.display, 'none');
+  await ui.el('toggle-mask-chinese').emit('change');
+  assert.equal(overlay.children.length, 0);
+  assert.equal(ui.el('chinese-sub-mask').style.display, 'none');
+  await button.click();
+  assert.equal(overlay.children.length, 2);
+  assert.equal(overlay.children[0].textContent, 'Tiêu đề dịch');
+  assert.equal(overlay.children[1].textContent, 'Phụ đề dịch');
+  await button.click();
+  ui.el('toggle-subtitles').checked = false; await ui.el('toggle-subtitles').emit('change');
+  await button.click();
+  assert.equal(overlay.children.length, 0);
+  assert.equal(ui.el('subtitle-overlay').style.display, 'none');
+  const other = studio(); await other.start();
+  const listen = other.el('seg-row-0').querySelector('.transcript-listen-original');
+  other.el('toggle-screen-text').checked = true;
+  other.el('toggle-mask-chinese').checked = true;
+  await other.el('toggle-mask-chinese').emit('change');
+  assert.equal(other.el('chinese-sub-mask').style.display, 'block');
+  await listen.click();
+  assert.equal(other.el('chinese-sub-mask').style.display, 'none');
+  await listen.click();
+  assert.equal(other.el('chinese-sub-mask').style.display, 'block');
+  assert.equal(other.el('subtitle-text').textContent, '<b>Xin chào</b>');
+});
+
+test('spoken captions use yellow fill, scalable black contour and lower centered placement independently from OCR titles', async () => {
+  const rules = [...stylesheet.matchAll(/#subtitle-text\s*\{([^}]+)\}/g)].map(match => match[1]).join(' ');
+  assert.match(rules, /color:\s*#FFEB00\b/i);
+  assert.match(rules, /font-weight:\s*700/);
+  assert.match(rules, /-webkit-text-stroke:\s*var\(--subtitle-stroke-width,[^)]+\)\s*#000/);
+  assert.match(rules, /paint-order:\s*stroke fill/);
+  assert.match(rules, /text-shadow:/);
+  assert.match(rules, /white-space:\s*pre\s*;/);
+  assert.match(rules, /background:\s*transparent/);
+  const ui = studio(); await ui.start();
+  const video = ui.el('video-player'); video.videoWidth = 1080; video.videoHeight = 1920;
+  ui.el('player-container').getBoundingClientRect = () => ({ width: 600, height: 640 });
+  await video.emit('loadedmetadata');
+  const style = ui.el('player-container').style;
+  const size = parseFloat(style['--subtitle-font-size']);
+  assert.ok(Math.abs(parseFloat(style['--subtitle-stroke-width']) - size * .2) < .00001);
+  assert.ok(Math.abs(parseFloat(style['--subtitle-shadow-offset']) - size * .055) < .00001);
+  assert.equal(parseFloat(ui.el('subtitle-overlay').style.bottom), 640 * .12);
+  // The two-line block spans about 82–88% of portrait image height.
+  assert.ok(1 - .12 - 2 * 1.25 * size / 640 >= .81);
+  visualFixture(ui, [{ start: 0, end: 10, text_vi: 'Tiêu đề gốc', bbox: [.1, .1, .8, .1], kind: 'title' }]);
+  const title = ui.el('screen-text-overlay').children[0];
+  assert.equal(title.className, 'screen-text-item');
+  assert.equal(title.style.top, '10%');
+  assert.equal(title.style.height, '10%');
+  assert.match(stylesheet, /\.screen-text-item\s*\{[^}]*color:\s*#fff\b/);
+});
+
+test('manual multi-line captions preserve every line by paging in pairs rather than covering the picture', async () => {
+  const ui = studio(); await ui.start();
+  const text = 'Dòng thứ nhất\nDòng thứ hai\nDòng thứ ba\nDòng thứ tư';
+  ui.sockets.at(-1).receive({ type: 'segment_update', id: 0, start: 0, end: 8, status: 'READY', final_vi: text,
+    subtitle_cues: [{ start: 0, end: 8, text }] });
+  const pages = [];
+  for (let time = 0; time < 8; time += .1) {
+    ui.el('video-player').currentTime = time; await ui.el('video-player').emit('timeupdate');
+    const page = ui.el('subtitle-text').textContent;
+    assert.ok(page.split('\n').length <= 2);
+    if (pages.at(-1) !== page) pages.push(page);
+  }
+  assert.deepEqual(pages, ['Dòng thứ nhất\nDòng thứ hai', 'Dòng thứ ba\nDòng thứ tư']);
+  assert.equal(pages.join('\n'), text);
+});
+
+test('screen translation and masking default off while AI reading remains independent and spoken captions stay visible', async () => {
+  for (const id of ['toggle-screen-text', 'toggle-mask-chinese']) {
+    const tag = template.match(new RegExp(`<input[^>]*id="${id}"[^>]*>`))?.[0];
+    assert.ok(tag);
+    assert.doesNotMatch(tag, /\bchecked\b/);
+  }
+  const ui = studio(); await ui.start();
+  const source = { start: 0, end: 10, text_vi: 'Bản dịch chữ trên hình', bbox: [.1, .7, .8, .08], kind: 'subtitle' };
+  ui.sockets.at(-1).receive({ type: 'init', duration: 10, segments_count: 1, visual_translation: true,
+    screen_texts: [source, { ...source, mask_only: true, text_vi: '' }],
+    segments: [{ id: 0, start: 0, end: 10, status: 'READY', final_vi: 'Lời thoại dưới video.' }] });
+  assert.equal(ui.el('toggle-screen-text').checked, false);
+  assert.equal(ui.el('toggle-mask-chinese').checked, false);
+  assert.equal(ui.el('screen-text-overlay').children.length, 0);
+  assert.equal(ui.el('chinese-sub-mask').style.display, 'none');
+  assert.equal(ui.el('subtitle-text').textContent, 'Lời thoại dưới video.');
+  assert.equal(JSON.parse(ui.requests.find(item => item.url === '/api/streaming/start-local-file').options.body).visual_translation, true);
+  ui.el('toggle-screen-text').checked = true; await ui.el('toggle-screen-text').emit('change');
+  assert.equal(ui.el('screen-text-overlay').children.length, 1);
+  assert.equal(ui.el('screen-text-overlay').children[0].dataset.mask, 'false');
+  assert.equal(ui.el('subtitle-text').textContent, '');
+  ui.el('toggle-mask-chinese').checked = true; await ui.el('toggle-mask-chinese').emit('change');
+  assert.equal(ui.el('screen-text-overlay').children.length, 2);
+  ui.el('toggle-screen-text').checked = false; await ui.el('toggle-screen-text').emit('change');
+  assert.equal(ui.el('screen-text-overlay').children.length, 0);
+  assert.equal(ui.el('chinese-sub-mask').style.display, 'none');
+  assert.equal(ui.el('subtitle-text').textContent, 'Lời thoại dưới video.');
+  const listen = ui.el('seg-row-0').querySelector('.transcript-listen-original');
+  await listen.click(); await listen.click();
+  assert.equal(ui.el('subtitle-text').textContent, 'Lời thoại dưới video.');
+  assert.equal(ui.el('screen-text-overlay').children.length, 0);
+});
+
+test('export sends screen translation and mask choices explicitly and explains the selected rendering', async () => {
+  for (const translate of [false, true]) for (const mask of [false, true]) {
+    const ui = studio(); await ui.start();
+    ui.el('toggle-screen-text').checked = translate; await ui.el('toggle-screen-text').emit('change');
+    ui.el('toggle-mask-chinese').checked = mask; await ui.el('toggle-mask-chinese').emit('change');
+    await ui.el('btn-export-hq').click();
+    const summary = ui.el('export-screen-text-summary').textContent;
+    assert.match(summary, translate ? /Dịch chữ trên hình: bật/ : /Dịch chữ trên hình: tắt/);
+    if (!translate) assert.match(summary, /Giữ nguyên chữ/);
+    if (translate && mask) assert.match(summary, /Che vùng chữ gốc/);
+    if (translate && !mask) assert.match(summary, /không thêm vùng che/);
+    ui.replies.set('/api/streaming/export-hq', { video_url: '/outputs/final.mp4' });
+    await ui.el('btn-confirm-export').click();
+    const request = ui.requests.find(item => item.url === '/api/streaming/export-hq');
+    assert.deepEqual(JSON.parse(request.options.body), { task_id: 'fixture', mask_chinese: mask, translate_screen_text: translate });
+  }
 });

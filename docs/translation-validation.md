@@ -1,6 +1,28 @@
 # Kiểm tra dịch video — 06/10/2026
 
-## Mẫu kiểm tra
+## Bản dùng OpenRouter trực tiếp và phụ đề theo mẫu
+
+Đã chuyển cấu hình tại máy sang `openrouter-free`, model `inclusionai/ling-3.0-flash-sante:free`. Luồng này dùng Faster-Whisper và RapidOCR tại máy, gửi văn bản để sửa nguồn có dẫn chứng, dịch và kiểm tra nghĩa. Không khởi tạo Gemini, không gửi video tới Gemini và không cần key Gemini. Dịch vụ miễn phí vẫn có hạn mức và phụ thuộc model còn được cung cấp; ứng dụng không tự chuyển sang model trả phí.
+
+Mẫu vẫn là `https://v.douyin.com/FUSSxhVKiZw/`, video `7676801479801388282`. Dùng lại nguồn có sẵn, không tải bản sao. Lượt thử đầu phát hiện phản hồi JSON thiếu trường bắt buộc; đã thêm tối đa một lượt yêu cầu sửa cấu trúc cho từng bước, giữ nguyên mọi cờ cần rà từ phản hồi trước. Lượt chạy lại hoàn tất phân tích: một câu đủ bằng chứng để xử lý, chín câu cần duyệt. Bản nháp còn lỗi như trộn chữ Trung vào lời Việt và rút ngắn sai câu cuối; các câu đó không tự tạo giọng hoặc cho phép xuất.
+
+Rà mã sau lượt chạy còn phát hiện so khớp gần đúng có thể bỏ qua chữ phủ định hoặc khác biệt số lượng, và kiểm tra riêng từng batch có thể bỏ sót bằng chứng OCR ở batch khác. Đã chuyển sang đối chiếu nguyên chữ theo thứ tự và kiểm tra sau khi ghép các batch; thêm bảy trường hợp hồi quy. Mọi cờ chưa chắc chắn từ các bước trước vẫn được giữ.
+
+Thành phẩm cuối được rà và sửa cả mười câu qua luồng lưu transcript/tạo lại giọng Edge-TTS Hoài My, rồi xuất. Đây là bản có biên tập, không phải xác nhận model tự dịch đúng toàn bộ. Câu kết vẫn giữ dấu lửng vì video nguồn bị cắt. Không đưa câu mẫu thành quy tắc thay thế trong mã sản phẩm.
+
+- MP4: `workspace/outputs/douyin-7676801479801388282-vi-free.mp4`.
+- Phụ đề: `workspace/outputs/douyin-7676801479801388282-vi-free.srt`.
+- H264/AAC stereo, 2160×3840, 32,633333 giây, 84.196.464 byte.
+- SHA-256: `639880a1a8e3545e3b01b6e7641b850bdc0f9a160cd4557e8e4499f5de88eae1`.
+- Chữ vàng đậm, viền đen, nền trong, tối đa hai dòng ở phía dưới. Bản này giữ nguyên chữ/hình nguồn, không có vùng che OCR.
+
+Đã kiểm tra thông số bằng ffprobe, giải mã toàn bộ luồng hình và tiếng bằng FFmpeg không lỗi, xem khung hình đã render để kiểm tra vị trí và kiểu chữ. Nhóm hồi quy cuối đạt 260 bài Python và 32 subtest; nhóm API/transcript đạt 71 bài và 15 subtest, bỏ qua một bài symlink do quyền Windows. Các nhóm này có bài trùng nhau, không cộng tổng. JavaScript đạt 87 bài. Qt smoke đạt kiểm tra kiểu phụ đề, trạng thái mặc định, payload xuất, phát/tạm dừng/tua, nghe gốc, danh sách giọng, dán link, sao chép log, sửa transcript và năm kích thước cửa sổ. Backend thử nghiệm đã dừng và media tạm của smoke đã được dọn.
+
+Studio đang mở được giữ nguyên; cần mở lại để nạp mã mới. Các bản xuất cũ bên dưới vẫn được giữ làm kết quả của lượt trước.
+
+## Lượt trước: Gemini và nhánh dự phòng
+
+### Mẫu kiểm tra
 
 - Nội dung chia sẻ: `做自媒体这些常见的谣言 你都信过哪些？`, tác giả `野生军师🧢`.
 - Link: https://v.douyin.com/FUSSxhVKiZw/ — video ID `7676801479801388282`.
@@ -9,7 +31,7 @@
 - Thành phẩm: H264/AAC stereo, 2160×3840, 32,633333 giây, 79.077.222 byte.
 - SHA-256 MP4: `164724a234cb03f7b29b5fc3583bc2963765739d8706616c42c70e7612886771`.
 
-## Lỗi phát hiện và sửa
+### Lỗi phát hiện và sửa
 
 | Nguồn | Sai lệch từng gặp | Bản đã rà |
 | --- | --- | --- |
@@ -22,13 +44,13 @@
 
 Mốc câu lấy từ Faster-Whisper trên toàn bộ âm thanh. OCR đo vị trí/thời gian thay vì để Gemini ước lượng. Tiêu đề giữ trọn câu suốt khoảng xuất hiện; phụ đề dài chia trang cân đối. Bản đã biên tập giữ vùng che chữ nguồn, hiển thị thoại một lần ở đáy hình. Mask nằm dưới chữ Việt trong export.
 
-## API và phạm vi xác nhận
+### API và phạm vi xác nhận
 
 Gemini 2.5 Flash trả kết quả cho một số lượt kiểm tra, sau đó trả HTTP 429. Nhánh OpenRouter miễn phí đã chạy được đến dịch/TTS/export, nhưng đối chiếu nghĩa phát hiện lỗi ngay cả sau khi model tự kiểm tra. Vì vậy nhánh này nay sửa nguồn có dẫn chứng OCR trước, dịch và kiểm tra nghĩa riêng, đồng thời luôn giữ câu thoại ở trạng thái cần rà. Chữ trên hình từ nhánh dự phòng cũng chưa được duyệt, giữ nguyên vùng chữ nguồn khi xem trước/xuất; sửa transcript không xác nhận thay cho bản dịch OCR. Model/provider được ghi đúng trong transcript, không nhận kết quả dự phòng là Gemini đã xem/nghe video.
 
 Hai model OpenRouter thay thế thử nghiệm chưa trả được kết quả dùng được (giới hạn lượt/phản hồi trống). Gemini Flash Lite trả 404, Gemini 3 Flash Preview trả 503; cấu hình model chính không được đổi. Chưa xác nhận lại luồng Gemini tự động hoàn chỉnh sau khi key bị giới hạn.
 
-## Kiểm thử
+### Kiểm thử
 
 - 245 bài Python đạt, 1 bài bỏ qua do quyền symlink Windows, 70 subtest đạt trong nhóm kiểm tra tập trung.
 - 82 bài JavaScript đạt.

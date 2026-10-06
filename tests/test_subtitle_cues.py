@@ -47,11 +47,48 @@ def test_invalid_timing_never_generates_ass_events(start, end):
 
 def test_manual_lines_literal_characters_and_long_word_are_preserved():
     text = "Xin chào\r\nMọi người\rNhé"
-    assert build_subtitle_cues(text, 0, 3) == [{"start": 0, "end": 3, "text": "Xin chào\nMọi người\nNhé"}]
+    cues = build_subtitle_cues(text, 0, 3)
+    assert [cue["text"] for cue in cues] == ["Xin chào\nMọi người", "Nhé"]
+    assert cues[0]["start"] == 0 and cues[-1]["end"] == 3
+    assert cues[0]["end"] == cues[1]["start"]
     literal = r"{\alpha&HFF&}A\NB"
     assert build_subtitle_cues(literal, 0, 1)[0]["text"] == literal
     word = "a" * 80
     assert build_subtitle_cues(word, 0, 1)[0]["text"] == word
+
+
+def test_manual_lines_use_same_paired_pages_and_proportional_timing_as_preview(tmp_path):
+    text = "Dòng thứ nhất\nDòng thứ hai\nDòng thứ ba\nDòng thứ tư"
+    cues = build_subtitle_cues(text, 0, 8)
+    assert [cue["text"] for cue in cues] == ["Dòng thứ nhất\nDòng thứ hai", "Dòng thứ ba\nDòng thứ tư"]
+    assert cues[0]["start"] == 0 and cues[-1]["end"] == 8
+    boundary = 8 * len(cues[0]["text"]) / sum(len(cue["text"]) for cue in cues)
+    assert cues[0]["end"] == cues[1]["start"] == boundary
+    assert "\n".join(cue["text"] for cue in cues) == text
+    segment = [{"start": 0, "end": 8, "vi_text": text}]
+    generator = SubtitleGenerator()
+    ass = generator.generate_ass(segment, tmp_path / "manual.ass").read_text(encoding="utf-8")
+    srt = generator.generate_srt(segment, tmp_path / "manual.srt").read_text(encoding="utf-8")
+    rows = [line for line in ass.splitlines() if line.startswith("Dialogue:")]
+    assert len(rows) == srt.count("-->") == 2
+    assert all(row.count(r"\N") == 1 for row in rows)
+    assert [row.split(",", 9)[-1].replace(r"\N", "\n") for row in rows] == [cue["text"] for cue in cues]
+
+
+def test_export_speech_style_matches_yellow_black_preview_without_a_background_box(tmp_path):
+    ass = SubtitleGenerator().generate_ass([], tmp_path / "style.ass", video_size=(1080, 1920)).read_text(encoding="utf-8")
+    styles = ass.split("[V4+ Styles]\n", 1)[1].split("[Events]", 1)[0].splitlines()
+    names = next(line for line in styles if line.startswith("Format:")).removeprefix("Format: ").split(", ")
+    values = next(line for line in styles if line.startswith("Style: TikTokStyle,")).removeprefix("Style: ").split(",")
+    style = dict(zip(names, values))
+    assert style["PrimaryColour"] == "&H0000EBFF"
+    assert style["Bold"] == "-1" and style["Alignment"] == "2"
+    assert style["BorderStyle"] == "1", "An outline must not become an opaque rectangle behind the speech"
+    font = float(style["Fontsize"])
+    assert float(style["Outline"]) == pytest.approx(round(font * .10, 1))
+    assert float(style["Shadow"]) == pytest.approx(round(font * .055, 1))
+    assert int(style["MarginV"]) == round(1920 * .12)
+    assert .81 < 1 - .12 - 2 * 1.25 * font / 1920 < .83
 
 
 def test_srt_and_ass_use_the_same_display_pages(tmp_path):

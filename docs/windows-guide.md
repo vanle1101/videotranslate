@@ -12,7 +12,7 @@ Môi trường `venv`, cấu hình `.env` và model Whisper Small đã được 
 
 - Nhận tiếng Trung: Faster-Whisper **Small**, CPU **int8**, **6 luồng**; model ở `workspace/models/faster-whisper-small`.
 - Giọng Việt: Edge-TTS Hoài My / Nam Minh, cần Internet.
-- Dịch trên máy này: **Gemini 2.5 Flash**, key lưu trong `.env` local. **OpenRouter Free** vẫn có sẵn bằng key OpenCode. Không tải LLM dịch về RAM. Có thể đổi nhà cung cấp trong Cài đặt.
+- Dịch trên máy này: **OpenRouter Free**, dùng kết nối OpenRouter đã lưu trong OpenCode. Không cần Gemini và không tải LLM dịch về RAM. Có thể đổi nhà cung cấp trong Cài đặt.
 - Giảm giọng gốc: DSP trên CPU, không tải bộ tách giọng nặng. Hiệu quả tùy video; có thể còn giọng gốc hoặc ảnh hưởng nhạc nền.
 - Xuất MP4: H.264 + AAC, phụ đề ASS, tùy chọn làm mờ sub gốc; giữ kích thước và tỉ lệ video nguồn.
 - Không nạp model lúc mở giao diện. Lần xử lý video đầu tiên cần thời gian nạp model; tốc độ thực tế phụ thuộc video và tải máy, không đảm bảo realtime.
@@ -27,7 +27,7 @@ Lượt tải ngày 05/10/2026 đã hoàn tất toàn bộ danh sách trên và 
 
 Ngày 05/10/2026, SenseVoice đã nhận dạng mẫu tiếng Trung 5,59 giây (0,29 giây suy luận); VieNeu đã tạo câu tiếng Việt bằng preset Trúc Ly, âm thanh 48 kHz dài 2,32 giây (1,98 giây tổng hợp, 14,47 giây tính cả nạp model). VieNeu mở được từ cache khi tắt mạng Hugging Face, có 25 preset. Đây là kiểm engine bằng mẫu ngắn; chưa phải benchmark video dài hoặc luồng UI chọn giọng VieNeu. Hai giọng Hoài My/Nam Minh ở Studio thuộc Edge-TTS, không dùng ID đó làm preset VieNeu.
 
-Gemini được đưa lên đầu Cài đặt, model hiện chọn là `gemini-2.5-flash`. Khi thử ngày 04/10/2026, model này dịch thành công. Các bản 3.5–3.8 gặp quá tải; 3.6 có lúc trả lời ngắn được nhưng hai lần thử pipeline video trả lỗi 503. Bản 3.1 Pro preview báo quota miễn phí bằng 0. Đây là lựa chọn hoạt động tại thời điểm kiểm tra, không phải cam kết chất lượng hoặc hạn mức. Có thể nhập model khác, lưu rồi bấm kiểm tra kết nối. Lỗi API hoặc JSON chưa hoàn chỉnh sẽ được báo rõ, không âm thầm đổi dịch vụ. Key không gửi về giao diện hay đưa lên GitHub.
+Gemini là lựa chọn tùy chọn. Model `gemini-2.5-flash` đã dịch được trong các lượt trước nhưng gặp giới hạn hạn mức. Chọn **OpenRouter Free** để dịch trực tiếp bằng dịch vụ miễn phí, không gọi Gemini trước. Key không gửi về giao diện hay đưa lên GitHub.
 
 ## Dùng key miễn phí có sẵn trong OpenCode
 
@@ -70,11 +70,17 @@ Có thể dán nguyên đoạn chia sẻ Douyin vào ô **Video nguồn**, gồm
 
 Với Gemini, bật **AI đọc chữ và kiểm chứng lời nói** trước khi bắt đầu. Faster-Whisper nhận diện toàn bộ âm thanh để giữ mốc câu thật. RapidOCR chạy tại máy, lấy mẫu hình 3 lần/giây để đo chữ và vị trí; thời điểm đổi chữ có thể lệch khoảng một khoảng lấy mẫu. Gemini nhận video nén kèm âm thanh theo đoạn khoảng 24 giây (tối đa 45 giây), bản nhận giọng và OCR để sửa nhận dạng, dịch theo ngữ cảnh, rồi kiểm tra lần hai bằng video. Model chỉ dịch/phân loại các vùng OCR đã đo, không được tạo tọa độ/thời gian mới. Ngữ cảnh đoạn trước chuyển sang đoạn tiếp theo. Mỗi đoạn thường dùng hai lượt Gemini; có sử dụng hạn mức và mất thêm thời gian.
 
-Chế độ này cần cấu hình Gemini ban đầu; Studio báo rõ nếu thiếu key hoặc đang chọn nhà cung cấp khác. Khi Gemini hết hạn mức, Studio có thể dùng model OpenRouter `:free` đã cấu hình và thông tin đăng nhập OpenRouter đã lưu. Nhánh này chỉ nhận văn bản ASR/OCR: sửa nguồn có dẫn chứng OCR cùng thời điểm, dịch, rồi kiểm tra nghĩa riêng (thường ba lượt cho mỗi batch). Transcript và cảnh báo ghi rõ **OpenRouter · bản chép + OCR**, không nhận là Gemini đã xem/nghe video. Không chuyển model trả phí; lỗi key, bộ lọc nội dung hoặc yêu cầu không hợp lệ không kích hoạt nhánh này. Nếu cả hai dịch vụ thất bại, tác vụ báo lỗi. File nén gửi Gemini tối đa 14 MB mỗi đoạn được dọn sau khi xử lý; video nguồn giữ nguyên. Khi tắt tùy chọn, ứng dụng dùng luồng dịch âm thanh như trước.
+Với **OpenRouter Free**, tùy chọn này dùng Faster-Whisper và RapidOCR tại máy, sau đó gửi văn bản tới model `:free` đã cấu hình để sửa nguồn, dịch và kiểm tra nghĩa riêng. Không yêu cầu key Gemini, không nén/gửi video tới Gemini. Lời thoại có bằng chứng OCR rõ cùng thời điểm được xử lý; câu thiếu căn cứ hoặc còn mâu thuẫn vẫn cần nghe lại. Nhãn **OpenRouter · bản chép + OCR** phân biệt rõ với Gemini xem/nghe video. Model miễn phí vẫn phụ thuộc hạn mức và khả dụng của OpenRouter; ứng dụng không tự chuyển model trả phí. Khi tắt tùy chọn, ứng dụng dùng luồng dịch âm thanh như trước.
+
+Nếu chọn Gemini và gặp lỗi hạn mức, Studio vẫn có thể dùng OpenRouter làm dự phòng. Trong trường hợp chuyển dịch vụ dự phòng này, toàn bộ bản dịch cần được duyệt trước khi sử dụng. Lỗi key, bộ lọc nội dung hoặc yêu cầu không hợp lệ không kích hoạt nhánh dự phòng. File nén gửi Gemini tối đa 14 MB mỗi đoạn được dọn sau khi xử lý; video nguồn giữ nguyên.
 
 Câu thiếu căn cứ được ghi **Cần kiểm tra**, kèm lý do trong transcript. Toàn bộ câu từ nhánh OpenRouter dự phòng cũng cần rà: kiểm thử thực tế phát hiện model vẫn tự tin với câu sai nghĩa dù đã tự kiểm tra. Studio chưa tạo giọng cho câu cần kiểm tra và khóa xuất video đến khi bạn nghe/xem lại rồi bấm **Lưu và tạo lại giọng**. Có thể giữ nguyên bản nháp và bấm lưu sau khi đã kiểm tra. Các câu chắc chắn từ luồng Gemini vẫn được xử lý. Chữ trên hình không đọc chắc, không xác định được vùng chữ hoặc được dịch qua nhánh OpenRouter dự phòng sẽ giữ nguyên, không tự che. Sửa lời thoại không duyệt thay bản dịch chữ trên hình; hiện chưa có trình duyệt OCR riêng.
 
-Phụ đề thoại dài tự chia thành trang ngắn 1–2 dòng; thời gian chuyển trang được ước tính trong câu, chưa phải căn chính xác từng từ. Tiêu đề/nhận định hiện trọn câu suốt khoảng xuất hiện, vừa vùng chữ được đo. Khi sửa thoại, vùng phụ đề Trung giữ vai trò che chữ cũ; lời Việt mới chạy một lần ở đáy hình và xuất cùng bản audio mới. Chế độ OCR không dùng thanh che ngang cố định. Model nhận dạng và OCR được giải phóng sau xử lý để giảm RAM. Cần xem lại nội dung, vị trí và tốc độ đọc trước khi xuất; có API không bảo đảm mọi câu đúng. Thay đổi áp dụng cho tác vụ mới sau khi mở lại ứng dụng; không tự sửa phiên đã xử lý.
+Phụ đề thoại màu vàng đậm, viền đen, nền trong, nằm giữa phía dưới video. Câu dài tự chia thành trang ngắn tối đa hai dòng, kể cả khi sửa có nhiều dấu xuống dòng; thời gian chuyển trang được ước tính trong câu, chưa phải căn chính xác từng từ.
+
+**Dịch chữ trên hình** và **Che phụ đề Trung** mặc định tắt để giữ nguyên hình nguồn và chỉ thêm phụ đề thoại Việt. Có thể bật dịch chữ để hiện các vùng OCR đã được duyệt; bật thêm che chữ để phủ vùng chữ nguồn. Tắt dịch chữ cũng tắt vùng che, kể cả khi checkbox che vẫn được chọn. Những lựa chọn này được áp dụng cả khi xem trước và xuất MP4. AI vẫn đọc OCR để kiểm chứng lời thoại nếu tùy chọn phân tích đang bật. Tiêu đề/nhận định được duyệt hiện trọn câu trong vùng OCR; lời thoại đã sửa hiển thị một lần ở đáy hình và xuất cùng bản audio mới.
+
+Model nhận dạng và OCR được giải phóng sau xử lý để giảm RAM. Cần xem lại nội dung, vị trí và tốc độ đọc trước khi xuất; có API không bảo đảm mọi câu đúng. Thay đổi áp dụng cho tác vụ mới sau khi mở lại ứng dụng; không tự sửa phiên đã xử lý. Kết quả kiểm tra mẫu thật và giới hạn dịch miễn phí được ghi trong [báo cáo kiểm tra dịch](translation-validation.md).
 
 ### Sửa transcript cạnh video
 

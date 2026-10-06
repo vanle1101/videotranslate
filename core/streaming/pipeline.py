@@ -115,10 +115,11 @@ class StreamingPipelineSession:
         self.screen_texts: List[Dict[str, Any]] = []
         self.translation_sources: List[Dict[str, str]] = []
         if self.visual_translation:
-            if (getattr(settings, "LLM_PROVIDER", "") or "").lower() != "gemini":
-                raise ValueError("Dịch hình ảnh chỉ hỗ trợ nhà cung cấp Gemini; không tự chuyển sang nhà cung cấp khác.")
-            if not (getattr(settings, "GEMINI_API_KEY", "") or os.getenv("GEMINI_API_KEY", "")).strip():
-                raise ValueError("Dịch hình ảnh cần API key Gemini trong Cài đặt.")
+            from core.video_intelligence import validate_visual_provider, VideoIntelligenceError
+            try:
+                validate_visual_provider()
+            except VideoIntelligenceError as exc:
+                raise ValueError(str(exc)) from None
 
         # Cache directories
         self.cache_dir = settings.BASE_DIR / "workspace" / "cache" / task_id
@@ -514,7 +515,7 @@ class StreamingPipelineSession:
                 provider = data.get("translation_provider")
                 if provider is None:
                     provider = ("openrouter-free" if getattr(self.video_intelligence, "used_text_fallback", False)
-                                else "gemini")
+                                else self.video_intelligence.provider)
                 if provider not in ("gemini", "openrouter-free"):
                     raise ValueError("Bản dịch chưa xác định đúng nhà cung cấp đã xử lý.")
                 fallback = provider == "openrouter-free"
@@ -529,7 +530,8 @@ class StreamingPipelineSession:
                     self.translation_sources.append(source)
                 item.needs_review = bool(data.get("needs_review", False))
                 item.review_reason = data.get("review_reason")
-            if any(source["provider"] == "openrouter-free" for source in self.translation_sources):
+            if (self.video_intelligence.provider == "gemini"
+                    and any(source["provider"] == "openrouter-free" for source in self.translation_sources)):
                 self.warnings.append(
                     "Gemini hết hạn mức; một phần bản dịch dùng OpenRouter miễn phí từ lời nhận diện Faster-Whisper "
                     "và chữ OCR trên máy. Phần này chưa được AI xem/nghe video để kiểm chứng; "
@@ -607,8 +609,10 @@ class StreamingPipelineSession:
         if not self.visual_translation:
             return self.asr_engine.name
         providers = {source["provider"] for source in self.translation_sources}
+        if not providers and self.video_intelligence:
+            providers = {self.video_intelligence.provider}
         if providers == {"openrouter-free"}:
-            return "Faster-Whisper + OCR tại máy; OpenRouter · dịch văn bản"
+            return "ASR + OCR miễn phí · Faster-Whisper + OpenRouter · dịch văn bản"
         if "openrouter-free" in providers:
             return "Faster-Whisper + OCR tại máy; Gemini + OpenRouter · xem chi tiết từng câu"
         return "Faster-Whisper · lời nói và thời gian; Gemini · đối chiếu hình ảnh"

@@ -115,6 +115,7 @@ class SeekRequest(BaseModel):
 class ExportHQRequest(BaseModel):
     task_id: str
     mask_chinese: Optional[bool] = True
+    translate_screen_text: bool = True
 
 class SegmentEditRequest(BaseModel):
     final_vi: str = Field(max_length=2000, strict=True)
@@ -712,8 +713,11 @@ async def export_hq(req: ExportHQRequest):
             video_path=session.video_path,
             segments=segments_data,
             total_duration=session.total_duration,
-            mask_chinese=req.mask_chinese if req.mask_chinese is not None else True,
-            screen_texts=getattr(session, "screen_texts", []) if getattr(session, "visual_translation", False) else None,
+            # Do not cover source pixels when screen-text translation is disabled.
+            mask_chinese=(req.mask_chinese if req.mask_chinese is not None else True)
+                and req.translate_screen_text,
+            screen_texts=(getattr(session, "screen_texts", []) if req.translate_screen_text else [])
+                if getattr(session, "visual_translation", False) else None,
             progress_callback=_prog_cb,
             cancel_check=_cancel_chk
         )
@@ -768,10 +772,12 @@ class StreamLocalFileRequest(BaseModel):
 
 
 def validate_visual_translation(enabled):
-    if enabled and settings.LLM_PROVIDER != "gemini":
-        raise HTTPException(status_code=422, detail="Đọc chữ và kiểm chứng video cần chọn Gemini trong Cài đặt.")
-    if enabled and not (settings.GEMINI_API_KEY or os.getenv("GEMINI_API_KEY", "")).strip():
-        raise HTTPException(status_code=422, detail="Nhập key Gemini trước khi bật đọc chữ và kiểm chứng video.")
+    if enabled:
+        from core.video_intelligence import validate_visual_provider, VideoIntelligenceError
+        try:
+            validate_visual_provider()
+        except VideoIntelligenceError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from None
 
 
 def reject_private_media_path(path):

@@ -56,6 +56,7 @@ document.addEventListener("DOMContentLoaded", () => {
   // Toggles & Volumes
   const toggleMaskChinese = document.getElementById("toggle-mask-chinese");
   const toggleSubtitles = document.getElementById("toggle-subtitles");
+  const toggleScreenText = document.getElementById("toggle-screen-text");
   const volDubSlider = document.getElementById("vol-dub");
   const volDubVal = document.getElementById("vol-dub-val");
   const volBgmSlider = document.getElementById("vol-bgm");
@@ -613,7 +614,7 @@ document.addEventListener("DOMContentLoaded", () => {
     taskProgressDetail.textContent = terminal
       ? (status === "FAILED" ? "Mở Diagnostics → Errors Log để xem chi tiết, hoặc thử lại nguồn video." : status === "COMPLETED" ? "Các câu dịch đã xử lý xong. Có thể xuất video." : "Tác vụ đã dừng.")
       : currentProgress.phase === "download" ? (pct === null ? "Đang tải video; máy chủ chưa cung cấp tổng dung lượng." : "Tiến độ tải video nguồn. Bước xử lý câu thoại sẽ có tiến độ riêng.")
-      : currentProgress.phase === "visual" ? (pct === null ? "AI đang xem hình và nghe tiếng. Đang chờ kết quả phân tích đầu tiên." : "Tiến độ thời lượng video đã phân tích hình và tiếng / tổng thời lượng. Bước tạo giọng sẽ có tiến độ riêng.")
+      : currentProgress.phase === "visual" ? (pct === null ? "Đang đối chiếu lời nhận dạng với chữ trên hình. Đang chờ kết quả phân tích đầu tiên." : "Tiến độ thời lượng video đã đối chiếu lời nói và chữ trên hình / tổng thời lượng. Bước tạo giọng sẽ có tiến độ riêng.")
       : pct !== null ? "Tiến độ xử lý câu thoại: số câu hoàn tất / tổng số câu."
       : "Bước này chưa có số liệu phần trăm. Trạng thái sẽ cập nhật khi có kết quả.";
     btnPauseWorker.classList.toggle("hidden", !currentProgress.can_pause || terminal);
@@ -770,7 +771,17 @@ document.addEventListener("DOMContentLoaded", () => {
     start = Number(start); end = Number(end);
     if (!text || !Number.isFinite(start) || !Number.isFinite(end) || end <= Math.max(0, start)) return [];
     start = Math.max(0, start);
-    if (text.includes("\n")) return [{ start, end, text }];
+    if (text.includes("\n")) {
+      const lines = text.split("\n"), pages = [];
+      for (let i = 0; i < lines.length; i += 2) pages.push(lines.slice(i, i + 2).join("\n"));
+      const weight = pages.reduce((sum, page) => sum + Math.max(1, page.length), 0);
+      let elapsed = 0;
+      return pages.map((page, i) => {
+        const cueStart = start + (end - start) * elapsed / weight;
+        elapsed += Math.max(1, page.length);
+        return { start: cueStart, end: i === pages.length - 1 ? end : start + (end - start) * elapsed / weight, text: page };
+      });
+    }
     const words = text.split(/\s+/), pages = [];
     while (words.length) {
       let count = 0, size = 0;
@@ -829,7 +840,9 @@ document.addEventListener("DOMContentLoaded", () => {
     const text = segmentTranslation(segment);
     if (!segment._displayCues || segment._displayText !== text) {
       segment._displayText = text;
-      segment._displayCues = Array.isArray(segment.subtitle_cues) ? segment.subtitle_cues : makeSubtitleCues(text, segment.start, segment.end);
+      segment._displayCues = Array.isArray(segment.subtitle_cues)
+        ? segment.subtitle_cues.flatMap(cue => makeSubtitleCues(cue.text, cue.start, cue.end))
+        : makeSubtitleCues(text, segment.start, segment.end);
     }
     return segment._displayCues.find(cue => time >= cue.start && time < cue.end)?.text || "";
   }
@@ -887,11 +900,22 @@ document.addEventListener("DOMContentLoaded", () => {
   function resetScreenTexts() {
     screenTexts = []; screenTextSignature = ""; visualSession = false;
     screenTextOverlay?.replaceChildren();
-    chineseSubMask.style.display = toggleMaskChinese.checked ? "block" : "none";
+    chineseSubMask.style.display = toggleScreenText.checked && toggleMaskChinese.checked ? "block" : "none";
   }
 
   function renderScreenTexts(time) {
     if (!screenTextOverlay) return false;
+    if (sourceAudition) {
+      screenTextOverlay.replaceChildren();
+      screenTextSignature = "";
+      chineseSubMask.style.display = "none";
+      return false;
+    }
+    if (!toggleScreenText.checked) {
+      screenTextOverlay.replaceChildren();
+      screenTextSignature = "";
+      return false;
+    }
     const active = screenTexts.filter(item => time >= item.start && time < item.end &&
       (item.mask_only ? toggleMaskChinese.checked : toggleSubtitles.checked));
     const width = containedVideoWidth || videoPlayer.videoWidth || 360;
@@ -936,7 +960,12 @@ document.addEventListener("DOMContentLoaded", () => {
     const bottom = (box.height - height) / 2;
     containedVideoWidth = width;
     containedVideoHeight = height;
-    playerContainer.style.setProperty("--subtitle-font-size", `${subtitleFontSize(width, height)}px`);
+    const fontSize = subtitleFontSize(width, height);
+    playerContainer.style.setProperty("--subtitle-font-size", `${fontSize}px`);
+    // CSS strokes straddle the glyph edge; paint-order keeps the yellow fill
+    // whole while leaving the same outer outline as the ASS export.
+    playerContainer.style.setProperty("--subtitle-stroke-width", `${fontSize * .20}px`);
+    playerContainer.style.setProperty("--subtitle-shadow-offset", `${fontSize * .055}px`);
     if (screenTextOverlay) {
       screenTextOverlay.style.left = `${side}px`;
       screenTextOverlay.style.top = `${bottom}px`;
@@ -953,7 +982,7 @@ document.addEventListener("DOMContentLoaded", () => {
     chineseSubMask.style.height = `${height * 0.14}px`;
     subtitleOverlay.style.left = `${side + width * 0.07}px`;
     subtitleOverlay.style.right = `${side + width * 0.07}px`;
-    subtitleOverlay.style.bottom = `${bottom + height * 0.08}px`;
+    subtitleOverlay.style.bottom = `${bottom + height * 0.12}px`;
   }
   if (typeof ResizeObserver !== "undefined") new ResizeObserver(positionVideoOverlays).observe(playerContainer);
   videoPlayer.addEventListener("loadedmetadata", () => {
@@ -1275,7 +1304,7 @@ document.addEventListener("DOMContentLoaded", () => {
     }
   });
   toggleMaskChinese.addEventListener("change", () => {
-    chineseSubMask.style.display = toggleMaskChinese.checked && !visualSession ? "block" : "none";
+    chineseSubMask.style.display = toggleScreenText.checked && toggleMaskChinese.checked && !visualSession && !sourceAudition ? "block" : "none";
     screenTextSignature = "";
     renderScreenTexts(videoPlayer.currentTime);
   });
@@ -1284,6 +1313,13 @@ document.addEventListener("DOMContentLoaded", () => {
     screenTextSignature = "";
     syncPlayback();
   });
+  toggleScreenText.addEventListener("change", () => {
+    screenTextSignature = "";
+    chineseSubMask.style.display = toggleScreenText.checked && toggleMaskChinese.checked && !visualSession && !sourceAudition ? "block" : "none";
+    syncPlayback();
+    updateExportScreenTextSummary();
+  });
+  toggleMaskChinese.addEventListener("change", updateExportScreenTextSummary);
 
   volDubSlider.addEventListener("input", () => {
     volDubVal.textContent = `${Math.round(volDubSlider.value * 100)}%`;
@@ -1516,7 +1552,7 @@ document.addEventListener("DOMContentLoaded", () => {
         visualSession = msg.visual_translation === true || (msg.screen_texts || []).length > 0;
         totalVideoDuration = msg.duration;
         setScreenTexts(msg.screen_texts);
-        chineseSubMask.style.display = toggleMaskChinese.checked && !visualSession ? "block" : "none";
+        chineseSubMask.style.display = toggleScreenText.checked && toggleMaskChinese.checked && !visualSession ? "block" : "none";
         positionVideoOverlays();
         barTotalTime.textContent = formatTime(totalVideoDuration);
         segmentsCountBadge.textContent = `${msg.segments_count} câu`;
@@ -1794,6 +1830,14 @@ document.addEventListener("DOMContentLoaded", () => {
     if (atEnd) videoPlayer.currentTime = audition.end;
     videoPlayer.muted = audition.muted;
     videoPlayer.volume = playbackVolume();
+    chineseSubMask.style.display = toggleScreenText.checked && toggleMaskChinese.checked && !visualSession ? "block" : "none";
+    screenTextSignature = "";
+    renderScreenTexts(videoPlayer.currentTime);
+    const currentSegment = Object.values(segments).find(segment => videoPlayer.currentTime >= segment.start && videoPlayer.currentTime < segment.end);
+    const covered = toggleScreenText.checked && toggleSubtitles.checked && screenTexts.some(item => !item.mask_only && item.kind === "subtitle" &&
+      videoPlayer.currentTime >= item.start && videoPlayer.currentTime < item.end);
+    subtitleText.textContent = !currentSegment || currentSegment.needs_review || covered ? "" : subtitleAtTime(currentSegment, videoPlayer.currentTime);
+    subtitleOverlay.classList.toggle("opacity-0", !subtitleText.textContent);
     const button = transcriptRows.get(audition.id)?.listen;
     if (button) {
       button.textContent = "Nghe gốc";
@@ -2742,6 +2786,13 @@ document.addEventListener("DOMContentLoaded", () => {
   // =========================================================
   // 11. HQ EXPORT & NATIVE SAVE
   // =========================================================
+  function updateExportScreenTextSummary() {
+    const summary = document.getElementById("export-screen-text-summary");
+    if (!summary) return;
+    summary.textContent = toggleScreenText.checked
+      ? `Dịch chữ trên hình: bật. ${toggleMaskChinese.checked ? "Che vùng chữ gốc và đặt bản dịch đúng vị trí." : "Hiện bản dịch tại vị trí chữ gốc, không thêm vùng che."}`
+      : "Dịch chữ trên hình: tắt. Giữ nguyên chữ trong video, thêm phụ đề lời thoại tiếng Việt ở dưới.";
+  }
   btnExportHQ.addEventListener("click", () => {
     if (btnExportHQ.disabled) return;
     if (!currentTaskId) {
@@ -2749,6 +2800,7 @@ document.addEventListener("DOMContentLoaded", () => {
       return;
     }
     exportModal.classList.remove("hidden");
+    updateExportScreenTextSummary();
     exportStatusBox.classList.toggle("hidden", !exportingTaskId);
     exportResultBox.classList.toggle("hidden", !lastExportedFileUrl || !!exportingTaskId);
     btnConfirmExport.classList.toggle("hidden", !!exportingTaskId);
@@ -2817,7 +2869,8 @@ document.addEventListener("DOMContentLoaded", () => {
       const res = await fetch("/api/streaming/export-hq", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ task_id: taskId, mask_chinese: toggleMaskChinese.checked })
+        body: JSON.stringify({ task_id: taskId, mask_chinese: toggleMaskChinese.checked,
+          translate_screen_text: toggleScreenText.checked })
       });
       clearInterval(pollInterval);
       const data = await res.json();
