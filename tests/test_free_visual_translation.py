@@ -1,6 +1,7 @@
 """Offline acceptance of explicit free ASR/OCR translation and evidence gates."""
 import json
 from copy import deepcopy
+from types import SimpleNamespace
 from unittest.mock import Mock
 
 import pytest
@@ -108,11 +109,6 @@ def test_free_primary_does_not_accept_unverified_provider_certainty(free_config,
     client, observed = install_responses(monkeypatch, **options)
     processor = VideoIntelligence()
     payload = [{"id": 0, "start": 0, "end": 2, "asr_text": options.get("source", "你来了")}]
-    if case == "other_time":
-        # Source repair may not cite a real OCR ID at an unrelated time.
-        with pytest.raises(VideoIntelligenceError, match="thời điểm"):
-            processor._translate_text(payload, observed, "", 0, 2)
-        return
     result = processor._translate_text(payload, observed, "", 0, 2)
     assert result["segments"][0]["needs_review"]
     assert result["segments"][0]["review_reason"]
@@ -298,3 +294,86 @@ def test_review_joins_full_chunk_evidence_across_independently_sliced_batches(fr
         assert screen["review_reason"] == "Chữ mờ"
     else:
         assert result["segments"][0]["source_evidence_ids"] == ["o24"]
+
+
+@pytest.mark.parametrize("refs", [["other-time"], ["missing"], [7]])
+def test_wrong_source_citation_retains_asr_as_unapproved_draft(refs):
+    processor = VideoIntelligence.__new__(VideoIntelligence)
+    raw = {"segments": [{"id": 0, "text_zh": "偷换成另一个人的话", "evidence_ids": refs,
+                         "needs_review": False, "review_reason": ""}]}
+    client = SimpleNamespace(translate=lambda *args, **kwargs: json.dumps(raw))
+    result = processor._correct_source(client, [{"id": 0, "start": 1, "end": 2, "asr_text": "你好"}],
+        [{"id": "other-time", "start": 5, "end": 6, "text_zh": "别人的话"}], "")
+    assert result[0]["text_zh"] == "你好"
+    assert result[0]["evidence_ids"] == []
+    assert result[0]["needs_review"] is True
+    assert "sai thời điểm" in result[0]["review_reason"]
+
+
+def test_repaired_response_keeps_low_confidence_from_otherwise_malformed_draft(free_config):
+    valid = {"segments": [translation()], "screen_texts": [], "summary": ""}
+    invalid = deepcopy(valid)
+    invalid["segments"][0]["confidence"] = .2
+    invalid["screen_texts"] = None
+    client = Mock(translate=Mock(side_effect=[json.dumps(invalid), json.dumps(valid)]))
+    _, result = VideoIntelligence()._request_text_result(client, "prompt",
+        [{"id": 0, "start": 0, "end": 2, "asr_text": "你来了"}], [], 0, 2)
+    assert result["segments"][0]["needs_review"]
+
+
+@pytest.mark.parametrize("raw", ["bad JSON", {"segments": []}, {"segments": [{"id": 7}]}])
+def test_source_repair_contract_error_stays_reviewable_with_original_asr(free_config, raw):
+    client = Mock(translate=Mock(return_value=raw if isinstance(raw, str) else json.dumps(raw)))
+    result = VideoIntelligence()._correct_source(client,
+        [{"id": 0, "start": 0, "end": 2, "asr_text": "你来了"}], [], "")
+    assert result[0]["text_zh"] == "你来了" and result[0]["needs_review"]
+    assert result[0]["evidence_ids"] == []
+    client.translate.assert_called_once()
+
+
+def test_source_repair_does_not_swallow_cancellation_or_quota(free_config):
+    from core.engines.translation.openrouter_client import OpenRouterClientError
+    payload = [{"id": 0, "start": 0, "end": 2, "asr_text": "你来了"}]
+    client = Mock(translate=Mock(side_effect=OpenRouterClientError("hạn mức")))
+    with pytest.raises(OpenRouterClientError, match="hạn mức"):
+        VideoIntelligence()._correct_source(client, payload, [], "")
+    with pytest.raises(VideoIntelligenceError, match="hủy"):
+        VideoIntelligence()._correct_source(client, payload, [], "", lambda: True)
+    assert client.translate.call_count == 1
+
+
+def test_quota_draft_edit_preserves_review_flags_but_uses_verified_source_placement(free_config, monkeypatch):
+    import asyncio
+    from pathlib import Path
+    from core.subtitle_cues import build_caption_layout
+    client, observed = install_responses(monkeypatch)
+    result = VideoIntelligence()._translate_text(
+        [{"id": 0, "start": 0, "end": 2, "asr_text": "你来了"}], observed, "", 0, 2, quota_fallback=True)
+    assert result["segments"][0]["needs_review"]
+    assert result["screen_texts"][0]["needs_review"]
+    assert result["screen_texts"][0]["source_region_verified"]
+    session = StreamingPipelineSession("placement-edit", free_config / "source.mp4", visual_translation=True)
+    seg = SegmentItem(0, 0, 2, 2)
+    seg.text_zh, seg.final_vi, seg.status, seg.needs_review = "你来了", "Bản nháp", "NEEDS_REVIEW", True
+    session.segments[0] = seg
+    session.screen_texts = result["screen_texts"]
+    session.total_duration = 2
+    def synthesize(*, output_path, **kwargs):
+        Path(output_path).write_bytes(b"stub")
+    def fit(source, output, ratio, **kwargs):
+        Path(output).write_bytes(b"fitted")
+        return 1
+    session.tts_engine = SimpleNamespace(synthesize=synthesize)
+    session.aligner = SimpleNamespace(min_speed=.9, get_audio_duration=lambda _: 1,
+                                     apply_atempo=fit)
+    monkeypatch.setattr("core.streaming.pipeline.trim_tts_padding", lambda _: None)
+    monkeypatch.setattr("core.streaming.pipeline.build_speech_timing", lambda *args: {
+        "subtitle_cues": [{"start": .2, "end": 1.8, "text": "Anh đã đến rồi."}],
+        "subtitle_timing_source": "audio-onset-estimate", "speech_start": .2, "speech_end": 1.8})
+    snapshot = asyncio.run(session.edit_segment(0, "Anh đã đến rồi."))
+    assert not snapshot["needs_review"]
+    assert session.screen_texts[0]["needs_review"] is True
+    assert session.screen_texts[0]["mask_only"] is True
+    plan = build_caption_layout([snapshot], session.screen_texts, (1080, 1920))
+    assert plan["cues"][0]["background"] == "yellow"
+    assert plan["cues"][0]["text"] == "Anh đã đến rồi."

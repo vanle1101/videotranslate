@@ -15,7 +15,7 @@ def test_empty_service_responses_retry_fresh_stream_and_discard_partial_audio(tm
         attempt = len(attempts)
         attempts.append((args, kwargs))
 
-        async def save(path):
+        async def save(path, metadata_path=None):
             path = Path(path)
             assert not path.exists()
             if attempt < 2:

@@ -96,8 +96,8 @@
             <h2 class="studio-card-heading"><i class="fa-solid fa-video" aria-hidden="true"></i>XEM TRƯỚC VIDEO</h2>
             <div class="player-options">
               <label title="Hiện phụ đề lời thoại tiếng Việt ở dưới video."><input type="checkbox" id="toggle-subtitles" checked> Hiện Sub Việt</label>
-              <label title="Dịch và thay chữ ở đúng vị trí trên hình. Tắt để giữ nguyên hình gốc; AI vẫn có thể đọc chữ để kiểm chứng lời thoại."><input type="checkbox" id="toggle-screen-text" aria-label="Dịch chữ trên hình; tắt để giữ nguyên chữ và hình gốc"> Dịch chữ trên hình</label>
-              <label title="Che vùng chữ Trung khi bật dịch chữ trên hình. Mặc định tắt để giữ nguyên hình gốc."><input type="checkbox" id="toggle-mask-chinese"> Che phụ đề Trung</label>
+              <label title="Giữ sub Trung và đặt lời Việt ngay bên dưới. Nếu không thấy sub gốc, đặt lời Việt nhỏ ở đáy hình."><input type="checkbox" id="toggle-screen-text" checked aria-label="Tự đặt lời Việt dưới phụ đề Trung"> Tự đặt vị trí sub</label>
+              <input type="checkbox" id="toggle-mask-chinese" hidden disabled aria-hidden="true">
             </div>
           </div>
           <div class="player-surface">
@@ -105,7 +105,7 @@
               <div id="player-container">
                 <video id="video-player" playsinline></video>
                 <div id="chinese-sub-mask" class="absolute bottom-16 left-0 right-0 h-14 bg-black/65 backdrop-blur-md pointer-events-none transition-opacity duration-300"></div>
-                <div id="subtitle-overlay" class="absolute bottom-16 left-4 right-4 text-center pointer-events-none z-10 transition-all duration-200"><span id="subtitle-text" class="inline-block px-3 py-1 rounded-md text-base md:text-lg font-bold text-yellow-300 bg-black/75 shadow-lg border border-black/40 text-center tracking-wide leading-tight"></span></div>
+                <div id="subtitle-overlay" class="absolute bottom-16 left-4 right-4 text-center pointer-events-none z-10"><span id="subtitle-text"></span></div>
                 <div id="screen-text-overlay" class="screen-text-overlay" aria-hidden="true"></div>
                 <div id="buffering-alert" role="status" aria-live="polite" class="hidden player-buffering-overlay">
                   <i class="fa-solid fa-spinner fa-spin" aria-hidden="true"></i>

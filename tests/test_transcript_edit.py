@@ -54,6 +54,9 @@ def session(tmp_path, monkeypatch):
     sess.aligner = SimpleNamespace(min_speed=0.9, max_speed=1.15,
                                    get_audio_duration=Mock(return_value=4.5),
                                    apply_atempo=Mock(side_effect=align))
+    # This transaction fixture uses text bytes as audio. Actual PCM activity and
+    # service word boundaries are exercised in test_speech_timing.py.
+    monkeypatch.setattr("core.engines.alignment.speech_timing.audio_activity_span", lambda path, **kwargs: (0, 3))
     registry[sess.task_id] = sess
     return sess
 
@@ -451,7 +454,9 @@ def test_export_screen_text_choice_keeps_spoken_captions_and_original_evidence(
     asyncio.run(run())
     expected_screens = (session.screen_texts if show_screen_text else []) if visual_translation else None
     assert captured["screen_texts"] == expected_screens
-    assert captured["mask_chinese"] is show_screen_text
+    # OCR may guide Vietnamese placement, but even a legacy client asking to
+    # mask Chinese must preserve the source pixels under the current contract.
+    assert captured["mask_chinese"] is False
     assert captured["segments"][0]["final_vi"] == session.segments[0].final_vi
     assert len(session.screen_texts) == 1
 

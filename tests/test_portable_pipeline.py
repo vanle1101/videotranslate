@@ -60,7 +60,7 @@ class PortablePipelineTests(unittest.TestCase):
             {"start": 3, "end": 6, "vi_text": r"{\alpha&HFF&}A\NB"},
         ], path)
         rows = path.read_text(encoding="utf-8").splitlines()
-        dialogue = [row for row in rows if row.startswith("Dialogue:")]
+        dialogue = [row for row in rows if row.startswith("Dialogue: 1,")]
         self.assertEqual(len(dialogue), 3)
         self.assertTrue(dialogue[0].endswith(r"Xin chào\NMọi người"))
         self.assertTrue(dialogue[1].endswith("Nhé"))
@@ -72,8 +72,8 @@ class PortablePipelineTests(unittest.TestCase):
         path = self.root / "wrapped.ass"
         SubtitleGenerator().generate_ass([{"start": 0, "end": 4, "vi_text": text}], path)
         dialogue = next(row for row in path.read_text(encoding="utf-8").splitlines()
-                        if row.startswith("Dialogue:"))
-        rendered_text = dialogue.split(",", 9)[-1]
+                        if row.startswith("Dialogue: 1,"))
+        rendered_text = dialogue.split(",", 9)[-1].split("}", 1)[-1]
         self.assertEqual(rendered_text.replace(r"\N", " "), text)
         self.assertEqual(rendered_text.count(r"\N"), 1)
 
@@ -86,7 +86,7 @@ class PortablePipelineTests(unittest.TestCase):
             SubtitleGenerator().generate_ass([{"start": 0, "end": 1, "vi_text": text}], path)
             result = subprocess.run([
                 "ffmpeg", "-hide_banner", "-loglevel", "error", "-nostdin",
-                "-f", "lavfi", "-i", "color=c=black:s=360x640:d=0.1",
+                "-f", "lavfi", "-i", "color=c=white:s=360x640:d=0.1",
                 "-vf", f"ass=filename={_escape_filter_filename(path)}",
                 "-frames:v", "1", "-pix_fmt", "gray", "-f", "rawvideo", "pipe:1",
             ], capture_output=True, timeout=20, creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
@@ -95,7 +95,7 @@ class PortablePipelineTests(unittest.TestCase):
             self.assertEqual(result.returncode, 0, result.stderr.decode(errors="replace"))
             self.assertEqual(len(result.stdout), 360 * 640)
             lit_rows = [row for row in range(640)
-                        if any(value > 100 for value in result.stdout[row * 360:(row + 1) * 360])]
+                        if any(value < 100 for value in result.stdout[row * 360:(row + 1) * 360])]
             bands = sum(index == 0 or row > lit_rows[index - 1] + 1
                         for index, row in enumerate(lit_rows))
             return result.stdout, bands
@@ -106,7 +106,7 @@ class PortablePipelineTests(unittest.TestCase):
         self.assertEqual(two_bands, 2, "The second edited line must survive ASS export")
         self.assertNotEqual(one, two)
         visible, bands = render(r"{\alpha&HFF&}HI", "literal.ass")
-        self.assertTrue(any(pixel > 100 for pixel in visible), "Literal user braces must not hide subtitle text")
+        self.assertTrue(any(pixel < 100 for pixel in visible), "Literal user braces must not hide subtitle text")
         self.assertEqual(bands, 1)
         _, literal_bands = render(r"A\NB", "slash.ass")
         self.assertEqual(literal_bands, 1, "A literal backslash-N must not create a line break")
@@ -290,7 +290,7 @@ class PortablePipelineTests(unittest.TestCase):
         subprocess.run(["ffmpeg", "-y", "-i", str(source), str(mp3)], capture_output=True, check=True)
         communicate = Mock()
 
-        async def save(path):
+        async def save(path, metadata_path=None):
             Path(path).write_bytes(mp3.read_bytes())
 
         communicate.save = save
@@ -309,9 +309,11 @@ class PortablePipelineTests(unittest.TestCase):
         events = []
         session = self.session(event_callback=lambda event, data: events.append((event, data)))
         session.video_path = audio
-        session.faster_whisper.transcribe = Mock(return_value=[{"text_zh": "第一句。"}, {"text_zh": "第二句。"}])
+        session.faster_whisper.transcribe = Mock(return_value=[
+            {"start": 0, "end": 1, "text_zh": "第一句。"}, {"start": 1, "end": 2, "text_zh": "第二句。"}])
         session.translator.translate_single_segment = Mock(return_value={"final_vi": "Xin chào tất cả."})
         session.edge_tts.synthesize = lambda text, output_path, **kwargs: write_wave(output_path)
+        session.segmenter.segment_audio = Mock(side_effect=AssertionError("Do not replace measured sentences with VAD chunks"))
 
         async def run():
             await session.start()
@@ -322,7 +324,12 @@ class PortablePipelineTests(unittest.TestCase):
             asyncio.run(run())
         self.assertIsNone(session.error)
         self.assertTrue(session.first_play_emitted)
-        self.assertEqual(session.segments[0].text_zh, "第一句。 第二句。")
+        self.assertEqual([item.text_zh for item in session.segments.values()], ["第一句。", "第二句。"])
+        self.assertEqual([(item.start, item.end) for item in session.segments.values()], [(0, 1), (1, 2)])
+        session.faster_whisper.transcribe.assert_called_once_with(session.raw_audio_16k, language="zh")
+        session.segmenter.segment_audio.assert_not_called()
+        self.assertEqual([call.kwargs["text_zh"] for call in session.translator.translate_single_segment.call_args_list],
+                         ["第一句。", "第二句。"])
         self.assertTrue(Path(session.segments[0].audio_path).is_file())
         self.assertFalse(list(session.cache_dir.glob("slice_*.wav")))
         self.assertFalse(list(session.cache_dir.glob("tts_*_raw.wav")))

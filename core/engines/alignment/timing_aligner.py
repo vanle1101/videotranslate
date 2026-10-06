@@ -6,6 +6,7 @@ from typing import List, Dict, Any, Tuple, Optional
 from config import settings
 from core.engines.alignment.base import AlignmentEngine
 from core.engines.tts.base import TTSEngine
+from core.engines.alignment.speech_timing import build_speech_timing, take_tts_word_boundaries, trim_tts_padding
 
 class TimingBudgetAligner(AlignmentEngine):
     """
@@ -114,6 +115,8 @@ class TimingBudgetAligner(AlignmentEngine):
 
             # 1. Synthesize with current TTS engine
             tts_engine.synthesize(text_vi, raw_wav, voice=voice, ref_audio=ref_audio)
+            boundaries = take_tts_word_boundaries(tts_engine, raw_wav)
+            trim_tts_padding(raw_wav)
             tts_dur = self.get_audio_duration(raw_wav)
             speed_ratio = max(self.min_speed, tts_dur / max(0.01, slot_duration))
 
@@ -134,6 +137,8 @@ class TimingBudgetAligner(AlignmentEngine):
             seg_copy["tts_duration"] = tts_dur
             seg_copy["speed_ratio"] = round(speed_ratio, 2)
             seg_copy["audio_path"] = str(fitted_wav.resolve())
+            seg_copy.update(build_speech_timing(text_vi, seg["start"], seg["end"],
+                                               fitted_wav, speed_ratio, boundaries))
             aligned_segments.append(seg_copy)
 
         return aligned_segments

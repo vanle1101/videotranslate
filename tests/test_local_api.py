@@ -4,7 +4,7 @@ import stat
 import tempfile
 import unittest
 from pathlib import Path
-from types import SimpleNamespace
+from types import MethodType, SimpleNamespace
 from urllib.parse import parse_qs, urlparse
 from unittest.mock import AsyncMock, Mock, patch
 
@@ -12,7 +12,7 @@ from fastapi.testclient import TestClient
 
 import main
 from config import settings
-from core.streaming.pipeline import SegmentItem
+from core.streaming.pipeline import SegmentItem, StreamingPipelineSession
 
 
 class LocalAPITests(unittest.TestCase):
@@ -46,6 +46,7 @@ class LocalAPITests(unittest.TestCase):
         attrs = dict(
             task_id="local-test", video_path=self.video, total_duration=1.0,
             initial_buffer_seconds=10.0, segments={0: segment},
+            screen_texts=[], video_size=(1080, 1920),
             is_running=False, is_paused=False, error=None,
             start_wall_time=0, first_play_emitted=True, bgm_url=None,
             vocal_suppressor=SimpleNamespace(name="DSP"), suppression_stats={},
@@ -54,7 +55,12 @@ class LocalAPITests(unittest.TestCase):
         )
         attrs["vocal_suppressor"].suppression_level_db = -20
         attrs.update(kwargs)
-        return SimpleNamespace(**attrs)
+        session = SimpleNamespace(**attrs)
+        # Keep reconnect serialization on the real contract: every session
+        # snapshot includes the same caption layouts used by preview/export.
+        session.caption_metadata = MethodType(StreamingPipelineSession.caption_metadata, session)
+        session.segment_snapshot = MethodType(StreamingPipelineSession.segment_snapshot, session)
+        return session
 
     def test_health_checks_tools_without_loading_hardware_or_models(self):
         with patch.object(main, "detect_hardware", side_effect=AssertionError("heavy probe")), \
@@ -354,6 +360,9 @@ class LocalAPITests(unittest.TestCase):
         segment.translation_provider = "openrouter-free"
         segment.translation_model = "example/text:free"
         segment.evidence_mode = "asr-ocr-text"
+        segment.subtitle_cues = [{"start": .15, "end": .8, "text": "Xin chào"}]
+        segment.subtitle_timing_source = "tts-boundaries"
+        segment.speech_start, segment.speech_end = .15, .8
         main.active_streaming_sessions[session.task_id] = session
         with self.client.websocket_connect(f"/ws/stream/{session.task_id}") as websocket:
             initial = websocket.receive_json()
@@ -364,6 +373,14 @@ class LocalAPITests(unittest.TestCase):
         self.assertNotIn("Gemini", initial["asr_engine"])
         self.assertEqual(initial["segments"][0]["source_method"], "text-ai")
         self.assertEqual(initial["segments"][0]["evidence_mode"], "asr-ocr-text")
+        snapshot = initial["segments"][0]
+        self.assertEqual(snapshot["caption_layout"], session.segment_snapshot(segment)["caption_layout"])
+        self.assertEqual(snapshot["caption_bottom_layout"], session.segment_snapshot(segment)["caption_bottom_layout"])
+        cue = snapshot["caption_layout"]["cues"][0]
+        self.assertEqual((cue["start"], cue["end"], cue["text"]), (.15, .8, "Xin chào"))
+        self.assertEqual(cue["background"], "white")
+        self.assertEqual(snapshot["caption_layout"]["video_size"], [1080, 1920])
+        self.assertNotIn("audio_path", snapshot)
 
 
 if __name__ == "__main__":

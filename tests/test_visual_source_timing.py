@@ -23,6 +23,7 @@ def visual_session(tmp_path, monkeypatch):
 
 
 def prepare_start(session, monkeypatch):
+    monkeypatch.setattr("core.streaming.export.HQExporter._video_size", Mock(return_value=(1080, 1920)))
     monkeypatch.setattr(session, "_run_ffmpeg", AsyncMock())
     monkeypatch.setattr(session, "_worker_loop", AsyncMock())
     monkeypatch.setattr(session.segmenter, "get_audio_duration", Mock(return_value=32.601667))
@@ -67,14 +68,16 @@ def test_visual_source_uses_whole_audio_words_and_exact_timestamps(visual_sessio
     assert session.segments[2].text_zh.endswith("粉丝群"), "A partial screen subtitle must not remove audible words"
 
 
-def test_legacy_mode_keeps_vad_and_does_not_add_full_transcription(visual_session, monkeypatch):
+def test_audio_only_whisper_preserves_whole_audio_sentence_timing_without_visual_analysis(visual_session, monkeypatch):
     session = visual_session
     prepare_start(session, monkeypatch)
     session.visual_translation = False
     session.asr_engine_name = "faster-whisper"
-    vad = Mock(return_value=[{"id": 0, "start": 0, "end": 6.52, "duration": 6.52}])
+    vad = Mock(side_effect=AssertionError("VAD chunks must not merge separate ASR sentences"))
     monkeypatch.setattr(session.segmenter, "segment_audio", vad)
-    asr = Mock(side_effect=AssertionError("Legacy ASR still runs per sentence in the worker"))
+    rows = [{"start": .4, "end": 2.1, "text_zh": "第一句。"},
+            {"start": 2.8, "end": 5.4, "text_zh": "第二句。"}]
+    asr = Mock(return_value=deepcopy(rows))
     monkeypatch.setattr(session.faster_whisper, "transcribe", asr)
     visual = Mock(side_effect=AssertionError("Visual opt-out must not call Gemini"))
     monkeypatch.setattr(session.video_intelligence, "prepass", visual)
@@ -84,10 +87,13 @@ def test_legacy_mode_keeps_vad_and_does_not_add_full_transcription(visual_sessio
         await session.worker_task
 
     asyncio.run(run())
-    vad.assert_called_once_with(session.raw_audio_16k)
-    asr.assert_not_called()
+    vad.assert_not_called()
+    asr.assert_called_once_with(session.raw_audio_16k, language="zh")
     visual.assert_not_called()
-    assert (session.segments[0].start, session.segments[0].end, session.segments[0].text_zh) == (0, 6.52, "")
+    assert [(segment.start, segment.end, segment.text_zh)
+            for segment in session.segments.values()] == [
+        (row["start"], row["end"], row["text_zh"]) for row in rows]
+    assert all(segment.asr_pretranscribed for segment in session.segments.values())
 
 
 def test_measured_long_sentence_is_not_split_at_guessed_word_times(visual_session):

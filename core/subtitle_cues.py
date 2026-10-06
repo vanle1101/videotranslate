@@ -168,3 +168,134 @@ def uncovered_intervals(start, end, screen_texts):
                     remaining.append((b, right))
         intervals = remaining
     return intervals
+
+
+def speech_caption_cues(segment):
+    """Keep explicit measured utterances; legacy callers retain their old cues."""
+    if not isinstance(segment, dict) or segment.get("needs_review") or segment.get("confirmed_silence"):
+        return []
+    try:
+        start, end = float(segment["start"]), float(segment["end"])
+        if not math.isfinite(start) or not math.isfinite(end) or end <= max(0, start):
+            return []
+    except (KeyError, TypeError, ValueError):
+        return []
+    if "subtitle_cues" in segment:
+        supplied = segment["subtitle_cues"]
+        if not isinstance(supplied, list):
+            return []
+    else:
+        text = segment.get("final_vi") or segment.get("vi_text") or segment.get("text_vi") or segment.get("text") or ""
+        supplied = build_subtitle_cues(text, start, end)
+    bounds = [max(0, start), end]
+    for index, name in enumerate(("speech_start", "speech_end")):
+        value = segment.get(name)
+        if value is not None:
+            try:
+                value = float(value)
+                if not math.isfinite(value):
+                    return []
+                bounds[index] = max(bounds[index], value) if index == 0 else min(bounds[index], value)
+            except (TypeError, ValueError):
+                return []
+    cues = []
+    for item in supplied:
+        if not isinstance(item, dict) or not isinstance(item.get("text"), str) or not item["text"].strip():
+            continue
+        try:
+            left, right = float(item["start"]), float(item["end"])
+        except (KeyError, TypeError, ValueError):
+            continue
+        if not math.isfinite(left) or not math.isfinite(right):
+            continue
+        left, right = max(bounds[0], left), min(bounds[1], right)
+        if right > left:
+            cues.append({**item, "start": left, "end": right, "text": item["text"].strip()})
+    return cues
+
+
+def _trusted_speech_regions(screen_texts):
+    regions = []
+    for row in screen_texts or []:
+        if (not isinstance(row, dict) or row.get("kind") != "subtitle"
+                or (row.get("needs_review") and row.get("source_region_verified") is not True)
+                or row.get("source_method") != "local-ocr"):
+            continue
+        box = row.get("bbox")
+        if not isinstance(box, (list, tuple)) or len(box) != 4:
+            continue
+        try:
+            start, end = float(row["start"]), float(row["end"])
+            x, y, w, h = map(float, box)
+            confidence = float(row.get("confidence", 0))
+        except (KeyError, TypeError, ValueError):
+            continue
+        if (not all(math.isfinite(v) for v in (start, end, x, y, w, h, confidence))
+                or end <= max(0, start) or confidence < .90 or x < 0 or y < 0
+                or w <= 0 or h <= 0 or h > .15 or w * h > .20 or x + w > 1 or y + h > 1):
+            continue
+        regions.append({**row, "start": max(0, start), "end": end, "bbox": [x, y, w, h]})
+    return regions
+
+
+def build_caption_layout(segments, screen_texts=None, video_size=None):
+    """One normalized caption plan for preview and ASS, preserving source text.
+
+    A trusted Chinese speech region selects a compact yellow caption immediately
+    below it (above only when necessary). No-region captions use a small white
+    box near the bottom. OCR translations/titles never become spoken captions.
+    """
+    width, height = video_size or (1080, 1920)
+    width, height = max(16, int(width)), max(16, int(height))
+    regions = _trusted_speech_regions(screen_texts)
+    base_font = max(8, round(min(width * .035, height * .028)))
+    margin_x, gap = width * .04, max(2, height * .006)
+    output = []
+    for index, segment in enumerate(segments or []):
+        for cue in speech_caption_cues(segment):
+            source_lines = [" ".join(line.split()) for line in cue["text"].splitlines() if line.strip()]
+            text = " ".join(source_lines)
+            wrapped = "\n".join(source_lines) if 1 < len(source_lines) <= 2 else _wrap_words(text, 32)
+            lines = wrapped.split("\n")
+            longest = max(map(len, lines))
+            font = min(base_font, (width - 2 * margin_x) / max(1, longest * .62 + 1.1))
+            pad_x, pad_y = font * .55, font * .20
+            box_w = min(width - 2 * margin_x, longest * font * .62 + 2 * pad_x)
+            box_h = len(lines) * font * 1.25 + 2 * pad_y
+            active = [row for row in regions if row["start"] < cue["end"] and row["end"] > cue["start"]]
+            # Keep one stable position throughout an utterance. Sampling gaps
+            # must not turn the same line from white to yellow or make it jump.
+            target = max(active, key=lambda row: (
+                min(row["end"], cue["end"]) - max(row["start"], cue["start"]),
+                row["confidence"]), default=None)
+            for left, right in [(cue["start"], cue["end"])]:
+                placement, background, source_bbox = "bottom", "white", None
+                x, y = (width - box_w) / 2, height * .90 - box_h
+                if target:
+                    rx, ry, rw, rh = target["bbox"]
+                    source_bbox = target["bbox"]
+                    x = min(width - margin_x - box_w, max(margin_x, (rx + rw / 2) * width - box_w / 2))
+                    # Another measured source line may appear lower during this
+                    # utterance. Keep one position that clears every intersecting
+                    # source box, rather than covering that later line.
+                    intersecting = [row["bbox"] for row in active
+                                    if row["bbox"][0] * width < x + box_w
+                                    and (row["bbox"][0] + row["bbox"][2]) * width > x]
+                    lower_edge = max(box[1] + box[3] for box in intersecting)
+                    upper_edge = min(box[1] for box in intersecting)
+                    y = lower_edge * height + gap
+                    placement, background = "below-source", "yellow"
+                    if y + box_h > height * .98:
+                        y = upper_edge * height - gap - box_h
+                        placement = "above-source"
+                    if y < height * .02:
+                        # Pathologically crowded source: never cover its pixels.
+                        x, y = (width - box_w) / 2, height * .90 - box_h
+                        placement, background, source_bbox = "bottom", "white", None
+                output.append({"segment_id": segment.get("id", index), "start": left, "end": right,
+                               "text": wrapped, "placement": placement,
+                               "bbox": [x / width, y / height, box_w / width, box_h / height],
+                               "source_bbox": source_bbox, "font_size": round(font, 3),
+                               "video_size": [width, height],
+                               "background": background, "color": "black", "border_radius": round(font * .18, 3)})
+    return {"video_size": [width, height], "cues": output}

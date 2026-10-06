@@ -25,12 +25,12 @@ class VideoComposer:
         audio_path: Path,
         subtitle_path: Path,
         output_path: Path,
-        mask_chinese_sub: bool = True,
+        mask_chinese_sub: bool = False,
         cancel_check=None,
     ) -> Path:
         """
         Merges video, ducked Vietnamese audio, and burns ASS subtitles.
-        Optionally applies a frosted-glass blur bar over the Chinese hard subtitle zone.
+        Keeps source pixels intact; caption geometry is supplied by ASS.
         """
         print(f"[*] Composing final video with FFmpeg...")
         print(f"    Video: {video_path.name}")
@@ -41,20 +41,9 @@ class VideoComposer:
         output_path.parent.mkdir(parents=True, exist_ok=True)
         sub_escaped = _escape_filter_filename(subtitle_path)
 
-        # Video filter construction
-        if mask_chinese_sub:
-            # 1. Split video into base and blur crop
-            # 2. Crop area around 72% - 86% of vertical height where Douyin subtitles live
-            # 3. Apply strong boxblur to frosted-glass the Chinese text
-            # 4. Overlay blurred strip back and burn Vietnamese ASS on top
-            vf = (
-                f"split=2[base][sub_area];"
-                f"[sub_area]crop=iw:ih*0.14:0:ih*0.72,gblur=sigma=12[blurred];"
-                f"[base][blurred]overlay=0:H*0.72[masked];"
-                f"[masked]subtitles=filename={sub_escaped}"
-            )
-        else:
-            vf = f"subtitles=filename={sub_escaped}"
+        # The legacy flag is accepted for callers, but never invent a full-width
+        # subtitle region. Automatic captions deliberately retain Chinese text.
+        vf = f"subtitles=filename={sub_escaped}"
 
         cmd = [
             "ffmpeg", "-hide_banner", "-loglevel", "error", "-nostdin", "-y",

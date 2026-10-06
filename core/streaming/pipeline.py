@@ -19,7 +19,7 @@ from core.engines.tts.edge_fallback import EdgeTTSFallbackEngine
 from core.voice_catalog import resolve_voice
 from core.engines.alignment.timing_aligner import TimingBudgetAligner
 from core.engines.separator.realtime_suppressor import RealtimeVocalSuppressor
-from core.subtitle_cues import build_subtitle_cues
+from core.engines.alignment.speech_timing import build_speech_timing, take_tts_word_boundaries, trim_tts_padding
 
 class SegmentEditConflict(RuntimeError):
     """Editing would conflict with the current session state."""
@@ -50,6 +50,10 @@ class SegmentItem:
         self.needs_review = False
         self.review_reason: Optional[str] = None
         self.confirmed_silence = False
+        self.subtitle_cues = []
+        self.subtitle_timing_source = "pending"
+        self.speech_start = None
+        self.speech_end = None
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -76,7 +80,10 @@ class SegmentItem:
             "needs_review": self.needs_review,
             "review_reason": self.review_reason,
             "confirmed_silence": self.confirmed_silence,
-            "subtitle_cues": build_subtitle_cues(self.final_vi or self.literal_vi, self.start, self.end),
+            "subtitle_cues": self.subtitle_cues,
+            "subtitle_timing_source": self.subtitle_timing_source,
+            "speech_start": self.speech_start,
+            "speech_end": self.speech_end,
         }
 
 class StreamingPipelineSession:
@@ -206,10 +213,14 @@ class StreamingPipelineSession:
         try:
             if confirm_silence:
                 tts_duration, ratio = 0.0, 1.0
+                timing = {"subtitle_cues": [], "subtitle_timing_source": "silence",
+                          "speech_start": None, "speech_end": None}
             else:
                 async with self._tts_lock:
                     await self._run_blocking(self.tts_engine.synthesize, text=text,
                                              output_path=raw_path, voice=self.voice, ref_audio=self.ref_audio)
+                    boundaries = take_tts_word_boundaries(self.tts_engine, raw_path)
+                    await self._run_blocking(trim_tts_padding, raw_path)
                 tts_duration = await self._run_blocking(self.aligner.get_audio_duration, raw_path)
                 if not math.isfinite(tts_duration) or tts_duration <= 0:
                     raise RuntimeError("Không đọc được âm thanh từ TTS.")
@@ -218,6 +229,8 @@ class StreamingPipelineSession:
                                                  ratio, fit_duration=seg.duration)
                 if not math.isfinite(ratio) or ratio <= 0 or not fitted_path.is_file() or not fitted_path.stat().st_size:
                     raise RuntimeError("Không tạo được giọng đọc hợp lệ.")
+                timing = await self._run_blocking(build_speech_timing, text, seg.start, seg.end,
+                                                  fitted_path, ratio, boundaries)
             if self.is_stopped:
                 raise asyncio.CancelledError
             final_path = self.segments_dir / f"seg_{seg.id}.wav"
@@ -236,6 +249,8 @@ class StreamingPipelineSession:
             seg.tts_duration = tts_duration
             seg.speed_ratio = round(ratio, 2)
             seg.audio_path = None if confirm_silence else str(final_path.resolve())
+            for key, value in timing.items():
+                setattr(seg, key, value)
             seg.revision += 1
             seg.audio_url = None if confirm_silence else f"/api/streaming/audio/{self.task_id}/{seg.id}?rev={seg.revision}"
             if was_review:
@@ -296,6 +311,8 @@ class StreamingPipelineSession:
                 self._release_runtime()
 
     async def emit(self, event_type: str, data: Dict[str, Any]):
+        if event_type == "segment_update":
+            data = self.caption_metadata(data)
         if self.event_callback:
             payload = {"type": event_type, "task_id": self.task_id, **data}
             if asyncio.iscoroutinefunction(self.event_callback):
@@ -304,6 +321,17 @@ class StreamingPipelineSession:
                 res = self.event_callback(event_type, payload)
                 if asyncio.iscoroutine(res):
                     await res
+
+    def caption_metadata(self, data):
+        """Preview and export consume the same measured caption layout."""
+        from core.subtitle_cues import build_caption_layout
+        size = getattr(self, "video_size", (1080, 1920))
+        return {**data,
+                "caption_layout": build_caption_layout([data], self.screen_texts, video_size=size),
+                "caption_bottom_layout": build_caption_layout([data], [], video_size=size)}
+
+    def segment_snapshot(self, segment):
+        return self.caption_metadata(segment.to_dict())
 
     def get_progress(self) -> Dict[str, Any]:
         snapshot = dict(self.progress)
@@ -428,6 +456,9 @@ class StreamingPipelineSession:
         if media_info is not None and not media_info["has_audio"]:
             raise ValueError("Video không có luồng âm thanh. Studio hiện cần video có âm thanh để xử lý và xuất bản dịch.")
         else:
+            from core.streaming.export import HQExporter
+            self.video_size = await self._run_blocking(
+                HQExporter._video_size, self.video_path, lambda: self.is_stopped)
             # 1. Extract 16kHz mono audio for VAD and legacy ASR.
             self.raw_audio_16k = self.cache_dir / "raw_audio_16k.wav"
             await self._run_ffmpeg([
@@ -451,7 +482,7 @@ class StreamingPipelineSession:
                 cancel_check=lambda: self.is_stopped,
             )
             self.bgm_url = f"/api/streaming/bgm/{self.task_id}"
-            if self.visual_translation:
+            if self.visual_translation or self.asr_engine is self.faster_whisper:
                 await self.report_progress("asr", "Đang nhận diện lời nói và mốc thời gian bằng Faster-Whisper...")
                 recognized = await self._run_blocking(
                     self.faster_whisper.transcribe, self.raw_audio_16k, language="zh",
@@ -462,9 +493,10 @@ class StreamingPipelineSession:
                 raw_segs = await self._run_blocking(self.segmenter.segment_audio, self.raw_audio_16k)
         for s in raw_segs:
             item = SegmentItem(s["id"], s["start"], s["end"], s["duration"])
-            if self.visual_translation:
+            if self.visual_translation or self.asr_engine is self.faster_whisper:
                 item.text_zh = s["text_zh"]
                 item.emotion = s.get("emotion") or "<|NEUTRAL|>"
+                item.asr_pretranscribed = True
             self.segments[item.id] = item
 
         if self.visual_translation and self.video_intelligence:
@@ -548,7 +580,7 @@ class StreamingPipelineSession:
         await self.emit("init", {
             "duration": self.total_duration,
             "segments_count": len(self.segments),
-            "segments": [s.to_dict() for s in self.segments.values()],
+            "segments": [self.segment_snapshot(s) for s in self.segments.values()],
             "initial_buffer_seconds": self.initial_buffer_seconds,
             "bgm_url": self.bgm_url,
             "vocal_removal_engine": self.vocal_suppressor.name,
@@ -575,7 +607,7 @@ class StreamingPipelineSession:
             raise ValueError("Faster-Whisper chưa trả danh sách lời thoại có mốc thời gian.")
         result = []
         previous_end = 0.0
-        max_duration = self.video_intelligence.MAX_CHUNK_SECONDS
+        max_duration = self.video_intelligence.MAX_CHUNK_SECONDS if self.video_intelligence else 45
         for row in recognized:
             if not isinstance(row, dict):
                 raise ValueError("Faster-Whisper trả câu thoại không hợp lệ.")
@@ -874,17 +906,17 @@ class StreamingPipelineSession:
         slice_wav = self.cache_dir / f"slice_{seg.id}.wav"
         raw_tts_wav = self.cache_dir / f"tts_{seg.id}_raw.wav"
         try:
-            await self._run_ffmpeg([
-                "ffmpeg", "-y", "-ss", f"{seg.start:.3f}",
-                "-i", str(self.raw_audio_16k), "-t", f"{seg.duration:.3f}",
-                "-c:a", "pcm_s16le", str(slice_wav),
-            ])
-            asr_res = await self._run_blocking(self.asr_engine.transcribe, slice_wav, language="zh")
-            # A slice can contain several sentences. Keep every recognized word.
-            seg.text_zh = " ".join(
-                part.get("text_zh", part.get("text", "")).strip() for part in (asr_res or [])
-            ).strip()
-            seg.emotion = asr_res[0].get("emotion", "<|NEUTRAL|>") if asr_res else "<|NEUTRAL|>"
+            if not getattr(seg, "asr_pretranscribed", False):
+                await self._run_ffmpeg([
+                    "ffmpeg", "-y", "-ss", f"{seg.start:.3f}",
+                    "-i", str(self.raw_audio_16k), "-t", f"{seg.duration:.3f}",
+                    "-c:a", "pcm_s16le", str(slice_wav),
+                ])
+                asr_res = await self._run_blocking(self.asr_engine.transcribe, slice_wav, language="zh")
+                seg.text_zh = " ".join(
+                    part.get("text_zh", part.get("text", "")).strip() for part in (asr_res or [])
+                ).strip()
+                seg.emotion = asr_res[0].get("emotion", "<|NEUTRAL|>") if asr_res else "<|NEUTRAL|>"
             if seg.text_zh:
                 seg.status = "TRANSLATING"
                 await self._segment_progress("translate", f"Đang dịch câu {seg.id + 1}")
@@ -916,6 +948,8 @@ class StreamingPipelineSession:
                         self.tts_engine.synthesize, text=seg.final_vi,
                         output_path=raw_tts_wav, voice=self.voice, ref_audio=self.ref_audio,
                     )
+                    boundaries = take_tts_word_boundaries(self.tts_engine, raw_tts_wav)
+                    await self._run_blocking(trim_tts_padding, raw_tts_wav)
                 seg.status = "ALIGNING"
                 await self._segment_progress("align", f"Đang khớp thời lượng câu {seg.id + 1}")
                 await self.emit("segment_update", seg.to_dict())
@@ -935,6 +969,10 @@ class StreamingPipelineSession:
                 seg.tts_duration = tts_dur
                 seg.speed_ratio = round(speed_ratio, 2)
                 seg.audio_path = str(final_seg_wav.resolve())
+                timing = await self._run_blocking(build_speech_timing, seg.final_vi, seg.start, seg.end,
+                                                  final_seg_wav, speed_ratio, boundaries)
+                for key, value in timing.items():
+                    setattr(seg, key, value)
                 seg.audio_url = f"/api/streaming/audio/{self.task_id}/{seg.id}"
             seg.status = "READY"
             self.total_processed_duration += seg.duration
@@ -960,6 +998,8 @@ class StreamingPipelineSession:
             async with self._tts_lock:
                 await self._run_blocking(self.tts_engine.synthesize, text=seg.final_vi,
                                          output_path=raw_tts_wav, voice=self.voice, ref_audio=self.ref_audio)
+                boundaries = take_tts_word_boundaries(self.tts_engine, raw_tts_wav)
+                await self._run_blocking(trim_tts_padding, raw_tts_wav)
             seg.status = "ALIGNING"
             tts_dur = await self._run_blocking(self.aligner.get_audio_duration, raw_tts_wav)
             if tts_dur <= 0:
@@ -971,6 +1011,10 @@ class StreamingPipelineSession:
             seg.tts_duration = tts_dur
             seg.speed_ratio = round(ratio, 2)
             seg.audio_path = str(final_path.resolve())
+            timing = await self._run_blocking(build_speech_timing, seg.final_vi, seg.start, seg.end,
+                                              final_path, ratio, boundaries)
+            for key, value in timing.items():
+                setattr(seg, key, value)
             seg.audio_url = f"/api/streaming/audio/{self.task_id}/{seg.id}"
             seg.status = "READY"
             self.total_processed_duration += seg.duration

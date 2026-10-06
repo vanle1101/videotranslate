@@ -841,7 +841,7 @@ document.addEventListener("DOMContentLoaded", () => {
     if (!segment._displayCues || segment._displayText !== text) {
       segment._displayText = text;
       segment._displayCues = Array.isArray(segment.subtitle_cues)
-        ? segment.subtitle_cues.flatMap(cue => makeSubtitleCues(cue.text, cue.start, cue.end))
+        ? segment.subtitle_cues
         : makeSubtitleCues(text, segment.start, segment.end);
     }
     return segment._displayCues.find(cue => time >= cue.start && time < cue.end)?.text || "";
@@ -894,60 +894,50 @@ document.addEventListener("DOMContentLoaded", () => {
     // Match the ASS font in source pixels, then scale with the contained image.
     const sourceWidth = videoPlayer.videoWidth || width;
     const sourceHeight = videoPlayer.videoHeight || height;
-    return Math.max(8, Math.round(Math.min(sourceWidth * .045, sourceHeight * .043))) * width / sourceWidth;
+    return Math.max(8, Math.round(Math.min(sourceWidth * .035, sourceHeight * .028))) * width / sourceWidth;
   }
 
   function resetScreenTexts() {
     screenTexts = []; screenTextSignature = ""; visualSession = false;
     screenTextOverlay?.replaceChildren();
-    chineseSubMask.style.display = toggleScreenText.checked && toggleMaskChinese.checked ? "block" : "none";
+    chineseSubMask.style.display = "none";
   }
 
   function renderScreenTexts(time) {
-    if (!screenTextOverlay) return false;
-    if (sourceAudition) {
-      screenTextOverlay.replaceChildren();
-      screenTextSignature = "";
-      chineseSubMask.style.display = "none";
-      return false;
+    // Source subtitles stay visible. Caption placement comes from the server's
+    // shared layout, never from an independent OCR translation or blur strip.
+    screenTextOverlay?.replaceChildren();
+    chineseSubMask.style.display = "none";
+    return false;
+  }
+
+  function renderSpeechCaption(segment, time) {
+    const plan = toggleScreenText.checked ? segment?.caption_layout : segment?.caption_bottom_layout;
+    const cue = plan?.cues?.find(item => time >= item.start && time < item.end);
+    const ready = segment && ["READY", "PLAYED"].includes(segment.status) && !segment.needs_review;
+    const text = ready && toggleSubtitles.checked && !sourceAudition
+      ? (plan ? cue?.text || "" : subtitleAtTime(segment, time)) : "";
+    subtitleText.textContent = text;
+    subtitleOverlay.classList.toggle("opacity-0", !text);
+    if (!text) return;
+    const frame = playerContainer.getBoundingClientRect();
+    const width = containedVideoWidth || frame.width, height = containedVideoHeight || frame.height;
+    const side = (frame.width - width) / 2, top = (frame.height - height) / 2;
+    if (cue) {
+      const [x,y,w,h] = cue.bbox;
+      Object.assign(subtitleOverlay.style, { left: `${side+x*width}px`, top: `${top+y*height}px`,
+        width: `${w*width}px`, height: `${h*height}px`, right: "auto", bottom: "auto" });
+      Object.assign(subtitleText.style, { width: "100%", height: "100%", padding: "0",
+        display: "flex", alignItems: "center", justifyContent: "center", boxSizing: "border-box",
+        fontSize: `${cue.font_size * width / cue.video_size[0]}px`,
+        background: cue.background === "yellow" ? "#FFE500" : "#FFFFFF",
+        borderRadius: `${cue.border_radius * width / cue.video_size[0]}px` });
+    } else {
+      Object.assign(subtitleOverlay.style, {left: `${side+width*.04}px`, right: `${side+width*.04}px`,
+        top: "auto", bottom: `${top+height*.10}px`, width: "auto", height: "auto" });
+      Object.assign(subtitleText.style, { width: "auto", height: "auto", padding: ".2em .55em",
+        display: "inline-block", background: "#FFFFFF", fontSize: `${subtitleFontSize(width,height)}px` });
     }
-    if (!toggleScreenText.checked) {
-      screenTextOverlay.replaceChildren();
-      screenTextSignature = "";
-      return false;
-    }
-    const active = screenTexts.filter(item => time >= item.start && time < item.end &&
-      (item.mask_only ? toggleMaskChinese.checked : toggleSubtitles.checked));
-    const width = containedVideoWidth || videoPlayer.videoWidth || 360;
-    const height = containedVideoHeight || videoPlayer.videoHeight || 640;
-    const baseFont = subtitleFontSize(width, height);
-    const items = active.map(item => {
-      const boxW = item.bbox[2] * width, boxH = item.bbox[3] * height;
-      if (item.mask_only) return { item, text: "", boxW, boxH };
-      if (item.kind === "title") return { item, text: fitTitleText(item.text_vi, boxW, boxH, baseFont), boxW, boxH };
-      const target = Math.min(baseFont, boxH * .9 / 1.25);
-      const lines = Math.min(2, Math.max(1, Math.floor(boxH * .9 / (target * 1.25))));
-      const lineChars = Math.max(8, Math.min(32, Math.floor(boxW * .92 / Math.max(1, target * .62))));
-      const cue = makeSubtitleCues(item.text_vi.split(/\s+/).join(" "), item.start, item.end, Math.min(60, lineChars * lines), lineChars)
-        .find(c => time >= c.start && time < c.end);
-      return { item, text: cue?.text || "", boxW, boxH };
-    });
-    const signature = JSON.stringify([toggleMaskChinese.checked, width, height, items.map(({ item, text }) => [item.bbox, text, item.mask_only])]);
-    if (signature !== screenTextSignature) {
-      screenTextSignature = signature;
-      screenTextOverlay.replaceChildren(...items.map(({ item, text, boxW, boxH }) => {
-        const node = document.createElement("div");
-        node.className = "screen-text-item"; node.textContent = text;
-        node.dataset.mask = String(toggleMaskChinese.checked);
-        node.dataset.maskOnly = String(item.mask_only);
-        const [x, y, w, h] = item.bbox;
-        Object.assign(node.style, { left: `${x * 100}%`, top: `${y * 100}%`, width: `${w * 100}%`, height: `${h * 100}%` });
-        const lines = text.split("\n"), longest = Math.max(1, ...lines.map(line => line.length));
-        node.style.fontSize = `${Math.max(1, Math.min(baseFont, boxW * .92 / (longest * .62), boxH * .9 / (lines.length * 1.25)))}px`;
-        return node;
-      }));
-    }
-    return active.some(item => item.kind !== "title" && !item.mask_only);
   }
 
   function positionVideoOverlays() {
@@ -974,15 +964,9 @@ document.addEventListener("DOMContentLoaded", () => {
       screenTextSignature = "";
       renderScreenTexts(videoPlayer.currentTime);
     }
-    // Keep the mask on the same 72–86% image band used by video export,
-    // including letterboxed sources and fullscreen resizing.
-    chineseSubMask.style.left = `${side}px`;
-    chineseSubMask.style.right = `${side}px`;
-    chineseSubMask.style.bottom = `${bottom + height * 0.14}px`;
-    chineseSubMask.style.height = `${height * 0.14}px`;
-    subtitleOverlay.style.left = `${side + width * 0.07}px`;
-    subtitleOverlay.style.right = `${side + width * 0.07}px`;
-    subtitleOverlay.style.bottom = `${bottom + height * 0.12}px`;
+    chineseSubMask.style.display = "none";
+    const current = Object.values(segments).find(s => videoPlayer.currentTime >= s.start && videoPlayer.currentTime < s.end);
+    renderSpeechCaption(current, videoPlayer.currentTime);
   }
   if (typeof ResizeObserver !== "undefined") new ResizeObserver(positionVideoOverlays).observe(playerContainer);
   videoPlayer.addEventListener("loadedmetadata", () => {
@@ -1304,7 +1288,7 @@ document.addEventListener("DOMContentLoaded", () => {
     }
   });
   toggleMaskChinese.addEventListener("change", () => {
-    chineseSubMask.style.display = toggleScreenText.checked && toggleMaskChinese.checked && !visualSession && !sourceAudition ? "block" : "none";
+    chineseSubMask.style.display = "none";
     screenTextSignature = "";
     renderScreenTexts(videoPlayer.currentTime);
   });
@@ -1315,7 +1299,7 @@ document.addEventListener("DOMContentLoaded", () => {
   });
   toggleScreenText.addEventListener("change", () => {
     screenTextSignature = "";
-    chineseSubMask.style.display = toggleScreenText.checked && toggleMaskChinese.checked && !visualSession && !sourceAudition ? "block" : "none";
+    chineseSubMask.style.display = "none";
     syncPlayback();
     updateExportScreenTextSummary();
   });
@@ -1552,7 +1536,7 @@ document.addEventListener("DOMContentLoaded", () => {
         visualSession = msg.visual_translation === true || (msg.screen_texts || []).length > 0;
         totalVideoDuration = msg.duration;
         setScreenTexts(msg.screen_texts);
-        chineseSubMask.style.display = toggleScreenText.checked && toggleMaskChinese.checked && !visualSession ? "block" : "none";
+        chineseSubMask.style.display = "none";
         positionVideoOverlays();
         barTotalTime.textContent = formatTime(totalVideoDuration);
         segmentsCountBadge.textContent = `${msg.segments_count} câu`;
@@ -1576,6 +1560,13 @@ document.addEventListener("DOMContentLoaded", () => {
           playerSuppressionBadge.textContent = `≈ ${msg.suppression_level}`;
         }
 
+        const activeSnapshot = msg.segments.find(s => s.id === activePlayingSegId);
+        if (activeAudio && (!activeSnapshot ||
+            activeSnapshot.audio_url !== segments[activePlayingSegId]?.audio_url)) {
+          activeAudio.pause();
+          activeAudio = null;
+          activePlayingSegId = null;
+        }
         msg.segments.forEach(s => {
           segments[s.id] = s;
         });
@@ -1722,8 +1713,7 @@ document.addEventListener("DOMContentLoaded", () => {
     highlightTranscript(matchedSeg?.id ?? null);
 
     if (matchedSeg) {
-      subtitleText.textContent = hasScreenSubtitle || matchedSeg.needs_review ? "" : subtitleAtTime(matchedSeg, curTime);
-      subtitleOverlay.classList.toggle("opacity-0", !subtitleText.textContent);
+      renderSpeechCaption(matchedSeg, curTime);
       if (!["READY", "PLAYED"].includes(matchedSeg.status) && !videoPlayer.paused) {
         isBufferingUnderrun = true;
         videoPlayer.pause();
@@ -1748,6 +1738,12 @@ document.addEventListener("DOMContentLoaded", () => {
         const offset = Math.max(0, curTime - matchedSeg.start);
         if (Math.abs(activeAudio.currentTime - offset) > 0.25) activeAudio.currentTime = offset;
         if (!videoPlayer.paused && activeAudio.paused && !activeAudio.ended && !audioPermissionNeeded) activeAudio.play().catch(reportPlayFailure);
+      } else if (activeAudio) {
+        // A confirmed silent row is still a matched segment. Stop the prior
+        // dub when crossing into it, just as we do for a gap between rows.
+        activeAudio.pause();
+        activeAudio = null;
+        activePlayingSegId = null;
       }
     } else {
       subtitleText.textContent = "";
@@ -1830,14 +1826,11 @@ document.addEventListener("DOMContentLoaded", () => {
     if (atEnd) videoPlayer.currentTime = audition.end;
     videoPlayer.muted = audition.muted;
     videoPlayer.volume = playbackVolume();
-    chineseSubMask.style.display = toggleScreenText.checked && toggleMaskChinese.checked && !visualSession ? "block" : "none";
+    chineseSubMask.style.display = "none";
     screenTextSignature = "";
     renderScreenTexts(videoPlayer.currentTime);
     const currentSegment = Object.values(segments).find(segment => videoPlayer.currentTime >= segment.start && videoPlayer.currentTime < segment.end);
-    const covered = toggleScreenText.checked && toggleSubtitles.checked && screenTexts.some(item => !item.mask_only && item.kind === "subtitle" &&
-      videoPlayer.currentTime >= item.start && videoPlayer.currentTime < item.end);
-    subtitleText.textContent = !currentSegment || currentSegment.needs_review || covered ? "" : subtitleAtTime(currentSegment, videoPlayer.currentTime);
-    subtitleOverlay.classList.toggle("opacity-0", !subtitleText.textContent);
+    renderSpeechCaption(currentSegment, videoPlayer.currentTime);
     const button = transcriptRows.get(audition.id)?.listen;
     if (button) {
       button.textContent = "Nghe gốc";
@@ -2790,8 +2783,8 @@ document.addEventListener("DOMContentLoaded", () => {
     const summary = document.getElementById("export-screen-text-summary");
     if (!summary) return;
     summary.textContent = toggleScreenText.checked
-      ? `Dịch chữ trên hình: bật. ${toggleMaskChinese.checked ? "Che vùng chữ gốc và đặt bản dịch đúng vị trí." : "Hiện bản dịch tại vị trí chữ gốc, không thêm vùng che."}`
-      : "Dịch chữ trên hình: tắt. Giữ nguyên chữ trong video, thêm phụ đề lời thoại tiếng Việt ở dưới.";
+      ? "Tự đặt vị trí: giữ sub Trung, lời Việt nền vàng ở ngay dưới; không có sub gốc thì dùng ô trắng nhỏ phía dưới. Mỗi lượt thoại chỉ hiện khi bắt đầu đọc."
+      : "Sub Việt nhỏ ở phía dưới. Giữ nguyên chữ và hình nguồn; mỗi lượt thoại hiện cùng giọng đọc.";
   }
   btnExportHQ.addEventListener("click", () => {
     if (btnExportHQ.disabled) return;
@@ -2869,7 +2862,7 @@ document.addEventListener("DOMContentLoaded", () => {
       const res = await fetch("/api/streaming/export-hq", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ task_id: taskId, mask_chinese: toggleMaskChinese.checked,
+        body: JSON.stringify({ task_id: taskId, mask_chinese: false,
           translate_screen_text: toggleScreenText.checked })
       });
       clearInterval(pollInterval);

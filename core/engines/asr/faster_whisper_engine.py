@@ -2,6 +2,7 @@ from pathlib import Path
 from typing import List, Dict, Any, Optional
 from config import settings
 from core.engines.asr.base import ASREngine
+from core.dialogue_segments import split_dialogue_segments
 
 class FasterWhisperFallbackEngine(ASREngine):
     """
@@ -48,11 +49,24 @@ class FasterWhisperFallbackEngine(ASREngine):
             str(audio_path),
             language=language,
             vad_filter=True,
-            beam_size=5
+            vad_parameters={"min_silence_duration_ms": 300},
+            beam_size=5,
+            word_timestamps=True,
         )
 
         results = []
         for idx, seg in enumerate(segments_gen):
+            words = []
+            for word in (getattr(seg, "words", None) or []):
+                word_text = getattr(word, "word", "")
+                word_start = getattr(word, "start", None)
+                word_end = getattr(word, "end", None)
+                if not isinstance(word_text, str):
+                    continue
+                if not isinstance(word_start, (int, float)) or not isinstance(word_end, (int, float)):
+                    continue
+                words.append({"word": word_text, "start": round(float(word_start), 3),
+                              "end": round(float(word_end), 3)})
             results.append({
                 "id": idx,
                 "start": round(seg.start, 2),
@@ -60,7 +74,11 @@ class FasterWhisperFallbackEngine(ASREngine):
                 "duration": round(seg.end - seg.start, 2),
                 "text_zh": seg.text.strip(),
                 "text": seg.text.strip(),
+                "words": words,
                 "emotion": "<|NEUTRAL|>",
-                "speaker": None
+                "speaker": getattr(seg, "speaker", None)
             })
-        return results
+        # Return complete utterances instead of Whisper's sometimes long VAD
+        # chunks.  The helper uses only measured word timestamps and leaves a
+        # row intact when Whisper did not provide usable word timing.
+        return split_dialogue_segments(results)

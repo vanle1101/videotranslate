@@ -67,7 +67,7 @@ def test_manual_lines_use_same_paired_pages_and_proportional_timing_as_preview(t
     assert "\n".join(cue["text"] for cue in cues) == text
     segment = [{"start": 0, "end": 8, "vi_text": text}]
     generator = SubtitleGenerator()
-    ass = generator.generate_ass(segment, tmp_path / "manual.ass").read_text(encoding="utf-8")
+    ass = generator.generate_manual_ass(segment, tmp_path / "manual.ass").read_text(encoding="utf-8")
     srt = generator.generate_srt(segment, tmp_path / "manual.srt").read_text(encoding="utf-8")
     rows = [line for line in ass.splitlines() if line.startswith("Dialogue:")]
     assert len(rows) == srt.count("-->") == 2
@@ -76,7 +76,7 @@ def test_manual_lines_use_same_paired_pages_and_proportional_timing_as_preview(t
 
 
 def test_export_speech_style_matches_yellow_black_preview_without_a_background_box(tmp_path):
-    ass = SubtitleGenerator().generate_ass([], tmp_path / "style.ass", video_size=(1080, 1920)).read_text(encoding="utf-8")
+    ass = SubtitleGenerator().generate_manual_ass([], tmp_path / "style.ass", video_size=(1080, 1920)).read_text(encoding="utf-8")
     styles = ass.split("[V4+ Styles]\n", 1)[1].split("[Events]", 1)[0].splitlines()
     names = next(line for line in styles if line.startswith("Format:")).removeprefix("Format: ").split(", ")
     values = next(line for line in styles if line.startswith("Style: TikTokStyle,")).removeprefix("Style: ").split(",")
@@ -96,7 +96,7 @@ def test_srt_and_ass_use_the_same_display_pages(tmp_path):
                  "Nội dung chất lượng mới giúp người xem muốn theo dõi bạn lâu dài."}]
     generator = SubtitleGenerator()
     srt = generator.generate_srt(segments, tmp_path / "captions.srt").read_text(encoding="utf-8")
-    ass = generator.generate_ass(segments, tmp_path / "captions.ass").read_text(encoding="utf-8")
+    ass = generator.generate_manual_ass(segments, tmp_path / "captions.ass").read_text(encoding="utf-8")
     cues = build_subtitle_cues(segments[0]["vi_text"], 0, 8)
     assert srt.count("-->") == len(cues)
     events = [line for line in ass.splitlines() if line.startswith("Dialogue:")]
@@ -123,7 +123,7 @@ def test_visual_metadata_is_bounded_and_uncertain_text_does_not_cover_video():
 def test_title_does_not_hide_speech_but_detected_hardsub_prevents_duplicates(tmp_path):
     rows = normalize_screen_texts([screen_row(), screen_row(start=0, end=3, kind="title")])
     assert uncovered_intervals(0, 3, rows) == [(0, 1), (2, 3)]
-    ass = SubtitleGenerator().generate_ass(
+    ass = SubtitleGenerator().generate_manual_ass(
         [{"start": 0, "end": 3, "vi_text": "Lời thoại"}], tmp_path / "screen.ass",
         screen_texts=rows, video_size=(360, 640),
     ).read_text(encoding="utf-8")
@@ -142,7 +142,7 @@ def test_long_title_stays_complete_in_one_timed_event_and_fits_original_box(tmp_
     assert title.replace("\n", " ") == text
     assert len(title.splitlines()) <= 2
     assert title == "Những lời đồn về lượt xem trên\nDouyin mà có thể bạn chưa biết."
-    ass = SubtitleGenerator().generate_ass(
+    ass = SubtitleGenerator().generate_manual_ass(
         [], tmp_path / "persistent-title.ass", video_size=(360, 640),
         screen_texts=[screen_row(start=0, end=32, text_vi=text, bbox=[.1, .1, .8, .1], kind="title")],
     ).read_text(encoding="utf-8")
@@ -157,7 +157,7 @@ def test_long_title_stays_complete_in_one_timed_event_and_fits_original_box(tmp_
 @pytest.mark.skipif(not shutil.which("ffmpeg"), reason="FFmpeg/libass is required")
 def test_libass_title_is_identical_at_start_middle_and_end(tmp_path):
     text = "Những lời đồn về lượt xem trên Douyin mà có thể bạn chưa biết."
-    path = SubtitleGenerator().generate_ass(
+    path = SubtitleGenerator().generate_manual_ass(
         [], tmp_path / "persistent-render.ass", video_size=(360, 640),
         screen_texts=[screen_row(start=0, end=32, text_vi=text, bbox=[.1, .1, .8, .1], kind="title")],
     )
@@ -192,7 +192,7 @@ def test_edited_speech_is_shown_once_across_multiple_mask_only_ocr_rows(tmp_path
     ])
     assert uncovered_intervals(0, 4, rows) == [(0, 4)]
     assert rows[1]["text_vi"] == ""
-    ass = SubtitleGenerator().generate_ass(
+    ass = SubtitleGenerator().generate_manual_ass(
         [{"start": 0, "end": 4, "vi_text": text}], tmp_path / "edited.ass",
         screen_texts=rows, mask_screen_text=mask,
     ).read_text(encoding="utf-8")
@@ -214,7 +214,7 @@ def test_mask_only_never_approves_uncertain_or_oversized_geometry():
 
 @pytest.mark.skipif(not shutil.which("ffmpeg"), reason="FFmpeg/libass is required")
 def test_libass_masks_only_detected_box_and_renders_translation_inside_it(tmp_path):
-    ass = SubtitleGenerator().generate_ass(
+    ass = SubtitleGenerator().generate_manual_ass(
         [{"start": 0, "end": 1, "vi_text": "Không được hiện thêm phụ đề trùng"}],
         tmp_path / "box.ass", screen_texts=[screen_row(start=0, end=1)], video_size=(360, 640),
     )
@@ -247,7 +247,7 @@ def test_libass_masks_only_detected_box_and_renders_translation_inside_it(tmp_pa
 def test_libass_spoken_subtitle_renders_above_overlapping_mask_only_region(tmp_path):
     """A valid lower-screen mask must not erase the edited spoken caption."""
     def render(mask):
-        ass = SubtitleGenerator().generate_ass(
+        ass = SubtitleGenerator().generate_manual_ass(
             [{"start": 0, "end": 1, "vi_text": "Lời thoại đã sửa"}],
             tmp_path / f"overlap-{mask}.ass", video_size=(360, 640),
             screen_texts=[screen_row(start=0, end=1, text_vi="", mask_only=True,
@@ -292,7 +292,7 @@ def test_export_uses_detected_boxes_instead_of_the_old_fixed_mask(tmp_path, monk
             patch.object(exporter, "_assemble_voice_timeline"), \
             patch.object(exporter.mixer, "mix"), \
             patch.object(exporter.composer, "compose", side_effect=compose):
-        exporter.export("boxes", tmp_path / "source.mp4", [], 3, screen_texts=[screen_row()])
+        exporter.export("boxes", tmp_path / "source.mp4", [{"start":0,"end":3,"final_vi":"Lời thoại"}], 3, screen_texts=[screen_row()])
     assert observed["mask_chinese_sub"] is False
     assert "PlayResX: 1920" in observed["ass"] and "PlayResY: 1080" in observed["ass"]
     assert "Dialogue: 0" in observed["ass"] and "Dialogue: 1" in observed["ass"]

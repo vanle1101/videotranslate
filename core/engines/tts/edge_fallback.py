@@ -1,4 +1,5 @@
 import asyncio
+import json
 import subprocess
 import tempfile
 from concurrent.futures import ThreadPoolExecutor
@@ -15,6 +16,10 @@ class EdgeTTSFallbackEngine(TTSEngine):
     """
     def __init__(self, voice: Optional[str] = None):
         self.voice = voice or settings.EDGE_VOICE
+        # Kept per output path so streaming can align captions to the exact
+        # speech that was just synthesized. The metadata is never persisted in
+        # user media or sent anywhere.
+        self._word_boundaries = {}
 
     @property
     def name(self) -> str:
@@ -43,6 +48,7 @@ class EdgeTTSFallbackEngine(TTSEngine):
     ) -> Path:
         output_path = Path(output_path)
         output_path.parent.mkdir(parents=True, exist_ok=True)
+        self._word_boundaries.pop(str(output_path.resolve()), None)
         if not text.strip():
             raise ValueError("Không có nội dung tiếng Việt để đọc.")
         # VieNeu preset names are not valid Microsoft voice IDs.
@@ -51,6 +57,8 @@ class EdgeTTSFallbackEngine(TTSEngine):
         # Edge returns MP3 bytes. Convert to real PCM when a WAV is requested.
         with tempfile.TemporaryDirectory(prefix="edge_tts_", dir=output_path.parent) as temp_dir:
             mp3_path = Path(temp_dir) / "speech.mp3"
+            metadata_path = Path(temp_dir) / "boundaries.jsonl"
+            boundaries = []
 
             async def _run():
                 # The service sometimes ends a valid request without audio. A
@@ -58,11 +66,28 @@ class EdgeTTSFallbackEngine(TTSEngine):
                 # and discard any partial file before requesting the same voice.
                 for attempt in range(3):
                     try:
-                        com = edge_tts.Communicate(text, chosen_voice, rate=rate_str)
-                        await com.save(str(mp3_path))
+                        boundaries.clear()
+                        com = edge_tts.Communicate(text, chosen_voice, rate=rate_str,
+                                                   boundary="WordBoundary")
+                        await com.save(str(mp3_path), str(metadata_path))
+                        if metadata_path.is_file():
+                            try:
+                                for line in metadata_path.read_text(encoding="utf-8").splitlines():
+                                    message = json.loads(line)
+                                    if message.get("type") == "WordBoundary":
+                                        boundaries.append({
+                                            "text": message.get("text", ""),
+                                            "start": float(message.get("offset", 0)) / 10_000_000,
+                                            "end": (float(message.get("offset", 0)) + float(message.get("duration", 0))) / 10_000_000,
+                                        })
+                            except (ValueError, TypeError, AttributeError):
+                                # Valid speech remains usable if metadata is
+                                # malformed; downstream exposes its fallback.
+                                boundaries.clear()
                         return
                     except edge_tts.exceptions.NoAudioReceived:
                         mp3_path.unlink(missing_ok=True)
+                        metadata_path.unlink(missing_ok=True)
                         if attempt == 2:
                             raise RuntimeError(
                                 "Edge-TTS chưa trả về âm thanh sau 3 lần thử. "
@@ -88,4 +113,11 @@ class EdgeTTSFallbackEngine(TTSEngine):
                 )
                 if result.returncode:
                     raise RuntimeError(result.stderr.decode("utf-8", errors="replace")[-1500:])
+        self._word_boundaries[str(output_path.resolve())] = boundaries
+        while len(self._word_boundaries) > 64:
+            self._word_boundaries.pop(next(iter(self._word_boundaries)))
         return output_path
+
+    def take_word_boundaries(self, path: Path):
+        """Return and consume boundaries for a completed synthesis."""
+        return self._word_boundaries.pop(str(Path(path).resolve()), [])

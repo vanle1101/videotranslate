@@ -1,6 +1,29 @@
 # Kiểm tra dịch video — 06/10/2026
 
-## Bản dùng OpenRouter trực tiếp và phụ đề theo mẫu
+## Lượt mới nhất: phụ đề theo lượt thoại và vị trí chữ nguồn
+
+Đã đối chiếu trực quan hai video TikTok được chỉ định: `@douyinsub4/video/7559200419537259783` và `@1.ting.trung.mi.n/video/7611469031224167700`. Yêu cầu hiện tại là hiện trọn lời đang được đọc, không đưa câu đáp tiếp theo lên sớm. Khi có phụ đề Trung, giữ chữ nguồn và đặt lời Việt đen trên ô vàng bên dưới; nếu không đủ chỗ thì đặt phía trên. Khi không đo được vùng phụ đề nguồn đáng tin cậy, dùng ô trắng nhỏ ở đáy hình. Không dùng dải blur tự động.
+
+Mẫu kiểm tra là đoạn 15 giây có sẵn `workspace/inputs/douyin-preview-7688769264395767049.mp4`, thuộc link `https://v.douyin.com/_lAiSDH0bK8/`. Không tải lại bản gốc lớn. Bản mới tách 14 lượt thoại thay cho hai khối gộp ở kết quả cũ. Faster-Whisper nhận dạng toàn bộ âm thanh một lần và giữ mốc từ; tách câu theo dấu câu, khoảng nghỉ và nhãn người nói nếu nguồn đã có. Chưa có mô hình phân biệt người nói độc lập, nên không khẳng định tự tách đúng mọi nhân vật trong mọi video.
+
+Edge-TTS cung cấp mốc từng từ; mốc phụ đề được chuyển theo tốc độ audio cuối, giới hạn trong phần tiếng thực sự phát. Đã sửa lỗi khoảng lặng ở đầu/cuối TTS làm câu ngắn như “Hả?” bị ép quá nhanh. Các engine không cung cấp mốc từ vẫn dùng ước lượng trong khoảng tiếng đo được và ghi rõ nguồn thời gian. Preview và export dùng chung kế hoạch vị trí, câu và thời điểm phụ đề.
+
+Lượt OpenRouter miễn phí trên mẫu này gặp dẫn chứng nguồn không hợp lệ, sai ID câu, sau đó hết hạn mức. Kết quả sửa nguồn không hợp lệ nay giữ nguyên bản ASR và đánh dấu cần rà; không tự coi nội dung đó là bản đã xác minh. Thành phẩm dưới đây dùng câu đã biên tập qua luồng sửa transcript và tạo lại giọng. Đây không phải bằng chứng rằng model miễn phí tự dịch đúng toàn bộ. Mẫu hiện dùng một giọng Hoài My; chưa xác nhận số giọng trong âm thanh hai video TikTok.
+
+- MP4: `workspace/outputs/dialogue-7688769264395767049-vi.mp4`.
+- Phụ đề: `workspace/outputs/dialogue-7688769264395767049-vi.srt`.
+- H264/AAC, 1920×1080, 15,016667 giây, 11.983.595 byte.
+- SHA-256: `68a01057f9c8aeec328b5a1b14a1f25d948ad8b07dfa4d78f76669d436740e98`.
+
+Đã giải mã toàn bộ MP4 bằng FFmpeg không lỗi và xem các khung hình trước tiếng, trong các câu ngắn, lúc đổi lượt và câu cuối. Các bản xuất có sẵn vẫn được giữ; không sửa chúng thành kết quả mới. Media thành phẩm không đưa lên Git.
+
+Rà độc lập đã sửa thêm việc reconnect giữ audio revision cũ, giọng trước phát qua câu được xác nhận im lặng, word timestamp làm trùng khoảng câu, metadata từ thiếu làm mất chữ, và ghi audio chưa hoàn tất. Vị trí OCR được xác minh riêng bằng dữ liệu local và lời nguồn cùng thời điểm; việc đặt hộp không tự duyệt bản dịch OCR. Caption cố định trong một lượt thoại nhưng tránh mọi vùng phụ đề nguồn giao nhau với lượt đó.
+
+Lượt kiểm tra cuối: **321 bài Python đạt, 19 subtest đạt**, một bài symlink bỏ qua do quyền Windows; **83 bài JavaScript đạt**. Qt desktop smoke đạt kiểm tra toàn câu/đổi lượt, nền vàng/trắng, giữ chữ nguồn, phát/tạm dừng/tua/nghe gốc, chỉnh transcript, lựa chọn xuất, dán link, tiến độ và danh sách 32 giọng. Smoke dùng dữ liệu kiểm soát, không phải chứng nhận chất lượng dịch tự động. Backend thử nghiệm đã dừng và media thử của smoke đã được dọn.
+
+Lệnh dọn các file tạm kiểm chứng `dialogue-*`, `caption-reference-*`, script render và cache `dialogue-validation` của lượt này bị bộ duyệt tự động từ chối (`blocked by policy`); chúng vẫn còn tại máy và không được đưa lên Git. Không thử lại bằng công cụ khác. Các tệp thành phẩm và media có sẵn được giữ nguyên.
+
+## Lượt trước: OpenRouter trực tiếp và phụ đề viền vàng
 
 Đã chuyển cấu hình tại máy sang `openrouter-free`, model `inclusionai/ling-3.0-flash-sante:free`. Luồng này dùng Faster-Whisper và RapidOCR tại máy, gửi văn bản để sửa nguồn có dẫn chứng, dịch và kiểm tra nghĩa. Không khởi tạo Gemini, không gửi video tới Gemini và không cần key Gemini. Dịch vụ miễn phí vẫn có hạn mức và phụ thuộc model còn được cung cấp; ứng dụng không tự chuyển sang model trả phí.
 

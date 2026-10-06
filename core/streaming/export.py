@@ -13,7 +13,6 @@ from core.audio_ducking import PremiumAudioMixer
 from core.subtitle import SubtitleGenerator
 from core.video_composer import VideoComposer
 from core.media_process import run_media
-from core.subtitle_cues import normalize_screen_texts
 
 class HQExporter:
     """
@@ -121,8 +120,8 @@ class HQExporter:
         video_size = self._video_size(video_path, cancel_check)
         self.sub_gen.generate_ass(
             subtitle_segments, ass_path,
-            screen_texts=normalize_screen_texts(screen_texts, total_duration),
-            video_size=video_size, mask_screen_text=mask_chinese,
+            screen_texts=screen_texts,
+            video_size=video_size,
         )
 
         # 6. Render final video at its original dimensions.
@@ -141,7 +140,7 @@ class HQExporter:
             output_path=rendered_video,
             # OCR-aware exports mask their exact text regions in ASS. An empty
             # detection list must not produce a blind strip across someone's body.
-            mask_chinese_sub=mask_chinese and screen_texts is None,
+            mask_chinese_sub=False,
             cancel_check=cancel_check,
         )
         _check_cancel()

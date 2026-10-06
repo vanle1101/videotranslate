@@ -56,12 +56,76 @@ def check_caption_defaults(page):
             mask: document.getElementById('toggle-mask-chinese').checked,
             maskDisplay: getComputedStyle(document.getElementById('chinese-sub-mask')).display,
             color: caption.color, weight: caption.fontWeight,
-            background: caption.backgroundColor, stroke: caption.webkitTextStrokeColor};
+            background: caption.backgroundColor, strokeWidth: caption.webkitTextStrokeWidth};
     })())'''))
-    assert not state['screenText'] and not state['mask'] and state['maskDisplay'] == 'none', state
-    assert state['color'] == 'rgb(255, 235, 0)' and int(state['weight']) >= 700, state
-    assert state['background'] == 'rgba(0, 0, 0, 0)' and state['stroke'] == 'rgb(0, 0, 0)', state
+    assert state['screenText'] and not state['mask'] and state['maskDisplay'] == 'none', state
+    assert state['color'] == 'rgb(17, 17, 17)' and int(state['weight']) >= 700, state
+    assert state['background'] == 'rgb(255, 229, 0)' and state['strokeWidth'] == '0px', state
     return state
+
+
+def check_measured_caption_layout(page):
+    """Exercise whole-line cue changes in the real Qt DOM without an AI job."""
+    javascript(page, """
+        window.__layoutFetch = window.fetch;
+        window.__layoutSocket = window.WebSocket;
+        window.fetch = async (url, options) => {
+            if (url === '/api/streaming/start-url') return new Response(JSON.stringify({task_id: 'qt-layout'}));
+            if (url === '/api/tasks') return new Response(JSON.stringify({tasks: []}));
+            if (url === '/api/tasks/qt-layout/stop') return new Response(JSON.stringify({status: 'ok'}));
+            return window.__layoutFetch(url, options);
+        };
+        window.WebSocket = class {
+            static OPEN = 1;
+            constructor() {this.readyState = 1; window.__layoutWs = this;}
+            send() {}
+            close() {this.readyState = 3;}
+        };
+        document.getElementById('video-url').value = 'https://www.douyin.com/video/7688769264395767049';
+        document.getElementById('btn-start').click();
+    """)
+    wait(200)
+    javascript(page, """
+        const makeCue = (start, end, text, background, y) => ({start, end, text,
+            bbox:[.1,y,.8,.08],font_size:48,video_size:[1080,1920],background,border_radius:6});
+        const cues = [makeCue(0,2,'Câu thứ nhất còn đang nói.','yellow',.62),
+                      makeCue(2,4,'Đây là lời đáp tiếp theo.','yellow',.62)];
+        window.__layoutWs.onmessage({data:JSON.stringify({type:'init',duration:4,segments_count:1,
+            visual_translation:true,screen_texts:[{start:0,end:4,text_vi:'Không được vẽ lại chữ nguồn',bbox:[.1,.1,.8,.1]}],
+            segments:[{id:0,start:0,end:4,duration:4,status:'READY',final_vi:'Câu thứ nhất còn đang nói.',
+                caption_layout:{video_size:[1080,1920],cues},
+                caption_bottom_layout:{video_size:[1080,1920],cues:cues.map(c=>({...c,bbox:[.05,.84,.9,.08],background:'white'}))}
+            }]})});
+        document.getElementById('buffering-alert').classList.add('hidden');
+    """)
+    def state():
+        return json.loads(javascript(page, """JSON.stringify({text:document.getElementById('subtitle-text').textContent,
+            background:getComputedStyle(document.getElementById('subtitle-text')).backgroundColor,
+            mask:getComputedStyle(document.getElementById('chinese-sub-mask')).display,
+            sourceOverlays:document.getElementById('screen-text-overlay').children.length})"""))
+    try:
+        for time in (0, .4, 1.9):
+            javascript(page, f"document.getElementById('video-player').currentTime = {time}; document.getElementById('video-player').dispatchEvent(new Event('timeupdate'));")
+            measured = state()
+            assert measured['text'] == 'Câu thứ nhất còn đang nói.', measured
+            assert measured['background'] == 'rgb(255, 229, 0)', measured
+            assert measured['mask'] == 'none' and measured['sourceOverlays'] == 0, measured
+        javascript(page, "document.getElementById('video-player').currentTime = 2.1; document.getElementById('video-player').dispatchEvent(new Event('timeupdate'));")
+        assert state()['text'] == 'Đây là lời đáp tiếp theo.'
+        javascript(page, "document.getElementById('toggle-screen-text').click();")
+        assert state()['background'] == 'rgb(255, 255, 255)', state()
+        javascript(page, "document.getElementById('video-player').currentTime = 4; document.getElementById('video-player').dispatchEvent(new Event('timeupdate'));")
+        assert state()['text'] == '', state()
+        return {'whole_utterance': True, 'speaker_handover': True, 'source_pixels_untouched': True,
+                'yellow_positioned_white_bottom': True}
+    finally:
+        javascript(page, "document.getElementById('toggle-screen-text').checked = true; window.studioStop();")
+        wait(200)
+        javascript(page, """
+            window.fetch = window.__layoutFetch; window.WebSocket = window.__layoutSocket;
+            document.getElementById('video-url').value = '';
+            document.getElementById('video-url').dispatchEvent(new Event('input', {bubbles:true}));
+        """)
 
 
 def check_media_playback(page, folder):
@@ -86,31 +150,8 @@ def check_media_playback(page, folder):
     assert (state['width'], state['height']) == (180, 320), state
     assert 7.9 <= state['duration'] <= 8.2, state
     assert '/api/preview/' in state['source'] or '/api/local-file?path=' in state['source'], state
-    # The mask is intentionally off by default. Enable its two independent
-    # controls before measuring its position against the contained video.
-    javascript(page, '''
-        document.getElementById('toggle-screen-text').click();
-        document.getElementById('toggle-mask-chinese').click();
-    ''')
-    assert javascript(page, "getComputedStyle(document.getElementById('chinese-sub-mask')).display") == 'block'
-    overlay = json.loads(javascript(page, '''JSON.stringify((() => {
-        const video = document.getElementById('video-player');
-        const frame = document.getElementById('player-container').getBoundingClientRect();
-        const mask = document.getElementById('chinese-sub-mask').getBoundingClientRect();
-        const scale = Math.min(frame.width / video.videoWidth, frame.height / video.videoHeight);
-        const width = video.videoWidth * scale, height = video.videoHeight * scale;
-        return {left: mask.left, width: mask.width, top: mask.top, height: mask.height,
-            expectedLeft: frame.left + (frame.width - width) / 2,
-            expectedTop: frame.top + (frame.height - height) / 2 + height * .72,
-            expectedWidth: width, expectedHeight: height * .14};
-    })())'''))
-    for key in ('left', 'top', 'width', 'height'):
-        assert abs(overlay[key] - overlay['expected' + key.title()]) < 1, overlay
-    javascript(page, '''
-        document.getElementById('toggle-screen-text').click();
-        document.getElementById('toggle-mask-chinese').click();
-    ''')
     assert javascript(page, "getComputedStyle(document.getElementById('chinese-sub-mask')).display") == 'none'
+    assert javascript(page, "document.getElementById('toggle-mask-chinese').disabled") is True
     javascript(page, '''
         window.__smokePlayError = null;
         document.getElementById('video-player').muted = true;
@@ -246,8 +287,13 @@ def check_original_segment_playback(page):
         assert all(track['time'] > .05 and not track.get('error') for track in active_tracks), before
         assert before['muted'] and before['review'] == 'true', before
         javascript(page, "document.querySelector('#seg-row-1 .transcript-listen-original').click()")
-        wait(350)
-        playing = audition_state()
+        # Decoder startup varies under headless Qt. Observe playback progress
+        # rather than assuming seeking/decoding completes within 350 ms.
+        for _ in range(60):
+            playing = audition_state()
+            if playing['time'] >= 3.15 and not playing['paused']:
+                break
+            wait(50)
         assert 3.15 <= playing['time'] < 4.4 and not playing['paused'], playing
         assert not playing['muted'] and abs(playing['volume'] - .35) < .001, playing
         assert playing['pressed'] == 'true' and playing['label'] == 'Dừng nghe gốc', playing
@@ -738,29 +784,23 @@ def check_transcript_editor(window, screenshot_path=None):
             errors:window.__transcriptErrors})"""))
         assert saved['hidden'] and saved['text'] == saved['subtitle'] == 'Đã sửa trực tiếp cạnh video.', saved
         assert not saved['exportDisabled'] and not saved['errors'], saved
-        for enabled in (False, True):
-            if enabled:
-                javascript(page, '''
-                    document.getElementById('toggle-screen-text').click();
-                    document.getElementById('toggle-mask-chinese').click();
-                ''')
+        requests = []
+        for positioned in (True, False):
+            javascript(page, f"document.getElementById('toggle-screen-text').checked = {str(positioned).lower()}; document.getElementById('toggle-screen-text').dispatchEvent(new Event('change', {{bubbles:true}}));")
             javascript(page, "document.getElementById('btn-export-hq').click()")
             modal = json.loads(javascript(page, '''JSON.stringify({
                 visible: !document.getElementById('export-modal').classList.contains('hidden'),
                 summary: document.getElementById('export-screen-text-summary').textContent
             })'''))
             assert modal['visible'], modal
-            assert ('bật' if enabled else 'tắt') in modal['summary'], modal
+            assert modal['summary'], modal
             javascript(page, "document.getElementById('btn-confirm-export').click()")
             wait(200)
             requests = json.loads(javascript(page, 'JSON.stringify(window.__captionExportRequests)'))
-            assert requests[-1] == {'task_id': 'qt-transcript', 'mask_chinese': enabled,
-                                    'translate_screen_text': enabled}, requests
+            assert requests[-1] == {'task_id': 'qt-transcript', 'mask_chinese': False,
+                                    'translate_screen_text': positioned}, requests
             javascript(page, "document.getElementById('btn-close-export-modal').click()")
-        javascript(page, '''
-            document.getElementById('toggle-screen-text').click();
-            document.getElementById('toggle-mask-chinese').click();
-        ''')
+        javascript(page, "document.getElementById('toggle-screen-text').checked = true; document.getElementById('toggle-screen-text').dispatchEvent(new Event('change', {bubbles:true}));")
         return {'caret_edit':True, 'server_save':True, 'subtitle_sync':True,
                 'screen_text_export_options': requests, 'layouts':geometry}
     finally:
@@ -796,6 +836,7 @@ def main():
         assert loaded and loaded[-1], 'Desktop page did not load'
         wait(500)
         caption_defaults = check_caption_defaults(window.web_view.page())
+        measured_caption = check_measured_caption_layout(window.web_view.page())
         voice_smoke = check_voice_catalog_and_preview(window.web_view.page(), media_folder.name)
         result = json.loads(javascript(window.web_view.page(), '''JSON.stringify({
             asr: document.body.dataset.asrEngine,
@@ -922,6 +963,7 @@ def main():
         wait(200)
         print(json.dumps({'result': 'PASS', 'desktop': result, 'upload': upload['requests'][0],
                           'caption_defaults': caption_defaults,
+                          'measured_caption': measured_caption,
                           'playback': playback, 'bgm': bgm, 'layout_1024': layout,
                           'original_segment_playback': original_playback,
                           'progress_and_logs': progress_logs, 'voices': voice_smoke, 'transcript': transcript_smoke}, ensure_ascii=False))

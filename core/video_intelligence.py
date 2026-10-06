@@ -216,8 +216,18 @@ class VideoIntelligence:
                 reason = " · ".join(dict.fromkeys(value for value in reasons if value))
                 if review and not reason:
                     reason = "Nội dung OCR hoặc bản dịch chưa chắc chắn; giữ nguyên vùng chữ để kiểm tra."
+                source_text = cls._compact_text(source_screen.get("text_zh", ""))
+                source_region_verified = (row["kind"] == "subtitle"
+                    and not source_screen.get("needs_review")
+                    and (cls._number(source_screen.get("confidence")) or 0) >= .90
+                    and bool(source_text)
+                    and any(float(cls._get(seg, "start")) < source_screen["end"]
+                            and float(cls._get(seg, "end")) > source_screen["start"]
+                            and source_text in cls._compact_text(cls._get(seg, "asr_text", "") or cls._get(seg, "text_zh", ""))
+                            for seg in source.values()))
                 screens.append({**source_screen, "text_vi": text.strip(), "kind": row["kind"],
                                 "needs_review": review, "review_reason": reason[:500],
+                                "source_region_verified": source_region_verified,
                                 "source_method": "local-ocr"})
             if seen_screens != set(expected_screens):
                 raise VideoIntelligenceError("Bộ dịch trả thiếu bản dịch vùng OCR.")
@@ -267,6 +277,17 @@ class VideoIntelligence:
         return result
 
     def _correct_source(self, client, payload, observed, context, cancel_check=None):
+        """Keep contract failures reviewable without inventing corrected speech."""
+        try:
+            return self._correct_source_checked(client, payload, observed, context, cancel_check)
+        except VideoIntelligenceError:
+            self._check_cancelled(cancel_check)
+            return {row["id"]: {"text_zh": row.get("asr_text", ""), "evidence_ids": [],
+                                "needs_review": True,
+                                "review_reason": "AI chưa xác minh được bản nhận giọng; nghe lại trước khi tạo giọng."}
+                    for row in payload}
+
+    def _correct_source_checked(self, client, payload, observed, context, cancel_check=None):
         """Repair recognition before translation, with validated evidence IDs."""
         if not payload:
             return {}
@@ -300,14 +321,19 @@ class VideoIntelligence:
                     or not isinstance(row.get("needs_review"), bool) or not isinstance(refs, list)):
                 raise VideoIntelligenceError("Bước sửa nhận dạng trả nội dung không hợp lệ.")
             source = expected[row["id"]]
-            for ref in refs:
-                if (not isinstance(ref, str) or ref not in evidence
-                        or evidence[ref]["start"] >= source["end"] or evidence[ref]["end"] <= source["start"]):
-                    raise VideoIntelligenceError("Bước sửa nhận dạng dẫn chứng không đúng câu/thời điểm.")
+            invalid_evidence = any(
+                not isinstance(ref, str) or ref not in evidence
+                or evidence[ref]["start"] >= source["end"] or evidence[ref]["end"] <= source["start"]
+                for ref in refs)
+            if invalid_evidence:
+                # A bad citation must not rewrite another character's words.
+                # Retain the measured ASR as an explicitly unapproved draft.
+                text, refs = source.get("asr_text", ""), []
+                reason = "AI dẫn chứng chữ ở sai thời điểm; giữ bản nhận giọng để nghe lại."
             compact = lambda value: re.sub(r"[\s\W_]+", "", value, flags=re.UNICODE)
             original = source.get("asr_text", "")
             changed = compact(text) != compact(original)
-            review = row["needs_review"] or (changed and not refs) or (bool(original.strip()) and not text.strip())
+            review = invalid_evidence or row["needs_review"] or (changed and not refs) or (bool(original.strip()) and not text.strip())
             if review and not reason.strip():
                 reason = "Chưa đủ bằng chứng OCR để xác minh câu nhận dạng."
             corrections[row["id"]] = {"text_zh": text.strip(), "evidence_ids": list(dict.fromkeys(refs)),
@@ -417,7 +443,10 @@ class VideoIntelligence:
             if not isinstance(rows, list):
                 continue
             for row in rows:
-                if not isinstance(row, dict) or row.get("needs_review") is not True:
+                if not isinstance(row, dict):
+                    continue
+                confidence = cls._number(row.get("confidence"))
+                if row.get("needs_review") is not True and not (confidence is not None and confidence < .60):
                     continue
                 sid = row.get("id")
                 valid_id = type(sid) is int if field == "segments" else isinstance(sid, str)
@@ -546,7 +575,10 @@ class VideoIntelligence:
                         row["needs_review"] = True
                         row["review_reason"] = uncertain_screens[row["id"]]["review_reason"]
                     draft_screen = next((item for item in result["screen_texts"] if item["id"] == row["id"]), None)
-                    if not quota_fallback and (draft_screen is None or draft_screen["kind"] != row["kind"]):
+                    classification_changed = draft_screen is None or draft_screen["kind"] != row["kind"]
+                    if classification_changed:
+                        row["source_region_verified"] = False
+                    if not quota_fallback and classification_changed:
                         row["needs_review"] = True
                         row["review_reason"] = row.get("review_reason") or "Hai lượt đối chiếu chưa thống nhất loại chữ trên hình."
                 result = verified

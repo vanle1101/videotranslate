@@ -641,7 +641,7 @@ async def edit_streaming_segment(task_id: str, segment_id: int, req: SegmentEdit
         raise HTTPException(status_code=422, detail="Nội dung hoặc thời lượng câu thoại không hợp lệ. Nhập từ 1 đến 2.000 ký tự.") from None
     except Exception:
         raise HTTPException(status_code=503, detail="Chưa tạo lại được giọng đọc. Nội dung và âm thanh cũ vẫn được giữ; hãy thử lại.") from None
-    return {"segment": segment, "screen_texts": getattr(session, "screen_texts", [])}
+    return {"segment": session.caption_metadata(segment), "screen_texts": getattr(session, "screen_texts", [])}
 
 @app.get("/api/streaming/bgm/{task_id}")
 async def get_streaming_bgm(task_id: str):
@@ -713,9 +713,8 @@ async def export_hq(req: ExportHQRequest):
             video_path=session.video_path,
             segments=segments_data,
             total_duration=session.total_duration,
-            # Do not cover source pixels when screen-text translation is disabled.
-            mask_chinese=(req.mask_chinese if req.mask_chinese is not None else True)
-                and req.translate_screen_text,
+            # Keep the Chinese subtitles, placing Vietnamese beneath them.
+            mask_chinese=False,
             screen_texts=(getattr(session, "screen_texts", []) if req.translate_screen_text else [])
                 if getattr(session, "visual_translation", False) else None,
             progress_callback=_prog_cb,
@@ -1079,7 +1078,7 @@ async def websocket_stream(websocket: WebSocket, task_id: str):
             "task_id": task_id,
             "duration": session.total_duration,
             "segments_count": len(session.segments),
-            "segments": [s.to_dict() for s in session.segments.values()],
+            "segments": [session.segment_snapshot(s) for s in session.segments.values()],
             "screen_texts": getattr(session, "screen_texts", []),
             "visual_translation": getattr(session, "visual_translation", False),
             "translation_sources": getattr(session, "translation_sources", []),

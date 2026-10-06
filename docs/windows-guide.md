@@ -76,9 +76,11 @@ Nếu chọn Gemini và gặp lỗi hạn mức, Studio vẫn có thể dùng Op
 
 Câu thiếu căn cứ được ghi **Cần kiểm tra**, kèm lý do trong transcript. Toàn bộ câu từ nhánh OpenRouter dự phòng cũng cần rà: kiểm thử thực tế phát hiện model vẫn tự tin với câu sai nghĩa dù đã tự kiểm tra. Studio chưa tạo giọng cho câu cần kiểm tra và khóa xuất video đến khi bạn nghe/xem lại rồi bấm **Lưu và tạo lại giọng**. Có thể giữ nguyên bản nháp và bấm lưu sau khi đã kiểm tra. Các câu chắc chắn từ luồng Gemini vẫn được xử lý. Chữ trên hình không đọc chắc, không xác định được vùng chữ hoặc được dịch qua nhánh OpenRouter dự phòng sẽ giữ nguyên, không tự che. Sửa lời thoại không duyệt thay bản dịch chữ trên hình; hiện chưa có trình duyệt OCR riêng.
 
-Phụ đề thoại màu vàng đậm, viền đen, nền trong, nằm giữa phía dưới video. Câu dài tự chia thành trang ngắn tối đa hai dòng, kể cả khi sửa có nhiều dấu xuống dòng; thời gian chuyển trang được ước tính trong câu, chưa phải căn chính xác từng từ.
+Phụ đề hiển thị **trọn câu đang được đọc**, không chạy từng chữ và không gộp lời đáp của nhân vật tiếp theo lên trước. Faster-Whisper giữ các câu riêng, dùng mốc từ, dấu kết câu và khoảng nghỉ để tách lời thoại; không còn chia video thành khối tám giây rồi ghép nhiều câu lại. Chưa có mô hình nhận diện người nói riêng nên cảnh nói chồng tiếng hoặc không có khoảng nghỉ vẫn cần rà transcript.
 
-**Dịch chữ trên hình** và **Che phụ đề Trung** mặc định tắt để giữ nguyên hình nguồn và chỉ thêm phụ đề thoại Việt. Có thể bật dịch chữ để hiện các vùng OCR đã được duyệt; bật thêm che chữ để phủ vùng chữ nguồn. Tắt dịch chữ cũng tắt vùng che, kể cả khi checkbox che vẫn được chọn. Những lựa chọn này được áp dụng cả khi xem trước và xuất MP4. AI vẫn đọc OCR để kiểm chứng lời thoại nếu tùy chọn phân tích đang bật. Tiêu đề/nhận định được duyệt hiện trọn câu trong vùng OCR; lời thoại đã sửa hiển thị một lần ở đáy hình và xuất cùng bản audio mới.
+**Tự đặt vị trí sub** mặc định bật. Nếu OCR xác định được phụ đề thoại Trung, Studio giữ chữ Trung và đặt lời Việt chữ đen trên ô vàng nhỏ sát dưới vùng đó; sát mép dưới không đủ chỗ thì đặt phía trên. Nếu không có vùng phụ đề chắc chắn, lời Việt nằm trong ô trắng nhỏ phía dưới. Tiêu đề và chữ khác giữ nguyên. Tắt tự đặt vị trí để luôn dùng vị trí đáy hình. Preview và MP4 dùng chung dữ liệu bố cục; không còn dải blur ngang hay tự che chữ nguồn.
+
+Giọng Edge sử dụng mốc từ do dịch vụ trả về, đối chiếu với âm thanh sau khi căn tốc độ. Khoảng lặng ở đầu/cuối âm thanh tổng hợp được cắt gọn trước khi tính tốc độ để câu đáp ngắn không bị ép nhanh vì thời gian im lặng. VieNeu/Piper chưa cung cấp mốc từ: đầu/cuối tiếng được đo trên PCM, mốc bên trong câu là ước tính và ghi rõ `audio-onset-estimate`. Sửa transcript sẽ tạo lại cả giọng và mốc sub.
 
 Model nhận dạng và OCR được giải phóng sau xử lý để giảm RAM. Cần xem lại nội dung, vị trí và tốc độ đọc trước khi xuất; có API không bảo đảm mọi câu đúng. Thay đổi áp dụng cho tác vụ mới sau khi mở lại ứng dụng; không tự sửa phiên đã xử lý. Kết quả kiểm tra mẫu thật và giới hạn dịch miễn phí được ghi trong [báo cáo kiểm tra dịch](translation-validation.md).
 
@@ -97,7 +99,7 @@ Khi tải, phần trăm, dung lượng đã nhận/tổng dung lượng, tốc �
 
 Nếu nghe lại xác nhận câu **Cần kiểm tra** thực sự không có người nói, bấm **Không có lời thoại**. Thao tác này bỏ lời và giọng nháp trong đúng khoảng câu, giữ thời gian và chữ nguồn để đối chiếu; có thể sửa lại thành lời thoại sau đó. Để trống ô sửa rồi lưu thông thường vẫn bị từ chối nhằm tránh xóa nhầm lời. Xác nhận im lặng không duyệt hoặc che chữ OCR trên hình.
 
-**Xuất Video Hoàn Chỉnh** bị khóa khi còn bản sửa chưa lưu hoặc đang tạo lại giọng. Lưu hoặc hủy bản sửa trước khi xuất. Mốc tua và căn giọng hiện theo **câu**, chưa có thời gian chính xác cho từng từ; vị trí chữ được bấm dùng để đặt con trỏ soạn thảo.
+**Xuất Video Hoàn Chỉnh** bị khóa khi còn bản sửa chưa lưu hoặc đang tạo lại giọng. Lưu hoặc hủy bản sửa trước khi xuất. Mốc tua vẫn theo **câu**; mốc sub lấy theo giọng tổng hợp như mô tả ở trên. Vị trí chữ được bấm dùng để đặt con trỏ soạn thảo.
 
 ### Chọn và nghe thử giọng
 
@@ -119,7 +121,7 @@ Nếu đường tải công khai không lấy được video, Studio tự thử 
 
 Lượt kiểm tra ngày 05/10/2026 dùng đúng link `_lAiSDH0bK8`: đã lấy mẫu **15 giây, 1080p, khoảng 28,5 MB** từ nguồn chất lượng gốc, giữ nguyên luồng hình/tiếng bằng remux. Chưa tải toàn bộ tệp nguồn khoảng **19,94 GB**. Sau một lượt Gemini trả 503, lần thử lại hoàn tất nhận diện, dịch và đọc cả 2 câu. Sửa một câu qua API đã tạo âm thanh mới, tăng revision và giữ nguyên mốc đầu/cuối; xuất MP4 H264/AAC **1920×1080, 15,017 giây, khoảng 11,3 MB** thành công. Bản tải nguồn giữ nguyên chất lượng; bản xuất lồng tiếng phải render lại để ghép âm thanh và phụ đề. Kết quả này chỉ xác nhận đoạn mẫu, chưa kiểm chứng xử lý toàn bộ video dài.
 
-Giới hạn hiện tại: Qt trên máy này cần bản xem trước WebM để phát H264/AAC. Bản xem trước có trần 90 MB nên video gần 3 giờ này chưa phát trọn vẹn trong Studio; tải nguồn thành công không đồng nghĩa preview video dài đã được hỗ trợ. Khi tắt đọc hình ảnh, vùng che phụ đề Trung vẫn cố định theo tỷ lệ khung hình; chế độ đọc hình ảnh dùng vùng OCR đo được. Video không có luồng âm thanh chưa được chế độ này hỗ trợ.
+Giới hạn hiện tại: Qt trên máy này cần bản xem trước WebM để phát H264/AAC. Bản xem trước có trần 90 MB nên video gần 3 giờ này chưa phát trọn vẹn trong Studio; tải nguồn thành công không đồng nghĩa preview video dài đã được hỗ trợ. Khi tắt đọc hình ảnh, phụ đề dùng vị trí đáy hình và giữ nguyên chữ nguồn. Video không có luồng âm thanh chưa được chế độ này hỗ trợ.
 
 ### Cookie Douyin khi cần đăng nhập
 

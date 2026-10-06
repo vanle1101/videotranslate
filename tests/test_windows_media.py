@@ -84,8 +84,8 @@ def test_compose_unicode_paths_burns_subtitles_and_keeps_video_length(media, mas
     assert {stream["codec_name"] for stream in metadata["streams"]} == {"h264", "aac"}
     assert float(metadata["format"]["duration"]) == pytest.approx(1.2, abs=0.12)
     frame = ffmpeg("-ss", "0.4", "-i", output, "-frames:v", "1", "-f", "rawvideo", "-pix_fmt", "rgb24", "pipe:1").stdout
-    # The source is black. Yellow pixels prove that the ASS text was burned in.
-    assert sum(r > 100 and g > 100 and b < 80 for r, g, b in zip(frame[::3], frame[1::3], frame[2::3])) > 10
+    # The source is black; the compact white panel proves captions burned in.
+    assert sum(min(r, g, b) > 180 for r, g, b in zip(frame[::3], frame[1::3], frame[2::3])) > 10
 
 
 def test_missing_subtitles_reports_failure_instead_of_silent_fallback(media):
@@ -128,7 +128,7 @@ def test_edge_converts_service_mp3_to_real_pcm_without_console_windows(media):
     ffmpeg("-i", voice, service_audio)
     service_bytes = service_audio.read_bytes()
 
-    async def save_response(path):
+    async def save_response(path, metadata_path=None):
         Path(path).write_bytes(service_bytes)
 
     output = folder / "giọng Edge.wav"

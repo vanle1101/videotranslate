@@ -1,7 +1,7 @@
 from pathlib import Path
 from typing import List, Dict, Any
 from config import settings
-from core.subtitle_cues import build_subtitle_cues, fit_title_text, normalize_screen_texts, uncovered_intervals
+from core.subtitle_cues import build_subtitle_cues, fit_title_text, normalize_screen_texts, uncovered_intervals, build_caption_layout, speech_caption_cues
 
 
 def _ass_text(text: str) -> str:
@@ -18,7 +18,7 @@ def _ass_text(text: str) -> str:
 class SubtitleGenerator:
     def __init__(self):
         self.font = settings.SUBTITLE_FONT
-        self.primary_color = settings.SUBTITLE_PRIMARY_COLOR # Yellow
+        self.primary_color = settings.SUBTITLE_PRIMARY_COLOR # Legacy/manual style
         self.outline_color = settings.SUBTITLE_OUTLINE_COLOR # Black
 
     def _format_time_srt(self, seconds: float) -> str:
@@ -41,8 +41,7 @@ class SubtitleGenerator:
         """Export clean standard SRT file."""
         lines = []
         for seg in segments:
-            text = seg.get("vi_text", seg.get("text", ""))
-            for cue in build_subtitle_cues(text, seg["start"], seg["end"]):
+            for cue in speech_caption_cues(seg):
                 start_str = self._format_time_srt(cue["start"])
                 end_str = self._format_time_srt(cue["end"])
                 lines.append(f"{len(lines) + 1}\n{start_str} --> {end_str}\n{cue['text']}\n")
@@ -52,8 +51,50 @@ class SubtitleGenerator:
         return output_path
 
     def generate_ass(self, segments: List[Dict[str, Any]], output_path: Path,
+                     screen_texts=None, video_size=None, mask_screen_text=False, caption_layout=None) -> Path:
+        """Render the same automatic caption plan as Studio, without source masks."""
+        width, height = video_size or (1080, 1920)
+        width, height = max(16, int(width)), max(16, int(height))
+        layout = build_caption_layout(segments, screen_texts, (width, height)) if caption_layout is None else caption_layout
+        header = f"""[Script Info]
+Title: Vietnamese Captions
+ScriptType: v4.00+
+WrapStyle: 2
+ScaledBorderAndShadow: yes
+YCbCr Matrix: TV.709
+PlayResX: {width}
+PlayResY: {height}
+
+[V4+ Styles]
+Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding
+Style: Caption,{self.font},32,&H00000000,&H00000000,&H00000000,&H00000000,-1,0,0,0,100,100,0,0,1,0,0,5,0,0,0,1
+
+[Events]
+Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
+"""
+        events = []
+        for cue in layout["cues"]:
+            x, y, w, h = cue["bbox"]
+            left, top, box_w, box_h = x * width, y * height, w * width, h * height
+            radius = min(cue["border_radius"], box_h / 2, box_w / 2)
+            color = "00E5FF" if cue["background"] == "yellow" else "FFFFFF"
+            rect = (f"{{\\an7\\pos({left:.3f},{top:.3f})\\p1\\bord0\\shad0\\1c&H{color}&}}"
+                    f"m {radius:.3f} 0 l {box_w-radius:.3f} 0 "
+                    f"b {box_w:.3f} 0 {box_w:.3f} 0 {box_w:.3f} {radius:.3f} "
+                    f"l {box_w:.3f} {box_h-radius:.3f} b {box_w:.3f} {box_h:.3f} {box_w:.3f} {box_h:.3f} {box_w-radius:.3f} {box_h:.3f} "
+                    f"l {radius:.3f} {box_h:.3f} b 0 {box_h:.3f} 0 {box_h:.3f} 0 {box_h-radius:.3f} "
+                    f"l 0 {radius:.3f} b 0 0 0 0 {radius:.3f} 0{{\\p0}}")
+            position = (f"{{\\an5\\q2\\pos({left+box_w/2:.3f},{top+box_h/2:.3f})"
+                        f"\\fs{cue['font_size']:.3f}\\bord0\\shad0\\1c&H000000&}}")
+            for layer, text in ((0, rect), (1, position + _ass_text(cue["text"]))):
+                events.append(f"Dialogue: {layer},{self._format_time_ass(cue['start'])},{self._format_time_ass(cue['end'])},Caption,,0,0,0,,{text}")
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        output_path.write_text(header + "\n".join(events), encoding="utf-8")
+        return output_path
+
+    def generate_manual_ass(self, segments: List[Dict[str, Any]], output_path: Path,
                      screen_texts=None, video_size=None, mask_screen_text=True) -> Path:
-        """Render compact speech cues and positioned translations of visible text."""
+        """Legacy explicit overlay renderer; Studio automatic captions use generate_ass."""
         width, height = video_size or (1080, 1920)
         width, height = max(16, int(width)), max(16, int(height))
         font_size = max(8, round(min(width * 0.045, height * 0.043)))
