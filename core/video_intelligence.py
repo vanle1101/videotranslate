@@ -1,6 +1,6 @@
 """Translate timed speech and local OCR with the explicitly selected provider.
 
-OpenRouter Free receives text evidence only. Optional Gemini uses compressed
+OpenCode and OpenRouter Free receive text evidence only. Optional Gemini uses compressed
 video parts. Both paths retain measured timing and require review when the
 available evidence does not support an automatic translation.
 """
@@ -18,6 +18,7 @@ from typing import Any, Dict, Iterable, List, Optional
 from config import settings
 from core.engines.translation.gemini_client import GeminiClient, GeminiError, GeminiIncompleteError
 from core.engines.translation.openrouter_client import OpenRouterFreeClient, OpenRouterClientError
+from core.engines.translation.opencode_client import OpenCodeZenClient, OpenCodeClientError
 from core.media_process import run_media
 from core.screen_ocr import ScreenOCR
 
@@ -76,8 +77,8 @@ class VideoIntelligenceError(RuntimeError):
 def validate_visual_provider():
     """Validate provider choice before creating media/cache or starting work."""
     provider = (getattr(settings, "LLM_PROVIDER", "") or "").strip().lower()
-    if provider not in {"gemini", "openrouter-free"}:
-        raise VideoIntelligenceError("Đọc chữ trong video hỗ trợ OpenRouter miễn phí hoặc Gemini; hãy chọn trong Cài đặt.")
+    if provider not in {"gemini", "openrouter-free", "opencode"}:
+        raise VideoIntelligenceError("Đọc chữ trong video hỗ trợ OpenCode, OpenRouter miễn phí hoặc Gemini; hãy chọn trong Cài đặt.")
     if provider == "gemini" and not (getattr(settings, "GEMINI_API_KEY", "") or os.getenv("GEMINI_API_KEY", "")).strip():
         raise VideoIntelligenceError("Dịch hình ảnh bằng Gemini cần API key Gemini trong Cài đặt.")
     return provider
@@ -265,8 +266,8 @@ class VideoIntelligence:
     @staticmethod
     def _with_provenance(result, provider, model):
         """Tag actual request provenance locally, never from model-authored JSON."""
-        evidence = "asr-ocr-text" if provider == "openrouter-free" else "audio-video"
-        method = "text-ai" if provider == "openrouter-free" else "video-ai"
+        evidence = "asr-ocr-text" if provider in {"openrouter-free", "opencode"} else "audio-video"
+        method = "text-ai" if provider in {"openrouter-free", "opencode"} else "video-ai"
         source = {"provider": provider, "model": str(model)[:200], "evidence_mode": evidence}
         for row in result["segments"].values():
             row.update(source_method=method, translation_provider=provider,
@@ -501,10 +502,14 @@ class VideoIntelligence:
     def _translate_text(self, payload, observed, previous_summary, start, end, cancel_check=None, *, quota_fallback=False):
         """Primary free translation and explicit quota fallback share text checks."""
         self._check_cancelled(cancel_check)
+        provider = "opencode" if getattr(self, "provider", None) == "opencode" and not quota_fallback else "openrouter-free"
+        label = "OpenCode" if provider == "opencode" else "OpenRouter"
+        model_setting = settings.OPENCODE_MODEL if provider == "opencode" else settings.OPENROUTER_MODEL
         try:
-            client = OpenRouterFreeClient(model=getattr(settings, "OPENROUTER_MODEL", ""), timeout=120)
+            client = (OpenCodeZenClient(model=model_setting, timeout=120) if provider == "opencode"
+                      else OpenRouterFreeClient(model=model_setting, timeout=120))
             if not client.has_credentials:
-                raise OpenRouterClientError("Chưa có thông tin OpenRouter-Free.")
+                raise VideoIntelligenceError(f"Chưa có thông tin đăng nhập {label}.")
             combined = {"segments": {}, "screen_texts": [], "summary": previous_summary}
             all_corrections = {}
             # Bound response size even when rapid subtitle changes produce many
@@ -529,7 +534,7 @@ class VideoIntelligence:
                     "Chỉ có bản nhận dạng âm thanh ASR và chữ OCR tại máy. Đối chiếu hai nguồn để"
                 ).replace("nghe video và chữ OCR", "bản ASR và chữ OCR")
                 prompt = (text_prompt + "\n"
-                          "Đây là chế độ ASR + OCR miễn phí qua OpenRouter, CHỈ VĂN BẢN, không có video/âm thanh đính kèm. "
+                          f"Đây là chế độ ASR + OCR miễn phí qua {label}, CHỈ VĂN BẢN, không có video/âm thanh đính kèm. "
                           "ASR KHÔNG phải bản chép chắc chắn đúng. Đối chiếu chữ OCR cùng thời điểm, câu liền kề và ngữ cảnh "
                           "để sửa ASR khi có bằng chứng rõ; không bịa cách sửa chỉ dựa vào âm gần giống. "
                           "Nếu ASR/OCR mâu thuẫn, câu bị cắt hoặc chưa đủ bằng chứng, giữ bản nháp có căn cứ và needs_review=true. "
@@ -612,9 +617,9 @@ class VideoIntelligence:
                         "giữ nguyên vùng chữ nguồn khi xem trước và xuất video.")
             model = getattr(client, "model", None)
             if not isinstance(model, str):
-                model = getattr(settings, "OPENROUTER_MODEL", "")
-            return self._with_provenance(combined, "openrouter-free", model)
-        except (OpenRouterClientError, GeminiError, VideoIntelligenceError) as exc:
+                model = model_setting
+            return self._with_provenance(combined, provider, model)
+        except (OpenCodeClientError, OpenRouterClientError, GeminiError, VideoIntelligenceError) as exc:
             self._check_cancelled(cancel_check)
             prefix = "Gemini hết hạn mức và bộ dịch dự phòng không hoàn tất" if quota_fallback else "Dịch ASR + OCR miễn phí chưa hoàn tất"
             raise VideoIntelligenceError(f"{prefix}: {exc}") from None
@@ -687,7 +692,7 @@ class VideoIntelligence:
         observed = self.screen_ocr.extract(video_path, start, end, cancel_check=cancel_check)
         payload = [{"id": int(self._get(s, "id")), "start": float(self._get(s, "start")),
                     "end": float(self._get(s, "end")), "asr_text": self._get(s, "text_zh", "")} for s in segments]
-        if self.provider == "openrouter-free":
+        if self.provider in {"openrouter-free", "opencode"}:
             return self._translate_text(payload, observed, previous_summary, start, end, cancel_check)
         # VAD may split a continuous sentence. Context before/after the output
         # window helps interpret it without duplicating segment IDs or cues.

@@ -1,5 +1,13 @@
 # Kiểm tra dịch video — 06/10/2026
 
+## Cấu hình mới nhất: Muse Spark Free qua OpenCode
+
+Theo lựa chọn của người dùng, Studio dùng `LLM_PROVIDER=opencode` và `OPENCODE_MODEL=muse-spark-1.3-contributor-free`. Danh mục chính thức `opencode models opencode --verbose` trên máy liệt kê Muse Spark 1.3 Free active, giá input/output 0. Đã nối provider này vào luồng ASR + OCR, giữ provenance đúng và ngăn tự gọi OpenRouter khi OpenCode thất bại. Muse qua Chrome là lựa chọn khác, không cần dùng cho luồng này.
+
+Ba lần kiểm tra thật bằng CLI 1.18.30 (adapter text-only, agent mặc định, đăng nhập OpenCode đã lưu) đều trả `FreeTierError`; chưa có câu dịch thành công qua Muse trên máy để xác nhận chất lượng. Không tạo video mới từ kết quả lỗi. Studio đã mở lại và API cấu hình xác nhận đúng provider/model, nhận được đăng nhập và CLI. Không thay cấu hình OpenCode toàn máy hoặc dùng model trả phí.
+
+214 bài Python, 28 subtest, 83 bài JavaScript và Qt desktop smoke đạt; một bài symlink bỏ qua theo quyền Windows. Test mới kiểm tra URL/file/upload qua OpenCode, sửa nguồn/dịch/kiểm tra bằng đúng model, metadata/tên provider, từ chối bản Muse trả phí và giữ nguyên provider khi lỗi. Kiểm thử giả lập xác nhận đường nối ứng dụng; chúng không thay thế lần gọi dịch vụ thật đang bị từ chối.
+
 ## Lượt mới nhất: phụ đề theo lượt thoại và vị trí chữ nguồn
 
 Đã đối chiếu trực quan hai video TikTok được chỉ định: `@douyinsub4/video/7559200419537259783` và `@1.ting.trung.mi.n/video/7611469031224167700`. Yêu cầu hiện tại là hiện trọn lời đang được đọc, không đưa câu đáp tiếp theo lên sớm. Khi có phụ đề Trung, giữ chữ nguồn và đặt lời Việt đen trên ô vàng bên dưới; nếu không đủ chỗ thì đặt phía trên. Khi không đo được vùng phụ đề nguồn đáng tin cậy, dùng ô trắng nhỏ ở đáy hình. Không dùng dải blur tự động.

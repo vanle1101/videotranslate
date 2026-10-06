@@ -2075,7 +2075,10 @@ document.addEventListener("DOMContentLoaded", () => {
     const item = transcriptRows.get(segment.id);
     item.badge.textContent = segmentStatusLabel(segment.status);
     if (segment.source_method === "video-ai" && !segment.needs_review) item.badge.textContent += " · AI hình + tiếng";
-    if (segment.source_method === "text-ai" && !segment.needs_review) item.badge.textContent += " · OpenRouter · bản chép + OCR";
+    if (segment.source_method === "text-ai" && !segment.needs_review) {
+      const provider = {opencode: "OpenCode", "openrouter-free": "OpenRouter"}[segment.translation_provider] || "AI";
+      item.badge.textContent += ` · ${provider} · bản chép + OCR`;
+    }
     item.badge.dataset.ready = String(["READY", "PLAYED"].includes(segment.status));
     item.row.dataset.needsReview = String(Boolean(segment.needs_review));
     item.original.textContent = segment.text_zh || (segment.confirmed_silence ? "Không có lời thoại" : "Đang nhận dạng lời thoại…");
@@ -2735,9 +2738,9 @@ document.addEventListener("DOMContentLoaded", () => {
 
   btnSaveSettings?.addEventListener("click", async () => {
     const payload = {
-      llm_provider: settingsLlmProvider?.value || "openrouter-free",
+      llm_provider: settingsLlmProvider?.value || "opencode",
       openrouter_model: settingsOpenRouterModel?.value.trim() || "inclusionai/ling-3.0-flash-sante:free",
-      opencode_model: settingsOpenCodeModel?.value || "big-pickle",
+      opencode_model: settingsOpenCodeModel?.value || "muse-spark-1.3-contributor-free",
       gemini_key: settingsGeminiKey?.value.trim() || undefined,
       gemini_model: settingsGeminiModel?.value || "gemini-2.5-flash",
       muse_browser_mode: document.getElementById("settings-muse-browser-mode")?.value || "dedicated",

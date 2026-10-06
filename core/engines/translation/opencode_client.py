@@ -18,14 +18,15 @@ from typing import Any, Mapping, Optional
 
 
 OPENCODE_BASE_URL = "https://opencode.ai/zen/v1"
-# Verified against https://opencode.ai/docs/zen/ on 2026-10-04. No paid fallback.
+# Free models only; Muse verified in the official CLI catalog on 2026-10-06.
 FREE_CHAT_MODELS = frozenset({
     "big-pickle", "space-bunny-free", "longcat-2.5-preview-free",
     "fledge-alpha-free", "mimo-v2.6-flash-free", "mimo-v2.5-free",
     "ling-3.1-flash-free", "ling-3.0-flash-fin-free",
     "nemotron-3-ultra-free", "nemotron-3.5-lightning-free",
+    "muse-spark-1.3-contributor-free",
 })
-DEFAULT_FREE_MODEL = "big-pickle"
+DEFAULT_FREE_MODEL = "muse-spark-1.3-contributor-free"
 _AGENT = "video-translator"
 _AGENT_PROMPT = (
     "You are a text translation service, not a coding agent. "

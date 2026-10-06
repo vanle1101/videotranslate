@@ -164,6 +164,8 @@ def test_errors_do_not_include_raw_cli_outputs(isolated, monkeypatch):
 
 def test_free_list_excludes_paid_models_and_non_chat_classifier():
     assert "big-pickle" in oc.OpenCodeZenClient.free_models()
+    assert "muse-spark-1.3-contributor-free" in oc.OpenCodeZenClient.free_models()
+    assert "muse-spark-1.3" not in oc.OpenCodeZenClient.free_models()
     assert "gpt-5" not in oc.OpenCodeZenClient.free_models()
     assert "jev-1.13-free" not in oc.OpenCodeZenClient.free_models()
     assert set(oc.OpenCodeZenClient.free_models()) == oc.FREE_CHAT_MODELS

@@ -88,6 +88,48 @@ def test_primary_free_needs_no_gemini_and_never_constructs_or_encodes_media(free
     gemini.assert_not_called()
 
 
+def test_opencode_muse_routes_asr_ocr_only_to_selected_model(free_config, monkeypatch):
+    monkeypatch.setattr(settings, "LLM_PROVIDER", "opencode")
+    monkeypatch.setattr(settings, "OPENCODE_MODEL", "muse-spark-1.3-contributor-free")
+    client, observed = install_responses(monkeypatch)
+    client.model = settings.OPENCODE_MODEL
+    constructor = Mock(return_value=client)
+    monkeypatch.setattr("core.video_intelligence.OpenCodeZenClient", constructor)
+    forbidden = Mock(side_effect=AssertionError("Wrong provider"))
+    monkeypatch.setattr("core.video_intelligence.OpenRouterFreeClient", forbidden)
+    monkeypatch.setattr("core.video_intelligence.GeminiClient", forbidden)
+    processor = VideoIntelligence()
+    monkeypatch.setattr(processor.screen_ocr, "extract", Mock(return_value=observed))
+    segment = SegmentItem(0, 0, 2, 2)
+    segment.text_zh = "你来了"
+    result = processor.analyze_chunk(free_config / "video.mp4", 0, 2, [segment])
+    constructor.assert_called_once_with(model=settings.OPENCODE_MODEL, timeout=120)
+    assert result["segments"][0]["translation_provider"] == "opencode"
+    assert result["segments"][0]["translation_model"] == settings.OPENCODE_MODEL
+    assert result["segments"][0]["evidence_mode"] == "asr-ocr-text"
+    assert result["segments"][0]["source_method"] == "text-ai"
+    assert not result["segments"][0]["needs_review"]
+    assert "OpenCode" in client.translate.call_args.args[0]
+    assert "OpenRouter" not in client.translate.call_args.args[0]
+    forbidden.assert_not_called()
+    session = StreamingPipelineSession("muse-primary", free_config / "video.mp4", visual_translation=True)
+    assert "OpenCode" in session.source_processing_label()
+    assert "Gemini" not in session.source_processing_label()
+
+
+def test_opencode_failure_preserves_provider_without_openrouter_fallback(free_config, monkeypatch):
+    from core.engines.translation.opencode_client import OpenCodeRequestError
+    monkeypatch.setattr(settings, "LLM_PROVIDER", "opencode")
+    client = Mock(has_credentials=True, translate=Mock(side_effect=OpenCodeRequestError("OpenCode FreeTierError")))
+    monkeypatch.setattr("core.video_intelligence.OpenCodeZenClient", Mock(return_value=client))
+    forbidden = Mock(side_effect=AssertionError("No provider switch"))
+    monkeypatch.setattr("core.video_intelligence.OpenRouterFreeClient", forbidden)
+    processor = VideoIntelligence()
+    with pytest.raises(VideoIntelligenceError, match="OpenCode FreeTierError"):
+        processor._translate_text([{"id": 0, "start": 0, "end": 2, "asr_text": "你来了"}], [evidence()], "", 0, 2)
+    forbidden.assert_not_called()
+
+
 @pytest.mark.parametrize("case", ["no_ocr", "low_confidence", "other_time", "contradiction",
                                  "source_review", "draft_review", "unsupported_change", "title_change"])
 def test_free_primary_does_not_accept_unverified_provider_certainty(free_config, monkeypatch, case):

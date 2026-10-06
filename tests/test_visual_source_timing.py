@@ -248,16 +248,18 @@ def test_ocr_only_text_fallback_keeps_provider_warning_even_without_speech(visua
     assert "Gemini" not in session.source_processing_label()
 
 
-def test_intentionally_free_primary_reports_asr_ocr_without_quota_warning(visual_session, monkeypatch):
+@pytest.mark.parametrize("provider, model", [("openrouter-free", "example/ocr:free"),
+                                             ("opencode", "muse-spark-1.3-contributor-free")])
+def test_intentionally_free_primary_reports_asr_ocr_without_quota_warning(visual_session, monkeypatch, provider, model):
     session = visual_session
-    session.video_intelligence.provider = "openrouter-free"
+    session.video_intelligence.provider = provider
     prepare_start(session, monkeypatch)
     monkeypatch.setattr(session.faster_whisper, "transcribe", Mock(return_value=[
         {"start": 0, "end": 2, "text_zh": "第一句"}]))
-    sources = [{"provider": "openrouter-free", "model": "example/ocr:free", "evidence_mode": "asr-ocr-text"}]
+    sources = [{"provider": provider, "model": model, "evidence_mode": "asr-ocr-text"}]
     monkeypatch.setattr(session.video_intelligence, "prepass", Mock(return_value={
-        "segments": {0: {"text_zh": "第一句", "final_vi": "Câu thứ nhất", "translation_provider": "openrouter-free",
-                         "translation_model": "example/ocr:free", "needs_review": False}},
+        "segments": {0: {"text_zh": "第一句", "final_vi": "Câu thứ nhất", "translation_provider": provider,
+                         "translation_model": model, "needs_review": False}},
         "screen_texts": [], "translation_sources": sources}))
 
     async def run():
@@ -268,5 +270,7 @@ def test_intentionally_free_primary_reports_asr_ocr_without_quota_warning(visual
     assert session.translation_sources == sources
     assert not any("hạn mức" in warning or "Gemini" in warning for warning in session.warnings)
     assert session.segments[0].source_method == "text-ai"
+    assert session.segments[0].translation_provider == provider
+    assert session.segments[0].translation_model == model
     assert "ASR + OCR miễn phí" in session.source_processing_label()
     assert "Gemini" not in session.source_processing_label()

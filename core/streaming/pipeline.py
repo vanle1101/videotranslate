@@ -522,11 +522,13 @@ class StreamingPipelineSession:
                 self._release_visual_runtime()
             for source in visual_result.get("translation_sources", []):
                 provider = source.get("provider") if isinstance(source, dict) else None
-                if provider not in ("gemini", "openrouter-free"):
+                if provider not in ("gemini", "openrouter-free", "opencode"):
                     raise ValueError("Bản dịch chưa xác định đúng nhà cung cấp đã xử lý.")
-                fallback = provider == "openrouter-free"
+                fallback = provider in ("openrouter-free", "opencode")
+                default_model = {"opencode": settings.OPENCODE_MODEL, "openrouter-free": settings.OPENROUTER_MODEL,
+                                 "gemini": settings.GEMINI_MODEL}[provider]
                 normalized_source = {"provider": provider,
-                                     "model": str(source.get("model") or (settings.OPENROUTER_MODEL if fallback else settings.GEMINI_MODEL))[:200],
+                                     "model": str(source.get("model") or default_model)[:200],
                                      "evidence_mode": "asr-ocr-text" if fallback else "audio-video"}
                 if normalized_source not in self.translation_sources:
                     self.translation_sources.append(normalized_source)
@@ -548,13 +550,14 @@ class StreamingPipelineSession:
                 if provider is None:
                     provider = ("openrouter-free" if getattr(self.video_intelligence, "used_text_fallback", False)
                                 else self.video_intelligence.provider)
-                if provider not in ("gemini", "openrouter-free"):
+                if provider not in ("gemini", "openrouter-free", "opencode"):
                     raise ValueError("Bản dịch chưa xác định đúng nhà cung cấp đã xử lý.")
-                fallback = provider == "openrouter-free"
+                fallback = provider in ("openrouter-free", "opencode")
+                default_model = {"opencode": settings.OPENCODE_MODEL, "openrouter-free": settings.OPENROUTER_MODEL,
+                                 "gemini": settings.GEMINI_MODEL}[provider]
                 item.source_method = "text-ai" if fallback else "video-ai"
                 item.translation_provider = provider
-                item.translation_model = str(data.get("translation_model") or
-                                             (settings.OPENROUTER_MODEL if fallback else settings.GEMINI_MODEL))[:200]
+                item.translation_model = str(data.get("translation_model") or default_model)[:200]
                 item.evidence_mode = "asr-ocr-text" if fallback else "audio-video"
                 source = {"provider": item.translation_provider, "model": item.translation_model,
                           "evidence_mode": item.evidence_mode}
@@ -643,6 +646,8 @@ class StreamingPipelineSession:
         providers = {source["provider"] for source in self.translation_sources}
         if not providers and self.video_intelligence:
             providers = {self.video_intelligence.provider}
+        if providers == {"opencode"}:
+            return "ASR + OCR miễn phí · Faster-Whisper + OpenCode · dịch văn bản"
         if providers == {"openrouter-free"}:
             return "ASR + OCR miễn phí · Faster-Whisper + OpenRouter · dịch văn bản"
         if "openrouter-free" in providers:

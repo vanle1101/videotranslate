@@ -93,8 +93,9 @@ def test_visual_configuration_rejected_before_source_work(source_api, monkeypatc
 
 
 @pytest.mark.parametrize("route", ["url", "local", "upload"])
-def test_explicit_openrouter_visual_mode_accepts_every_source_without_gemini_key(source_api, monkeypatch, route):
-    monkeypatch.setattr(settings, "LLM_PROVIDER", "openrouter-free")
+@pytest.mark.parametrize("provider", ["opencode", "openrouter-free"])
+def test_explicit_text_visual_mode_accepts_every_source_without_gemini_key(source_api, monkeypatch, route, provider):
+    monkeypatch.setattr(settings, "LLM_PROVIDER", provider)
     monkeypatch.setattr(settings, "GEMINI_API_KEY", "")
     monkeypatch.delenv("GEMINI_API_KEY", raising=False)
     response = post_source(source_api, route, True)

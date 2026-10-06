@@ -90,11 +90,11 @@ class Settings(BaseSettings):
 
     # LLM Translation API Settings
     # OpenCode reuses its local login; no translation LLM is loaded into RAM.
-    LLM_PROVIDER: str = "openrouter-free" # also 'opencode', 'free', 'gemini', 'deepseek', 'openai', 'muse'
+    LLM_PROVIDER: str = "opencode" # also 'openrouter-free', 'free', 'gemini', 'deepseek', 'openai', 'muse'
     MUSE_BROWSER_MODE: Literal["dedicated", "existing"] = "dedicated"
     MUSE_CHROME_PORT: int = Field(default=0, ge=0, le=65535)
     OPENCODE_API_KEY: str = "" # Optional local override; otherwise read OpenCode auth.json.
-    OPENCODE_MODEL: str = "big-pickle"
+    OPENCODE_MODEL: str = "muse-spark-1.3-contributor-free"
     OPENCODE_TIMEOUT: float = 60.0
     OPENROUTER_API_KEY: str = "" # Otherwise reuse OpenRouter-Free login from OpenCode.
     OPENROUTER_MODEL: str = "inclusionai/ling-3.0-flash-sante:free"

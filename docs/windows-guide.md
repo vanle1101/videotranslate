@@ -12,7 +12,7 @@ Môi trường `venv`, cấu hình `.env` và model Whisper Small đã được 
 
 - Nhận tiếng Trung: Faster-Whisper **Small**, CPU **int8**, **6 luồng**; model ở `workspace/models/faster-whisper-small`.
 - Giọng Việt: Edge-TTS Hoài My / Nam Minh, cần Internet.
-- Dịch trên máy này: **OpenRouter Free**, dùng kết nối OpenRouter đã lưu trong OpenCode. Không cần Gemini và không tải LLM dịch về RAM. Có thể đổi nhà cung cấp trong Cài đặt.
+- Dịch trên máy này: **OpenCode Zen · Muse Spark Free**, model `muse-spark-1.3-contributor-free`, dùng đăng nhập OpenCode đã có. Không cần Chrome hoặc Gemini. Tình trạng gọi dịch vụ được ghi bên dưới.
 - Giảm giọng gốc: DSP trên CPU, không tải bộ tách giọng nặng. Hiệu quả tùy video; có thể còn giọng gốc hoặc ảnh hưởng nhạc nền.
 - Xuất MP4: H.264 + AAC, phụ đề ASS, tùy chọn làm mờ sub gốc; giữ kích thước và tỉ lệ video nguồn.
 - Không nạp model lúc mở giao diện. Lần xử lý video đầu tiên cần thời gian nạp model; tốc độ thực tế phụ thuộc video và tải máy, không đảm bảo realtime.
@@ -27,17 +27,23 @@ Lượt tải ngày 05/10/2026 đã hoàn tất toàn bộ danh sách trên và 
 
 Ngày 05/10/2026, SenseVoice đã nhận dạng mẫu tiếng Trung 5,59 giây (0,29 giây suy luận); VieNeu đã tạo câu tiếng Việt bằng preset Trúc Ly, âm thanh 48 kHz dài 2,32 giây (1,98 giây tổng hợp, 14,47 giây tính cả nạp model). VieNeu mở được từ cache khi tắt mạng Hugging Face, có 25 preset. Đây là kiểm engine bằng mẫu ngắn; chưa phải benchmark video dài hoặc luồng UI chọn giọng VieNeu. Hai giọng Hoài My/Nam Minh ở Studio thuộc Edge-TTS, không dùng ID đó làm preset VieNeu.
 
-Gemini là lựa chọn tùy chọn. Model `gemini-2.5-flash` đã dịch được trong các lượt trước nhưng gặp giới hạn hạn mức. Chọn **OpenRouter Free** để dịch trực tiếp bằng dịch vụ miễn phí, không gọi Gemini trước. Key không gửi về giao diện hay đưa lên GitHub.
+Gemini là lựa chọn tùy chọn. Model `gemini-2.5-flash` đã dịch được trong các lượt trước nhưng gặp giới hạn hạn mức. Nhà cung cấp mặc định hiện là OpenCode Muse Spark Free; tác vụ OpenCode không tự chuyển sang OpenRouter khi lỗi. Key không gửi về giao diện hay đưa lên GitHub.
 
-## Dùng key miễn phí có sẵn trong OpenCode
+## Muse Spark Free trong OpenCode
 
-Máy mới chưa cấu hình chọn **OpenRouter Free** bằng kết nối `OpenRouter-Free` có sẵn trong OpenCode. Đây là dịch vụ OpenRouter, không phải OpenCode Zen. Chỉ chấp nhận model có hậu tố `:free`; không tự đổi provider hoặc model trả phí khi lỗi. Lần thử API trên máy trả bản dịch thành công và báo chi phí 0. Hạn mức và khả dụng phụ thuộc dịch vụ: [tài liệu bản miễn phí](https://openrouter.ai/docs/guides/routing/model-variants/free).
+Chọn **OpenCode Zen · Muse Spark Free** và model `muse-spark-1.3-contributor-free`. Danh mục CLI ngày 06/10/2026 ghi tên **Muse Spark 1.3 Free**, trạng thái active, giá input/output bằng 0. Bản `muse-spark-1.3` không nằm trong danh sách miễn phí được Studio cho phép. Luồng ASR + OCR và luồng chỉ dịch tiếng nói đều dùng model đã chọn; UI ghi đúng OpenCode.
+
+Studio dùng [CLI chính thức](https://opencode.ai/docs/cli/#run), key `opencode` đã lưu hoặc `OPENCODE_API_KEY`, phiên riêng không chạy công cụ. Muse trong OpenCode độc lập với tùy chọn Muse qua Chrome bên dưới. Hiện Studio gửi văn bản ASR/OCR để dịch, không nhận đó là Muse đã trực tiếp xem video.
+
+Kiểm tra thật ngày 06/10/2026: CLI 1.18.30 trả **FreeTierError** cho model Muse miễn phí qua adapter, agent mặc định và đăng nhập OpenCode đã lưu. Chưa xác nhận dịch thành công bằng model này trên máy. Studio giữ nguyên OpenCode khi gặp lỗi; cần dịch vụ chấp nhận lượt gọi trước khi có thể xuất một bản dịch mới. Không tự đổi sang OpenRouter hoặc model trả phí.
+
+## OpenRouter Free (lựa chọn riêng)
+
+Có thể chủ động chọn **OpenRouter Free** bằng kết nối `OpenRouter-Free` có sẵn trong OpenCode. Đây là dịch vụ OpenRouter, không phải OpenCode Zen. Chỉ chấp nhận model có hậu tố `:free`; không tự đổi provider hoặc model trả phí khi lỗi. Các lượt thử trước đã trả bản dịch và báo chi phí 0, sau đó gặp giới hạn. Hạn mức và khả dụng phụ thuộc dịch vụ: [tài liệu bản miễn phí](https://openrouter.ai/docs/guides/routing/model-variants/free).
 
 Key được tự đọc từ `%USERPROFILE%\.local\share\opencode\auth.json` (hoặc đường dẫn `XDG_DATA_HOME` nếu có). Không cần chép key vào code hay nhập lại. Có thể đặt `OPENROUTER_API_KEY` trong `.env` local để ghi đè. Key không xuất hiện trong API Cài đặt, giao diện hoặc GitHub.
 
 Trong **Cài đặt**, chọn **OpenRouter Free**, lưu model rồi bấm **Kiểm tra OpenRouter Free**. Nếu chuyển máy, kết nối OpenRouter trong OpenCode hoặc đặt key vào `.env` local. Phần nhận giọng nói vẫn dùng Whisper Small trên CPU, còn tạo giọng Việt dùng Edge-TTS qua mạng.
-
-Tùy chọn **OpenCode Zen Free** dùng [CLI chính thức](https://opencode.ai/docs/cli/#run), key `opencode` hoặc `OPENCODE_API_KEY`, session riêng không có quyền chạy công cụ, không chia sẻ và tự dọn file tạm. Khi kiểm tra ngày 04/10/2026, Zen trả **403 FreeTierError** ngay cả qua CLI gốc 1.18.30; vấn đề tương tự đã được báo ở [upstream](https://github.com/anomalyco/opencode/issues/49756). Vì vậy Zen không được đặt làm mặc định. Không giả lập header hoặc lách chặn dịch vụ.
 
 ## Muse qua tài khoản của bạn (thử nghiệm)
 

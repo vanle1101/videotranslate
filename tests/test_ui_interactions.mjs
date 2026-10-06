@@ -1662,11 +1662,13 @@ test('caption edits replace text and layout together and ignore a stale websocke
   assert.equal(ui.el('screen-text-overlay').children.length, 0);
 });
 
-test('transcript distinguishes OpenRouter transcript plus OCR from video AI and keeps review status prominent', async () => {
+test('transcript reports selected text provider and keeps review status prominent', async () => {
   const ui = studio(); await ui.start();
   const segment = { id: 0, start: 0, end: 10, status: 'READY', final_vi: 'Bản đã đối chiếu.' };
-  ui.sockets.at(-1).receive({ type: 'segment_update', ...segment, source_method: 'text-ai' });
+  ui.sockets.at(-1).receive({ type: 'segment_update', ...segment, source_method: 'text-ai', translation_provider: 'openrouter-free' });
   assert.equal(ui.el('seg-badge-0').textContent, 'Sẵn sàng · OpenRouter · bản chép + OCR');
+  ui.sockets.at(-1).receive({ type: 'segment_update', ...segment, source_method: 'text-ai', translation_provider: 'opencode' });
+  assert.equal(ui.el('seg-badge-0').textContent, 'Sẵn sàng · OpenCode · bản chép + OCR');
   ui.sockets.at(-1).receive({ type: 'segment_update', ...segment, source_method: 'video-ai' });
   assert.equal(ui.el('seg-badge-0').textContent, 'Sẵn sàng · AI hình + tiếng');
   ui.sockets.at(-1).receive({ type: 'segment_update', ...segment, source_method: 'text-ai', status: 'NEEDS_REVIEW', needs_review: true });

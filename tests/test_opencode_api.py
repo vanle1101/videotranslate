@@ -90,6 +90,19 @@ def test_settings_saves_only_provider_and_canonical_free_model(local_api):
     assert "fixture-" not in response.text
 
 
+def test_settings_accepts_muse_free_but_rejects_paid_muse(local_api):
+    client, persist = local_api
+    response = client.post("/api/settings", json={"llm_provider": "opencode",
+        "opencode_model": "muse-spark-1.3-contributor-free"})
+    assert response.status_code == 200
+    assert main.settings.OPENCODE_MODEL == "muse-spark-1.3-contributor-free"
+    persist.assert_called_once_with({"LLM_PROVIDER": "opencode", "OPENCODE_MODEL": "muse-spark-1.3-contributor-free"})
+    persist.reset_mock()
+    response = client.post("/api/settings", json={"opencode_model": "muse-spark-1.3"})
+    assert response.status_code == 422
+    persist.assert_not_called()
+
+
 @pytest.mark.parametrize("invalid_fields", [
     {"llm_provider": "opencode", "opencode_model": "gpt-5"},
     {"llm_provider": "unknown", "opencode_model": "space-bunny-free"},

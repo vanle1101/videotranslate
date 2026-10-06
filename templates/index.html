@@ -72,7 +72,7 @@
         </section>
         <section class="studio-action-card studio-card" aria-labelledby="action-heading">
           <h2 id="action-heading" class="studio-card-heading"><i class="fa-solid fa-sliders" aria-hidden="true"></i>2. DỊCH VÀ LỒNG TIẾNG</h2>
-          <label class="visual-translation-option"><input id="visual-translation" type="checkbox" {% if settings.LLM_PROVIDER in ('gemini', 'openrouter-free') %}checked{% endif %}><span>AI đọc chữ và kiểm chứng lời nói<small>OpenRouter miễn phí đối chiếu lời nhận dạng với chữ trên hình; không cần Gemini. Có thể tắt nếu chỉ muốn dịch tiếng nói.</small></span></label>
+          <label class="visual-translation-option"><input id="visual-translation" type="checkbox" {% if settings.LLM_PROVIDER in ('gemini', 'openrouter-free', 'opencode') %}checked{% endif %}><span>AI đọc chữ và kiểm chứng lời nói<small>Dùng nhà cung cấp đã chọn trong Cài đặt để đối chiếu lời nhận dạng với chữ trên hình. OpenCode hỗ trợ Muse Spark Free; không cần mở Chrome.</small></span></label>
           <div id="task-progress" class="hidden task-progress" aria-label="Tiến độ xử lý video">
             <div class="task-progress-heading" role="status" aria-live="polite"><span id="task-progress-stage">Đang gửi yêu cầu…</span><span id="task-progress-value">Chưa có %</span></div>
             <div id="task-progress-track" class="task-progress-track" role="progressbar" aria-label="Tiến độ bước hiện tại" aria-valuemin="0" aria-valuemax="100"><div id="task-progress-bar" class="task-progress-bar"></div></div>
@@ -339,8 +339,8 @@
             <option value="deepseek">DeepSeek AI (Văn phong kịch tính)</option>
             <option value="openai">OpenAI Compatible API</option>
             <option value="free">Google / MyMemory miễn phí</option>
-            <option value="opencode">OpenCode Zen Free (CLI)</option>
-            <option value="muse">Muse (thử nghiệm, cần đăng nhập Meta)</option>
+            <option value="opencode" {% if settings.LLM_PROVIDER == 'opencode' %}selected{% endif %}>OpenCode Zen · Muse Spark Free</option>
+            <option value="muse">Muse qua Chrome (thử nghiệm, tài khoản Meta)</option>
           </select>
         </div>
 
@@ -389,13 +389,13 @@
         </div>
 
         <details class="rounded-xl border border-gray-700 p-3 space-y-2">
-          <summary class="text-xs text-gray-300 cursor-pointer">OpenCode Zen Free (tùy chọn)</summary>
+          <summary class="text-xs text-gray-300 cursor-pointer">OpenCode Zen · Muse Spark Free</summary>
           <label for="settings-opencode-model" class="text-xs text-gray-300 block">Model OpenCode Free:</label>
           <select id="settings-opencode-model" class="w-full bg-[#08090d] border border-gray-700 rounded-xl px-3 py-2 text-xs text-gray-100 focus:outline-none focus:border-pink-500">
             <option value="{{ settings.OPENCODE_MODEL }}">{{ settings.OPENCODE_MODEL }}</option>
           </select>
           <p id="opencode-auth-status" role="status" class="text-xs text-gray-400">Đang kiểm tra key OpenCode trên máy…</p>
-          <p class="text-[11px] text-gray-500">Dùng OpenCode CLI. Dịch vụ hiện có thể trả lỗi 403 với free tier; chọn OpenRouter Free nếu gặp lỗi này.</p>
+          <p class="text-[11px] text-gray-500">Dùng model miễn phí qua OpenCode đã đăng nhập trên máy, không cần Chrome. Nếu dịch vụ từ chối hoặc hết hạn mức, tác vụ báo lỗi và giữ nguyên nhà cung cấp đã chọn.</p>
           <button type="button" id="btn-test-opencode" class="px-3 py-1.5 rounded-xl border border-pink-500/50 hover:bg-pink-600/20 text-pink-300 text-xs font-semibold transition">Kiểm tra kết nối OpenCode</button>
           <span id="opencode-test-result" role="status" class="block text-xs text-gray-400"></span>
         </details>
