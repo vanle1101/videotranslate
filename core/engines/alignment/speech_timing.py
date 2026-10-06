@@ -11,16 +11,16 @@ import numpy as np
 from core.subtitle_cues import build_subtitle_cues
 
 
-def audio_activity_span(path, *, threshold=.001):
-    """Measure first/last audible 10 ms PCM blocks without another media process."""
+def _audio_activity_intervals(path, *, threshold=.001, min_pause=.25):
+    """Measure speech islands, merging brief phoneme gaps but retaining pauses."""
     try:
         with wave.open(str(path), "rb") as audio:
             if audio.getsampwidth() != 2 or audio.getcomptype() != "NONE":
-                return None
+                return []
             rate, channels = audio.getframerate(), audio.getnchannels()
             samples = np.frombuffer(audio.readframes(audio.getnframes()), dtype="<i2")
         if rate <= 0 or not channels or not len(samples):
-            return None
+            return []
         samples = samples.reshape(-1, channels).astype(np.float64) / 32768.0
         energy = np.mean(samples * samples, axis=1)
         frame = max(1, round(rate * .01))
@@ -30,14 +30,22 @@ def audio_activity_span(path, *, threshold=.001):
         # enough to exclude a quiet opening consonant or final syllable.
         active = np.flatnonzero(rms >= threshold)
         if not len(active):
-            return None
+            return []
         # A single impulse is not speech. Require at least 30 ms of activity.
         if len(active) * frame / rate < .03:
-            return None
-        return ((active[0] + 1) * frame / rate,
-                min(len(energy) / rate, (active[-1] + 1) * frame / rate))
+            return []
+        groups = np.split(active, np.flatnonzero((np.diff(active) - 1) * frame / rate >= min_pause) + 1)
+        return [((group[0] + 1) * frame / rate,
+                 min(len(energy) / rate, (group[-1] + 1) * frame / rate))
+                for group in groups if len(group) * frame / rate >= .03]
     except (OSError, EOFError, wave.Error, ValueError):
-        return None
+        return []
+
+
+def audio_activity_span(path, *, threshold=.001):
+    """Measure outer audible bounds without treating an isolated click as speech."""
+    intervals = _audio_activity_intervals(path, threshold=threshold)
+    return (intervals[0][0], intervals[-1][1]) if intervals else None
 
 
 def take_tts_word_boundaries(engine, path):
@@ -133,13 +141,80 @@ def _match_boundaries(text, boundaries):
     return result
 
 
+def _estimate_tokens(tokens, intervals):
+    """Map estimated speaking time onto audible spans, excluding long silence."""
+    durations = [right - left for left, right in intervals]
+    duration = sum(durations)
+    weights = [max(1, len(_letters(token))) for token in tokens]
+    total, elapsed = sum(weights), 0
+
+    def at_time(position, *, onset):
+        for (left, right), length in zip(intervals, durations):
+            # A word beginning exactly at a pause belongs to the next audible
+            # span; a word ending there belongs to the previous span.
+            if position < length - 1e-9 or (not onset and position <= length + 1e-9):
+                return min(right, left + max(0, position))
+            position -= length
+        return intervals[-1][1]
+
+    words = []
+    for token, weight in zip(tokens, weights):
+        left = at_time(duration * elapsed / total, onset=True)
+        elapsed += weight
+        right = at_time(duration * elapsed / total, onset=False)
+        words.append({"text": token, "start": left, "end": max(left, right)})
+    return words
+
+
+def _estimate_speech_words(text, sentences, intervals):
+    """Use real pauses to separate sentences; within each span timing is estimated.
+
+    This is not forced alignment or speaker identification. When there are at
+    least as many audible spans as sentences and their speaking budgets agree,
+    assign each sentence at least one span in order. Extra spans are divided
+    near proportional speaking budgets.
+    Otherwise retain estimated token timing over audible time only.
+    """
+    groups = [_display_tokens(sentence) for sentence in sentences]
+    groups = [group for group in groups if group]
+    if len(groups) < 2 or len(intervals) < len(groups):
+        return _estimate_tokens(_display_tokens(text), intervals)
+    # Vietnamese whitespace tokens are mostly syllables. Character counts can
+    # make a short reply such as "Ừ" look far shorter than it is when spoken.
+    weights = [len(group) for group in groups]
+    cumulative = [0.0]
+    for left, right in intervals:
+        cumulative.append(cumulative[-1] + right - left)
+    total_weight, elapsed, cursor, assigned = sum(weights), 0, 0, []
+    for index, (tokens, weight) in enumerate(zip(groups, weights)):
+        elapsed += weight
+        remaining = len(groups) - index - 1
+        if remaining:
+            target = cumulative[-1] * elapsed / total_weight
+            boundary = min(range(cursor + 1, len(intervals) - remaining + 1),
+                           key=lambda cut: abs(cumulative[cut] - target))
+            if abs(cumulative[boundary] - target) > max(.20, cumulative[-1] * .20):
+                # A pause after "Nào," is not evidence that the whole first
+                # sentence finished. Do not force one sentence onto each island
+                # when their speaking budgets disagree; retain the estimate.
+                return _estimate_tokens(_display_tokens(text), intervals)
+        else:
+            boundary = len(intervals)
+        assigned.append((tokens, intervals[cursor:boundary]))
+        cursor = boundary
+    words = []
+    for tokens, spans in assigned:
+        words.extend(_estimate_tokens(tokens, spans))
+    return words
+
+
 def build_speech_timing(text, start, end, fitted_audio, speed_ratio=1.0, word_boundaries=None):
     """Build absolute display pages for the current spoken sentence.
 
     Word boundaries are relative to the raw TTS audio. Their first offset is
     calibrated against the final fitted PCM, including encoder silence and any
     atempo adjustment. Voices lacking timestamps get explicitly estimated word
-    timing between measured audio onset/offset, never a fictitious exact label.
+    timing over measured audible spans, never a fictitious exact label.
     """
     empty = {"subtitle_cues": [], "subtitle_timing_source": "unavailable",
              "speech_start": None, "speech_end": None}
@@ -151,13 +226,16 @@ def build_speech_timing(text, start, end, fitted_audio, speed_ratio=1.0, word_bo
         return empty
     if not str(text or "").strip():
         return empty
-    activity = audio_activity_span(Path(fitted_audio))
-    if activity is None:
+    activity = _audio_activity_intervals(Path(fitted_audio))
+    if not activity:
         return empty
-    onset, offset = activity
+    onset, offset = activity[0][0], activity[-1][1]
     speech_start, speech_end = max(0.0, start + onset), min(end, start + offset)
     if speech_end <= speech_start:
         return empty
+    intervals = [(max(speech_start, start + left), min(speech_end, start + right))
+                 for left, right in activity if start + right > speech_start and start + left < speech_end]
+    sentences = re.split(r'(?<=[.!?。！？…])\s+', str(text).strip())
     words = _match_boundaries(text, word_boundaries or [])
     source = "edge-word-boundary" if words else "audio-onset-estimate"
     if words:
@@ -170,21 +248,13 @@ def build_speech_timing(text, start, end, fitted_audio, speed_ratio=1.0, word_bo
         if any(word["end"] <= word["start"] for word in words):
             words, source = [], "audio-onset-estimate"
     if not words:
-        tokens = _display_tokens(text)
-        if not tokens:
+        if not _display_tokens(text):
             return empty
-        weights = [max(1, len(_letters(token))) for token in tokens]
-        total, elapsed = sum(weights), 0
-        for token, weight in zip(tokens, weights):
-            a = speech_start + (speech_end - speech_start) * elapsed / total
-            elapsed += weight
-            b = speech_start + (speech_end - speech_start) * elapsed / total
-            words.append({"text": token, "start": a, "end": b})
+        words = _estimate_speech_words(text, sentences, intervals)
+        source = "audio-pause-estimate" if len(intervals) > 1 else "audio-onset-estimate"
     # A complete current sentence appears when its first spoken word starts;
     # the next sentence must never be combined into that earlier display page.
     # This is ordinary subtitle paging, not karaoke/progressive word reveal.
-    sentences = (re.split(r'(?<=[.!?。！？…])\s+', str(text).strip())
-                 if "\n" not in str(text) else [text])
     pages = [page for sentence in sentences
              for page in build_subtitle_cues(sentence, speech_start, speech_end,
                                               max_chars=48, line_chars=26)]
@@ -204,10 +274,37 @@ def build_speech_timing(text, start, end, fitted_audio, speed_ratio=1.0, word_bo
             continue
         cues.append({"text": page["text"], "start": group[0]["start"],
                      "end": group[-1]["end"], "words": group})
-    # Keep each page visible through short pauses until the next page starts.
+    # Keep the current page through short pauses only. Long pauses should not
+    # leave stale words on screen or reveal the next sentence before its voice.
     for left, right in zip(cues, cues[1:]):
-        left["end"] = right["start"]
+        if right["start"] - left["end"] < .25:
+            left["end"] = right["start"]
     if cues:
         cues[-1]["end"] = speech_end
+    if len(intervals) > 1:
+        # One sentence can also contain a long dramatic pause. Keep the same
+        # page/geometry on either side, but hide it during measured silence.
+        # Ordinary comma pauses must not make the entire caption blink.
+        display_intervals = []
+        for left, right in intervals:
+            if display_intervals and left - display_intervals[-1][1] < .6:
+                display_intervals[-1] = (display_intervals[-1][0], right)
+            else:
+                display_intervals.append((left, right))
+        clipped = []
+        for cue in cues:
+            assigned_words = set()
+            for left, right in display_intervals:
+                left, right = max(cue["start"], left), min(cue["end"], right)
+                if right > left:
+                    visible_words = []
+                    for index, word in enumerate(cue["words"]):
+                        if index not in assigned_words and word["start"] < right and word["end"] > left:
+                            visible_words.append({**word, "start": max(left, word["start"]),
+                                                  "end": min(right, word["end"])})
+                            assigned_words.add(index)
+                    clipped.append({**cue, "start": left, "end": right,
+                                    "words": visible_words})
+        cues = clipped
     return {"subtitle_cues": cues, "subtitle_timing_source": source,
             "speech_start": speech_start, "speech_end": speech_end}

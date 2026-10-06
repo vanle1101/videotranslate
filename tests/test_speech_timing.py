@@ -26,6 +26,18 @@ def pcm(path, *, duration=3, onset=.4, offset=2.6):
         audio.writeframes(samples.tobytes())
 
 
+def paused_pcm(path, intervals, duration=4):
+    rate = 24000
+    times = np.arange(round(duration * rate)) / rate
+    speaking = np.zeros(len(times), dtype=bool)
+    for left, right in intervals:
+        speaking |= (times >= left) & (times < right)
+    samples = (.2 * np.sin(2 * math.pi * 440 * times) * speaking * 32767).astype("<i2")
+    with wave.open(str(path), "wb") as audio:
+        audio.setparams((1, 2, rate, 0, "NONE", "not compressed"))
+        audio.writeframes(samples.tobytes())
+
+
 def test_pcm_activity_excludes_encoder_silence(tmp_path):
     audio = tmp_path / "speech.wav"
     pcm(audio)
@@ -235,3 +247,112 @@ def test_trim_offset_cancels_when_word_metadata_is_anchored_to_final_audio(tmp_p
     assert trimmed["subtitle_timing_source"] == "edge-word-boundary"
     for before, after in zip(untrimmed["subtitle_cues"], trimmed["subtitle_cues"]):
         assert before["start"] - after["start"] == pytest.approx(removed, abs=.011)
+
+
+@pytest.mark.parametrize("boundaries", [[], [{"text": "mismatched", "start": .1, "end": 3.8}]])
+def test_estimated_next_sentence_waits_for_real_speech_after_long_pause(tmp_path, boundaries):
+    audio = tmp_path / "paused.wav"
+    paused_pcm(audio, [(.1, .6), (3, 3.8)])
+    result = build_speech_timing("Ừ. Sao vậy?", 0, 4, audio, word_boundaries=boundaries)
+    assert result["subtitle_timing_source"] == "audio-pause-estimate"
+    first, second = result["subtitle_cues"]
+    assert first["text"] == "Ừ." and second["text"] == "Sao vậy?"
+    assert first["end"] == pytest.approx(.6, abs=.011)
+    assert second["start"] == pytest.approx(3.01, abs=.011)
+    assert not any(cue["start"] <= 1 < cue["end"] for cue in result["subtitle_cues"])
+    assert result["speech_end"] == pytest.approx(3.8)
+
+
+def test_local_sentence_timing_uses_final_pcm_after_trim_and_global_offset(tmp_path):
+    from core.engines.alignment.speech_timing import trim_tts_padding
+    audio = tmp_path / "paused.wav"
+    paused_pcm(audio, [(.4, .8), (2.7, 3.6)])
+    before = build_speech_timing("Ừ. Sao vậy?", 10, 14, audio)
+    removed = trim_tts_padding(audio)
+    after = build_speech_timing("Ừ. Sao vậy?", 10, 14, audio)
+    assert after["subtitle_timing_source"] == "audio-pause-estimate"
+    for original, trimmed in zip(before["subtitle_cues"], after["subtitle_cues"]):
+        assert original["start"] - trimmed["start"] == pytest.approx(removed, abs=.011)
+    assert after["subtitle_cues"][1]["start"] >= 10 + 2.7 - removed
+
+
+def test_estimated_words_never_start_inside_a_measured_long_pause(tmp_path):
+    audio = tmp_path / "paused.wav"
+    paused_pcm(audio, [(.1, .6), (2, 2.5), (3, 3.8)])
+    text = "Hôm nay chúng ta cùng tìm hiểu điều này thật kỹ để tránh nhầm lẫn."
+    result = build_speech_timing(text, 5, 9, audio)
+    words = [word for cue in result["subtitle_cues"] for word in cue["words"]]
+    assert " ".join(word["text"] for word in words) == text
+    assert all(not 5.6 < word["start"] < 7 and not 7.5 < word["start"] < 8 for word in words)
+    assert all(5 <= word["start"] < word["end"] <= 8.8 for word in words)
+
+
+def test_sentence_pauses_preserve_measured_provider_boundaries(tmp_path):
+    audio = tmp_path / "paused.wav"
+    paused_pcm(audio, [(.1, .6), (3, 3.8)])
+    result = build_speech_timing("Ừ. Sao vậy?", 0, 4, audio, word_boundaries=[
+        {"text": "Ừ", "start": .1, "end": .6},
+        {"text": "Sao", "start": 3, "end": 3.3},
+        {"text": "vậy", "start": 3.3, "end": 3.8},
+    ])
+    first, second = result["subtitle_cues"]
+    assert result["subtitle_timing_source"] == "edge-word-boundary"
+    assert second["start"] - first["start"] == pytest.approx(2.9)
+    assert first["end"] < .7 and second["start"] >= 3
+
+
+def test_sentence_after_newline_is_not_combined_with_earlier_speaker(tmp_path):
+    audio = tmp_path / "paused.wav"
+    paused_pcm(audio, [(.1, .6), (3, 3.8)])
+    result = build_speech_timing("Ừ.\nSao vậy?", 0, 4, audio)
+    first, second = result["subtitle_cues"]
+    assert first["text"] == "Ừ." and second["text"] == "Sao vậy?"
+    assert second["start"] >= 3
+
+
+def test_short_phoneme_gaps_do_not_get_promoted_to_sentence_boundaries(tmp_path):
+    audio = tmp_path / "brief-gaps.wav"
+    paused_pcm(audio, [(.1, .4), (.5, .8), (.9, 1.3)], duration=2)
+    result = build_speech_timing("Xin chào bạn.", 0, 2, audio)
+    assert result["subtitle_timing_source"] == "audio-onset-estimate"
+    assert len(result["subtitle_cues"]) == 1
+
+
+def test_comma_pause_does_not_force_next_sentence_into_second_audio_island(tmp_path):
+    audio = tmp_path / "comma-pause.wav"
+    paused_pcm(audio, [(.1, .4), (.8, 3.8)])
+    text = "Nào, chúng ta bắt đầu nhé. Đi thôi."
+    result = build_speech_timing(text, 0, 4, audio)
+    next_sentence = [cue for cue in result["subtitle_cues"] if cue["text"] == "Đi thôi."]
+    assert next_sentence and next_sentence[0]["start"] > 2
+    assert any(cue["start"] <= .6 < cue["end"] for cue in result["subtitle_cues"]), "Keep current page through a normal comma pause"
+    assert result["subtitle_timing_source"] == "audio-pause-estimate"
+
+
+def test_single_page_hides_during_long_pause_without_changing_words(tmp_path):
+    audio = tmp_path / "dramatic-pause.wav"
+    paused_pcm(audio, [(.1, .7), (2.7, 3.8)])
+    result = build_speech_timing("Chúng ta cùng chờ một chút nhé.", 0, 4, audio)
+    cues = result["subtitle_cues"]
+    assert len(cues) == 2 and cues[0]["text"] == cues[1]["text"]
+    assert cues[0]["end"] == pytest.approx(.7, abs=.011)
+    assert cues[1]["start"] >= 2.7
+    assert not any(cue["start"] <= 1 < cue["end"] for cue in cues)
+
+
+def test_real_sample_comma_pause_does_not_blink_or_lose_boundary_word(tmp_path):
+    audio = tmp_path / "comma.wav"
+    paused_pcm(audio, [(.04, .47), (.75, 1.91)], duration=2.06)
+    text = "Về nhất, phá kỷ lục của trường."
+    result = build_speech_timing(text, 2.44, 4.5, audio, word_boundaries=[
+        {"text": "Về", "start": .04, "end": .24},
+        {"text": "nhất", "start": .24, "end": .515},
+        {"text": "phá", "start": .70, "end": .95},
+        {"text": "kỷ", "start": .95, "end": 1.125},
+        {"text": "lục", "start": 1.125, "end": 1.375},
+        {"text": "của", "start": 1.375, "end": 1.565},
+        {"text": "trường", "start": 1.565, "end": 1.91}])
+    assert len(result["subtitle_cues"]) == 1
+    cue = result["subtitle_cues"][0]
+    assert cue["start"] < 2.91 < 3.19 < cue["end"]
+    assert " ".join(word["text"] for word in cue["words"]) == text

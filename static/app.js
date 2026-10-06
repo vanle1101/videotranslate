@@ -170,6 +170,11 @@ document.addEventListener("DOMContentLoaded", () => {
   let pendingTranscriptSaves = 0;
   let activeAudio = null;
   let activePlayingSegId = null;
+  const dubAudioCache = new Map();
+  let dubPlaybackWait = null;
+  let internalDubPauseEvents = 0;
+  let playbackFrame = null;
+  let playbackFrameGeneration = 0;
   let bgmAudio = null;
   let sourceAudition = null;
   let bgmUrl = null;
@@ -234,7 +239,6 @@ document.addEventListener("DOMContentLoaded", () => {
     mediaPlayButton.classList.add("hidden");
     bufferingAlert.classList.add("hidden");
     if (!sourceAudition && bgmAudio) bgmAudio.play().catch(reportPlayFailure);
-    if (!sourceAudition && activeAudio) activeAudio.play().catch(reportPlayFailure);
     videoPlayer.play().catch(reportPlayFailure);
   });
 
@@ -440,7 +444,7 @@ document.addEventListener("DOMContentLoaded", () => {
     const generation = voicePreviewGeneration;
     voicePreviewBusy = true;
     previewedVoiceId = voice.id;
-    voicePreviewStatus.textContent = `Đang tạo mẫu giọng ${voice.name}…`;
+    voicePreviewStatus.textContent = `Đang chuẩn bị mẫu giọng ${voice.name}…`;
     updateVoiceControls();
     try {
       const response = await fetch("/api/voices/preview", {
@@ -456,7 +460,7 @@ document.addEventListener("DOMContentLoaded", () => {
       voicePreviewAudio.src = audioUrl.href;
       voicePreviewAudio.setAttribute("aria-label", `Mẫu giọng ${voice.name}`);
       voicePreviewAudio.classList.remove("hidden");
-      voicePreviewStatus.textContent = `Đang nghe mẫu: ${voice.name}. Bấm Chọn ở dòng giọng bạn muốn dùng.`;
+      voicePreviewStatus.textContent = `Đang nghe mẫu: ${voice.name}.${data.cached ? " Dùng mẫu đã lưu." : " Mẫu đã được lưu cho lần sau."} Bấm Chọn ở dòng giọng bạn muốn dùng.`;
       try { await voicePreviewAudio.play(); }
       catch (_) {
         if (generation === voicePreviewGeneration) voicePreviewStatus.textContent = "Mẫu giọng đã sẵn sàng. Bấm nút phát trên thanh âm thanh để nghe.";
@@ -561,7 +565,7 @@ document.addEventListener("DOMContentLoaded", () => {
     automaticExportActive = false;
     taskResult?.classList.add("hidden");
     taskResultLink?.classList.add("hidden");
-    btnSaveResult?.classList.add("hidden");
+    if (btnSaveResult) btnSaveResult.disabled = true;
     taskResultLink?.removeAttribute("href");
   }
 
@@ -681,6 +685,7 @@ document.addEventListener("DOMContentLoaded", () => {
     closeResultPreview(false);
     stopVoicePreview();
     stopSourceAudition();
+    cancelDubPlaybackWait();
     resultPreviewActive = true;
     isBufferingUnderrun = false;
     playWhenPreviewReady = false;
@@ -688,7 +693,7 @@ document.addEventListener("DOMContentLoaded", () => {
     resultPreviewTrigger = trigger;
     resultPreviewStatus.textContent = "";
     resultPreviewModal.classList.remove("hidden");
-    const state = resultPreviewState = { generation: resultPreviewGeneration, filename, phase: "direct", mediaUrl: url.href };
+    const state = resultPreviewState = { generation: resultPreviewGeneration, filename, outputUrl: url.pathname, phase: "direct", mediaUrl: url.href };
     resultPreviewVideo.volume = playbackVolume();
     if (resultPreviewVideo.canPlayType?.('video/mp4; codecs="avc1.42E01E, mp4a.40.2"') === "") {
       startResultCompatibility(state);
@@ -714,7 +719,7 @@ document.addEventListener("DOMContentLoaded", () => {
   resultPreviewModal?.addEventListener("keydown", event => {
     if (event.key === "Escape") { event.preventDefault(); closeResultPreview(); }
     if (event.key === "Tab") {
-      const first = btnCloseResultPreview, last = resultPreviewVideo;
+      const first = document.getElementById("btn-save-preview-result") || btnCloseResultPreview, last = resultPreviewVideo;
       if (event.shiftKey && document.activeElement === first) { event.preventDefault(); last.focus(); }
       else if (!event.shiftKey && document.activeElement === last) { event.preventDefault(); first.focus(); }
     }
@@ -740,6 +745,8 @@ document.addEventListener("DOMContentLoaded", () => {
     taskResult.classList.remove("hidden");
     taskResultLink.classList.remove("hidden");
     btnSaveResult.classList.remove("hidden");
+    btnSaveResult.disabled = false;
+    btnSaveResult.title = "Lưu toàn bộ MP4 đã dịch, giữ nguyên chất lượng xuất";
   }
 
   function resetWorkerBadges() {
@@ -754,7 +761,7 @@ document.addEventListener("DOMContentLoaded", () => {
     if (taskResult) {
       taskResult.classList.remove("hidden");
       taskResultLink.classList.add("hidden");
-      btnSaveResult.classList.add("hidden");
+      btnSaveResult.disabled = true;
       taskResultStatus.textContent = message || (status === "CANCELLED" ? "Đã hủy xuất video. Bản dịch vẫn được giữ." : "Chưa xuất được video. Bấm Xuất video MP4 để thử lại.");
     }
   }
@@ -879,7 +886,7 @@ document.addEventListener("DOMContentLoaded", () => {
     else taskProgressTrack.setAttribute("aria-valuenow", String(pct));
     taskProgressBar.style.width = pct === null ? "100%" : `${pct}%`;
     taskProgressDetail.textContent = terminal
-      ? (currentProgress.phase === "export_error" ? "Video kết quả chưa được tạo. Bản dịch và giọng đọc vẫn được giữ; bạn có thể xuất lại." : incompleteReview ? reviewSummaryText() : status === "FAILED" ? "Mở Diagnostics để xem lỗi. Nếu có nút Thử lại câu lỗi, bạn có thể tiếp tục mà không dịch lại." : status === "COMPLETED" ? (reviewSummaryText() || (currentProgress.review_count ? "Bản dịch còn câu chưa chắc chắn. Bấm AI kiểm tra lại để tự đối chiếu và sửa." : "Các câu dịch đã xử lý xong. Có thể xuất video.")) : "Tác vụ đã dừng.")
+      ? (currentProgress.phase === "export_error" ? "Video kết quả chưa được tạo. Bản dịch và giọng đọc vẫn được giữ; bạn có thể xuất lại." : incompleteReview ? reviewSummaryText() : status === "FAILED" ? "Mở Diagnostics để xem lỗi. Bấm Tiếp tục tác vụ để dùng lại phần đã lưu." : status === "COMPLETED" ? (reviewSummaryText() || (currentProgress.review_count ? "Bản dịch còn câu chưa chắc chắn. Bấm AI kiểm tra lại để tự đối chiếu và sửa." : "Các câu dịch đã xử lý xong. Có thể xuất video.")) : "Tác vụ đã dừng.")
       : reviewInProgress() || currentProgress.phase === "review" ? (reviewSummaryText() || "AI đang đối chiếu từng câu với lời gốc và chữ trên hình, tự sửa lỗi trước khi tạo giọng.")
       : currentProgress.phase === "export" ? "Đang tạo video kết quả từ bản dịch đã được AI kiểm tra. Tiến độ xuất được cập nhật riêng."
       : currentProgress.phase === "download" ? (pct === null ? "Đang tải video; máy chủ chưa cung cấp tổng dung lượng." : "Tiến độ tải video nguồn. Bước xử lý câu thoại sẽ có tiến độ riêng.")
@@ -909,11 +916,12 @@ document.addEventListener("DOMContentLoaded", () => {
         isBufferingUnderrun = false;
         bufferingAlert.classList.add("hidden");
       } else if (status === "FAILED") {
+        cancelDubPlaybackWait();
         videoPlayer.pause();
         isBufferingUnderrun = false;
         bufferingText.textContent = taskProgressStage.textContent;
         bufferingAlert.classList.remove("hidden");
-      } else if (!previewPending) {
+      } else if (!previewPending && !dubPlaybackWait) {
         isBufferingUnderrun = false;
         bufferingAlert.classList.add("hidden");
       }
@@ -948,6 +956,8 @@ document.addEventListener("DOMContentLoaded", () => {
   }
 
   function stopPreviewAudio() {
+    cancelDubPlaybackWait();
+    stopPlaybackFrames();
     stopSourceAudition();
     isBufferingUnderrun = false;
     videoPlayer.pause();
@@ -955,6 +965,7 @@ document.addEventListener("DOMContentLoaded", () => {
     if (bgmAudio) bgmAudio.pause();
     activeAudio = null;
     activePlayingSegId = null;
+    releaseDubAudio();
     bgmAudio = null;
     if (playerBgmStatus) playerBgmStatus.textContent = "Chưa có";
     playerSuppressionBadge.textContent = "--";
@@ -994,6 +1005,7 @@ document.addEventListener("DOMContentLoaded", () => {
   }
 
   function showMediaError(message) {
+    cancelDubPlaybackWait();
     previewPending = false;
     videoPlayer.pause();
     bufferingText.textContent = message;
@@ -1195,6 +1207,7 @@ document.addEventListener("DOMContentLoaded", () => {
   }
 
   function renderSpeechCaption(segment, time) {
+    if (dubPlaybackWait) return;
     const plan = toggleScreenText.checked ? segment?.caption_layout : segment?.caption_bottom_layout;
     const cue = plan?.cues?.find(item => time >= item.start && time < item.end);
     const ready = segment && ["READY", "PLAYED"].includes(segment.status);
@@ -1261,6 +1274,7 @@ document.addEventListener("DOMContentLoaded", () => {
     if (previewResumeTime !== null) videoPlayer.currentTime = Math.min(previewResumeTime, videoPlayer.duration || 0);
   });
   videoPlayer.addEventListener("emptied", () => {
+    cancelDubPlaybackWait();
     stopSourceAudition();
     playerContainer.style.aspectRatio = "9 / 16";
     playerContainer.style.setProperty("--source-ratio", "0.5625");
@@ -1534,12 +1548,19 @@ document.addEventListener("DOMContentLoaded", () => {
   }
   function updatePlayerControls() {
     if (playerPlayToggle) {
-      playerPlayToggle.innerHTML = `<i class="fa-solid ${videoPlayer.paused ? "fa-play" : "fa-pause"}" aria-hidden="true"></i>`;
-      playerPlayToggle.setAttribute("aria-label", videoPlayer.paused ? "Phát video" : "Tạm dừng video");
+      const playing = !videoPlayer.paused || !!dubPlaybackWait;
+      playerPlayToggle.innerHTML = `<i class="fa-solid ${playing ? "fa-pause" : "fa-play"}" aria-hidden="true"></i>`;
+      playerPlayToggle.setAttribute("aria-label", playing ? "Tạm dừng video" : "Phát video");
     }
   }
   playerPlayToggle?.addEventListener("click", () => {
     if (!videoPlayer.currentSrc && !videoPlayer.getAttribute("src")) return;
+    if (dubPlaybackWait) {
+      cancelDubPlaybackWait();
+      bufferingAlert.classList.add("hidden");
+      videoPlayer.pause();
+      return;
+    }
     if (videoPlayer.paused) videoPlayer.play().catch(reportPlayFailure);
     else videoPlayer.pause();
   });
@@ -1605,17 +1626,34 @@ document.addEventListener("DOMContentLoaded", () => {
       bgmAudio.play().catch(reportPlayFailure);
     }
     syncPlayback();
+    startPlaybackFrames();
   });
 
   videoPlayer.addEventListener("pause", () => {
+    // pause() dispatches asynchronously in a browser. A buffering pause must
+    // not cancel its own intent, nor pause audio resumed before this event.
+    if (internalDubPauseEvents) { internalDubPauseEvents--; return; }
+    cancelDubPlaybackWait();
+    stopPlaybackFrames();
     if (bgmAudio) bgmAudio.pause();
     if (activeAudio) activeAudio.pause();
+    releaseDubAudio(activeAudio);
     if (videoPlayer.paused) stopSourceAudition();
   });
-  videoPlayer.addEventListener("ended", () => stopSourceAudition());
-  window.addEventListener?.("pagehide", () => stopSourceAudition());
+  videoPlayer.addEventListener("ended", () => {
+    cancelDubPlaybackWait();
+    stopPlaybackFrames();
+    stopSourceAudition();
+    bgmAudio?.pause();
+    activeAudio?.pause();
+    activeAudio = null;
+    activePlayingSegId = null;
+    releaseDubAudio();
+  });
+  window.addEventListener?.("pagehide", stopPreviewAudio);
 
   videoPlayer.addEventListener("seeking", () => {
+    cancelDubPlaybackWait();
     if (sourceAudition) {
       if (videoPlayer.currentTime < sourceAudition.start || videoPlayer.currentTime >= sourceAudition.end) stopSourceAudition();
       else return;
@@ -2045,9 +2083,179 @@ document.addEventListener("DOMContentLoaded", () => {
     };
   }
 
-  // Realtime Dubbing Frame Loop
+  function releaseDubAudio(keep = null) {
+    for (const [id, entry] of dubAudioCache) {
+      if (entry.audio === keep) continue;
+      // Remove before load(): aborted preloads must not report stale errors.
+      dubAudioCache.delete(id);
+      entry.audio.pause();
+      entry.audio.removeAttribute("src");
+      entry.audio.load();
+    }
+  }
+
+  function cancelDubPlaybackWait() {
+    const wait = dubPlaybackWait;
+    if (!wait) return;
+    dubPlaybackWait = null;
+    clearTimeout(wait.timer);
+    wait.audio.pause();
+    updatePlayerControls();
+  }
+
+  function currentDubWait(wait) {
+    return dubPlaybackWait === wait && currentTaskId === wait.taskId && !sourceAudition && !resultPreviewActive &&
+      activePlayingSegId === wait.segmentId && activeAudio === wait.audio &&
+      segments[wait.segmentId]?.audio_url === wait.url &&
+      Math.abs(videoPlayer.currentTime - wait.time) < 0.05;
+  }
+
+  function failDubPlayback(wait, error = null) {
+    if (!currentDubWait(wait)) return;
+    cancelDubPlaybackWait();
+    const entry = dubAudioCache.get(wait.segmentId);
+    if (entry?.audio === wait.audio) dubAudioCache.delete(wait.segmentId);
+    wait.audio.removeAttribute("src");
+    wait.audio.load();
+    activeAudio = null;
+    activePlayingSegId = null;
+    if (error?.name === "NotAllowedError") reportPlayFailure(error);
+    else showMediaError("Chưa tải/phát được giọng đọc. Bấm Phát để tải lại câu này; nếu vẫn lỗi, mở Diagnostics.");
+  }
+
+  function resumeDubPlayback(wait) {
+    if (!currentDubWait(wait) || wait.starting) return;
+    const entry = dubAudioCache.get(wait.segmentId);
+    // Fitted speech can end before its segment. play() at the media endpoint
+    // rewinds to zero, so a cold seek into trailing silence must skip it.
+    if (entry && dubSpeechFinished(segments[wait.segmentId], wait.audio, wait.time)) {
+      wait.audio.pause();
+      clearTimeout(wait.timer);
+      dubPlaybackWait = null;
+      bufferingAlert.classList.add("hidden");
+      renderSpeechCaption(segments[wait.segmentId], wait.time);
+      videoPlayer.play().catch(reportPlayFailure);
+      return;
+    }
+    if (!entry || entry.waiting || !(wait.audio.readyState >= 3) || wait.audio.seeking) return;
+    wait.starting = true;
+    Promise.resolve(wait.audio.play()).then(() => {
+      if (!currentDubWait(wait)) {
+        if (dubPlaybackWait?.audio !== wait.audio && (activeAudio !== wait.audio || videoPlayer.paused)) wait.audio.pause();
+        return;
+      }
+      wait.starting = false;
+      if (!(wait.audio.readyState >= 3) || wait.audio.seeking || entry.waiting || wait.audio.paused) return;
+      clearTimeout(wait.timer);
+      dubPlaybackWait = null;
+      bufferingAlert.classList.add("hidden");
+      renderSpeechCaption(segments[wait.segmentId], wait.time);
+      videoPlayer.play().catch(reportPlayFailure);
+    }).catch(error => failDubPlayback(wait, error));
+  }
+
+  function dubSpeechFinished(segment, audio, time) {
+    return segment && audio.readyState >= 1 && Number.isFinite(audio.duration) && audio.duration > 0 &&
+      time - segment.start >= audio.duration;
+  }
+
+  function waitForDubPlayback(segment, audio) {
+    if (dubPlaybackWait && !currentDubWait(dubPlaybackWait)) cancelDubPlaybackWait();
+    if (!dubPlaybackWait) {
+      const wait = {taskId: currentTaskId, segmentId: segment.id, url: segment.audio_url,
+        audio, time: videoPlayer.currentTime, starting: false};
+      dubPlaybackWait = wait;
+      wait.timer = setTimeout(() => failDubPlayback(wait), 15000);
+      // Pause the master clock before asking the browser to decode/play audio.
+      // Keep the already rendered cue frozen until actual playback starts.
+      stopPlaybackFrames();
+      bgmAudio?.pause();
+      if (!videoPlayer.paused) { internalDubPauseEvents++; videoPlayer.pause(); }
+      audio.pause();
+      bufferingText.textContent = "Đang chờ âm thanh câu hiện tại…";
+      bufferingAlert.classList.remove("hidden");
+      updatePlayerControls();
+    }
+    resumeDubPlayback(dubPlaybackWait);
+  }
+
+  function prepareDubAudio(curTime) {
+    // Only the current and next two ready utterances are retained. Never
+    // preload an entire long transcript or hold old revisions after an edit.
+    const upcoming = Object.values(segments)
+      .filter(segment => segment.end > curTime && segment.start < curTime + 12 &&
+        ["READY", "PLAYED"].includes(segment.status) && segment.audio_url)
+      .sort((a, b) => a.start - b.start).slice(0, 3);
+    const wanted = new Map(upcoming.map(segment => [segment.id, segment]));
+    for (const [id, entry] of dubAudioCache) {
+      const segment = wanted.get(id);
+      if (segment && entry.url === segment.audio_url && entry.revision === (segment.revision || 0)) continue;
+      dubAudioCache.delete(id);
+      entry.audio.pause();
+      entry.audio.removeAttribute("src");
+      entry.audio.load();
+    }
+    for (const segment of upcoming) {
+      if (dubAudioCache.has(segment.id)) continue;
+      const audio = new Audio(segment.audio_url);
+      const entry = { audio, url: segment.audio_url, revision: segment.revision || 0 };
+      dubAudioCache.set(segment.id, entry);
+      audio.preload = "auto";
+      audio.addEventListener("error", () => {
+        if (dubAudioCache.get(segment.id) !== entry || activeAudio !== audio) return;
+        if (!dubPlaybackWait && !videoPlayer.paused) waitForDubPlayback(segment, audio);
+        if (dubPlaybackWait?.audio === audio) failDubPlayback(dubPlaybackWait);
+      });
+      for (const event of ["waiting", "stalled"]) audio.addEventListener(event, () => {
+        if (dubAudioCache.get(segment.id) !== entry || activeAudio !== audio) return;
+        // stalled describes the network request, not necessarily playback.
+        // Buffered audio may continue without another canplay event.
+        if (event === "stalled" && audio.readyState >= 3 && !audio.seeking) return;
+        entry.waiting = true;
+        if (!videoPlayer.paused || dubPlaybackWait?.audio === audio) waitForDubPlayback(segment, audio);
+      });
+      for (const event of ["canplay", "seeked", "playing"]) audio.addEventListener(event, () => {
+        if (dubAudioCache.get(segment.id) !== entry || activeAudio !== audio) return;
+        entry.waiting = false;
+        if (dubPlaybackWait?.audio === audio) resumeDubPlayback(dubPlaybackWait);
+        else if (event === "playing" && videoPlayer.paused) audio.pause();
+      });
+      audio.addEventListener("loadedmetadata", () => {
+        if (dubAudioCache.get(segment.id) === entry && dubPlaybackWait?.audio === audio)
+          resumeDubPlayback(dubPlaybackWait);
+      });
+      audio.load();
+    }
+  }
+
+  function stopPlaybackFrames() {
+    playbackFrameGeneration++;
+    if (playbackFrame !== null) window.cancelAnimationFrame?.(playbackFrame);
+    playbackFrame = null;
+  }
+
+  function startPlaybackFrames() {
+    if (playbackFrame !== null || videoPlayer.paused || videoPlayer.ended || !window.requestAnimationFrame) return;
+    const generation = playbackFrameGeneration;
+    const frame = () => {
+      if (generation !== playbackFrameGeneration) return;
+      playbackFrame = null;
+      if (videoPlayer.paused || videoPlayer.ended) return;
+      syncPlayback();
+      if (generation === playbackFrameGeneration && !videoPlayer.paused && !videoPlayer.ended)
+        playbackFrame = window.requestAnimationFrame(frame);
+    };
+    playbackFrame = window.requestAnimationFrame(frame);
+  }
+
+  // timeupdate may arrive only four times a second. Preload the next utterance
+  // and synchronize on animation frames so short lines retain their opening.
   function syncPlayback() {
     const curTime = videoPlayer.currentTime;
+    if (dubPlaybackWait) {
+      if (currentDubWait(dubPlaybackWait)) { resumeDubPlayback(dubPlaybackWait); return; }
+      cancelDubPlaybackWait();
+    }
     telPlaying.textContent = formatTime(curTime);
     barCurrentTime.textContent = formatTime(curTime);
     const hasScreenSubtitle = renderScreenTexts(curTime);
@@ -2070,6 +2278,7 @@ document.addEventListener("DOMContentLoaded", () => {
       }
       return;
     }
+    prepareDubAudio(curTime);
 
     // Sync BGM
     if (bgmAudio && !videoPlayer.paused) {
@@ -2093,7 +2302,6 @@ document.addEventListener("DOMContentLoaded", () => {
     highlightTranscript(matchedSeg?.id ?? null);
 
     if (matchedSeg) {
-      renderSpeechCaption(matchedSeg, curTime);
       if (!["READY", "PLAYED"].includes(matchedSeg.status) && !videoPlayer.paused) {
         isBufferingUnderrun = true;
         videoPlayer.pause();
@@ -2104,14 +2312,14 @@ document.addEventListener("DOMContentLoaded", () => {
       }
 
       if (["READY", "PLAYED"].includes(matchedSeg.status) && matchedSeg.audio_url) {
-        if (activePlayingSegId !== matchedSeg.id) {
+        const preparedAudio = dubAudioCache.get(matchedSeg.id)?.audio;
+        if (activePlayingSegId !== matchedSeg.id || activeAudio !== preparedAudio) {
           if (activeAudio) {
             activeAudio.pause();
             activeAudio = null;
           }
           activePlayingSegId = matchedSeg.id;
-          activeAudio = new Audio(matchedSeg.audio_url);
-          activeAudio.addEventListener("error", () => showMediaError(`Không phát được giọng đọc câu #${matchedSeg.id}. Xem Diagnostics rồi thử lại.`));
+          activeAudio = preparedAudio;
           activeAudio.volume = parseFloat(volDubSlider.value) * playbackVolume();
           const offset = Math.max(0, curTime - matchedSeg.start);
           activeAudio.currentTime = offset;
@@ -2119,7 +2327,13 @@ document.addEventListener("DOMContentLoaded", () => {
         activeAudio.playbackRate = videoPlayer.playbackRate;
         const offset = Math.max(0, curTime - matchedSeg.start);
         if (Math.abs(activeAudio.currentTime - offset) > 0.25) activeAudio.currentTime = offset;
-        if (!videoPlayer.paused && activeAudio.paused && !activeAudio.ended && !audioPermissionNeeded) activeAudio.play().catch(reportPlayFailure);
+        const entry = dubAudioCache.get(matchedSeg.id);
+        if (!videoPlayer.paused && !audioPermissionNeeded && !activeAudio.ended &&
+            !dubSpeechFinished(matchedSeg, activeAudio, curTime) &&
+            (activeAudio.paused || !(activeAudio.readyState >= 3) || activeAudio.seeking || entry.waiting)) {
+          waitForDubPlayback(matchedSeg, activeAudio);
+          return;
+        }
       } else if (activeAudio) {
         // A confirmed silent row is still a matched segment. Stop the prior
         // dub when crossing into it, just as we do for a gap between rows.
@@ -2127,6 +2341,7 @@ document.addEventListener("DOMContentLoaded", () => {
         activeAudio = null;
         activePlayingSegId = null;
       }
+      renderSpeechCaption(matchedSeg, curTime);
     } else {
       subtitleText.textContent = "";
       subtitleOverlay.classList.add("opacity-0");
@@ -2226,6 +2441,7 @@ document.addEventListener("DOMContentLoaded", () => {
     if (sourceAudition?.id === id) { stopSourceAudition(); return; }
     stopSourceAudition();
     stopVoicePreview();
+    cancelDubPlaybackWait();
     videoPlayer.pause();
     activeAudio?.pause();
     bgmAudio?.pause();
@@ -2625,7 +2841,7 @@ document.addEventListener("DOMContentLoaded", () => {
       }
       if (!["COMPLETED", "FAILED", "STOPPED", "CANCELLED"].includes(currentProgress?.status)) {
         isBufferingUnderrun = true;
-        bufferingText.textContent = "Đang tạo lại giọng từ câu lỗi…";
+        bufferingText.textContent = currentProgress?.stage || "Đang tiếp tục từ phần đã lưu…";
         bufferingAlert.classList.remove("hidden");
         if (translationReady && !previewPending) videoPlayer.play().catch(reportPlayFailure);
       }
@@ -3481,6 +3697,7 @@ document.addEventListener("DOMContentLoaded", () => {
       exportStatusBox.classList.add("hidden");
       exportResultBox.classList.remove("hidden");
       lastExportedFileUrl = data.video_url;
+      showTaskResult({output_video_url: data.video_url, output_filename: data.output_filename});
       updateTasksTable();
 
       // Native desktop notification if available
@@ -3505,9 +3722,15 @@ document.addEventListener("DOMContentLoaded", () => {
     }
   });
 
-  async function saveResultVideo() {
-    if (!lastExportedFileUrl) return;
-    const defaultName = lastExportedFileUrl.split("/").pop() || "vietnamese_dub.mp4";
+  async function saveResultVideo(rawUrl = lastExportedFileUrl) {
+    const origin = `${window.location.protocol}//${window.location.host}`;
+    let url, defaultName;
+    try {
+      url = new URL(rawUrl, origin);
+      defaultName = decodeURIComponent(url.pathname.split("/").pop());
+    } catch (_) { return; }
+    if (url.origin !== origin || !/^\/api\/outputs\/[^/]+\.mp4$/i.test(url.pathname)
+        || url.search || url.hash || /[\\/:\x00-\x1f]/.test(defaultName)) return;
     if (window.desktopBridge && typeof window.desktopBridge.saveVideoAs === "function") {
       const targetPath = await new Promise(resolve => window.desktopBridge.saveVideoAs(defaultName, resolve));
       if (targetPath) {
@@ -3515,15 +3738,18 @@ document.addEventListener("DOMContentLoaded", () => {
       }
     } else {
       const a = document.createElement("a");
-      a.href = lastExportedFileUrl;
+      a.href = url.href;
       a.download = defaultName;
       document.body.appendChild(a);
       a.click();
       a.remove();
     }
   }
-  btnSaveAsNative?.addEventListener("click", saveResultVideo);
-  btnSaveResult?.addEventListener("click", saveResultVideo);
+  btnSaveAsNative?.addEventListener("click", () => saveResultVideo());
+  btnSaveResult?.addEventListener("click", () => saveResultVideo());
+  document.getElementById("btn-save-preview-result")?.addEventListener("click", () => {
+    if (resultPreviewActive && resultPreviewState) saveResultVideo(resultPreviewState.outputUrl);
+  });
 
   loadSettingsForm();
   refreshDouyinCookies();

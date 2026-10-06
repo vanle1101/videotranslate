@@ -303,7 +303,7 @@ class PortablePipelineTests(unittest.TestCase):
         self.assertFalse(list(self.root.glob("edge_tts_*")))
 
     @unittest.skipUnless(shutil.which("ffmpeg") and shutil.which("ffprobe"), "FFmpeg is required")
-    def test_streaming_keeps_all_asr_sentences_and_cleans_intermediates(self):
+    def test_streaming_keeps_asr_preparation_for_resume_and_cleans_scratch(self):
         audio = self.root / "hội thoại.wav"
         write_wave(audio, 2)
         events = []
@@ -334,7 +334,9 @@ class PortablePipelineTests(unittest.TestCase):
         self.assertTrue(Path(session.segments[0].audio_path).is_file())
         self.assertFalse(list(session.cache_dir.glob("slice_*.wav")))
         self.assertFalse(list(session.cache_dir.glob("tts_*_raw.wav")))
-        self.assertFalse(session.raw_audio_16k.exists())
+        self.assertTrue(session.raw_audio_16k.exists())
+        self.assertTrue(session.bgm_audio_path.is_file())
+        self.assertTrue(session._prepared)
         self.assertIsNone(session.faster_whisper.model)
         self.assertEqual(session.suppression_stats["mode"], "DSP_MONO_ADAPTIVE_FORMANT")
         self.assertEqual(session.bgm_audio_path.suffix, ".ogg")
@@ -349,25 +351,24 @@ class PortablePipelineTests(unittest.TestCase):
         self.assertEqual(json.loads(probe.stdout)["streams"][0]["codec_name"], "opus")
 
     @unittest.skipUnless(shutil.which("ffmpeg") and shutil.which("ffprobe"), "FFmpeg is required")
-    def test_long_speech_fits_slot_without_losing_translated_text(self):
+    def test_long_speech_refuses_unnatural_speed_without_losing_translated_text(self):
         session = self.session()
         session.raw_audio_16k = self.root / "source.wav"
         write_wave(session.raw_audio_16k, 0.5)
         session.asr_engine = Mock(transcribe=Mock(return_value=[{"text_zh": "完整的句子"}]))
         text = "Giữ lại toàn bộ nội dung cuối câu."
         session.translator.translate_single_segment = Mock(return_value={"final_vi": text})
+        session.translator.rewrite_for_pacing = Mock(side_effect=RuntimeError("cannot preserve meaning"))
         session.tts_engine = Mock()
         session.tts_engine.synthesize = lambda text, output_path, **kw: write_wave(output_path, 2)
         segment = SegmentItem(0, 0, 0.5, 0.5)
         session.total_duration = 0.5
         session.segments = {0: segment}
-        asyncio.run(session._process_segment(segment))
-        duration = session.aligner.get_audio_duration(Path(segment.audio_path))
-        self.assertLessEqual(duration, 0.5001)
-        self.assertGreater(duration, 0.35)
+        with self.assertRaisesRegex(RuntimeError, "cannot preserve meaning"):
+            asyncio.run(session._process_segment(segment))
         self.assertEqual(segment.final_vi, text)
-        self.assertGreater(segment.speed_ratio, 1.15)
-        self.assertTrue(session.warnings)
+        self.assertIsNone(segment.audio_path)
+        self.assertFalse(list(session.segments_dir.glob("speech-fit-*")))
 
     def test_cancelled_final_render_preserves_previous_output(self):
         exporter = HQExporter()
@@ -396,11 +397,11 @@ class PortablePipelineTests(unittest.TestCase):
         aligner = self.session().aligner
         text = "Giữ nguyên đầy đủ hành động và ý nghĩa ở cuối câu."
         segment = {"id": 1, "start": 0, "end": 0.5, "final_vi": text}
-        tts = SimpleNamespace(synthesize=lambda text, path, **kw: write_wave(path, 2))
-        result = aligner.align_and_budget([segment], tts, None)
+        tts = SimpleNamespace(synthesize=lambda text, output_path, **kw: write_wave(output_path, 2))
+        with self.assertRaisesRegex(RuntimeError, "quá dài"):
+            aligner.align_and_budget([segment], tts, None)
         self.assertEqual(segment["final_vi"], text)
-        self.assertEqual(result[0]["final_vi"], text)
-        self.assertLessEqual(aligner.get_audio_duration(Path(result[0]["audio_path"])), 0.5001)
+        self.assertFalse((aligner.temp_dir / 'seg_1_fitted.wav').exists())
         self.assertFalse(list(aligner.temp_dir.glob("*_raw.wav")))
 
     @unittest.skipUnless(shutil.which("ffmpeg") and shutil.which("ffprobe"), "FFmpeg is required")
@@ -411,6 +412,11 @@ class PortablePipelineTests(unittest.TestCase):
         for duration in (0.2, 0.35, 0.9, 1.1):
             with self.subTest(duration=duration):
                 destination = self.root / f"fitted_{duration}.wav"
+                if 1 / duration > aligner.max_speed:
+                    with self.assertRaisesRegex(RuntimeError, "giới hạn"):
+                        aligner.apply_atempo(source, destination, 1 / duration, fit_duration=duration)
+                    self.assertFalse(destination.exists())
+                    continue
                 speed = aligner.apply_atempo(source, destination, 1 / duration, fit_duration=duration)
                 self.assertGreaterEqual(speed, 1 / duration)
                 self.assertLessEqual(aligner.get_audio_duration(destination), duration + 0.0001)

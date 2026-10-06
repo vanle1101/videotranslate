@@ -8,6 +8,10 @@ from core.engines.alignment.base import AlignmentEngine
 from core.engines.tts.base import TTSEngine
 from core.engines.alignment.speech_timing import build_speech_timing, take_tts_word_boundaries, trim_tts_padding
 
+class SpeechBudgetError(RuntimeError):
+    """Complete speech cannot fit without an unnatural speed change."""
+
+
 class TimingBudgetAligner(AlignmentEngine):
     """
     Time-Budgeting & Speech Alignment Engine.
@@ -59,6 +63,11 @@ class TimingBudgetAligner(AlignmentEngine):
             raise ValueError("Thời lượng đoạn thoại không hợp lệ.")
         actual_speed = speed_factor if fit_duration is not None else max(self.min_speed, min(self.max_speed, speed_factor))
         for _ in range(4):
+            if fit_duration is not None and actual_speed > self.max_speed + 1e-6:
+                raise SpeechBudgetError(
+                    f"Lời thoại quá dài để đọc tự nhiên (cần {actual_speed:.2f}x, "
+                    f"giới hạn {self.max_speed:.2f}x). Hãy rút gọn lời Việt hoặc thử tạo giọng lại."
+                )
             # Chaining values <= 2 avoids atempo dropping samples at high speeds.
             factor = actual_speed
             filters = []
@@ -113,26 +122,19 @@ class TimingBudgetAligner(AlignmentEngine):
             raw_wav = self.temp_dir / f"seg_{seg_id}_raw.wav"
             fitted_wav = self.temp_dir / f"seg_{seg_id}_fitted.wav"
 
-            # 1. Synthesize with current TTS engine
-            tts_engine.synthesize(text_vi, raw_wav, voice=voice, ref_audio=ref_audio)
-            boundaries = take_tts_word_boundaries(tts_engine, raw_wav)
-            trim_tts_padding(raw_wav)
-            tts_dur = self.get_audio_duration(raw_wav)
-            speed_ratio = max(self.min_speed, tts_dur / max(0.01, slot_duration))
-
-            print(f"    Segment #{seg_id}: slot={slot_duration:.2f}s, tts={tts_dur:.2f}s, ratio={speed_ratio}x")
-
-            # Do not "shorten" a translation by deleting its final words. That
-            # silently changes meaning and can remove negation or an action.
-            if speed_ratio > self.max_speed:
-                print(f"    [!] Segment #{seg_id} needs {speed_ratio:.2f}x to preserve all spoken words.")
-
-            try:
-                speed_ratio = self.apply_atempo(raw_wav, fitted_wav, speed_ratio, fit_duration=slot_duration)
-            finally:
-                raw_wav.unlink(missing_ok=True)
+            from core.engines.alignment.natural_speech import synthesize_natural_speech
+            spoken = synthesize_natural_speech(text=text_vi, source=seg.get("text_zh", ""),
+                duration=slot_duration, output_path=fitted_wav, engine=tts_engine, aligner=self,
+                translator=translation_engine, voice=voice, ref_audio=ref_audio)
+            text_vi = spoken["text"]
+            tts_dur, speed_ratio, boundaries = spoken["tts_duration"], spoken["speed_ratio"], spoken["boundaries"]
 
             seg_copy = dict(seg)
+            seg_copy["final_vi"] = text_vi
+            if spoken["pacing_verification"]:
+                seg_copy["verification"] = {**(seg.get("verification") or {}),
+                    "pacing": spoken["pacing_verification"], "before_pacing": seg.get("final_vi"),
+                    "translation_changed": True}
             seg_copy["target_words"] = int(slot_duration * 3.0)
             seg_copy["tts_duration"] = tts_dur
             seg_copy["speed_ratio"] = round(speed_ratio, 2)

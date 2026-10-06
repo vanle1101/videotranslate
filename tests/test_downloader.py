@@ -20,6 +20,25 @@ from core.downloader import VideoDownloader, VideoDownloadError, friendly_downlo
 from core.download_worker import progress_payload, single_video_downloader
 
 
+def save_valid_partial(prefix, data=b'partial'):
+    import hashlib
+    from core.download_worker import _save_checkpoint
+    partial = prefix.with_suffix('.mp4.part')
+    partial.write_bytes(data)
+    _save_checkpoint(prefix.with_suffix('.resume.json'), partial,
+                     video_id='7688978448627473651', format_identity='a' * 64,
+                     total=100000, downloaded=len(data),
+                     validators={'etag': '"fixture"', 'last_modified': None}, digest=hashlib.sha256(data))
+
+
+@pytest.fixture
+def owned_video(tmp_path):
+    output = tmp_path / ('video_' + 'a' * 32 + '.mp4')
+    subprocess.run(['ffmpeg', '-v', 'error', '-f', 'lavfi', '-i', 'color=c=blue:s=32x32:d=0.2',
+                    '-c:v', 'libx264', '-y', str(output)], check=True, capture_output=True, timeout=15)
+    return output
+
+
 @pytest.mark.parametrize('text,expected', [
     ('https://v.douyin.com/_lAiSDH0bK8/', 'https://v.douyin.com/_lAiSDH0bK8/'),
     ('3.14 复制打开抖音 https://v.douyin.com/_lAiSDH0bK8/。 分享', 'https://v.douyin.com/_lAiSDH0bK8/'),
@@ -106,6 +125,11 @@ def test_resolution_fallback_resets_idle_timeout_but_repeated_heartbeat_does_not
     monkeypatch.setattr(module, 'queue', SimpleNamespace(Queue=TimedQueue, Empty=queue.Empty))
     monkeypatch.setattr(module, 'time', SimpleNamespace(monotonic=lambda: clock.now))
     monkeypatch.setattr(module.subprocess, 'Popen', start_worker)
+    def register_completed(self, url, result):
+        if not changed_field:
+            raise VideoDownloadError('fixture is not a validated video')
+        return result
+    monkeypatch.setattr(VideoDownloader, 'register_completed', register_completed)
     downloader = VideoDownloader(tmp_path)
     if changed_field:
         result = downloader.download('https://v.douyin.com/test/')
@@ -224,7 +248,7 @@ def test_resume_index_reuses_owned_partial_then_cleans_index_on_success(tmp_path
         prefixes.append(prefix)
         if len(prefixes) == 1:
             Path(prefix + '.mp4.part').write_bytes(b'partial')
-            Path(prefix + '.resume.json').write_text('{}')
+            save_valid_partial(Path(prefix))
             event = {'kind': 'error', 'message': 'Retry later', 'resumable': True}
         else:
             assert Path(prefix + '.mp4.part').read_bytes() == b'partial'
@@ -234,6 +258,7 @@ def test_resume_index_reuses_owned_partial_then_cleans_index_on_success(tmp_path
         return SimpleNamespace(stdout=io.StringIO(json.dumps(event)), poll=lambda: 0)
 
     monkeypatch.setattr(module.subprocess, 'Popen', worker)
+    monkeypatch.setattr(VideoDownloader, 'register_completed', lambda self, url, result: result)
     downloader = VideoDownloader(tmp_path)
     with pytest.raises(VideoDownloadError, match='Retry later'):
         downloader.download('https://v.douyin.com/retry/')
@@ -333,3 +358,249 @@ def test_download_logs_safe_run_id_mapping(tmp_path, monkeypatch, caplog):
         with pytest.raises(VideoDownloadError):
             VideoDownloader(tmp_path).download('https://v.douyin.com/retry/')
     assert 'run_id=pipeline-run-42' in caplog.text
+
+
+def test_completed_source_survives_new_downloader_and_canonical_alias(tmp_path, owned_video, monkeypatch):
+    url = 'https://www.douyin.com/jingxuan?modal_id=7688978448627473651&tracking=ignored'
+    VideoDownloader(tmp_path).register_completed(url, {'file_path': str(owned_video), 'title': 'Original'})
+    monkeypatch.setattr(VideoDownloader, '_download_remote', lambda *args: pytest.fail('must not download cached source'))
+    events = []
+    result = VideoDownloader(tmp_path).download('https://www.douyin.com/video/7688978448627473651', events.append)
+    assert result['file_path'] == str(owned_video)
+    assert result['title'] == 'Original' and result['duration'] > 0
+    assert result['reused_source'] and result['reusable_source'] and result['owned_paths'] == []
+    assert events[-1]['downloaded_bytes'] == owned_video.stat().st_size
+    assert 'không tải lại' in events[-1]['stage']
+
+
+@pytest.mark.parametrize('damage', ['deleted', 'truncated', 'nonvideo', 'external', 'wrong-id', 'duration', 'oversized'])
+def test_invalid_completed_source_cannot_be_reported_as_reused(tmp_path, owned_video, monkeypatch, damage):
+    url = 'https://www.douyin.com/video/7688978448627473651'
+    downloader = VideoDownloader(tmp_path)
+    downloader.register_completed(url, {'file_path': str(owned_video)})
+    index = next(tmp_path.glob('.source-*.json'))
+    record = json.loads(index.read_text())
+    if damage == 'deleted':
+        owned_video.unlink()
+    elif damage == 'truncated':
+        owned_video.write_bytes(owned_video.read_bytes()[:20])
+    elif damage == 'nonvideo':
+        owned_video.write_bytes(b'provider returned an error')
+        record.update(size=owned_video.stat().st_size, mtime_ns=owned_video.stat().st_mtime_ns)
+    elif damage == 'external':
+        record['file_name'] = '../user.mp4'
+    elif damage == 'wrong-id':
+        record['source_identity'] = 'douyin:1234567890123456789'
+    elif damage == 'duration':
+        record['duration'] = 900
+    index.write_text(json.dumps(record) if damage != 'oversized' else ' ' * 17000)
+    calls = []
+    monkeypatch.setattr(downloader, '_download_remote', lambda *args: calls.append(args) or {'new_request': True})
+    assert downloader.download(url) == {'new_request': True}
+    assert len(calls) == 1
+
+
+def test_registration_rejects_non_video_and_external_files(tmp_path, owned_video):
+    from core.download_worker import MediaDownloadError
+    url = 'https://www.douyin.com/video/7688978448627473651'
+    downloader = VideoDownloader(tmp_path / 'other')
+    with pytest.raises(VideoDownloadError):
+        downloader.register_completed(url, {'file_path': str(owned_video)})
+    owned_video.write_bytes(b'not a video')
+    with pytest.raises(MediaDownloadError):
+        VideoDownloader(tmp_path).register_completed(url, {'file_path': str(owned_video)})
+    assert not list(tmp_path.glob('.source-*.json'))
+
+
+@pytest.mark.parametrize('failure', ['cancel', 'eof', 'error'])
+def test_interruption_retains_valid_checkpoint_and_index(tmp_path, monkeypatch, failure):
+    from core import downloader as module
+    prefix_seen = []
+    cancel = threading.Event()
+
+    def worker(arguments, **kwargs):
+        prefix = Path(arguments[-1])
+        prefix_seen.append(prefix)
+        # An app crash must already have a durable pointer to its partial file.
+        index = next(tmp_path.glob('.download-*.json'))
+        assert json.loads(index.read_text())['prefix'] == prefix.name
+        save_valid_partial(prefix)
+        if failure == 'cancel':
+            cancel.set()
+        event = {'kind': 'error', 'message': 'Interrupted'} if failure == 'error' else None
+        return SimpleNamespace(stdout=io.StringIO(json.dumps(event) if event else ''), poll=lambda: 0)
+
+    monkeypatch.setattr(module.subprocess, 'Popen', worker)
+    with pytest.raises(VideoDownloadError):
+        VideoDownloader(tmp_path).download('https://www.douyin.com/video/7688978448627473651',
+                                           cancel_check=cancel.is_set)
+    assert prefix_seen[0].with_suffix('.mp4.part').read_bytes() == b'partial'
+    assert prefix_seen[0].with_suffix('.resume.json').is_file()
+    assert len(list(tmp_path.glob('.download-*.json'))) == 1
+
+
+def test_douyin_alias_concurrency_uses_same_source_lock(tmp_path):
+    url = 'https://www.douyin.com/video/7688978448627473651'
+    key = (str(tmp_path.resolve()), VideoDownloader.source_hash(url))
+    VideoDownloader._active_sources.add(key)
+    try:
+        with pytest.raises(VideoDownloadError, match='đang được tải'):
+            VideoDownloader(tmp_path).download('https://www.douyin.com/jingxuan?modal_id=7688978448627473651')
+    finally:
+        VideoDownloader._active_sources.discard(key)
+
+
+def test_legacy_url_checkpoint_is_migrated_before_worker_start(tmp_path, monkeypatch):
+    import hashlib
+    from core import downloader as module
+    url = 'https://www.douyin.com/jingxuan?modal_id=7688978448627473651'
+    prefix = tmp_path / ('video_' + 'a' * 32)
+    save_valid_partial(prefix)
+    legacy = tmp_path / ('.download-' + hashlib.sha256(url.encode()).hexdigest() + '.json')
+    legacy.write_text(json.dumps({'prefix': prefix.name}))
+
+    def worker(arguments, **kwargs):
+        assert arguments[-1] == str(prefix)
+        assert not legacy.exists()
+        assert (tmp_path / ('.download-' + VideoDownloader.source_hash(url) + '.json')).is_file()
+        return SimpleNamespace(stdout=io.StringIO(''), poll=lambda: 0)
+
+    monkeypatch.setattr(module.subprocess, 'Popen', worker)
+    with pytest.raises(VideoDownloadError):
+        VideoDownloader(tmp_path).download(url)
+    assert prefix.with_suffix('.mp4.part').read_bytes() == b'partial'
+
+
+def test_stop_racing_final_worker_message_keeps_completed_video(tmp_path, owned_video, monkeypatch):
+    from core import downloader as module
+    url = 'https://www.douyin.com/video/7688978448627473651'
+    video_bytes = owned_video.read_bytes()
+    cancel = threading.Event()
+    prefixes = []
+    real_popen = module.subprocess.Popen
+
+    def worker(arguments, **kwargs):
+        if 'download_worker.py' not in ' '.join(map(str, arguments)):
+            return real_popen(arguments, **kwargs)
+        prefix = arguments[-1]
+        prefixes.append(prefix)
+        Path(prefix + '.mp4').write_bytes(video_bytes)
+        cancel.set()
+        return SimpleNamespace(stdout=io.StringIO(''), poll=lambda: 0)
+
+    monkeypatch.setattr(module.subprocess, 'Popen', worker)
+    with pytest.raises(VideoDownloadError, match='Đã hủy'):
+        VideoDownloader(tmp_path).download(url, cancel_check=cancel.is_set)
+    cancel.clear()
+    result = VideoDownloader(tmp_path).download(url, cancel_check=cancel.is_set)
+    assert result['reused_source'] and result['file_path'] == prefixes[0] + '.mp4'
+    assert len(prefixes) == 1
+
+
+def test_hard_exit_after_final_rename_recovers_completed_source_without_worker(tmp_path, owned_video, monkeypatch):
+    from core import downloader as module
+    url = 'https://www.douyin.com/video/7688978448627473651'
+    index = tmp_path / ('.download-' + VideoDownloader.source_hash(url) + '.json')
+    index.write_text(json.dumps({'prefix': owned_video.stem}))
+    real_popen = module.subprocess.Popen
+
+    def no_download(arguments, **kwargs):
+        assert 'download_worker.py' not in ' '.join(map(str, arguments))
+        return real_popen(arguments, **kwargs)
+
+    monkeypatch.setattr(module.subprocess, 'Popen', no_download)
+    events = []
+    result = VideoDownloader(tmp_path).download(url, events.append)
+    assert result['reused_source'] and result['file_path'] == str(owned_video)
+    assert not index.exists()
+    assert len(list(tmp_path.glob('.source-*.json'))) == 1
+    assert events[-1]['downloaded_bytes'] == owned_video.stat().st_size
+
+
+def test_completed_source_is_not_owned_for_deletion_when_index_write_fails(tmp_path, owned_video, monkeypatch):
+    downloader = VideoDownloader(tmp_path)
+    monkeypatch.setattr(downloader, '_write_index', lambda *args: (_ for _ in ()).throw(OSError('disk full')))
+    result = {'file_path': str(owned_video), 'owned_paths': [str(owned_video)]}
+    with pytest.raises(OSError):
+        downloader.register_completed('https://www.douyin.com/video/7688978448627473651', result)
+    assert result['reusable_source'] and result['owned_paths'] == []
+
+
+def test_real_worker_stop_and_fresh_downloader_resumes_http_range(tmp_path, owned_video, monkeypatch):
+    """Exercise process termination, buffered writes and reload against real HTTP."""
+    from core import downloader as module
+    video_bytes = owned_video.read_bytes() + b'\0' * (3 * 1024 * 1024)
+    requests = []
+
+    class Handler(http.server.BaseHTTPRequestHandler):
+        def log_message(self, *_):
+            pass
+
+        def do_GET(self):
+            range_header = self.headers.get('Range')
+            requests.append(range_header)
+            offset = int(range_header.removeprefix('bytes=').removesuffix('-')) if range_header else 0
+            self.send_response(206 if range_header else 200)
+            self.send_header('Content-Type', 'video/mp4')
+            self.send_header('Content-Length', str(len(video_bytes) - offset))
+            self.send_header('ETag', '"stable-local-entity"')
+            if range_header:
+                self.send_header('Content-Range', f'bytes {offset}-{len(video_bytes)-1}/{len(video_bytes)}')
+            self.end_headers()
+            try:
+                for start in range(offset, len(video_bytes), 65536):
+                    self.wfile.write(video_bytes[start:start + 65536])
+                    self.wfile.flush()
+                    time.sleep(.025)
+            except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError):
+                pass
+
+    server = http.server.ThreadingHTTPServer(('127.0.0.1', 0), Handler)
+    server.daemon_threads = True
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    worker_script = tmp_path / 'local_worker.py'
+    worker_script.write_text(
+        'import sys, requests\n'
+        f'sys.path.insert(0, {str(Path(__file__).resolve().parents[1])!r})\n'
+        'from core import download_worker as worker\n'
+        'worker.resolve_douyin = lambda *args: {"id":"7688978448627473651", "duration":0.2, '
+        '"formats":[{"original":True,"width":32,"height":32,"bitrate":1000,"codec":"h264",'
+        f'"size":{len(video_bytes)},"urls":["http://127.0.0.1:{server.server_port}/video.mp4"]' + '}]}\n'
+        'class Response:\n'
+        ' def __init__(self, response):\n'
+        '  self.response=response; self.headers=response.headers; self.status=response.status_code\n'
+        ' def iter_content(self, size): return self.response.iter_content(size)\n'
+        ' def close(self): self.response.close()\n'
+        'worker.open_public_media=lambda url, headers=None: Response(requests.get(url, headers=headers, stream=True, timeout=5))\n'
+        'raise SystemExit(worker.main())\n', encoding='utf-8')
+    real_popen = module.subprocess.Popen
+
+    def local_worker(arguments, **kwargs):
+        arguments = list(arguments)
+        if any(str(arg).endswith('download_worker.py') for arg in arguments):
+            arguments = [str(worker_script) if str(arg).endswith('download_worker.py') else arg for arg in arguments]
+        return real_popen(arguments, **kwargs)
+
+    monkeypatch.setattr(module.subprocess, 'Popen', local_worker)
+    destination = tmp_path / 'downloads'
+    cancel = threading.Event()
+
+    def progress(event):
+        if event.get('downloaded_bytes', 0) >= 512 * 1024:
+            cancel.set()
+
+    try:
+        with pytest.raises(VideoDownloadError, match='Đã hủy'):
+            VideoDownloader(destination).download('https://www.douyin.com/video/7688978448627473651',
+                                                  progress, cancel.is_set)
+        checkpoint = json.loads(next(destination.glob('*.resume.json')).read_text())
+        count = checkpoint['downloaded_bytes']
+        assert 0 < count < len(video_bytes)
+        result = VideoDownloader(destination).download('https://www.douyin.com/jingxuan?modal_id=7688978448627473651')
+        assert Path(result['file_path']).read_bytes() == video_bytes
+        assert requests == [None, f'bytes={count}-']
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=2)

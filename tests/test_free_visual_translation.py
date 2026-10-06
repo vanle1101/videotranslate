@@ -406,7 +406,7 @@ def test_quota_draft_edit_preserves_review_flags_but_uses_verified_source_placem
         Path(output).write_bytes(b"fitted")
         return 1
     session.tts_engine = SimpleNamespace(synthesize=synthesize)
-    session.aligner = SimpleNamespace(min_speed=.9, get_audio_duration=lambda _: 1,
+    session.aligner = SimpleNamespace(min_speed=.9, max_speed=1.15, get_audio_duration=lambda _: 1,
                                      apply_atempo=fit)
     monkeypatch.setattr("core.streaming.pipeline.trim_tts_padding", lambda _: None)
     monkeypatch.setattr("core.streaming.pipeline.build_speech_timing", lambda *args: {

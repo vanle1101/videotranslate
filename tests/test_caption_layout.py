@@ -102,6 +102,51 @@ def test_stable_caption_does_not_cover_a_later_lower_source_line():
     assert (plan[0]["start"], plan[0]["end"]) == (.4, 2.8)
 
 
+def test_multiple_pages_keep_anchor_color_font_and_box_through_ocr_gap():
+    segment = speech(end=6, speech_start=0, speech_end=6, subtitle_cues=[
+        {"start": 0, "end": 3, "text": "Câu mở đầu."},
+        {"start": 3, "end": 6, "text": "Đây là phần tiếp theo của cùng câu thoại dài."},
+    ])
+    plan = layout([segment], [region(end=2.9)], (1080, 1920))
+    assert len(plan) == 2
+    assert [cue["background"] for cue in plan] == ["yellow", "yellow"]
+    for key in ("bbox", "font_size", "placement", "source_bbox"):
+        assert plan[0][key] == plan[1][key]
+    assert [(cue["start"], cue["end"]) for cue in plan] == [(0, 3), (3, 6)]
+    assert [cue["text"] for cue in plan if cue["start"] <= 1 < cue["end"]] == ["Câu mở đầu."]
+    assert "tiếp theo" not in plan[0]["text"]
+
+
+@pytest.mark.parametrize("source_regions", [[], [region(end=3), region(start=3, end=6, bbox=[.3, .77, .4, .04])]])
+def test_all_pages_share_size_for_long_manual_line_and_clear_later_source(source_regions):
+    segment = speech(end=6, speech_start=0, speech_end=6, subtitle_cues=[
+        {"start": 0, "end": 3, "text": "Ngắn."},
+        {"start": 3, "end": 6, "text": "W" * 80},
+    ])
+    first, second = layout([segment], source_regions, (1080, 1920))
+    assert first["bbox"] == second["bbox"]
+    assert first["font_size"] == second["font_size"] < 38
+    if source_regions:
+        assert first["bbox"][1] > .81
+    else:
+        assert first["bbox"][1] + first["bbox"][3] == pytest.approx(.9)
+
+
+def test_utterance_anchor_does_not_leak_to_next_speaker():
+    first = speech()
+    second = speech(identifier=1, start=3, end=6,
+                    subtitle_cues=[{"start": 3.4, "end": 5.8, "text": "Người thứ hai trả lời."}])
+    plan = layout([first, second], [region(end=3)], (1080, 1920))
+    assert [cue["background"] for cue in plan] == ["yellow", "white"]
+    assert not any(cue["segment_id"] == 1 and cue["start"] < 3.4 for cue in plan)
+
+
+def test_source_region_at_edge_does_not_crash_after_caption_margin_clamping():
+    cue = layout([speech()], [region(bbox=[0, .7, .01, .04])], (1080, 1920))[0]
+    assert cue["placement"] == "below-source"
+    assert cue["bbox"][0] >= .04
+
+
 def test_placement_can_use_verified_source_region_without_approving_translation():
     uncertain = region(needs_review=True, source_region_verified=True, text_vi="Bản dịch chưa rõ")
     plan = layout([speech()], [uncertain], (1080, 1920))

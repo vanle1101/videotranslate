@@ -119,6 +119,28 @@ def test_clean_sentence_also_gets_independent_semantic_check(review):
     assert run(review, source)["summary"]["checked"] == 1
 
 
+def test_malformed_reply_retries_without_rescanning_or_accepting_missing_rows(review):
+    review.client.translate.side_effect = ['{"segments":[]}', answer(), 'not-json', answer()]
+    result = run(review)
+    assert result["summary"]["verified"] == 1
+    assert review.client.translate.call_count == 4
+    review.screen_ocr.extract.assert_called_once()
+
+
+def test_malformed_reply_stops_at_three_without_publishing(review):
+    review.client.translate.return_value = '{"segments":[]}'
+    with pytest.raises(VideoIntelligenceError):
+        run(review)
+    assert review.client.translate.call_count == 3
+
+
+def test_provider_transport_error_is_not_retried_as_schema_failure(review):
+    review.client.translate.side_effect = RuntimeError("transport failure")
+    with pytest.raises(RuntimeError, match="transport failure"):
+        run(review)
+    assert review.client.translate.call_count == 1
+
+
 @pytest.mark.parametrize("refs", [["nonexistent"], ["review0", "invented"], ["review1"]])
 def test_bad_citations_never_apply_changed_translation(review, refs):
     review.screen_ocr.extract.return_value = [ocr(), ocr(start=4, end=5)]

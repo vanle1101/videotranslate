@@ -41,7 +41,9 @@ class OpenCodeTranslationTests(unittest.TestCase):
         self.assertIn("previous-2", instruction)
         self.assertIn("previous-6", instruction)
         self.assertIn("anh - em", instruction)
-        self.assertIn("tối đa 6 từ", instruction)
+        self.assertIn("2.0 giây", instruction)
+        self.assertIn("đo âm thanh thật", instruction)
+        self.assertNotIn("tối đa 6 từ", instruction)
 
     def test_selected_provider_uses_client_without_other_keys(self):
         with patch("core.engines.translation.opencode_client.OpenCodeZenClient") as client, \

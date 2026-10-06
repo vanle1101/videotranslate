@@ -21,6 +21,7 @@ from core.engines.tts.vieneu_engine import VieNeuEngine
 from core.engines.tts.edge_fallback import EdgeTTSFallbackEngine
 from core.voice_catalog import resolve_voice
 from core.engines.alignment.timing_aligner import TimingBudgetAligner
+from core.engines.alignment.natural_speech import synthesize_natural_speech
 from core.engines.separator.realtime_suppressor import RealtimeVocalSuppressor
 from core.engines.alignment.speech_timing import build_speech_timing, take_tts_word_boundaries, trim_tts_padding
 
@@ -61,7 +62,6 @@ class SegmentItem:
         self.subtitle_timing_source = "pending"
         self.speech_start = None
         self.speech_end = None
-
     def to_dict(self) -> Dict[str, Any]:
         return {
             "id": self.id,
@@ -97,6 +97,19 @@ class SegmentItem:
             "speech_end": self.speech_end,
         }
 
+
+def _naturalize_spoken_line(source_text: str, translated_text: str) -> str:
+    """Give TTS a sentence boundary without changing the spoken wording."""
+    text = str(translated_text or "").strip()
+    if not text or text.endswith((".", "?", "!", "…", "。", "！", "？")):
+        return text
+    source = str(source_text or "").strip()
+    if source.endswith(("?", "？")):
+        return text + "?"
+    if source.endswith(("!", "！")):
+        return text + "!"
+    return text + "."
+
 class StreamingPipelineSession:
     """
     Real-Time Streaming Localization Session.
@@ -119,6 +132,11 @@ class StreamingPipelineSession:
         self.source_video_url: Optional[str] = None
         self.initialized = False
         self._download_info: Optional[Dict[str, Any]] = None
+        self.source_url = None
+        self._source_downloader = None
+        self._startup_failed = False
+        self._prepared = False
+        self._visual_result = None
         self.progress = {
             "phase": "prepare" if video_path else "resolve",
             "stage": "Đang chuẩn bị video..." if video_path else "Đang nhận diện link video...",
@@ -197,6 +215,10 @@ class StreamingPipelineSession:
 
     @property
     def can_retry(self):
+        if (self._startup_failed and not self.initialized and not self.is_running
+                and not self.is_stopped and not self.is_editing and self.error):
+            return bool((self.video_path and self.video_path.is_file())
+                        or (self.source_url and self._source_downloader))
         failed = [segment for segment in self.segments.values() if segment.status == "FAILED"]
         return bool(self.initialized and not self.is_stopped and not self.is_running
                     and not self.is_editing and self.error and failed
@@ -205,10 +227,24 @@ class StreamingPipelineSession:
                             for segment in self.segments.values()))
 
     async def retry_failed_synthesis(self):
-        """Resume saved translations after a TTS failure, retaining ready audio."""
+        """Continue the failed phase, retaining completed downloads and processing."""
         if (not self.can_retry or (self.worker_task and not self.worker_task.done())
                 or (self.start_task and not self.start_task.done())):
-            raise SegmentEditConflict("Chỉ thử lại khi phiên đã dừng do lỗi tạo giọng hoặc khớp thời lượng.")
+            raise SegmentEditConflict("Chỉ tiếp tục khi tác vụ đã dừng do lỗi và không có thao tác khác đang chạy.")
+        if self._startup_failed and not self.initialized:
+            self.is_running = True
+            self.error = None
+            self._startup_failed = False
+            self.progress = {"phase": "prepare", "stage": "Đang tiếp tục từ phần đã lưu…",
+                             "progress_pct": None, "status": "RUNNING"}
+            async def restart():
+                try:
+                    await self._start_guarded(self._source_downloader, self.source_url)
+                except Exception:
+                    # _start_guarded publishes the actionable error and retains state.
+                    pass
+            self.start_task = asyncio.create_task(restart())
+            return self.get_progress()
         # There is no await before reservation and worker creation, so concurrent
         # API requests cannot start two workers for the same saved session.
         self.is_running = True
@@ -292,18 +328,10 @@ class StreamingPipelineSession:
                           "speech_start": None, "speech_end": None}
             else:
                 async with self._tts_lock:
-                    await self._run_blocking(self.tts_engine.synthesize, text=text,
-                                             output_path=raw_path, voice=self.voice, ref_audio=self.ref_audio)
-                    boundaries = take_tts_word_boundaries(self.tts_engine, raw_path)
-                    await self._run_blocking(trim_tts_padding, raw_path)
-                tts_duration = await self._run_blocking(self.aligner.get_audio_duration, raw_path)
-                if not math.isfinite(tts_duration) or tts_duration <= 0:
-                    raise RuntimeError("Không đọc được âm thanh từ TTS.")
-                ratio = max(self.aligner.min_speed, tts_duration / seg.duration)
-                ratio = await self._run_blocking(self.aligner.apply_atempo, raw_path, fitted_path,
-                                                 ratio, fit_duration=seg.duration)
-                if not math.isfinite(ratio) or ratio <= 0 or not fitted_path.is_file() or not fitted_path.stat().st_size:
-                    raise RuntimeError("Không tạo được giọng đọc hợp lệ.")
+                    spoken = await self._run_blocking(synthesize_natural_speech,
+                        text=text, source=seg.text_zh, duration=seg.duration, output_path=fitted_path,
+                        engine=self.tts_engine, aligner=self.aligner, voice=self.voice, ref_audio=self.ref_audio)
+                tts_duration, ratio, boundaries = spoken["tts_duration"], spoken["speed_ratio"], spoken["boundaries"]
                 timing = await self._run_blocking(build_speech_timing, text, seg.start, seg.end,
                                                   fitted_path, ratio, boundaries)
             if self.is_stopped:
@@ -456,8 +484,9 @@ class StreamingPipelineSession:
             except asyncio.CancelledError:
                 self.is_stopped = True
                 raise
-            except Exception:
+            except Exception as error:
                 self.review_summary = {"status": "failed"}
+                logging.getLogger("errors").error("[%s] REVIEW_FAILED error_type=%s", self.task_id, type(error).__name__)
                 self.warnings.append("AI kiểm tra lại chưa hoàn tất. Các câu đã lưu và âm thanh sẵn có được giữ; có thể thử lại.")
             finally:
                 self.is_running = False
@@ -536,6 +565,7 @@ class StreamingPipelineSession:
         await self._start_guarded()
 
     async def start_from_url(self, downloader, url: str):
+        self.source_url, self._source_downloader = url, downloader
         await self._start_guarded(downloader, url)
 
     async def _start_guarded(self, downloader=None, url=None):
@@ -544,8 +574,9 @@ class StreamingPipelineSession:
             if self.is_stopped:
                 raise asyncio.CancelledError
             self.is_running = True
-            self.start_wall_time = time.time()
-            if downloader is not None:
+            if not self.start_wall_time:
+                self.start_wall_time = time.time()
+            if downloader is not None and (self.video_path is None or not self.video_path.is_file()):
                 loop = asyncio.get_running_loop()
 
                 def publish_progress(data):
@@ -577,6 +608,7 @@ class StreamingPipelineSession:
         except Exception as exc:
             self.is_running = False
             self.error = str(exc)
+            self._startup_failed = not self.initialized
             logging.getLogger("errors").error("[%s] Không thể xử lý video: %s", self.task_id, self.error)
             self._release_runtime()
             await self.emit("progress", self.get_progress())
@@ -617,61 +649,85 @@ class StreamingPipelineSession:
         elif self.tts_engine_name != "edge-tts":
             raise ValueError(f"TTS engine không được hỗ trợ: {self.tts_engine_name}")
 
-        media_info = None
-        if self.visual_translation:
-            media_info = await self._run_blocking(self.video_intelligence.media_info, self.video_path,
-                                                   cancel_check=lambda: self.is_stopped)
-        if media_info is not None and not media_info["has_audio"]:
-            raise ValueError("Video không có luồng âm thanh. Studio hiện cần video có âm thanh để xử lý và xuất bản dịch.")
-        else:
-            from core.streaming.export import HQExporter
-            self.video_size = await self._run_blocking(
-                HQExporter._video_size, self.video_path, lambda: self.is_stopped)
-            # 1. Extract 16kHz mono audio for VAD and legacy ASR.
-            self.raw_audio_16k = self.cache_dir / "raw_audio_16k.wav"
-            await self._run_ffmpeg([
-                "ffmpeg", "-y", "-i", str(self.video_path),
-                "-vn", "-acodec", "pcm_s16le", "-ar", "16000", "-ac", "1",
-                str(self.raw_audio_16k),
-            ])
-            self.total_duration = await self._run_blocking(self.segmenter.get_audio_duration, self.raw_audio_16k)
-            if self.total_duration <= 0:
-                raise ValueError("Video không có âm thanh hợp lệ để dịch.")
-            if media_info:
-                self.total_duration = max(self.total_duration, media_info["duration"])
-
-            # QtWebEngine requires an open codec for separated background audio.
-            self.bgm_audio_path = self.cache_dir / "bgm_suppressed.ogg"
-            await self.report_progress("prepare", "Đang xử lý nhạc nền và lọc thoại gốc...")
-            self.suppression_stats = await self._run_blocking(
-                self.vocal_suppressor.process_file, input_audio_path=self.video_path,
-                output_audio_path=self.bgm_audio_path,
-                forced_mode=None if settings.SUPPRESSION_MODE == "AUTO" else settings.SUPPRESSION_MODE,
-                cancel_check=lambda: self.is_stopped,
-            )
-            self.bgm_url = f"/api/streaming/bgm/{self.task_id}"
-            if self.visual_translation or self.asr_engine is self.faster_whisper:
-                await self.report_progress("asr", "Đang nhận diện lời nói và mốc thời gian bằng Faster-Whisper...")
-                asr_loop = asyncio.get_running_loop()
-                def asr_progress(end):
-                    if not self.is_stopped and self.total_duration > 0:
-                        pct = round(min(99.9, max(0, end / self.total_duration * 100)), 1)
-                        asr_loop.call_soon_threadsafe(lambda: asyncio.create_task(self.report_progress(
-                            "asr", f"Đang nhận diện lời nói · {end:.0f}/{self.total_duration:.0f} giây", pct)))
-                recognized = await self._run_blocking(
-                    self.faster_whisper.transcribe, self.raw_audio_16k, language="zh", progress_callback=asr_progress,
-                )
-                raw_segs = await self._run_blocking(self._grounded_visual_segments, recognized)
+        if not self._prepared:
+            from core.streaming.preparation_checkpoint import load
+            saved = await self._run_blocking(load, self)
+            if saved:
+                self.raw_audio_16k = Path(saved["assets"]["raw_audio_16k"]["path"])
+                self.bgm_audio_path = Path(saved["assets"]["bgm_audio_path"]["path"])
+                self.bgm_url = f"/api/streaming/bgm/{self.task_id}"
+                self.total_duration, self.video_size = saved["duration"], tuple(saved["video_size"])
+                self.suppression_stats = saved["suppression_stats"]
+                for row in saved["segments"]:
+                    segment = SegmentItem(row["id"], row["start"], row["end"], row["duration"])
+                    segment.text_zh, segment.emotion = row["text_zh"], row["emotion"]
+                    segment.asr_pretranscribed = row["asr_pretranscribed"]
+                    self.segments[segment.id] = segment
+                self._prepared = True
+                await self.report_progress("prepare", "Đã khôi phục âm thanh và lời nhận diện đã lưu")
+        if not self._prepared:
+            media_info = None
+            if self.visual_translation:
+                media_info = await self._run_blocking(self.video_intelligence.media_info, self.video_path,
+                                                       cancel_check=lambda: self.is_stopped)
+            if media_info is not None and not media_info["has_audio"]:
+                raise ValueError("Video không có luồng âm thanh. Studio hiện cần video có âm thanh để xử lý và xuất bản dịch.")
             else:
-                await self.report_progress("prepare", "Đang phân chia câu thoại...")
-                raw_segs = await self._run_blocking(self.segmenter.segment_audio, self.raw_audio_16k)
-        for s in raw_segs:
-            item = SegmentItem(s["id"], s["start"], s["end"], s["duration"])
-            if self.visual_translation or self.asr_engine is self.faster_whisper:
-                item.text_zh = s["text_zh"]
-                item.emotion = s.get("emotion") or "<|NEUTRAL|>"
-                item.asr_pretranscribed = True
-            self.segments[item.id] = item
+                from core.streaming.export import HQExporter
+                self.video_size = await self._run_blocking(
+                    HQExporter._video_size, self.video_path, lambda: self.is_stopped)
+                # 1. Extract 16kHz mono audio for VAD and legacy ASR.
+                self.raw_audio_16k = self.cache_dir / "raw_audio_16k.wav"
+                await self._run_ffmpeg([
+                    "ffmpeg", "-y", "-i", str(self.video_path),
+                    "-vn", "-acodec", "pcm_s16le", "-ar", "16000", "-ac", "1",
+                    str(self.raw_audio_16k),
+                ])
+                self.total_duration = await self._run_blocking(self.segmenter.get_audio_duration, self.raw_audio_16k)
+                if self.total_duration <= 0:
+                    raise ValueError("Video không có âm thanh hợp lệ để dịch.")
+                if media_info:
+                    self.total_duration = max(self.total_duration, media_info["duration"])
+
+                # QtWebEngine requires an open codec for separated background audio.
+                self.bgm_audio_path = self.cache_dir / "bgm_suppressed.ogg"
+                await self.report_progress("prepare", "Đang xử lý nhạc nền và lọc thoại gốc...")
+                self.suppression_stats = await self._run_blocking(
+                    self.vocal_suppressor.process_file, input_audio_path=self.video_path,
+                    output_audio_path=self.bgm_audio_path,
+                    forced_mode=None if settings.SUPPRESSION_MODE == "AUTO" else settings.SUPPRESSION_MODE,
+                    cancel_check=lambda: self.is_stopped,
+                )
+                self.bgm_url = f"/api/streaming/bgm/{self.task_id}"
+                if self.visual_translation or self.asr_engine is self.faster_whisper:
+                    await self.report_progress("asr", "Đang nhận diện lời nói và mốc thời gian bằng Faster-Whisper...")
+                    asr_loop = asyncio.get_running_loop()
+                    def asr_progress(end):
+                        if not self.is_stopped and self.total_duration > 0:
+                            pct = round(min(99.9, max(0, end / self.total_duration * 100)), 1)
+                            asr_loop.call_soon_threadsafe(lambda: asyncio.create_task(self.report_progress(
+                                "asr", f"Đang nhận diện lời nói · {end:.0f}/{self.total_duration:.0f} giây", pct)))
+                    recognized = await self._run_blocking(
+                        self.faster_whisper.transcribe, self.raw_audio_16k, language="zh", progress_callback=asr_progress,
+                    )
+                    raw_segs = await self._run_blocking(self._grounded_visual_segments, recognized)
+                else:
+                    await self.report_progress("prepare", "Đang phân chia câu thoại...")
+                    raw_segs = await self._run_blocking(self.segmenter.segment_audio, self.raw_audio_16k)
+            for s in raw_segs:
+                item = SegmentItem(s["id"], s["start"], s["end"], s["duration"])
+                if self.visual_translation or self.asr_engine is self.faster_whisper:
+                    item.text_zh = s["text_zh"]
+                    item.emotion = s.get("emotion") or "<|NEUTRAL|>"
+                    item.asr_pretranscribed = True
+                self.segments[item.id] = item
+
+            self._prepared = True
+            from core.streaming.preparation_checkpoint import save
+            try:
+                await self._run_blocking(save, self)
+            except OSError:
+                self.warnings.append("Không lưu được tiến độ nhận diện xuống đĩa; giữ trong phiên hiện tại.")
 
         if self.visual_translation and self.video_intelligence:
             await self.report_progress("visual", "Đang đọc phụ đề và tiêu đề trong khung hình...")
@@ -682,14 +738,16 @@ class StreamingPipelineSession:
                         lambda: asyncio.create_task(self.report_progress(
                             "visual", "Đang đối chiếu lời thoại, phụ đề và tiêu đề", percent)))
             try:
-                visual_result = await self._run_blocking(
-                    self.video_intelligence.prepass,
-                    self.video_path,
-                    list(self.segments.values()),
-                    total_duration=self.total_duration,
-                    cancel_check=lambda: self.is_stopped,
-                    progress_callback=visual_progress,
-                )
+                if self._visual_result is None:
+                    self._visual_result = await self._run_blocking(
+                        self.video_intelligence.prepass,
+                        self.video_path,
+                        list(self.segments.values()),
+                        total_duration=self.total_duration,
+                        cancel_check=lambda: self.is_stopped,
+                        progress_callback=visual_progress,
+                    )
+                visual_result = self._visual_result
             finally:
                 # _run_blocking waits for cancelled native work to return; only
                 # then is it safe to release this session's OCR/ASR models.
@@ -720,7 +778,7 @@ class StreamingPipelineSession:
                 item.text_zh = data.get("text_zh", "").strip()
                 item.literal_vi = data.get("literal_vi", "").strip()
                 item.natural_vi = data.get("natural_vi", "").strip()
-                item.final_vi = data.get("final_vi", "").strip()
+                item.final_vi = _naturalize_spoken_line(item.text_zh, data.get("final_vi", ""))
                 provider = data.get("translation_provider")
                 if provider is None:
                     provider = ("openrouter-free" if getattr(self.video_intelligence, "used_text_fallback", False)
@@ -756,8 +814,9 @@ class StreamingPipelineSession:
                 await self._review_translations()
             except asyncio.CancelledError:
                 raise
-            except Exception:
+            except Exception as error:
                 self.review_summary = {"status": "failed"}
+                logging.getLogger("errors").error("[%s] REVIEW_FAILED error_type=%s", self.task_id, type(error).__name__)
                 self.warnings.append("AI kiểm tra lại chưa hoàn tất; giữ bản nháp và cho phép thử lại.")
 
         # 3. Enqueue all segments with initial priority based on time
@@ -1056,9 +1115,12 @@ class StreamingPipelineSession:
         needs_remaining_asr = (self.can_retry and not self.visual_translation and any(
             segment.status == "WAITING" and not getattr(segment, "asr_pretranscribed", False)
             for segment in self.segments.values()))
-        if raw_audio and not needs_remaining_asr:
+        # These files back a durable preparation checkpoint and may already be
+        # reused by another session. They are not disposable failure scratch.
+        keep_preparation = self._prepared
+        if raw_audio and not needs_remaining_asr and not self._startup_failed and not keep_preparation:
             remove_generated(raw_audio)
-        if self.is_stopped and self._owns_cache:
+        if self.is_stopped and self._owns_cache and not keep_preparation:
             # A stopped session is removed from the registry, so its generated
             # media can no longer be replayed/exported. Remove only paths that
             # this session generated; never recurse into user-owned content.
@@ -1071,7 +1133,8 @@ class StreamingPipelineSession:
                     directory.rmdir()
                 except OSError:
                     pass
-        if self.is_stopped and self._download_info and not self._download_info.get("is_local"):
+        if (self.is_stopped and self._download_info and not self._download_info.get("is_local")
+                and not self._download_info.get("reusable_source")):
             # The downloader reports only uniquely named artifacts it created.
             # Never glob a prefix or remove a local user input here.
             prefix = self._download_info.get("owned_prefix")
@@ -1131,7 +1194,9 @@ class StreamingPipelineSession:
                 )
                 seg.literal_vi = trans.get("literal_vi", "")
                 seg.natural_vi = trans.get("natural_vi", "")
-                seg.final_vi = trans.get("final_vi") or seg.natural_vi or seg.literal_vi
+                seg.final_vi = _naturalize_spoken_line(
+                    seg.text_zh, trans.get("final_vi") or seg.natural_vi or seg.literal_vi
+                )
                 if trans.get("needs_review"):
                     seg.needs_review = True
                     seg.review_reason = trans.get("review_reason") or "Nhận dạng câu thoại chưa chắc chắn; hãy kiểm tra và sửa tiếng Việt."
@@ -1163,25 +1228,41 @@ class StreamingPipelineSession:
             seg.status = "TTS"
             await self._segment_progress("tts", f"Đang tạo giọng đọc câu {seg.id + 1}")
             await self.emit("segment_update", seg.to_dict())
+            loop = asyncio.get_running_loop()
+            async def publish_stage(stage):
+                if self.is_stopped:
+                    raise asyncio.CancelledError
+                seg.status = "ALIGNING" if stage == "ALIGNING" else "TTS"
+                label = {"TTS": "Đang tạo giọng đọc", "ALIGNING": "Đang căn nhịp đọc",
+                         "REWRITING": "AI đang rút gọn và kiểm tra nghĩa lời đọc"}[stage]
+                await self._segment_progress("align" if stage == "ALIGNING" else "tts", f"{label} câu {seg.id + 1}")
+                await self.emit("segment_update", seg.to_dict())
+            def speech_stage(stage):
+                asyncio.run_coroutine_threadsafe(publish_stage(stage), loop).result()
             async with self._tts_lock:
-                await self._run_blocking(self.tts_engine.synthesize, text=seg.final_vi,
-                                         output_path=raw_tts_wav, voice=self.voice, ref_audio=self.ref_audio)
-                boundaries = take_tts_word_boundaries(self.tts_engine, raw_tts_wav)
-                await self._run_blocking(trim_tts_padding, raw_tts_wav)
+                final_path = self.segments_dir / f"seg_{seg.id}.wav"
+                spoken = await self._run_blocking(synthesize_natural_speech,
+                    text=seg.final_vi, source=seg.text_zh, duration=seg.duration, output_path=final_path,
+                    engine=self.tts_engine, aligner=self.aligner, translator=self.translator,
+                    voice=self.voice, ref_audio=self.ref_audio, on_stage=speech_stage,
+                    context=[{"zh": s.text_zh, "vi": s.final_vi} for s in self.segments.values()
+                             if s.end <= seg.start][-4:])
             seg.status = "ALIGNING"
             await self._segment_progress("align", f"Đang khớp thời lượng câu {seg.id + 1}")
             await self.emit("segment_update", seg.to_dict())
-            tts_dur = await self._run_blocking(self.aligner.get_audio_duration, raw_tts_wav)
-            if tts_dur <= 0:
-                raise RuntimeError("Không đọc được âm thanh từ TTS.")
-            ratio = max(self.aligner.min_speed, tts_dur / max(0.01, seg.duration))
-            if ratio > self.aligner.max_speed:
-                self.warnings.append(
-                    f"Đoạn {seg.id + 1} cần đọc {ratio:.2f}x để giữ đủ lời trong thời lượng gốc."
-                )
-            final_path = self.segments_dir / f"seg_{seg.id}.wav"
-            ratio = await self._run_blocking(self.aligner.apply_atempo, raw_tts_wav, final_path, ratio,
-                                             fit_duration=seg.duration)
+            tts_dur, ratio, boundaries = spoken["tts_duration"], spoken["speed_ratio"], spoken["boundaries"]
+            if spoken["text"] != seg.final_vi:
+                previous = seg.final_vi
+                seg.final_vi = spoken["text"]
+                proof = spoken["pacing_verification"]
+                seg.verification = {**(seg.verification or {}), "pacing": proof,
+                    "before_pacing": previous, "translation_changed": True}
+                if not seg.needs_review and seg.verification.get("status") == "verified":
+                    seg.verification["status"] = "corrected"
+                    if self.review_summary.get("status") == "completed":
+                        self.review_summary["verified"] = max(0, self.review_summary.get("verified", 0) - 1)
+                        self.review_summary["corrected"] = self.review_summary.get("corrected", 0) + 1
+                seg.revision += 1
             seg.tts_duration = tts_dur
             seg.speed_ratio = round(ratio, 2)
             seg.audio_path = str(final_path.resolve())

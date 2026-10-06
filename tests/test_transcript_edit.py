@@ -52,11 +52,12 @@ def session(tmp_path, monkeypatch):
 
     sess.tts_engine = SimpleNamespace(synthesize=Mock(side_effect=synthesize))
     sess.aligner = SimpleNamespace(min_speed=0.9, max_speed=1.15,
-                                   get_audio_duration=Mock(return_value=4.5),
+                                   get_audio_duration=Mock(return_value=3.3),
                                    apply_atempo=Mock(side_effect=align))
     # This transaction fixture uses text bytes as audio. Actual PCM activity and
     # service word boundaries are exercised in test_speech_timing.py.
     monkeypatch.setattr("core.engines.alignment.speech_timing.audio_activity_span", lambda path, **kwargs: (0, 3))
+    monkeypatch.setattr("core.engines.alignment.speech_timing._audio_activity_intervals", lambda path, **kwargs: [(0, 3)])
     registry[sess.task_id] = sess
     return sess
 
@@ -87,7 +88,7 @@ def test_edit_completed_segment_publishes_text_and_fitted_audio_with_new_revisio
             assert saved["final_vi"] == saved["text_vi"] == "Lời thoại mới"
             assert saved["status"] == "PLAYED" and saved["revision"] == 1
             assert saved["audio_url"].endswith("?rev=1")
-            assert saved["tts_duration"] == 4.5 and saved["speed_ratio"] == 1.5
+            assert saved["tts_duration"] == 3.3 and saved["speed_ratio"] == 1.1
             audio = await api.get(saved["audio_url"])
             assert audio.content == "Lời thoại mới aligned".encode()
             assert audio.headers["cache-control"] == "no-store"
@@ -170,7 +171,7 @@ def test_uncertain_draft_is_audible_before_edit_and_edit_replaces_audio_without_
         assert session.total_processed_duration == segment.duration
         async with client() as api:
             audio = await api.get(draft["audio_url"])
-            assert audio.status_code == 200 and audio.content == "Lời thoại cũ aligned".encode()
+            assert audio.status_code == 200 and audio.content == (draft["final_vi"] + " aligned").encode()
             exported = await api.post("/api/streaming/export-hq", json={"task_id": session.task_id})
             assert exported.status_code == 409
             response = await api.patch(route(session), json={"final_vi": "Câu đã nghe và sửa"})

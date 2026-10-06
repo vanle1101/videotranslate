@@ -8,6 +8,8 @@ available evidence does not support an automatic translation.
 from __future__ import annotations
 
 import json
+import hashlib
+import logging
 import math
 import os
 import re
@@ -49,8 +51,11 @@ segments: trả đúng một hàng cho MỖI ID đã cấp và giữ nguyên sta
 Mỗi hàng có asr_text nhận dạng âm thanh tại máy; hãy sửa lỗi từ nhận dạng bằng
 nghe video và chữ OCR. Không chuyển lời của ID này sang ID khác. Chỉ dịch lời
 trong ID đó. Câu ngắn hãy dịch ngắn, dùng khẩu ngữ rõ nghĩa, phù hợp thời lượng;
-không cắt mất phủ định hoặc thêm ý để ép khớp. Giữ literal_vi đầy đủ, final_vi
-rút gọn các từ đệm. Với lời đáp phản bác/đồng tình một nhận định trên màn hình,
+final_vi là lời để đọc thành tiếng, đúng ngữ pháp và có dấu câu tự nhiên.
+Giữ quan hệ chủ thể/hành động/đối tượng, nghĩa đầy đủ của thuật ngữ, số và đơn vị.
+Không áp dụng hạn mức số từ, không biến câu thành từ khóa rời hoặc viết tắt khó đọc.
+Phần mềm sẽ đo giọng thật sau khi dịch; không cắt mất nghĩa để ép thời lượng.
+Giữ literal_vi đầy đủ, final_vi chỉ lược từ đệm thừa. Với lời đáp phản bác/đồng tình một nhận định trên màn hình,
 phải tách câu Đúng/Sai khỏi lời giải thích, tránh làm phủ định áp lên giải thích.
 Ví dụ dạng '假的，反而…' -> 'Sai. Ngược lại, …', không ghép 'Không đúng là…'.
 Nếu chắc chắn không có lời nói, trả các trường chữ rỗng; nếu thiếu căn cứ đánh dấu
@@ -97,6 +102,7 @@ class VideoIntelligence:
     # Base64 expansion stays below the 20 MB inline request budget.
     MAX_INLINE_BYTES = 14_000_000
     MAX_WIDTH = 720
+    CHECKPOINT_VERSION = 1
 
     @staticmethod
     def suppress_diagnostic_placeholder(row):
@@ -146,6 +152,166 @@ class VideoIntelligence:
         self._video_duration: Optional[float] = None
         self.screen_ocr = ScreenOCR()
         self.used_text_fallback = False
+        self._checkpoint_context = None
+
+    @staticmethod
+    def _checkpoint_digest(value):
+        # JSON persists integer segment-map keys as strings. Canonicalize before
+        # sorting so IDs 2/10 hash identically before and after disk round trips.
+        canonical = json.loads(json.dumps(value, ensure_ascii=False, allow_nan=False))
+        return hashlib.sha256(json.dumps(canonical, ensure_ascii=False, sort_keys=True,
+                                         separators=(",", ":"), allow_nan=False).encode("utf-8")).hexdigest()
+
+    def _checkpoint_identity(self, video_path, segments, total_duration):
+        """Identify reusable work independently of ephemeral pipeline session IDs.
+
+        Only allowlisted, non-secret settings enter the identity. Source stat,
+        recognition content, selected models, OCR parameters and implementation
+        hashes prevent a previous result from approving changed inputs/prompts.
+        """
+        try:
+            path = Path(video_path).resolve(strict=True)
+            stat = path.stat()
+            if not path.is_file() or stat.st_size <= 0:
+                return None
+            source = {"path": str(path), "size": stat.st_size, "mtime_ns": stat.st_mtime_ns}
+            config = {name: getattr(settings, name, None) for name in (
+                "LLM_PROVIDER", "OPENCODE_MODEL", "OPENROUTER_MODEL", "GEMINI_MODEL",
+                "ASR_ENGINE", "WHISPER_MODEL_SIZE", "WHISPER_COMPUTE_TYPE")}
+            actual_model = getattr(self.client, "model", None)
+            if isinstance(actual_model, str):
+                config["client_model"] = actual_model
+            identity = {"version": self.CHECKPOINT_VERSION, "source": source,
+                        "config": config, "provider": self.provider,
+                        "duration": total_duration,
+                        "segments": [{name: self._get(seg, name, None) for name in
+                                      ("id", "start", "end", "text_zh", "asr_text")} for seg in segments],
+                        "chunking": [self.MAX_CHUNK_SECONDS, self.TARGET_CHUNK_SECONDS, self.MAX_WIDTH],
+                        "ocr": [ScreenOCR.FPS, ScreenOCR.MAX_DIMENSION, ScreenOCR.MIN_CONFIDENCE],
+                        "code": [hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),
+                                 hashlib.sha256(Path(__file__).with_name("screen_ocr.py").read_bytes()).hexdigest()]}
+            key = self._checkpoint_digest(identity)
+            return {"key": key, "source": source,
+                    "directory": Path(settings.WORKSPACE_DIR) / "cache" / "visual_checkpoints" / key}
+        except (OSError, TypeError, ValueError):
+            # Non-file inputs (including isolated test fixtures) have no stable
+            # identity and must never reuse persisted provider results.
+            return None
+
+    def _read_checkpoint(self, stage):
+        context = self._checkpoint_context
+        if context is None:
+            return None
+        try:
+            source = context["source"]
+            stat = Path(source["path"]).stat()
+            if stat.st_size != source["size"] or stat.st_mtime_ns != source["mtime_ns"]:
+                raise VideoIntelligenceError("Video nguồn đã thay đổi khi đang xử lý; hãy chạy lại với file mới.")
+            path = context["directory"] / (self._checkpoint_digest(stage) + ".json")
+            if path.stat().st_size > 32_000_000:
+                return None
+            record = json.loads(path.read_text(encoding="utf-8"))
+            if (not isinstance(record, dict) or record.get("version") != self.CHECKPOINT_VERSION
+                    or record.get("key") != context["key"] or record.get("stage") != stage
+                    or record.get("digest") != self._checkpoint_digest(record.get("payload"))):
+                return None
+            return record["payload"]
+        except (OSError, ValueError, TypeError, KeyError):
+            return None
+
+    def _write_checkpoint(self, stage, payload, cancel_check=None):
+        self._check_cancelled(cancel_check)
+        context = self._checkpoint_context
+        if context is None:
+            return
+        temporary = None
+        try:
+            source = context["source"]
+            stat = Path(source["path"]).stat()
+            if stat.st_size != source["size"] or stat.st_mtime_ns != source["mtime_ns"]:
+                raise VideoIntelligenceError("Video nguồn đã thay đổi khi đang xử lý; hãy chạy lại với file mới.")
+            directory = context["directory"]
+            directory.mkdir(parents=True, exist_ok=True)
+            record = {"version": self.CHECKPOINT_VERSION, "key": context["key"], "stage": stage,
+                      "digest": self._checkpoint_digest(payload), "payload": payload}
+            with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8", prefix="checkpoint_",
+                                             suffix=".tmp", dir=directory, delete=False) as handle:
+                temporary = Path(handle.name)
+                json.dump(record, handle, ensure_ascii=False, allow_nan=False)
+                handle.flush()
+                os.fsync(handle.fileno())
+            self._check_cancelled(cancel_check)
+            os.replace(temporary, directory / (self._checkpoint_digest(stage) + ".json"))
+        except OSError as exc:
+            # A cache write failure cannot turn valid provider work into fake
+            # success, nor discard the in-memory result. Diagnose lost resume.
+            logging.getLogger("pipeline").warning("Không lưu được điểm tiếp tục phân tích video: %s", type(exc).__name__)
+        finally:
+            if temporary is not None:
+                temporary.unlink(missing_ok=True)
+
+    @classmethod
+    def _valid_observed_screens(cls, rows, start, end):
+        if not isinstance(rows, list):
+            return False
+        seen = set()
+        for row in rows:
+            if not isinstance(row, dict) or not isinstance(row.get("id"), str) or row["id"] in seen:
+                return False
+            seen.add(row["id"])
+            lo, hi = cls._number(row.get("start")), cls._number(row.get("end"))
+            box = row.get("bbox")
+            if (lo is None or hi is None or not start - .02 <= lo < hi <= end + .02
+                    or not isinstance(box, list) or len(box) != 4
+                    or any(cls._number(value) is None for value in box)):
+                return False
+            x, y, w, h = map(float, box)
+            confidence = cls._number(row.get("confidence"))
+            if (min(x, y) < 0 or min(w, h) <= 0 or x + w > 1.000001 or y + h > 1.000001
+                    or confidence is None or not 0 <= confidence <= 1
+                    or not isinstance(row.get("text_zh"), str) or len(row["text_zh"]) > 2000
+                    or ("needs_review" in row and not isinstance(row["needs_review"], bool))):
+                return False
+        return True
+
+    @classmethod
+    def _checked_checkpoint_result(cls, result, segments, start, end):
+        """Revalidate persisted normalized results; preserve review/provenance.
+
+        A status string or nonempty object is never sufficient. Every expected
+        speech ID and its fixed timing must be present, including silent rows.
+        """
+        if (not isinstance(result, dict) or not isinstance(result.get("segments"), dict)
+                or not isinstance(result.get("screen_texts"), list)
+                or not isinstance(result.get("summary"), str)):
+            raise VideoIntelligenceError("Điểm tiếp tục thiếu kết quả phân tích hợp lệ.")
+        rows = result["segments"]
+        if any(not isinstance(row, dict) or str(row.get("id")) != str(key) for key, row in rows.items()):
+            raise VideoIntelligenceError("Điểm tiếp tục chứa ID câu không hợp lệ.")
+        # Normalization permits null review_reason for a verified row.
+        normalized = [{**row, "review_reason": row.get("review_reason") or ""} for row in rows.values()]
+        checked = cls.validate_result({"segments": normalized, "screen_texts": [], "summary": result["summary"]},
+                                      segments, start, end)
+        for original in rows.values():
+            valid = checked["segments"][original["id"]]
+            if valid["needs_review"] and not original["needs_review"]:
+                raise VideoIntelligenceError("Điểm tiếp tục bỏ qua cảnh báo bản dịch.")
+        screens = result["screen_texts"]
+        if not cls._valid_observed_screens(screens, start, end):
+            raise VideoIntelligenceError("Điểm tiếp tục chứa vùng OCR không hợp lệ.")
+        for row in screens:
+            if (row.get("kind") not in {"subtitle", "title", "ignore"}
+                    or not isinstance(row.get("needs_review"), bool)
+                    or not isinstance(row.get("text_vi"), str) or len(row["text_vi"]) > 2000
+                    or not isinstance(row.get("review_reason", "") or "", str)):
+                raise VideoIntelligenceError("Điểm tiếp tục thiếu bản dịch OCR.")
+        sources = result.get("translation_sources", [])
+        if not isinstance(sources, list) or any(
+                not isinstance(item, dict) or item.get("provider") not in {"gemini", "opencode", "openrouter-free"}
+                or not isinstance(item.get("model"), str) or not item["model"]
+                or item.get("evidence_mode") not in {"audio-video", "asr-ocr-text"} for item in sources):
+            raise VideoIntelligenceError("Điểm tiếp tục thiếu nguồn bản dịch.")
+        return {**result, "segments": {row["id"]: dict(row) for row in rows.values()}}
 
     @staticmethod
     def _get(obj: Any, key: str, default: Any = None) -> Any:
@@ -572,6 +738,35 @@ class VideoIntelligence:
                 self._check_cancelled(cancel_check)
                 batch_payload = payload[index * 12:(index + 1) * 12]
                 batch_screens = observed[index * 24:(index + 1) * 24]
+                batch_stage = {"kind": "text_batch", "start": start, "end": end, "index": index,
+                               "provider": provider, "model": model_setting, "quota_fallback": quota_fallback,
+                               "context": self._checkpoint_digest([payload, observed, combined["summary"]])}
+                saved_batch = self._read_checkpoint(batch_stage)
+                if isinstance(saved_batch, dict):
+                    try:
+                        saved_result = self._checked_checkpoint_result(saved_batch.get("result"),
+                            self._fallback_segments(batch_payload), start, end)
+                        saved_corrections = saved_batch.get("corrections")
+                        expected = {str(row["id"]) for row in batch_payload}
+                        if not isinstance(saved_corrections, dict) or set(saved_corrections) != expected:
+                            raise ValueError("missing source review")
+                        evidence_ids = {row["id"] for row in observed}
+                        for correction in saved_corrections.values():
+                            if (not isinstance(correction, dict) or not isinstance(correction.get("text_zh"), str)
+                                    or not isinstance(correction.get("needs_review"), bool)
+                                    or not isinstance(correction.get("review_reason"), str)
+                                    or not isinstance(correction.get("evidence_ids"), list)
+                                    or any(not isinstance(ref, str) or ref not in evidence_ids
+                                           for ref in correction["evidence_ids"])):
+                                raise ValueError("invalid source review")
+                    except (VideoIntelligenceError, KeyError, TypeError, ValueError):
+                        pass
+                    else:
+                        all_corrections.update({int(key): value for key, value in saved_corrections.items()})
+                        combined["segments"].update(saved_result["segments"])
+                        combined["screen_texts"].extend(saved_result["screen_texts"])
+                        combined["summary"] = saved_result["summary"] or combined["summary"]
+                        continue
                 corrections = self._correct_source(client, batch_payload, observed, context, cancel_check)
                 all_corrections.update(corrections)
                 corrected_payload = [{**row, "corrected_text_zh": corrections[row["id"]]["text_zh"],
@@ -636,6 +831,8 @@ class VideoIntelligence:
                         row["needs_review"] = True
                         row["review_reason"] = row.get("review_reason") or "Hai lượt đối chiếu chưa thống nhất loại chữ trên hình."
                 result = verified
+                self._write_checkpoint(batch_stage, {"result": result,
+                    "corrections": {str(key): value for key, value in corrections.items()}}, cancel_check)
                 combined["segments"].update(result["segments"])
                 combined["screen_texts"].extend(result["screen_texts"])
                 combined["summary"] = result["summary"] or combined["summary"]
@@ -738,7 +935,13 @@ class VideoIntelligence:
                       segments: Iterable[Any], previous_summary: str = "", cancel_check=None) -> Dict[str, Any]:
         segments = list(segments)
         self._check_cancelled(cancel_check)
-        observed = self.screen_ocr.extract(video_path, start, end, cancel_check=cancel_check)
+        ocr_stage = {"kind": "ocr", "start": start, "end": end}
+        observed = self._read_checkpoint(ocr_stage)
+        if not self._valid_observed_screens(observed, start, end):
+            observed = self.screen_ocr.extract(video_path, start, end, cancel_check=cancel_check)
+            self._check_cancelled(cancel_check)
+            if self._valid_observed_screens(observed, start, end):
+                self._write_checkpoint(ocr_stage, observed, cancel_check)
         payload = [{"id": int(self._get(s, "id")), "start": float(self._get(s, "start")),
                     "end": float(self._get(s, "end")), "asr_text": self._get(s, "text_zh", "")} for s in segments]
         if self.provider in {"openrouter-free", "opencode"}:
@@ -815,6 +1018,19 @@ class VideoIntelligence:
 
     def prepass(self, video_path: Path, segments: List[Any], total_duration: Optional[float] = None,
                 cancel_check=None, progress_callback=None) -> Dict[str, Any]:
+        self._check_cancelled(cancel_check)
+        segments = sorted(segments, key=lambda seg: self._get(seg, "start"))
+        previous_context = self._checkpoint_context
+        self._checkpoint_context = self._checkpoint_identity(video_path, segments, total_duration)
+        try:
+            return self._prepass(video_path, segments, total_duration, cancel_check, progress_callback)
+        finally:
+            # A later standalone analyze_chunk must not inherit another file's
+            # namespace merely because the same instance is reused.
+            self._checkpoint_context = previous_context
+
+    def _prepass(self, video_path: Path, segments: List[Any], total_duration: Optional[float] = None,
+                 cancel_check=None, progress_callback=None) -> Dict[str, Any]:
         segments = sorted(segments, key=lambda seg: self._get(seg, "start"))
         for seg in segments:
             start, end = self._number(self._get(seg, "start")), self._number(self._get(seg, "end"))
@@ -829,6 +1045,37 @@ class VideoIntelligence:
         sources = []
         summary = ""
         cursor = 0.0
+        completed = []
+        restored = self._read_checkpoint({"kind": "chunks"})
+        for entry in restored if isinstance(restored, list) else []:
+            self._check_cancelled(cancel_check)
+            try:
+                if (not isinstance(entry, dict) or self._number(entry.get("start")) != cursor
+                        or entry.get("previous_summary") != summary):
+                    break
+                end = self._number(entry.get("end"))
+                if end is None or not cursor < end <= hi or end - cursor > self.MAX_CHUNK_SECONDS:
+                    break
+                if any(self._get(seg, "start") < end < self._get(seg, "end") for seg in segments):
+                    break
+                chunk_segments = [seg for seg in segments if self._get(seg, "start") >= cursor and self._get(seg, "end") <= end]
+                result = self._checked_checkpoint_result(entry.get("result"), chunk_segments, cursor, end)
+            except (VideoIntelligenceError, KeyError, TypeError, ValueError):
+                break
+            output.update(result["segments"])
+            screens.extend(result["screen_texts"])
+            for source in result.get("translation_sources", []):
+                if source not in sources:
+                    sources.append(source)
+                if self.provider == "gemini" and source["provider"] == "openrouter-free":
+                    self.used_text_fallback = True
+            summary = result["summary"]
+            cursor = end
+            completed.append(entry)
+        if cursor and progress_callback:
+            progress_callback(round(100 * cursor / hi, 1))
+        if cursor:
+            logging.getLogger("pipeline").info("Tiếp tục phân tích video từ %.1f/%.1f giây (%d đoạn đã lưu)", cursor, hi, len(completed))
         while cursor < hi:
             self._check_cancelled(cancel_check)
             chunk_duration = self.TARGET_CHUNK_SECONDS
@@ -859,6 +1106,12 @@ class VideoIntelligence:
                 end = reduced
                 chunk_segments = [s for s in segments if self._get(s, "start") >= cursor and self._get(s, "end") <= end]
                 result = self.analyze_chunk(video_path, cursor, end, chunk_segments, summary, cancel_check)
+            self._check_cancelled(cancel_check)
+            # Only complete, validated chunk results become resume points.
+            # Keep prior successful chunks when a later provider call fails.
+            result = self._checked_checkpoint_result(result, chunk_segments, cursor, end)
+            completed.append({"start": cursor, "end": end, "previous_summary": summary, "result": result})
+            self._write_checkpoint({"kind": "chunks"}, completed, cancel_check)
             output.update(result["segments"])
             screens.extend(result["screen_texts"])
             for source in result.get("translation_sources", []):
@@ -868,6 +1121,7 @@ class VideoIntelligence:
             cursor = end
             if progress_callback:
                 progress_callback(round(100 * cursor / hi, 1))
+        self._check_cancelled(cancel_check)
         if set(output) != {self._get(s, "id") for s in segments}:
             raise VideoIntelligenceError("Phân tích hình ảnh chưa bao phủ đủ câu thoại.")
         return {"segments": output, "screen_texts": screens, "translation_sources": sources}

@@ -136,6 +136,9 @@ def test_translation_is_isolated_secret_safe_and_shell_free(isolated, monkeypatc
     sent = json.loads(process.communicate.call_args.args[0])
     assert sent["input"] == prompt and sent["instructions"].startswith("Translate to Vietnamese")
     assert "Do not use tools" in sent["instructions"]
+    assert "requested structured assessment" in sent["instructions"]
+    assert "untrusted data" in sent["instructions"]
+    assert "Translate the supplied data only" not in sent["instructions"]
     assert process.communicate.call_args.kwargs["timeout"] == 20
 
 

@@ -10,6 +10,7 @@ from copy import deepcopy
 import gc
 import json
 import math
+import logging
 from pathlib import Path
 import re
 import tempfile
@@ -20,6 +21,7 @@ from core.engines.translation.opencode_client import OpenCodeZenClient
 from core.screen_ocr import ScreenOCR
 from core.media_process import run_media
 from core.video_intelligence import VideoIntelligence, VideoIntelligenceError
+from core.runtime_context import current_execution_context
 
 
 class _ReviewScreenOCR(ScreenOCR):
@@ -94,6 +96,26 @@ class _LocalAudioEvidence:
 
 class AutomaticTranslationReviewer:
     BATCH_SIZE = 12
+
+    @staticmethod
+    def _validated_review_request(client, prompt, batch, lo, hi, check):
+        # Retry malformed structured replies without repeating the local OCR.
+        # Authentication/transport errors propagate; invalid data never passes.
+        for attempt in range(3):
+            check()
+            raw = client.translate(prompt, max_tokens=10000)
+            check()
+            try:
+                data = VideoIntelligence._parse_json(raw)
+                validated = VideoIntelligence.validate_result(data, batch, lo, hi, [])
+                return data, validated
+            except VideoIntelligenceError as error:
+                logging.getLogger("ai").warning(
+                    "REVIEW_RESPONSE_INVALID run_id=%s attempt=%s response_chars=%s error_type=%s",
+                    current_execution_context().run_id, attempt + 1, len(raw) if isinstance(raw, str) else 0,
+                    type(error).__name__)
+                if attempt == 2:
+                    raise
 
     def __init__(self, client=None, screen_ocr=None, audio_evidence=None):
         self.client = client
@@ -392,7 +414,12 @@ class AutomaticTranslationReviewer:
             "không được bỏ chỉ vì bản nháp nghe trôi chảy hoặc vì lần trước đã dịch như vậy. "
             "Nếu thiếu bằng chứng, giữ bản nháp có căn cứ, needs_review=true, lý do tiếng Việt cụ thể. "
             "semantic_verified=true CHỈ khi đã kiểm tra nghĩa của mọi mệnh đề; không bảo đảm nguồn nếu OCR thiếu. "
-            "Giữ lời Việt ngắn, tự nhiên nhưng đầy đủ phủ định/ý chính, không có chữ Hán.\n"
+            "Giữ lời Việt ngắn, văn nói tự nhiên nhưng đầy đủ phủ định/ý chính, không có chữ Hán. "
+            "Giữ dấu câu để tạo giọng, câu hỏi phải có dấu hỏi. Kiểm tra cả nghĩa và văn nói: "
+            "phải giữ quan hệ chủ thể/hành động/đối tượng, nghĩa đầy đủ của thuật ngữ, số và đơn vị. "
+            "Không chấp nhận chuỗi từ khóa hoặc cụm bị rút sai nghĩa dù ngắn và vừa thời lượng. "
+            "Không dùng hạn mức số từ; thời lượng không phải lý do để xác nhận câu thiếu ý. "
+            "verification_reason phải giải thích đối chiếu ý nghĩa Việt với Trung, không chỉ xác nhận OCR.\n"
             "final_vi chỉ có lời dịch để đọc; ghi chú như 'nghe chưa rõ', '[không rõ]' phải ở review_reason. "
             "Không sao chép ghi chú nhận dạng thành lời nhân vật. Nếu chưa có bản dịch có căn cứ, "
             "giữ nguồn, để final_vi rỗng và needs_review=true. Lời dẫn chuyện cũng là lời nói; không tự "
@@ -472,10 +499,8 @@ class AutomaticTranslationReviewer:
             lo, hi = min(row["start"] for row in batch), max(row["end"] for row in batch)
             context = [{key: row.get(key, "") for key in ("start", "end", "text_zh", "final_vi")}
                        for row in rows if row["start"] < hi + 10 and row["end"] > lo - 10]
-            raw = client.translate(self._prompt(prompt_rows, relevant, context), max_tokens=10000)
-            check()
-            data = VideoIntelligence._parse_json(raw)
-            validated = VideoIntelligence.validate_result(data, batch, lo, hi, [])
+            data, validated = self._validated_review_request(
+                client, self._prompt(prompt_rows, relevant, context), batch, lo, hi, check)
             audit_rows = {item["id"]: item for item in data["segments"]}
             # Run a separate semantic pass over the same measured evidence.
             # This catches fluent but over-broad translations (quantifiers,
@@ -487,9 +512,8 @@ class AutomaticTranslationReviewer:
                     "Không mặc định bản nháp đúng. Rà từng mệnh đề, lượng từ, mức độ, @mention, số và chủ thể; "
                     "sửa nếu cần theo nguồn/OCR và giữ needs_review=true nếu còn nghi ngờ. Trả đúng schema, đủ ID.\n"
                     + json.dumps(data["segments"], ensure_ascii=False))
-                checked_data = VideoIntelligence._parse_json(client.translate(recheck_prompt, max_tokens=10000))
-                check()
-                checked_validated = VideoIntelligence.validate_result(checked_data, batch, lo, hi, [])
+                checked_data, checked_validated = self._validated_review_request(
+                    client, recheck_prompt, batch, lo, hi, check)
                 checked_rows = {item["id"]: item for item in checked_data["segments"]}
                 if all(isinstance(row.get("semantic_verified"), bool)
                        and isinstance(row.get("verification_reason"), str)

@@ -101,7 +101,8 @@ def test_original_download_preserves_bytes_and_reports_measured_progress(monkeyp
     assert 0 < result["duration"] < 1
     assert result["title"] == "Sample Douyin video" and result["source"] == "douyin-public"
     assert response.closed
-    progress = [event for event in events if event["phase"] == "download"]
+    progress = [event for event in events if event.get("phase") == "download"]
+    assert any(event.get("code") == "resume_validators_missing" for event in events)
     assert progress[0]["downloaded_bytes"] == 0
     assert progress[-1]["downloaded_bytes"] == progress[-1]["total_bytes"] == len(mp4_bytes)
     assert progress[-1]["progress_pct"] == 100
@@ -118,7 +119,7 @@ def test_unknown_transfer_total_does_not_invent_a_percentage(monkeypatch, work_d
     monkeypatch.setattr(worker, "open_public_media", lambda url: response)
     events = []
     worker.download_resolved_video(video_info(), str(work_directory / "video"), events.append)
-    progress = [event for event in events if event["phase"] == "download"]
+    progress = [event for event in events if event.get("phase") == "download"]
     assert all(event["total_bytes"] is None and event["progress_pct"] is None for event in progress)
     assert progress[-1]["downloaded_bytes"] == len(mp4_bytes)
 
@@ -378,7 +379,7 @@ def test_unknown_total_becomes_known_only_from_validated_range(monkeypatch, work
 
 
 @pytest.mark.parametrize("validator", [{}, {"ETag": 'W/"weak-123"'}])
-def test_no_strong_validator_restarts_cleanly_and_reports_why(monkeypatch, work_directory, mp4_bytes, validator):
+def test_no_strong_validator_verifies_entire_prefix_before_append(monkeypatch, work_directory, mp4_bytes, validator):
     calls, events = [], []
 
     def open_media(url, headers=None):
@@ -390,10 +391,12 @@ def test_no_strong_validator_restarts_cleanly_and_reports_why(monkeypatch, work_
     result = worker.download_resolved_video(video_info(), str(work_directory / "video"), events.append)
     assert Path(result["file_path"]).read_bytes() == mp4_bytes
     assert len(calls) == 2
-    assert any("không xác nhận" in event.get("stage", "") for event in events)
+    assert any("Đã đối chiếu đúng" in event.get("stage", "") for event in events)
+    counts = [e["downloaded_bytes"] for e in events if e.get("phase") == "download"]
+    assert counts == sorted(counts), "Verified bytes must not fall back to zero"
 
 
-def test_server_ignoring_range_200_truncates_old_partial(monkeypatch, work_directory, mp4_bytes):
+def test_server_ignoring_range_200_verifies_old_partial(monkeypatch, work_directory, mp4_bytes):
     calls, events = [], []
 
     def open_media(url, headers=None):
@@ -405,7 +408,74 @@ def test_server_ignoring_range_200_truncates_old_partial(monkeypatch, work_direc
     assert calls == [None, {"Range": "bytes=512-", "If-Range": ETAG}]
     assert Path(result["file_path"]).read_bytes() == mp4_bytes
     assert any(event.get("code") == "range_ignored" for event in events)
-    assert any("tải lại từ đầu" in event.get("stage", "") for event in events)
+    assert any("Đã đối chiếu đúng" in event.get("stage", "") for event in events)
+
+
+def test_validatorless_checkpoint_survives_new_worker_and_chunk_boundary(monkeypatch, work_directory, mp4_bytes):
+    prefix = str(work_directory / "video")
+    monkeypatch.setattr(worker, "MAX_MEDIA_RETRIES", 0)
+    monkeypatch.setattr(worker, "open_public_media", lambda url: MediaResponse(mp4_bytes, failure=TimeoutError()))
+    with pytest.raises(worker.MediaDownloadError) as failed:
+        worker.download_resolved_video(video_info(), prefix, lambda event: None)
+    assert failed.value.resumable
+    # Retain an unaligned prefix so the verification chunk also contains new bytes.
+    partial, manifest = Path(prefix + ".mp4.part"), Path(prefix + ".resume.json")
+    partial.write_bytes(mp4_bytes[:377])
+    saved = json.loads(manifest.read_text())
+    saved.update(downloaded_bytes=377, sha256=worker.hashlib.sha256(mp4_bytes[:377]).hexdigest())
+    manifest.write_text(json.dumps(saved))
+    monkeypatch.setattr(worker, "open_public_media", lambda url: MediaResponse(mp4_bytes))
+    events = []
+    result = worker.download_resolved_video(video_info(), prefix, events.append)
+    assert Path(result["file_path"]).read_bytes() == mp4_bytes
+    assert any(e.get("downloaded_bytes") == 377 and "khôi phục" in e.get("stage", "") for e in events)
+    assert any("Đã đối chiếu đúng" in e.get("stage", "") for e in events)
+
+
+def test_validatorless_changed_prefix_is_never_joined(monkeypatch, work_directory, mp4_bytes):
+    calls, events = [], []
+    def open_media(url):
+        calls.append(url)
+        if len(calls) == 1:
+            return MediaResponse(b"x" * 512 + mp4_bytes[512:], failure=TimeoutError())
+        return MediaResponse(mp4_bytes)
+    monkeypatch.setattr(worker, "open_public_media", open_media)
+    result = worker.download_resolved_video(video_info(), str(work_directory / "video"), events.append)
+    assert len(calls) == 3
+    assert Path(result["file_path"]).read_bytes() == mp4_bytes
+    assert any(e.get("code") == "resource_changed" for e in events)
+
+
+def test_validatorless_resume_rejects_unsolicited_suffix(monkeypatch, work_directory, mp4_bytes):
+    calls, events = [], []
+    def open_media(url):
+        calls.append(url)
+        if len(calls) == 1:
+            return MediaResponse(mp4_bytes, failure=TimeoutError())
+        if len(calls) == 2:
+            return ranged_response(mp4_bytes, 512)
+        return MediaResponse(mp4_bytes)
+    monkeypatch.setattr(worker, "open_public_media", open_media)
+    result = worker.download_resolved_video(video_info(), str(work_directory / "video"), events.append)
+    assert len(calls) == 3
+    assert Path(result["file_path"]).read_bytes() == mp4_bytes
+    assert any(e.get("code") == "range_invalid" for e in events)
+
+
+def test_validatorless_resume_keeps_known_length_when_header_disappears(monkeypatch, work_directory, mp4_bytes):
+    calls = []
+    def open_media(url):
+        calls.append(url)
+        if len(calls) == 1:
+            return MediaResponse(mp4_bytes, failure=TimeoutError())
+        return MediaResponse(mp4_bytes[:-200], length=None)
+    monkeypatch.setattr(worker, "open_public_media", open_media)
+    monkeypatch.setattr(worker, "MAX_MEDIA_RETRIES", 1)
+    with pytest.raises(worker.MediaDownloadError):
+        worker.download_resolved_video(video_info(), str(work_directory / "video"), lambda e: None)
+    assert not (work_directory / "video.mp4").exists()
+    saved = json.loads((work_directory / "video.resume.json").read_text())
+    assert saved["total_bytes"] == len(mp4_bytes)
 
 
 @pytest.mark.parametrize("changed_headers", [
@@ -505,6 +575,46 @@ def test_retry_exhaustion_persists_verified_checkpoint_and_next_job_resumes(monk
     assert len(calls) == 1 and not checkpoint_path.exists()
 
 
+def test_hard_stop_after_uncheckpointed_write_resumes_only_verified_prefix(monkeypatch, work_directory, mp4_bytes):
+    prefix = save_interrupted_checkpoint(monkeypatch, work_directory, mp4_bytes)
+    partial = Path(prefix + '.mp4.part')
+    # The parent can retain this checkpoint without touching media. The worker
+    # checks the same rendition and hash before discarding the uncommitted tail.
+    with partial.open('ab') as handle:
+        handle.write(b'uncommitted bytes at process exit')
+    checkpoint, _ = worker._load_checkpoint(Path(prefix + '.resume.json'), partial)
+    assert checkpoint['downloaded_bytes'] == 512 and partial.stat().st_size > 512
+
+    def open_media(url, headers=None):
+        assert headers == {'Range': 'bytes=512-', 'If-Range': ETAG}
+        assert partial.stat().st_size == 512
+        return ranged_response(mp4_bytes, 512)
+
+    monkeypatch.setattr(worker, 'open_public_media', open_media)
+    result = worker.download_resolved_video(video_info(), prefix, lambda event: None)
+    assert Path(result['file_path']).read_bytes() == mp4_bytes
+
+
+def test_checkpoint_is_published_during_healthy_transfer_before_process_stop(monkeypatch, work_directory, mp4_bytes):
+    prefix = str(work_directory / 'video')
+
+    class HardStop(BaseException):
+        pass
+
+    class InterruptedResponse(MediaResponse):
+        def iter_content(self, chunk_size):
+            yield mp4_bytes[:512]
+            saved = json.loads(Path(prefix + '.resume.json').read_text())
+            assert saved['downloaded_bytes'] == 512
+            raise HardStop()
+
+    monkeypatch.setattr(worker, 'open_public_media', lambda url: InterruptedResponse(mp4_bytes, headers={'ETag': ETAG}))
+    with pytest.raises(HardStop):
+        worker.download_resolved_video(video_info(), prefix, lambda event: None)
+    saved, _ = worker._load_checkpoint(Path(prefix + '.resume.json'), Path(prefix + '.mp4.part'))
+    assert saved['downloaded_bytes'] == 512
+
+
 @pytest.mark.parametrize("damage", ["hash", "size", "stale", "format", "video", "malformed", "oversized", "validator"])
 def test_invalid_checkpoint_restarts_instead_of_appending(monkeypatch, work_directory, mp4_bytes, damage):
     prefix = save_interrupted_checkpoint(monkeypatch, work_directory, mp4_bytes)
@@ -521,7 +631,7 @@ def test_invalid_checkpoint_restarts_instead_of_appending(monkeypatch, work_dire
     elif damage == "video":
         checkpoint["video_id"] = "1234567890123456789"
     elif damage == "validator":
-        checkpoint["etag"] = None
+        checkpoint["etag"] = 'W/"invalid-weak-validator"'
     checkpoint_path.write_text(json.dumps(checkpoint), encoding="utf-8")
     if damage == "malformed":
         checkpoint_path.write_text("[", encoding="utf-8")

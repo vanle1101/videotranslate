@@ -640,6 +640,16 @@ async def run_session(session):
         # The pipeline records and broadcasts its startup error.
         pass
 
+def _retry_configuration_signature():
+    """Compare captured engines without recording keys in logs or checkpoints."""
+    names = ("LLM_PROVIDER", "GEMINI_MODEL", "OPENCODE_MODEL", "OPENROUTER_MODEL",
+             "WHISPER_MODEL_SIZE", "WHISPER_COMPUTE_TYPE", "SUPPRESSION_MODE",
+             "MUSE_BROWSER_MODE", "OPENCODE_API_KEY", "OPENROUTER_API_KEY",
+             "GEMINI_API_KEY", "DEEPSEEK_API_KEY", "OPENAI_API_KEY")
+    values = {name: getattr(settings, name, None) or os.getenv(name, "") for name in names}
+    return hashlib.sha256(json.dumps(values, sort_keys=True).encode("utf-8")).hexdigest()
+
+
 @app.post("/api/streaming/start-url")
 async def start_streaming_url(req: StreamUrlRequest):
     validate_visual_translation(req.visual_translation)
@@ -652,6 +662,28 @@ async def start_streaming_url(req: StreamUrlRequest):
         raise HTTPException(status_code=422, detail=str(exc)) from None
 
     engine, voice = validated_voice(req.voice_id, req.tts_engine, req.voice)
+    config_signature = _retry_configuration_signature()
+    # The same source/config must not silently create another download when the
+    # previous attempt only failed in ASR/OCR/translation. Retry its saved state.
+    for existing in reversed(list(active_streaming_sessions.values())):
+        if (not getattr(existing, "source_url", None)
+                or downloader.source_identity(existing.source_url) != downloader.source_identity(url)
+                or existing.voice != voice or existing.tts_engine_name != engine
+                or existing.asr_engine_name != (req.asr_engine or settings.ASR_ENGINE)
+                or existing.visual_translation != req.visual_translation
+                or getattr(existing, "_retry_config_signature", None) != config_signature
+                or existing.is_stopped):
+            continue
+        if existing.is_running or (not existing.initialized and not existing.error):
+            raise HTTPException(status_code=409, detail="Video này đang xử lý. Mở tác vụ hiện tại để xem tiến độ.")
+        if existing.can_retry:
+            try:
+                await existing.retry_failed_synthesis()
+            except SegmentEditConflict as exc:
+                raise HTTPException(status_code=409, detail=str(exc)) from None
+            return {"task_id": existing.task_id, "video_url": existing.source_video_url,
+                    "initial_buffer_seconds": existing.initial_buffer_seconds,
+                    "progress": existing.get_progress(), "status": "started", "resumed": True}
     task_id = str(uuid.uuid4())[:8]
 
     # Create session
@@ -666,6 +698,8 @@ async def start_streaming_url(req: StreamUrlRequest):
         event_callback=lambda event_type, data: broadcast_session_event(task_id, event_type, data)
     )
     session.auto_export_result = bool(req.visual_translation and settings.LLM_PROVIDER == "opencode")
+    session.source_url, session._source_downloader = url, downloader
+    session._retry_config_signature = config_signature
 
     async def start_source():
         try:
@@ -820,8 +854,12 @@ async def edit_streaming_segment(task_id: str, segment_id: int, req: SegmentEdit
 
 @app.get("/api/streaming/bgm/{task_id}")
 async def get_streaming_bgm(task_id: str):
-    bgm_path = settings.BASE_DIR / "workspace" / "cache" / task_id / "bgm_suppressed.ogg"
-    if not bgm_path.exists():
+    session = get_streaming_session(task_id)
+    root = (settings.BASE_DIR / "workspace" / "cache").resolve()
+    value = getattr(session, "bgm_audio_path", None)
+    bgm_path = Path(value) if value else root / task_id / "bgm_suppressed.ogg"
+    if (bgm_path.is_symlink() or not bgm_path.resolve().is_relative_to(root)
+            or not bgm_path.is_file() or bgm_path.stat().st_size <= 0):
         raise HTTPException(status_code=404, detail="BGM stream not found or still generating")
     return FileResponse(bgm_path, media_type="audio/ogg")
 

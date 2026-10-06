@@ -34,6 +34,96 @@ async def wait_for(predicate):
             await asyncio.sleep(0.005)
 
 
+def test_failed_startup_retries_same_task_without_redownloading(isolated, monkeypatch):
+    source = isolated / "complete.mp4"
+    source.write_bytes(b"complete source")
+    download = Mock(return_value={"file_path": str(source), "is_local": False})
+    monkeypatch.setattr(main.downloader, "download", download)
+    prepare = AsyncMock(side_effect=[RuntimeError("Provider timeout"), None])
+    monkeypatch.setattr(StreamingPipelineSession, "_start", prepare)
+
+    async def run():
+        req = main.StreamUrlRequest(url="https://www.douyin.com/video/7688978448627473651")
+        first = await main.start_streaming_url(req)
+        session = main.active_streaming_sessions[first["task_id"]]
+        await wait_for(lambda: session.error is not None)
+        assert session.can_retry
+        second = await main.start_streaming_url(req)
+        assert second["task_id"] == first["task_id"] and second["resumed"]
+        await session.start_task
+        assert download.call_count == 1 and prepare.await_count == 2
+        assert session.video_path == source
+        session.is_running = False
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize('name,value', [('LLM_PROVIDER', 'gemini'), ('GEMINI_MODEL', 'another-model'),
+                                        ('GEMINI_API_KEY', 'changed-key'), ('SUPPRESSION_MODE', 'different-mode')])
+def test_changed_provider_configuration_creates_fresh_engines(isolated, monkeypatch, name, value):
+    source = isolated / 'complete.mp4'
+    source.write_bytes(b'complete source')
+    monkeypatch.setattr(settings, 'LLM_PROVIDER', 'opencode')
+    monkeypatch.setattr(main.downloader, 'download', Mock(return_value={'file_path': str(source), 'is_local': False}))
+    monkeypatch.setattr(StreamingPipelineSession, '_start', AsyncMock(side_effect=RuntimeError('Provider failed')))
+
+    async def run():
+        req = main.StreamUrlRequest(url='https://www.douyin.com/video/7688978448627473651')
+        first = await main.start_streaming_url(req)
+        old = main.active_streaming_sessions[first['task_id']]
+        await wait_for(lambda: old.error is not None)
+        monkeypatch.setattr(settings, name, value)
+        second = await main.start_streaming_url(req)
+        fresh = main.active_streaming_sessions[second['task_id']]
+        assert fresh.task_id != old.task_id and not second.get('resumed')
+        await wait_for(lambda: fresh.error is not None)
+        assert fresh.translator.provider == settings.LLM_PROVIDER
+        assert fresh._retry_config_signature != old._retry_config_signature
+
+    asyncio.run(run())
+
+
+def test_restored_background_audio_is_served_from_checkpoint_asset(isolated):
+    previous = isolated / 'workspace' / 'cache' / 'previous-session'
+    previous.mkdir(parents=True)
+    audio = previous / 'bgm_suppressed.ogg'
+    audio.write_bytes(b'restored audio bytes')
+    session = main.create_streaming_session('restored-session', isolated / 'source.mp4')
+    session.bgm_audio_path = audio
+    assert not (session.cache_dir / 'bgm_suppressed.ogg').exists()
+    with TestClient(main.app) as client:
+        response = client.get('/api/streaming/bgm/restored-session')
+    assert response.status_code == 200 and response.content == audio.read_bytes()
+
+
+def test_restored_background_endpoint_rejects_foreign_asset(isolated):
+    audio = isolated / 'private.ogg'
+    audio.write_bytes(b'not a pipeline asset')
+    session = main.create_streaming_session('unsafe-session', isolated / 'source.mp4')
+    session.bgm_audio_path = audio
+    with TestClient(main.app) as client:
+        assert client.get('/api/streaming/bgm/unsafe-session').status_code == 404
+
+
+def test_failed_download_retry_reserves_session_against_double_click(isolated, monkeypatch):
+    download = Mock(side_effect=RuntimeError("Connection closed"))
+    monkeypatch.setattr(main.downloader, "download", download)
+
+    async def run():
+        first = await main.start_streaming_url(main.StreamUrlRequest(url="https://v.douyin.com/test/"))
+        session = main.active_streaming_sessions[first["task_id"]]
+        await wait_for(lambda: session.error is not None)
+        assert session.can_retry
+        first_retry = await session.retry_failed_synthesis()
+        assert first_retry["status"] == "RUNNING"
+        with pytest.raises(Exception, match="Chỉ tiếp tục"):
+            await session.retry_failed_synthesis()
+        await session.start_task
+        assert download.call_count == 2 and session.can_retry
+
+    asyncio.run(run())
+
+
 def test_url_returns_task_before_download_finishes_and_stop_reaps_it(isolated, monkeypatch):
     started, stopped = threading.Event(), threading.Event()
 

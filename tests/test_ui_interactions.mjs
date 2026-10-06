@@ -11,6 +11,7 @@ function studio(cookieReply = { configured: false, count: 0, message: '' }, voic
   const elements = new Map(), audio = [], sockets = [], requests = [], alerts = [], copied = [];
   const intervals = new Map();
   const timeouts = new Map();
+  const frames = new Map();
   let nextIntervalId = 1;
   let ready;
   class Element {
@@ -122,7 +123,9 @@ function studio(cookieReply = { configured: false, count: 0, message: '' }, voic
     body: new Element(), activeElement: null,
   };
   document.body.dataset = { asrEngine: 'faster-whisper', ttsEngine: 'edge-tts' };
-  class Audio extends Element { constructor(url) { super(); this.src = url; audio.push(this); } }
+  class Audio extends Element {
+    constructor(url) { super(); this.src = url; this.readyState = 4; this.seeking = false; audio.push(this); }
+  }
   class WebSocket {
     static OPEN = 1;
     constructor() { this.readyState = 1; this.sent = []; sockets.push(this); }
@@ -140,6 +143,8 @@ function studio(cookieReply = { configured: false, count: 0, message: '' }, voic
   const windowEvents = {}, saved = new Map(Object.entries(voiceConfig.saved || {}));
   const window = {
     location: { protocol: 'http:', host: 'localhost' },
+    requestAnimationFrame(callback) { const id = nextIntervalId++; frames.set(id, callback); return id; },
+    cancelAnimationFrame(id) { frames.delete(id); },
     addEventListener(name, callback) { (windowEvents[name] ||= []).push(callback); },
     async emit(name) { for (const callback of windowEvents[name] || []) await callback(); },
   };
@@ -183,6 +188,13 @@ function studio(cookieReply = { configured: false, count: 0, message: '' }, voic
     }
     await flush();
   }
+  async function tickFrames() {
+    for (const [id, callback] of [...frames]) {
+      frames.delete(id);
+      callback();
+    }
+    await flush();
+  }
   async function start() {
     await flush();
     window.loadDroppedLocalVideo('D:/clip.mp4');
@@ -195,7 +207,7 @@ function studio(cookieReply = { configured: false, count: 0, message: '' }, voic
   const row = id => el('voice-list').querySelectorAll('.voice-row').find(item => item.dataset.voiceId === id);
   const choose = id => row(id).querySelector('.voice-choose-button').click();
   const preview = id => row(id).querySelector('.voice-preview-button').click();
-  return { el, row, choose, preview, audio, sockets, requests, replies, alerts, copied, window, document, playerSurface, flush, tickIntervals, tickTimeouts, start, saved };
+  return { el, row, choose, preview, audio, sockets, requests, replies, alerts, copied, window, document, playerSurface, flush, tickIntervals, tickTimeouts, tickFrames, frames, start, saved };
 }
 
 const voiceCatalog = {
@@ -315,7 +327,7 @@ test('row preview auditions an unselected voice, prevents duplicates and ignores
   ui.replies.set('/api/voices/preview', () => new Promise(resolve => { finish = resolve; }));
   const pending = ui.preview('vieneu:Trúc Ly'); await ui.flush();
   assert.equal(ui.row('vieneu:Trúc Ly').querySelector('.voice-preview-button').disabled, true);
-  assert.match(ui.el('voice-preview-status').textContent, /Đang tạo mẫu.*Trúc Ly/);
+  assert.match(ui.el('voice-preview-status').textContent, /Đang chuẩn bị mẫu.*Trúc Ly/);
   assert.equal(ui.el('voice-select').value, voiceCatalog.default_voice_id);
   assert.notEqual(ui.saved.get('studio.voice-id'), 'vieneu:Trúc Ly');
   await ui.preview('vieneu:Trúc Ly');
@@ -668,6 +680,269 @@ test('master mute and volume apply to translated speech and background without u
   assert.equal(dub.volume, 0.4);
   assert.ok(Math.abs(bgm.volume - 0.3 * 0.5 * 10 ** (-18 / 20)) < 0.00001);
   assert.equal(video.muted, true);
+});
+
+test('short utterances start from preloaded audio on a frame without waiting for timeupdate', async () => {
+  const ui = studio(); await ui.start();
+  ui.sockets.at(-1).receive({type:'init',duration:8,segments_count:8,segments:
+    Array.from({length:8}, (_, id) => ({id,start:id,end:id+1,duration:1,status:'READY',
+      final_vi:`Câu ${id}`,audio_url:`/short-${id}.wav`}))});
+  const video = ui.el('video-player');
+  const next = ui.audio.find(audio => audio.src === '/short-1.wav');
+  assert.equal(next.preload, 'auto');
+  assert.equal(next.loadCount, 1);
+  assert.equal(next.playCount, 0, 'preloading must never play the next line early');
+  assert.equal(ui.audio.filter(audio => audio.src?.startsWith('/short-')).length, 3);
+  await video.play();
+  const first = ui.audio.find(audio => audio.src === '/short-0.wav');
+  const requestsBeforeFrame = ui.audio.length;
+  video.currentTime = 1.008;
+  await ui.tickFrames();
+  assert.equal(first.paused, true);
+  assert.equal(next.paused, false);
+  assert.ok(Math.abs(next.currentTime - .008) < .000001, 'keep the opening, not a 250 ms timeupdate offset');
+  assert.equal(ui.audio.filter(audio => audio.src === '/short-1.wav').length, 1, 'reuse the preload');
+  assert.equal(ui.audio.length, requestsBeforeFrame + 1, 'load only the next upcoming line');
+  assert.equal(ui.audio.filter(audio => audio.src?.startsWith('/short-')).length, 3);
+  assert.equal(ui.frames.size, 1, 'only one frame loop may run');
+});
+
+test('pause cancels the frame loop and releases future preloads; resume keeps the current voice', async () => {
+  const ui = studio(); await ui.start();
+  ui.sockets.at(-1).receive({type:'segment_update',id:1,start:10,end:11,duration:1,status:'READY',
+    final_vi:'Câu kế tiếp',audio_url:'/next-voice.wav'});
+  const video = ui.el('video-player');
+  await video.play();
+  const current = ui.audio.find(audio => audio.src === '/dub.wav');
+  const future = ui.audio.find(audio => audio.src === '/next-voice.wav');
+  const obsoleteFrame = [...ui.frames.values()][0];
+  video.pause();
+  assert.equal(ui.frames.size, 0);
+  assert.equal(current.paused, true);
+  assert.equal(future.src, undefined, 'cancel preloads when playback pauses');
+  obsoleteFrame();
+  assert.equal(ui.frames.size, 0, 'a cancelled frame cannot restart playback');
+  assert.equal(current.playCount, 1);
+  await video.play();
+  assert.equal(current.playCount, 2);
+  assert.equal(ui.frames.size, 1);
+});
+
+test('cold dub decode freezes video and captions until readiness and the play promise both succeed', async () => {
+  const ui = studio(); await ui.start();
+  const video = ui.el('video-player'), dub = ui.audio.find(audio => audio.src === '/dub.wav');
+  const caption = ui.el('subtitle-text').textContent;
+  dub.readyState = 0;
+  video.currentTime = 2;
+  await video.play();
+  assert.equal(video.paused,true);
+  assert.equal(video.currentTime,2);
+  assert.equal(dub.playCount,0);
+  assert.equal(ui.frames.size,0);
+  assert.equal(ui.el('subtitle-text').textContent,caption);
+  let finish;
+  dub.play = () => { dub.playCount++; return new Promise(resolve=>{finish=()=>{dub.paused=false;resolve();};}); };
+  dub.readyState = 3;
+  await dub.emit('canplay');
+  assert.equal(video.paused,true,'decode-ready is not yet audible playback');
+  assert.equal(dub.currentTime,2);
+  finish(); await ui.flush();
+  assert.equal(video.paused,false);
+  assert.equal(dub.paused,false);
+  assert.equal(video.currentTime,2);
+  assert.equal(ui.frames.size,1);
+  assert.equal(ui.el('buffering-alert').classList.contains('hidden'),true);
+});
+
+test('dub stalls freeze the last cue and resume only after audio can play at the frozen offset', async () => {
+  const ui = studio(); await ui.start();
+  const video = ui.el('video-player'), dub = ui.audio.find(audio => audio.src === '/dub.wav');
+  await video.play();
+  video.currentTime=2; await video.emit('timeupdate');
+  const caption = ui.el('subtitle-text').textContent;
+  dub.readyState=2;
+  await dub.emit('waiting');
+  assert.equal(video.paused,true);
+  assert.equal(dub.paused,true);
+  assert.equal(ui.el('subtitle-text').textContent,caption);
+  await dub.emit('stalled');
+  await ui.tickFrames();
+  assert.equal(video.currentTime,2);
+  assert.equal(ui.frames.size,0);
+  await dub.emit('canplay');
+  assert.equal(video.paused,true,'an event alone is not proof that audio has enough data');
+  dub.readyState=3;
+  await dub.emit('canplay'); await ui.flush();
+  assert.equal(video.paused,false);
+  assert.equal(dub.currentTime,2);
+  assert.equal(dub.paused,false);
+});
+
+test('network stalled with playable buffered audio does not freeze or create a false timeout', async () => {
+  const ui = studio(); await ui.start();
+  const video=ui.el('video-player'), dub=ui.audio.find(audio=>audio.src==='/dub.wav');
+  await video.play();
+  dub.readyState=3;
+  const plays=dub.playCount;
+  await dub.emit('stalled');
+  assert.equal(video.paused,false);
+  assert.equal(dub.paused,false);
+  await ui.tickTimeouts(15000);
+  assert.equal(video.paused,false);
+  assert.equal(dub.playCount,plays);
+  assert.doesNotMatch(ui.el('buffering-text').textContent || '',/Bấm Phát để tải lại/);
+});
+
+test('cold seek beyond fitted speech resumes the silent segment tail without restarting the sentence', async () => {
+  const ui = studio(); await ui.start();
+  const video=ui.el('video-player'), dub=ui.audio.find(audio=>audio.src==='/dub.wav');
+  dub.readyState=0;
+  video.currentTime=8;
+  await video.play();
+  assert.equal(video.paused,true);
+  dub.duration=5;
+  dub.readyState=1;
+  await dub.emit('loadedmetadata'); await ui.flush();
+  assert.equal(video.paused,false);
+  assert.equal(video.currentTime,8);
+  assert.equal(dub.paused,true);
+  assert.equal(dub.playCount,0);
+  // Metadata already proves this time is silence; no decode event is required.
+  await ui.tickFrames(); await ui.tickTimeouts(15000);
+  assert.equal(video.paused,false);
+  assert.equal(dub.playCount,0);
+  // Returning to a voiced offset must still wait for playable audio.
+  video.currentTime=2;
+  await video.emit('seeking'); await video.emit('seeked');
+  assert.equal(video.paused,true);
+  dub.readyState=3; await dub.emit('canplay'); await ui.flush();
+  assert.equal(video.paused,false);
+  assert.equal(dub.playCount,1);
+  assert.equal(dub.currentTime,2);
+});
+
+test('cancelling a dub wait by pause, seek, stop or pagehide prevents late audio autoplay', async () => {
+  for (const action of ['pause','seek','stop','pagehide']) {
+    const ui = studio(); await ui.start();
+    const video = ui.el('video-player'), dub = ui.audio.find(audio=>audio.src==='/dub.wav');
+    let finish;
+    dub.play=()=>new Promise(resolve=>{finish=()=>{dub.paused=false;resolve();};});
+    await video.play();
+    assert.equal(video.paused,true,action);
+    if (action==='pause') await ui.el('player-play-toggle').click();
+    if (action==='seek') { video.currentTime=6; await video.emit('seeking'); await video.emit('seeked'); }
+    if (action==='stop') ui.sockets.at(-1).receive({type:'progress',status:'STOPPED'});
+    if (action==='pagehide') await ui.window.emit('pagehide');
+    const plays = video.playCount;
+    finish(); await dub.emit('canplay'); await ui.flush();
+    assert.equal(video.paused,true,action);
+    assert.equal(video.playCount,plays,action);
+    assert.equal(dub.paused,true,action);
+    assert.equal(ui.frames.size,0,action);
+  }
+});
+
+test('dub wait times out visibly and explicit Play obtains a new audio request', async () => {
+  const ui = studio(); await ui.start();
+  const video = ui.el('video-player'), dub = ui.audio.find(audio=>audio.src==='/dub.wav');
+  delete dub.readyState;
+  await video.play();
+  assert.equal(video.paused,true,'missing readiness must never be assumed ready');
+  await ui.tickTimeouts(15000);
+  assert.equal(video.paused,true);
+  assert.match(ui.el('buffering-text').textContent,/Bấm Phát để tải lại/);
+  assert.equal(dub.src,undefined);
+  dub.readyState=4; await dub.emit('canplay');
+  assert.equal(video.paused,true);
+  await ui.el('player-play-toggle').click(); await ui.flush();
+  const replacement=ui.audio.find(audio=>audio!==dub && audio.src==='/dub.wav');
+  assert.ok(replacement);
+  assert.equal(replacement.paused,false);
+  assert.equal(video.paused,false);
+});
+
+test('queued browser pause from buffering does not cancel already resumed audio', async () => {
+  const ui = studio(); await ui.start();
+  const video = ui.el('video-player'), dub = ui.audio.find(audio=>audio.src==='/dub.wav');
+  let queuedPause;
+  video.pause=()=>{if(!video.paused){video.paused=true;queuedPause=()=>video.emit('pause');}};
+  await video.play(); await ui.flush();
+  assert.equal(video.paused,false);
+  assert.equal(dub.paused,false);
+  await queuedPause();
+  assert.equal(video.paused,false);
+  assert.equal(dub.paused,false);
+  assert.equal(ui.frames.size,1);
+});
+
+test('a paused seek previews text without starting audio or a readiness timeout', async () => {
+  const ui = studio(); await ui.start();
+  const video = ui.el('video-player'), dub = ui.audio.find(audio=>audio.src==='/dub.wav');
+  dub.readyState=0;
+  video.currentTime=3;
+  await video.emit('seeking'); await video.emit('seeked');
+  assert.equal(video.paused,true);
+  assert.equal(dub.playCount,0);
+  await ui.tickTimeouts(15000);
+  assert.doesNotMatch(ui.el('buffering-text').textContent || '',/Bấm Phát để tải lại/);
+  dub.readyState=3; await dub.emit('canplay');
+  assert.equal(video.paused,true);
+});
+
+test('playing seek into a cold different sentence waits at the exact seek offset and ignores the previous audio', async () => {
+  const ui = studio(); await ui.start();
+  ui.sockets.at(-1).receive({type:'init',duration:12,segments_count:2,segments:[
+    {id:0,start:0,end:6,duration:6,status:'READY',audio_url:'/first.wav',final_vi:'Nhân vật một'},
+    {id:1,start:6,end:12,duration:6,status:'READY',audio_url:'/second.wav',final_vi:'Nhân vật hai'}]});
+  const video=ui.el('video-player'), first=ui.audio.find(audio=>audio.src==='/first.wav');
+  const second=ui.audio.find(audio=>audio.src==='/second.wav');
+  second.readyState=0;
+  await video.play();
+  video.currentTime=8;
+  await video.emit('seeking'); await video.emit('seeked');
+  assert.equal(video.paused,true);
+  assert.equal(second.currentTime,2);
+  assert.equal(second.playCount,0);
+  assert.equal(ui.el('subtitle-text').textContent,'Nhân vật một','the next speaker must not appear before its audio');
+  await first.emit('canplay'); await ui.flush();
+  assert.equal(video.paused,true);
+  second.readyState=3; second.seeking=true; await second.emit('canplay');
+  assert.equal(video.paused,true,'do not play while the audio seek is unfinished');
+  second.seeking=false; await second.emit('seeked'); await ui.flush();
+  assert.equal(video.paused,false);
+  assert.equal(first.paused,true);
+  assert.equal(second.paused,false);
+  assert.equal(second.currentTime,2);
+  assert.equal(ui.el('subtitle-text').textContent,'Nhân vật hai');
+});
+
+test('ending, task stop and pagehide release all dub media and do not leave a frame callback running', async () => {
+  for (const ending of ['ended', 'stop', 'pagehide']) {
+    const ui = studio(); await ui.start();
+    const video = ui.el('video-player'); await video.play();
+    const dub = ui.audio.find(audio => audio.src === '/dub.wav');
+    if (ending === 'ended') { video.ended = true; await video.emit('ended'); }
+    if (ending === 'stop') {
+      ui.sockets.at(-1).receive({type:'progress',status:'STOPPED',phase:'stopped'});
+    }
+    if (ending === 'pagehide') await ui.window.emit('pagehide');
+    assert.equal(dub.paused, true, ending);
+    assert.equal(dub.src, undefined, ending);
+    assert.equal(ui.frames.size, 0, ending);
+  }
+});
+
+test('editing an upcoming utterance discards its preloaded old revision before playback', async () => {
+  const ui = studio(); await ui.start();
+  const next = {id:1,start:10,end:11,duration:1,status:'READY',final_vi:'Câu cũ',audio_url:'/next-old.wav',revision:0};
+  ui.sockets.at(-1).receive({type:'segment_update',...next});
+  const old = ui.audio.find(audio => audio.src === next.audio_url);
+  ui.sockets.at(-1).receive({type:'segment_update',...next,final_vi:'Câu mới',audio_url:'/next-new.wav',revision:1});
+  assert.equal(old.src, undefined);
+  const video = ui.el('video-player'); await video.play();
+  video.currentTime = 10.005; await ui.tickFrames();
+  assert.equal(old.playCount, 0);
+  assert.equal(ui.audio.find(audio => audio.src === '/next-new.wav').paused, false);
 });
 
 test('timeline uses current marker after init and replays READY colors', async () => {
@@ -1899,6 +2174,19 @@ test('reconnect snapshot replaces an edited audio revision at the current paused
 });
 
 
+test('startup retry continues saved processing without a new URL request or premature playback', async () => {
+  const ui = studio(); await ui.start();
+  ui.sockets.at(-1).receive({type:'progress',status:'FAILED',phase:'failed',can_retry:true,stage:'Provider timeout'});
+  const starts = ui.requests.filter(r=>r.url.includes('/start-')).length;
+  const plays = ui.el('video-player').playCount;
+  ui.replies.set('/api/streaming/fixture/retry', {progress:{status:'RUNNING',phase:'visual',stage:'Đang tiếp tục từ phần đã lưu…',can_retry:false}});
+  await ui.el('btn-retry-worker').click();
+  assert.equal(ui.requests.filter(r=>r.url.includes('/start-')).length,starts);
+  assert.equal(ui.el('video-player').playCount,plays);
+  assert.match(ui.el('buffering-text').textContent,/tiếp tục/);
+  assert.equal(ui.el('task-progress').dataset.status,'RUNNING');
+});
+
 test('retry resumes failed speech without starting or translating the video again', async () => {
   const ui = studio(); await ui.start();
   const socket = ui.sockets.at(-1);
@@ -2546,12 +2834,36 @@ test('opening the result uses an in-app player, preserves transcript and source,
   assert.equal(ui.el('seg-vi-0').textContent, transcript);
   assert.equal(ui.requests.length, requestsBeforeOpen);
   assert.doesNotMatch(template.match(/<a id="task-result-link"[^>]*>/)[0], /target="_blank"/);
+  const saved = [];
+  ui.window.desktopBridge = {saveVideoAs:(name, callback)=>{saved.push(name);callback('D:/saved.mp4');}};
+  // Saving inside the preview must use its full MP4, even after another result arrives.
+  ui.sockets.at(-1).receive({type:'result_ready',output_video_url:'/api/outputs/newer.mp4'});
+  await ui.el('btn-save-preview-result').click();
+  assert.deepEqual(saved, ['final.mp4']);
   await ui.el('btn-close-result-preview').click();
   assert.equal(ui.el('result-preview-video').paused, true);
   assert.equal(ui.el('result-preview-video').getAttribute('src'), undefined);
   assert.equal(ui.el('result-preview-modal').classList.contains('hidden'), true);
   assert.equal(source.paused, true);
   assert.equal(ui.document.activeElement, ui.el('task-result-link'));
+});
+
+test('result preview focus wraps through the full-MP4 Save button', async () => {
+  const ui=studio(); await ui.start();
+  ui.sockets.at(-1).receive({type:'result_ready',output_video_url:'/api/outputs/final.mp4'});
+  await ui.el('task-result-link').click();
+  const modal=ui.el('result-preview-modal'), save=ui.el('btn-save-preview-result');
+  const video=ui.el('result-preview-video'), close=ui.el('btn-close-result-preview');
+  video.focus();
+  let prevented=false;
+  await modal.emit('keydown',{key:'Tab',preventDefault(){prevented=true;}});
+  assert.equal(prevented,true);
+  assert.equal(ui.document.activeElement,save);
+  await modal.emit('keydown',{key:'Tab',shiftKey:true});
+  assert.equal(ui.document.activeElement,video);
+  close.focus(); prevented=false;
+  await modal.emit('keydown',{key:'Tab',shiftKey:true,preventDefault(){prevented=true;}});
+  assert.equal(prevented,false,'native Shift+Tab from Close must be free to reach Save');
 });
 
 test('result preview surfaces playback failure and closes with Escape or pagehide', async () => {

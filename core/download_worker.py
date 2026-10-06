@@ -36,7 +36,7 @@ _MEDIA_TYPES = {"video/mp4", "application/octet-stream", "binary/octet-stream"}
 _SAFE_CAUSES = {"read_timeout", "connection_timeout", "connection_reset", "incomplete_read",
                 "connection_closed", "tls_error", "transport_error", "http_error", "range_invalid",
                 "range_ignored", "resource_changed", "content_type", "length_mismatch", "checkpoint_invalid",
-                "disk_full", "disk_error", "resolve_failed"}
+                "disk_full", "disk_error", "resolve_failed", "resume_validators_missing"}
 _SAFE_ERROR_TYPES = {"TimeoutError", "ConnectionResetError", "IncompleteRead", "RemoteDisconnected",
                      "SSLError", "TransportError", "HTTPError", "OSError", "DouyinResolveError",
                      "MediaResponseError"}
@@ -108,7 +108,7 @@ def _format_identity(chosen):
     return hashlib.sha256(json.dumps(fields, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
 
 
-def _load_checkpoint(path, partial, video_id=None, format_identity=None):
+def _load_checkpoint(path, partial, video_id=None, format_identity=None, *, truncate_tail=False):
     """Only trust our bounded, recent manifest when every saved byte still matches."""
     digest = hashlib.sha256()
     if not path.exists() or not partial.exists():
@@ -130,18 +130,28 @@ def _load_checkpoint(path, partial, video_id=None, format_identity=None):
                 or (total is not None and (type(total) is not int or total < count))
                 or not isinstance(saved_time, (int, float)) or not math.isfinite(saved_time)
                 or not -60 <= time.time() - saved_time <= CHECKPOINT_MAX_AGE
-                or partial.stat().st_size != count
+                or partial.stat().st_size < count
                 or not isinstance(checkpoint.get("sha256"), str)
                 or not re.fullmatch(r"[0-9a-f]{64}", checkpoint["sha256"])):
             return None, digest
         validators = _validators({"ETag": checkpoint.get("etag"), "Last-Modified": checkpoint.get("last_modified")})
-        if not any(validators.values()) or any(checkpoint.get(key) != value for key, value in validators.items()):
+        if any(checkpoint.get(key) != value for key, value in validators.items()):
             return None, digest
         with partial.open("rb") as handle:
-            for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            remaining = count
+            while remaining:
+                chunk = handle.read(min(1024 * 1024, remaining))
+                if not chunk:
+                    return None, hashlib.sha256()
                 digest.update(chunk)
-        if partial.stat().st_size != count or digest.hexdigest() != checkpoint["sha256"]:
+                remaining -= len(chunk)
+        if partial.stat().st_size < count or digest.hexdigest() != checkpoint["sha256"]:
             return None, hashlib.sha256()
+        # A process may stop between a media write and the next atomic
+        # checkpoint. Only the verified prefix can be appended safely.
+        if truncate_tail and partial.stat().st_size > count:
+            with partial.open("r+b") as handle:
+                handle.truncate(count)
         return checkpoint, digest
     except (ValueError, TypeError, AttributeError, UnicodeError, RecursionError):
         return None, hashlib.sha256()
@@ -153,7 +163,7 @@ def _save_checkpoint(path, partial, *, video_id, format_identity, total, downloa
     """Atomically publish metadata, never signed media URLs or browser credentials."""
     temporary = path.with_name(path.name + ".tmp")
     try:
-        if not downloaded or not any(validators.values()) or partial.stat().st_size != downloaded:
+        if not downloaded or partial.stat().st_size != downloaded:
             path.unlink(missing_ok=True)
             return False
         data = {"version": 1, "video_id": str(video_id), "format_identity": format_identity,
@@ -203,12 +213,13 @@ def download_resolved_video(info, prefix, send):
                                          checkpoint_path.with_name(checkpoint_path.name + ".tmp"))):
         raise MediaDownloadError("Đường dẫn lưu video không hợp lệ. Hãy chọn lại thư mục tải.")
     format_identity = _format_identity(chosen)
-    checkpoint, digest = _load_checkpoint(checkpoint_path, partial, info["id"], format_identity)
+    checkpoint, digest = _load_checkpoint(checkpoint_path, partial, info["id"], format_identity, truncate_tail=True)
     downloaded = checkpoint["downloaded_bytes"] if checkpoint else 0
     total = checkpoint["total_bytes"] if checkpoint else None
     validators = {key: checkpoint.get(key) if checkpoint else None for key in ("etag", "last_modified")}
     started = last_emit = time.monotonic()
     starting_bytes = downloaded
+    checkpoint_bytes, checkpoint_time = downloaded, time.monotonic()
     stage_base = "Đang tải bản gốc Douyin" if chosen.get("original") else "Đang tải video Douyin"
     if chosen.get("height"):
         stage_base += f" {chosen['height']}p"
@@ -246,8 +257,6 @@ def download_resolved_video(info, prefix, send):
         response = None
         try:
             can_resume = downloaded > 0 and any(validators.values())
-            if downloaded and not can_resume:
-                restart("Máy chủ không xác nhận được phần đã tải; đang tải lại đúng bản đã chọn từ đầu…")
             request_headers = {"Range": f"bytes={downloaded}-", "If-Range": validators["etag"] or validators["last_modified"]} if can_resume else None
             url = urls[attempt % len(urls)]
             response = open_public_media(url, headers=request_headers) if request_headers else open_public_media(url)
@@ -258,6 +267,10 @@ def download_resolved_video(info, prefix, send):
                 raise _TransferIssue("content_type", response.status)
             length = _positive_int(response.headers.get("Content-Length"))
             if response.status == 206:
+                if downloaded and not can_resume:
+                    # We requested a full response to prove the old prefix.
+                    # An unsolicited suffix cannot establish entity identity.
+                    raise _TransferIssue("range_invalid", 206)
                 match = re.fullmatch(r"bytes (\d{1,20})-(\d{1,20})/(\d{1,20})", response.headers.get("Content-Range", ""))
                 if not match:
                     raise _TransferIssue("range_invalid", 206)
@@ -274,10 +287,43 @@ def download_resolved_video(info, prefix, send):
             else:
                 if can_resume:
                     _diagnostic(send, _TransferIssue("range_ignored", 200), attempt, downloaded)
-                    restart("Máy chủ yêu cầu tải lại từ đầu; giữ nguyên chất lượng đã chọn…")
-                total, response_end = length, length
+                if downloaded and total is not None and length is not None and total != length:
+                    restart("Nguồn đã đổi kích thước; đang tải lại đúng bản đã chọn…")
+                    raise _TransferIssue("resource_changed", 200)
+                total = length if length is not None else (total if downloaded else None)
+                response_end = total
+            chunks = iter(response.iter_content(256 * 1024))
+            prefix_tail = b""
+            if downloaded and response.status == 200:
+                # With no trusted HTTP validator (or an ignored Range), prove
+                # every retained byte against this ONE response before append.
+                # The rest of the same response is the only permitted suffix.
+                # This re-reads the prefix over the network without discarding it.
+                verified, remote_digest = 0, hashlib.sha256()
+                report("Đang đối chiếu phần đã tải với máy chủ trước khi nối tiếp…", waiting=True)
+                for chunk in chunks:
+                    if not chunk:
+                        continue
+                    take = min(len(chunk), downloaded - verified)
+                    remote_digest.update(chunk[:take])
+                    verified += take
+                    if time.monotonic() - last_emit >= 0.2:
+                        report(f"Đang đối chiếu phần đã tải: {verified / 1024**2:,.1f}/{downloaded / 1024**2:,.1f} MB…", waiting=True)
+                        last_emit = time.monotonic()
+                    if verified == downloaded:
+                        prefix_tail = chunk[take:]
+                        break
+                if verified != downloaded:
+                    raise _TransferIssue("incomplete_read", response.status)
+                if remote_digest.digest() != digest.digest():
+                    restart("Nội dung nguồn đã thay đổi; đang tải lại bản đã chọn…")
+                    raise _TransferIssue("resource_changed", response.status)
+                validators = _validators(response.headers)
+                report("Đã đối chiếu đúng phần đã tải; đang tải tiếp…", waiting=True)
             if not downloaded:
                 validators = _validators(response.headers)
+                if not any(validators.values()):
+                    _diagnostic(send, _TransferIssue("resume_validators_missing", response.status), attempt, downloaded)
             try:
                 if total and shutil.disk_usage(output.parent).free < total - downloaded + 128 * 1024 * 1024:
                     raise MediaDownloadError(f"Không đủ dung lượng để tải video ({total / 1024**3:.2f} GB). Hãy giải phóng ổ đĩa rồi thử lại.", code="disk_full")
@@ -291,10 +337,12 @@ def download_resolved_video(info, prefix, send):
             # retried or described as the user's Internet disconnecting.
             try:
                 with partial.open("ab" if downloaded else "wb") as target:
-                    chunks = iter(response.iter_content(256 * 1024))
                     while True:
                         try:
-                            chunk = next(chunks)
+                            if prefix_tail:
+                                chunk, prefix_tail = prefix_tail, b""
+                            else:
+                                chunk = next(chunks)
                         except StopIteration:
                             break
                         except retry_errors as error:
@@ -310,6 +358,14 @@ def download_resolved_video(info, prefix, send):
                             raise OSError(errno.EIO, "Incomplete local write")
                         digest.update(chunk)
                         downloaded += written
+                        if (downloaded - checkpoint_bytes >= 4 * 1024 * 1024
+                                or time.monotonic() - checkpoint_time >= 1
+                                or not checkpoint_bytes):
+                            target.flush()
+                            _save_checkpoint(checkpoint_path, partial, video_id=info["id"],
+                                             format_identity=format_identity, total=total, downloaded=downloaded,
+                                             validators=validators, digest=digest)
+                            checkpoint_bytes, checkpoint_time = downloaded, time.monotonic()
                         if time.monotonic() - last_emit >= 0.2:
                             report()
                             last_emit = time.monotonic()

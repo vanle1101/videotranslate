@@ -256,50 +256,64 @@ def build_caption_layout(segments, screen_texts=None, video_size=None):
     margin_x, gap = width * .04, max(2, height * .006)
     output = []
     for index, segment in enumerate(segments or []):
+        pages = []
         for cue in speech_caption_cues(segment):
             source_lines = [" ".join(line.split()) for line in cue["text"].splitlines() if line.strip()]
             text = " ".join(source_lines)
             wrapped = "\n".join(source_lines) if 1 < len(source_lines) <= 2 else _wrap_words(text, 32)
-            lines = wrapped.split("\n")
-            longest = max(map(len, lines))
-            font = min(base_font, (width - 2 * margin_x) / max(1, longest * .62 + 1.1))
-            pad_x, pad_y = font * .55, font * .20
-            box_w = min(width - 2 * margin_x, longest * font * .62 + 2 * pad_x)
-            box_h = len(lines) * font * 1.25 + 2 * pad_y
-            active = [row for row in regions if row["start"] < cue["end"] and row["end"] > cue["start"]]
-            # Keep one stable position throughout an utterance. Sampling gaps
-            # must not turn the same line from white to yellow or make it jump.
-            target = max(active, key=lambda row: (
-                min(row["end"], cue["end"]) - max(row["start"], cue["start"]),
-                row["confidence"]), default=None)
-            for left, right in [(cue["start"], cue["end"])]:
-                placement, background, source_bbox = "bottom", "white", None
+            pages.append({**cue, "text": wrapped})
+        if not pages:
+            continue
+        # Resolve typography and placement once for the entire utterance, not
+        # once per display page. OCR sampling gaps and changing line lengths
+        # must not make a sentence jump, change font, or switch background.
+        longest = max(len(line) for page in pages for line in page["text"].split("\n"))
+        line_count = max(len(page["text"].split("\n")) for page in pages)
+        font = min(base_font, (width - 2 * margin_x) / max(1, longest * .62 + 1.1))
+        pad_x, pad_y = font * .55, font * .20
+        box_w = min(width - 2 * margin_x, longest * font * .62 + 2 * pad_x)
+        box_h = line_count * font * 1.25 + 2 * pad_y
+        utterance_start = min(page["start"] for page in pages)
+        utterance_end = max(page["end"] for page in pages)
+        active = [row for row in regions if row["start"] < utterance_end and row["end"] > utterance_start]
+        target = max(active, key=lambda row: (
+            min(row["end"], utterance_end) - max(row["start"], utterance_start),
+            row["confidence"]), default=None)
+        placement, background, source_bbox = "bottom", "white", None
+        x, y = (width - box_w) / 2, height * .90 - box_h
+        if target:
+            rx, ry, rw, rh = target["bbox"]
+            source_bbox = target["bbox"]
+            x = min(width - margin_x - box_w, max(margin_x, (rx + rw / 2) * width - box_w / 2))
+            # Clear every source box encountered during this utterance. Include
+            # the anchor even if edge clamping moved its narrow box outside x.
+            intersecting = [row["bbox"] for row in active
+                            if row is target or (row["bbox"][0] * width < x + box_w
+                            and (row["bbox"][0] + row["bbox"][2]) * width > x)]
+            lower_edge = max(box[1] + box[3] for box in intersecting)
+            upper_edge = min(box[1] for box in intersecting)
+            y = lower_edge * height + gap
+            placement, background = "below-source", "yellow"
+            # A few OCR pixels must not flip consecutive dialogue from below
+            # to above the source. Prefer a modest readable size adjustment.
+            available_height = height * .98 - y
+            if box_h > available_height >= box_h * .85:
+                scale = available_height / box_h
+                font *= scale
+                box_w *= scale
+                box_h = available_height
+                x = min(width - margin_x - box_w, max(margin_x, (rx + rw / 2) * width - box_w / 2))
+            if y + box_h > height * .98:
+                y = upper_edge * height - gap - box_h
+                placement = "above-source"
+            if y < height * .02:
                 x, y = (width - box_w) / 2, height * .90 - box_h
-                if target:
-                    rx, ry, rw, rh = target["bbox"]
-                    source_bbox = target["bbox"]
-                    x = min(width - margin_x - box_w, max(margin_x, (rx + rw / 2) * width - box_w / 2))
-                    # Another measured source line may appear lower during this
-                    # utterance. Keep one position that clears every intersecting
-                    # source box, rather than covering that later line.
-                    intersecting = [row["bbox"] for row in active
-                                    if row["bbox"][0] * width < x + box_w
-                                    and (row["bbox"][0] + row["bbox"][2]) * width > x]
-                    lower_edge = max(box[1] + box[3] for box in intersecting)
-                    upper_edge = min(box[1] for box in intersecting)
-                    y = lower_edge * height + gap
-                    placement, background = "below-source", "yellow"
-                    if y + box_h > height * .98:
-                        y = upper_edge * height - gap - box_h
-                        placement = "above-source"
-                    if y < height * .02:
-                        # Pathologically crowded source: never cover its pixels.
-                        x, y = (width - box_w) / 2, height * .90 - box_h
-                        placement, background, source_bbox = "bottom", "white", None
-                output.append({"segment_id": segment.get("id", index), "start": left, "end": right,
-                               "text": wrapped, "placement": placement,
-                               "bbox": [x / width, y / height, box_w / width, box_h / height],
-                               "source_bbox": source_bbox, "font_size": round(font, 3),
-                               "video_size": [width, height],
-                               "background": background, "color": "black", "border_radius": round(font * .18, 3)})
+                placement, background, source_bbox = "bottom", "white", None
+        for cue in pages:
+            output.append({"segment_id": segment.get("id", index), "start": cue["start"], "end": cue["end"],
+                           "text": cue["text"], "placement": placement,
+                           "bbox": [x / width, y / height, box_w / width, box_h / height],
+                           "source_bbox": source_bbox, "font_size": round(font, 3),
+                           "video_size": [width, height],
+                           "background": background, "color": "black", "border_radius": round(font * .18, 3)})
     return {"video_size": [width, height], "cues": output}

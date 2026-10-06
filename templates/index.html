@@ -83,16 +83,16 @@
           <button id="btn-start" class="studio-start-button"><i class="fa-solid fa-play" aria-hidden="true"></i>Bắt đầu dịch</button>
           <div class="worker-actions">
             <button id="btn-review-worker" class="hidden"><i class="fa-solid fa-check-double" aria-hidden="true"></i> AI kiểm tra lại</button>
-            <button id="btn-retry-worker" class="hidden"><i class="fa-solid fa-rotate-right" aria-hidden="true"></i> Thử lại câu lỗi</button>
+            <button id="btn-retry-worker" class="hidden"><i class="fa-solid fa-rotate-right" aria-hidden="true"></i> Tiếp tục tác vụ</button>
             <button id="btn-pause-worker" class="hidden"><i class="fa-solid fa-pause" aria-hidden="true"></i> Tạm dừng</button>
             <button id="btn-resume-worker" class="hidden"><i class="fa-solid fa-play" aria-hidden="true"></i> Tiếp tục</button>
             <button id="btn-stop-worker" class="hidden"><i class="fa-solid fa-stop" aria-hidden="true"></i> Dừng hẳn</button>
           </div>
           <button id="btn-export-hq" disabled title="Hoàn tất các câu dịch trước khi xuất video" class="studio-export-button"><i class="fa-solid fa-arrow-up-from-bracket" aria-hidden="true"></i>Xuất video MP4</button>
+          <button id="btn-save-result" class="studio-export-button" disabled title="Có thể lưu sau khi xuất xong toàn bộ video">Tải video đầy đủ đã dịch</button>
           <div id="task-result" class="hidden" role="status">
             <p id="task-result-status" class="task-progress-detail"></p>
-            <a id="task-result-link" class="studio-export-button hidden">Mở video kết quả</a>
-            <button id="btn-save-result" class="studio-export-button hidden">Lưu video kết quả</button>
+            <a id="task-result-link" class="studio-export-button hidden">Xem trước kết quả</a>
           </div>
           <div class="buffer-setting"><label for="buffer-select">Đệm trước khi phát</label><select id="buffer-select"><option value="5">5 giây (Nhanh nhất)</option><option value="10" selected>10 giây (Khuyên dùng)</option><option value="15">15 giây (Ổn định)</option><option value="30">30 giây (An toàn)</option></select></div>
         </section>
@@ -541,7 +541,8 @@
   <div id="result-preview-modal" role="dialog" aria-modal="true" aria-labelledby="result-preview-title" class="fixed inset-0 bg-black/85 z-50 flex items-center justify-center p-4 hidden">
     <div class="bg-[#161922] border border-gray-800 rounded-2xl max-w-4xl w-full p-4 space-y-3 shadow-2xl">
       <div class="flex items-center justify-between gap-3">
-        <h3 id="result-preview-title" class="text-sm font-bold text-white">Video kết quả</h3>
+        <h3 id="result-preview-title" class="text-sm font-bold text-white">Xem trước kết quả</h3>
+        <button id="btn-save-preview-result" class="text-xs text-pink-200 px-3 py-1.5 rounded-lg border border-pink-700">Tải video đầy đủ đã dịch</button>
         <button id="btn-close-result-preview" class="text-xs text-gray-300 px-3 py-1.5 rounded-lg border border-gray-700">Đóng</button>
       </div>
       <video id="result-preview-video" controls playsinline preload="metadata" class="w-full bg-black rounded-lg" style="max-height: 75vh;"></video>

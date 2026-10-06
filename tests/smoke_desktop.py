@@ -625,7 +625,9 @@ def check_voice_catalog_and_preview(page, folder):
                 sample.writeframes(frames)
             return output
 
-        with patch('core.voice_preview.VieNeuEngine.synthesize', side_effect=synthesize_fixture):
+        with tempfile.TemporaryDirectory(prefix='voice-preview-smoke-') as voice_cache, \
+                patch('core.voice_preview.voice_preview_manager.cache_dir', Path(voice_cache)), \
+                patch('core.voice_preview.VieNeuEngine.synthesize', side_effect=synthesize_fixture):
             javascript(page, '''
                 document.getElementById('voice-preview-audio').muted = true;
                 window.__voiceSmokeRow('vieneu:Trúc Ly').querySelector('.voice-preview-button').click();
