@@ -6,7 +6,7 @@ Date: 2026-10-06, Asia/Saigon. **Overall verdict: FAIL / audit still in progress
 
 The user confirmed **Douyin2TikTok AI Studio**, specifically its download failure, in this repository. Seedream, Seedance, image-generation nodes, graph fan-in/fan-out and remote image uploads are **not applicable** to this application. The separate AI Video Workflow Studio was not modified.
 
-Baseline commit: `dc9b567756d2b441427f41bdb08d436c09d112d4`. Runtime fixes below are uncommitted audit work at the time of testing. No UI redesign or new provider was added. Offline regression results are kept separate from actual desktop/provider runs. PASS is bounded to the exact scenario tested.
+Baseline commit: `dc9b567756d2b441427f41bdb08d436c09d112d4`. Runtime fixes were tested in the working tree and recorded in commit eb8cddf (later report-only corrections may follow). No UI redesign or new provider was added. Offline regression results are kept separate from actual desktop/provider runs. PASS is bounded to the exact scenario tested.
 
 ## Original failure and root cause
 
@@ -31,7 +31,7 @@ UI task `42b996fd`, downloader `9db952f3`, started20:32:11. At20:44:39 the real 
 
 ### Fresh translated output and Stop regression
 
-`c06917ab` completed real ASR/OCR/OpenCode translation/review/Edge-TTS/export:14checked,12verified,2unresolved. `workspace/outputs/douyin_translated_c06917ab_hq.mp4` is11,968,957bytes, H264/AAC1920x1080,15.016667s; full audio/video FFmpeg decode passed. Segment10's rejected filler is now empty with no audio; segment8 remains uncertain. **PASS execution/media, FAIL semantic acceptance**. The first result-modal retest failed in Qt with “Unable to play media”; existing WebM conversion is now wired into the result player, awaiting live retest.
+`c06917ab` completed real ASR/OCR/OpenCode translation/review/Edge-TTS/export:14checked,12verified,2unresolved. `workspace/outputs/douyin_translated_c06917ab_hq.mp4` is11,968,957bytes, H264/AAC1920x1080,15.016667s; full audio/video FFmpeg decode passed. Segment10's rejected filler is now empty with no audio; segment8 remains uncertain. **PASS execution/media, FAIL semantic acceptance**. The first result-modal retest failed in Qt with “Unable to play media”; existing WebM conversion is now wired into the result player and passed the later live retest documented below.
 
 Stopping long-source ASR exposed another real failure: `session.stop()` removed the active task before the native thread drained, so the UI reported no task while Whisper continued. User exit21:11:09 timed out; old backend finally ended21:25:24. Fixes add CANCELLING history before removal, cancellation checks at ASR segment boundaries, actual recognized-seconds progress, and propagation of a completed executor's CancelledError rather than endlessly re-awaiting it. Native model loading or an individual decoded segment cannot stop instantaneously. Offline regression passed; live native Stop retest pending.
 
@@ -43,7 +43,7 @@ Actual UI **Mở video kết quả** first triggered automatic compatible-previe
 
 | Test and exact steps | Expected | Actual / verdict | Fix and retest |
 | --- | --- | --- | --- |
-| Original download: inspect failed task, UI retry same source, then Dừng hẳn | Real byte progress and stop without false success | Task `b62d21ca`, 19:35:15-19:35:49, reached1.4%, STOPPED, partial removed, controls restored. **PASS cancellation; original full transfer NOT VERIFIED** | Recovery changes covered by transport regression tests; complete 3.21GB UI transfer remains untested |
+| Original download: inspect failed task, UI retry same source, then Dừng hẳn | Real byte progress and stop without false success | Task `b62d21ca`, 19:35:15-19:35:49, reached1.4%, STOPPED, partial removed, controls restored. **PASS cancellation; original full transfer NOT VERIFIED** | Recovery changes covered by transport regression tests; full 3.21GB retest subsequently passed; see above |
 | Native file picker -> select `workspace/inputs/douyin-preview-7688769264395767049.mp4` -> Bắt đầu dịch with AI review, OpenCode Muse and Hoài My -> await auto export | Real ASR/OCR, provider translation/review, TTS, playable MP4 | Task `f8500b88` started19:37:53;14segments;10verified/2corrected/2unresolved. Real12MB MP4 H2641920x1080+AAC,15.016667s; full FFmpeg decode passed; preview reached15s. **PASS execution/media; FAIL final semantic quality** | One unresolved line spoke diagnostic 'nghe chưa rõ'. Placeholder guard and stale-audio removal added; clean-run retest pending below. Baseline used already-loaded modules; not proof of final code |
 | Click Mở video kết quả in desktop after export | Play saved MP4 | No new playback/window: **FAIL reproduced** | `target=_blank` had no Qt createWindow handler. Link now uses in-app result player; actual retest pending |
 | Tray -> Thoát hoàn toàn -> normal launcher/runtime check -> reopen -> inspect tasks and select same file | Preserve saved task/transcript and allow rerun | User exited20:10:41; log confirms clean shutdown20:10:42. Normal runtime check/desktop_app launch20:11:47; UI ready20:11:57 on49891. Settings retained, MP4 retained, **task history empty**. **FAIL session persistence** | Settings persistence works; task/session restoration remains unimplemented. Do not equate tray hiding with restart persistence |
@@ -57,7 +57,7 @@ The restart command was initially rejected by automatic approval review. The use
 
 | Root cause | Files changed | Correction | Retest scope |
 | --- | --- | --- | --- |
-| Media interruption loses partial and cause | `core/douyin_resolver.py`, `core/download_worker.py`, `core/downloader.py` | Separate30s media read timeout; bounded retries; validate Range/If-Range/Content-Range/identity; restart when validators unsafe; verify total size/media; guarded checkpoint; cancellation cleanup; safe typed diagnostics | Real bounded CDN check, real UI cancellation, offline interrupted transport/status/resume cases; full original transfer still unverified |
+| Media interruption loses partial and cause | `core/douyin_resolver.py`, `core/download_worker.py`, `core/downloader.py` | Separate30s media read timeout; bounded retries; validate Range/If-Range/Content-Range/identity; restart when validators unsafe; verify total size/media; guarded checkpoint; cancellation cleanup; safe typed diagnostics | Real bounded CDN check, real UI cancellation, offline interrupted transport/status/resume cases; full original transfer/recovery subsequently passed; validator-based resume remains unverified |
 | Resume resolver fallback could append another rendition | worker/downloader | Refuse fallback over retained original partial; preserve retry candidate without claiming it was validated; propagate status/type/bytes | Regression suite; production interruption across fresh process not yet verified |
 | Failed second review could appear complete | `core/translation_review.py`, `core/streaming/pipeline.py`, `main.py`, frontend | Review failure/incomplete stays visible, blocks final export, permits retry | Offline provider-failure and state tests; actual provider failure injection not run |
 | Diagnostic fillers reached spoken text | `core/video_intelligence.py`, review/pipeline/frontend | Reject spoken diagnostic filler; keep source and unresolved reason; remove stale TTS/cues when review clears text; empty final text cannot revive discarded draft; literal hearing-related dialogue remains allowed | Source frame/OCR verified;122review/video-intelligence tests and73transcript tests; fresh real run pending |
@@ -95,7 +95,7 @@ Earlier failures were stale exporter fixtures omitting required audio/duration m
 
 - Full source download `42b996fd` completed after safe restart, and latest Qt result playback passed. Native ASR cancellation still needs retesting with the latest executor fix.
 - Full restart loses editable task/transcript runtime state, although settings and exported media persist.
-- Baseline source contains unresolved speech; a valid playable MP4 does not prove correct translation. Fresh result must be assessed below.
+- Baseline source contains unresolved speech; a valid playable MP4 does not prove correct translation. Latest requested-source excerpt has eight verified sentences; earlier source remains unresolved as documented above.
 - Actual UI drag/drop, crash-resume, reconnect/stale-event races, invalid key/model,429/5xx, deleted-source and network fault injection have not all been performed. SenseVoice was used as reviewer evidence in the baseline sidecar, but a primary SenseVoice-ASR run was not performed. Offline coverage is not a manual QA pass.
 - Cache-off/on/force-rerun acceptance was not performed as a separate matrix; fresh session IDs rerun ASR/OCR/provider, while compatible media preview may reuse a local cache.
 - No full audit success is claimed while these runtime cases remain failing/unverified.
@@ -105,4 +105,3 @@ Earlier failures were stale exporter fixtures omitting required audio/duration m
 The current15s result `142bb90d` is retained with its review sidecar; original source and user media remain unchanged. User was asked to exit via the tray so the latest executor-cancellation fix can load; that live Stop retest is pending. No test server or watcher is intentionally left running; the normal Studio application remains open for the user.
 
 Automatic policy review rejected cleanup of the superseded task-generated `f8500b88` MP4/sidecar and task-created pytest temporary directories220–222, returning only “blocked by policy”. The cleanup command did not execute; those files remain. No alternative deletion route was attempted. No backup repository or dependency reinstall was created.
-
