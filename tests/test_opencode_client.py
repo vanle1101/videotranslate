@@ -16,6 +16,8 @@ def isolated(monkeypatch, tmp_path):
     monkeypatch.delenv("OPENCODE_API_KEY", raising=False)
     monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path / "existing-data"))
     monkeypatch.setattr(oc, "find_opencode_executable", lambda: "opencode.exe")
+    monkeypatch.setattr(oc, "_managed_configuration_present", lambda: False)
+    monkeypatch.setattr(oc, "_blocked_shell", lambda root: str(root / "translation-shell.exe"))
     return tmp_path
 
 
@@ -81,6 +83,10 @@ def test_translation_is_isolated_secret_safe_and_shell_free(isolated, monkeypatc
     monkeypatch.setenv("OPENCODE_CONFIG", "user-config.json")
     monkeypatch.setenv("OPENCODE_PERMISSION", '{"*":"allow"}')
     monkeypatch.setenv("GEMINI_API_KEY", "unrelated-key")
+    monkeypatch.setenv("HF_TOKEN", "unrelated-hf")
+    monkeypatch.setenv("AWS_ACCESS_KEY_ID", "unrelated-cloud")
+    monkeypatch.setenv("NODE_OPTIONS", "--require unsafe.js")
+    monkeypatch.setenv("BUN_OPTIONS", "--preload unsafe.js")
     process = make_process()
     start = Mock(return_value=process)
     monkeypatch.setattr(oc.subprocess, "Popen", start)
@@ -94,39 +100,73 @@ def test_translation_is_isolated_secret_safe_and_shell_free(isolated, monkeypatc
     assert "fixture-key" not in argv
     assert "--pure" in argv
     assert argv[argv.index("--model") + 1] == "opencode/big-pickle"
+    assert argv[argv.index("--agent") + 1] == "plan"
+    assert not any(flag in argv for flag in ("--auto", "--yolo", "--dangerously-skip-permissions"))
     assert not Path(options["cwd"]).exists()
     env = options["env"]
     assert env["OPENCODE_API_KEY"] == "fixture-key"
     assert "OPENCODE_CONFIG" not in env
     assert "OPENCODE_PERMISSION" not in env
     assert "GEMINI_API_KEY" not in env
+    assert not any(name in env for name in ("HF_TOKEN", "AWS_ACCESS_KEY_ID", "NODE_OPTIONS", "BUN_OPTIONS"))
     assert env["OPENCODE_DISABLE_PROJECT_CONFIG"] == "true"
     assert env["OPENCODE_TEST_HOME"] != str(Path.home())
     cfg = json.loads(env["OPENCODE_CONFIG_CONTENT"])
     assert cfg["model"] == cfg["small_model"] == "opencode/big-pickle"
     assert cfg["enabled_providers"] == ["opencode"]
-    assert cfg["permission"] == {"*": "deny"}
+    assert cfg["permission"] == {"*": "ask"}
+    assert cfg["shell"] == str(Path(options["cwd"]).parent / "translation-shell.exe")
     assert cfg["share"] == "disabled"
     assert cfg["snapshot"] is False
     assert cfg["autoupdate"] is False
-    assert cfg["agent"]["video-translator"]["tools"] == {"*": False}
+    assert cfg["agent"]["plan"]["permission"] == {"*": "ask"}
+    assert "prompt" not in cfg["agent"]["plan"]
+    assert "tools" not in cfg and "tools" not in cfg["agent"]["plan"]
     assert "fixture-key" not in env["OPENCODE_CONFIG_CONTENT"]
     assert "provider" not in cfg  # Native provider supplies first-party auth behavior.
     sent = json.loads(process.communicate.call_args.args[0])
-    assert sent == {"instructions": "Translate to Vietnamese", "input": prompt}
+    assert sent["input"] == prompt and sent["instructions"].startswith("Translate to Vietnamese")
+    assert "Do not use tools" in sent["instructions"]
     assert process.communicate.call_args.kwargs["timeout"] == 20
 
 
 def test_stdout_events_are_parsed_without_reasoning_or_tool_output(isolated, monkeypatch):
     events = [
         {"type": "reasoning", "part": {"text": "private reasoning"}},
-        {"type": "tool_use", "part": {"text": "not answer"}},
         {"type": "text", "part": {"text": "Xin "}},
         {"type": "text", "part": {"text": "chào"}},
     ]
     process = make_process("notice\n" + "\n".join(map(json.dumps, events)))
     monkeypatch.setattr(oc.subprocess, "Popen", Mock(return_value=process))
     assert oc.OpenCodeZenClient(api_key="fixture-key").translate("hello") == "Xin chào"
+
+
+def test_tool_request_never_returns_tool_output_as_translation(isolated, monkeypatch):
+    events = [
+        {"type": "tool_use", "part": {"state": {"status": "error"}, "text": "private result"}},
+        {"type": "text", "part": {"text": "not a valid translation"}},
+    ]
+    monkeypatch.setattr(oc.subprocess, "Popen", Mock(return_value=make_process("\n".join(map(json.dumps, events)))))
+    with pytest.raises(oc.OpenCodeRequestError, match="công cụ") as caught:
+        oc.OpenCodeZenClient(api_key="fixture-key").translate("hello")
+    assert "private result" not in str(caught.value)
+
+
+def test_managed_config_fails_closed_without_reading_or_overriding_it(isolated, monkeypatch):
+    monkeypatch.setattr(oc, "_managed_configuration_present", lambda: True)
+    start = Mock()
+    monkeypatch.setattr(oc.subprocess, "Popen", start)
+    with pytest.raises(oc.OpenCodeConfigurationError, match="hệ thống quản lý"):
+        oc.OpenCodeZenClient(api_key="fixture-key").translate("hello")
+    start.assert_not_called()
+
+
+def test_completed_tool_event_does_not_falsely_claim_execution_was_blocked(isolated, monkeypatch):
+    event = {"type": "tool_use", "part": {"state": {"status": "completed"}}}
+    monkeypatch.setattr(oc.subprocess, "Popen", Mock(return_value=make_process(json.dumps(event))))
+    with pytest.raises(oc.OpenCodeRequestError, match="không chấp nhận") as caught:
+        oc.OpenCodeZenClient(api_key="fixture-key").translate("hello")
+    assert "đã bị từ chối" not in str(caught.value)
 
 
 def test_native_free_tier_error_is_clear_and_redacted(isolated, monkeypatch):
@@ -169,3 +209,129 @@ def test_free_list_excludes_paid_models_and_non_chat_classifier():
     assert "gpt-5" not in oc.OpenCodeZenClient.free_models()
     assert "jev-1.13-free" not in oc.OpenCodeZenClient.free_models()
     assert set(oc.OpenCodeZenClient.free_models()) == oc.FREE_CHAT_MODELS
+
+
+@pytest.fixture
+def windows_shell(monkeypatch, tmp_path):
+    windows = tmp_path / "Windows"
+    compiler = windows / "Microsoft.NET" / "Framework64" / "v4.0.30319" / "csc.exe"
+    compiler.parent.mkdir(parents=True)
+    compiler.touch()
+    root = tmp_path / "request"
+    root.mkdir()
+    monkeypatch.setattr(oc.sys, "platform", "win32")
+    monkeypatch.setenv("WINDIR", str(windows))
+    return root, compiler
+
+
+def test_windows_shell_compiles_only_noop_in_request_and_probes_it(windows_shell, monkeypatch):
+    root, compiler = windows_shell
+    executable = root / "translation-shell.exe"
+
+    def run(argv, **options):
+        assert options["shell"] is False
+        assert options["stdin"] == options["stdout"] == options["stderr"] == subprocess.DEVNULL
+        assert options["creationflags"] == getattr(subprocess, "CREATE_NO_WINDOW", 0)
+        if argv[0] == str(compiler):
+            assert argv == [str(compiler), "/nologo", "/noconfig", "/target:exe",
+                            f"/out:{executable}", str(root / "translation-shell.cs")]
+            assert options["timeout"] == 15
+            assert options["cwd"] == str(root)
+            assert (root / "translation-shell.cs").read_text() == (
+                "internal static class TranslationShell { private static int Main() { return 1; } }")
+            executable.write_bytes(b"MZ")
+            return subprocess.CompletedProcess(argv, 0)
+        assert argv == [str(executable)]
+        assert options["timeout"] == 5
+        return subprocess.CompletedProcess(argv, 1)
+
+    execute = Mock(side_effect=run)
+    monkeypatch.setattr(oc.subprocess, "run", execute)
+    assert oc._blocked_shell(root) == str(executable)
+    assert execute.call_count == 2
+
+
+def test_windows_shell_uses_framework_fallback(windows_shell, monkeypatch):
+    root, compiler = windows_shell
+    compiler.unlink()
+    fallback = compiler.parents[2] / "Framework" / "v4.0.30319" / "csc.exe"
+    fallback.parent.mkdir(parents=True)
+    fallback.touch()
+
+    def run(argv, **options):
+        if argv[0] == str(fallback):
+            (root / "translation-shell.exe").write_bytes(b"MZ")
+            return subprocess.CompletedProcess(argv, 0)
+        return subprocess.CompletedProcess(argv, 1)
+
+    execute = Mock(side_effect=run)
+    monkeypatch.setattr(oc.subprocess, "run", execute)
+    assert oc._blocked_shell(root) == str(root / "translation-shell.exe")
+    assert execute.call_args_list[0].args[0][0] == str(fallback)
+
+
+def test_windows_shell_missing_compiler_fails_before_starting_process(windows_shell, monkeypatch):
+    root, compiler = windows_shell
+    compiler.unlink()
+    execute = Mock()
+    monkeypatch.setattr(oc.subprocess, "run", execute)
+    with pytest.raises(oc.OpenCodeConfigurationError, match="bộ chặn lệnh"):
+        oc._blocked_shell(root)
+    execute.assert_not_called()
+
+
+@pytest.mark.parametrize("failure", ["compile_exit", "compile_timeout", "missing_exe", "probe_exit", "probe_oserror"])
+def test_windows_shell_build_or_probe_failure_is_closed_and_sanitized(windows_shell, monkeypatch, failure):
+    root, compiler = windows_shell
+
+    def run(argv, **options):
+        if argv[0] == str(compiler):
+            if failure == "compile_timeout":
+                raise subprocess.TimeoutExpired("private-compiler", 15, output="private-output")
+            if failure != "missing_exe":
+                (root / "translation-shell.exe").write_bytes(b"MZ")
+            return subprocess.CompletedProcess(argv, 7 if failure == "compile_exit" else 0)
+        if failure == "probe_oserror":
+            raise OSError("private-path")
+        return subprocess.CompletedProcess(argv, 0)
+
+    execute = Mock(side_effect=run)
+    monkeypatch.setattr(oc.subprocess, "run", execute)
+    with pytest.raises(oc.OpenCodeConfigurationError, match="bộ chặn lệnh") as caught:
+        oc._blocked_shell(root)
+    assert "private" not in str(caught.value)
+    assert execute.call_count == (2 if failure.startswith("probe") else 1)
+
+
+@pytest.mark.parametrize("candidate", ["/usr/bin/false", "/bin/false", None])
+def test_nonwindows_shell_uses_only_existing_false_binary(tmp_path, monkeypatch, candidate):
+    monkeypatch.setattr(oc.sys, "platform", "linux")
+    monkeypatch.setattr(Path, "is_file", lambda path: str(path).replace("\\", "/") == candidate)
+    execute = Mock(return_value=subprocess.CompletedProcess([], 1))
+    monkeypatch.setattr(oc.subprocess, "run", execute)
+    if candidate is None:
+        with pytest.raises(oc.OpenCodeConfigurationError, match="bộ chặn lệnh"):
+            oc._blocked_shell(tmp_path)
+        execute.assert_not_called()
+    else:
+        assert oc._blocked_shell(tmp_path).replace("\\", "/") == candidate
+        assert execute.call_args.args[0] == [str(Path(candidate))]
+        assert execute.call_args.kwargs["shell"] is False
+        assert execute.call_args.kwargs["timeout"] == 5
+
+
+def test_guard_failure_prevents_cli_launch_and_cleans_request(isolated, monkeypatch):
+    seen = []
+
+    def fail(root):
+        seen.append(root)
+        (root / "translation-shell.cs").write_text("temporary")
+        raise oc.OpenCodeConfigurationError("bộ chặn lệnh")
+
+    start = Mock()
+    monkeypatch.setattr(oc, "_blocked_shell", fail)
+    monkeypatch.setattr(oc.subprocess, "Popen", start)
+    with pytest.raises(oc.OpenCodeConfigurationError, match="bộ chặn lệnh"):
+        oc.OpenCodeZenClient(api_key="fixture-key").translate("hello")
+    start.assert_not_called()
+    assert len(seen) == 1 and not seen[0].exists()

@@ -4,9 +4,13 @@
 
 Theo lựa chọn của người dùng, Studio dùng `LLM_PROVIDER=opencode` và `OPENCODE_MODEL=muse-spark-1.3-contributor-free`. Danh mục chính thức `opencode models opencode --verbose` trên máy liệt kê Muse Spark 1.3 Free active, giá input/output 0. Đã nối provider này vào luồng ASR + OCR, giữ provenance đúng và ngăn tự gọi OpenRouter khi OpenCode thất bại. Muse qua Chrome là lựa chọn khác, không cần dùng cho luồng này.
 
-Ba lần kiểm tra thật bằng CLI 1.18.30 (adapter text-only, agent mặc định, đăng nhập OpenCode đã lưu) đều trả `FreeTierError`; chưa có câu dịch thành công qua Muse trên máy để xác nhận chất lượng. Không tạo video mới từ kết quả lỗi. Studio đã mở lại và API cấu hình xác nhận đúng provider/model, nhận được đăng nhập và CLI. Không thay cấu hình OpenCode toàn máy hoặc dùng model trả phí.
+Kiểm tra tiếp bằng CLI chính thức 1.18.30 với agent `plan` có sẵn đã trả bản dịch thành công. Luồng sửa nguồn ASR/OCR → dịch → kiểm tra nghĩa sau đó hoàn tất hai câu trong **51,16 giây**: thả tim giúp tăng đề xuất; bình luận thu hút người xem tài khoản. Kết quả vẫn giữ `needs_review`, không tự coi hai câu là đã được duyệt. Đây là kiểm tra dịch văn bản có dẫn chứng ASR/OCR, không phải Muse trực tiếp xem/nghe video và chưa phải kiểm chứng một video hoàn chỉnh.
 
-214 bài Python, 28 subtest, 83 bài JavaScript và Qt desktop smoke đạt; một bài symlink bỏ qua theo quyền Windows. Test mới kiểm tra URL/file/upload qua OpenCode, sửa nguồn/dịch/kiểm tra bằng đúng model, metadata/tên provider, từ chối bản Muse trả phí và giữ nguyên provider khi lỗi. Kiểm thử giả lập xác nhận đường nối ứng dụng; chúng không thay thế lần gọi dịch vụ thật đang bị từ chối.
+Các lần thử trước với cấu hình cầu nối khác trả `FreeTierError`; kết luận trước đó rằng chưa dịch được bằng Muse trên máy đã được thay thế bởi kết quả thành công trên. Không tạo video mới trong lượt kiểm tra Muse này. Cầu nối chạy `plan` trong phiên riêng, tách cấu hình và dữ liệu phiên, có kiểm soát quyền công cụ và shell native tạm chỉ trả lỗi; không cam kết sandbox hệ điều hành. Không thay cấu hình OpenCode toàn máy hoặc dùng model trả phí.
+
+Cấu hình cuối đạt **105 bài Python, 13 subtest** thuộc bốn nhóm OpenCode client/translation/API và free visual translation. Bộ chặn shell native 3.584 byte được biên dịch và thử trực tiếp: trả lỗi, không tạo tệp được yêu cầu qua tham số lệnh; thư mục tạm được dọn sau thử. Studio đã mở lại, API xác nhận đúng provider/model và `/api/test-opencode` trả `ok: true` sau 30.063 ms. Không thay giao diện trong lượt này, không chạy lại Qt smoke; kiểm tra trực tiếp ở đây xác nhận cửa sổ ứng dụng và kết nối dịch vụ.
+
+Thư mục tạm của các lượt OpenCode và thử bộ chặn đã tự dọn. Lệnh xóa hai thư mục pytest của lượt kiểm tra cuối (`pytest-173`, `pytest-174` trong Windows Temp) bị bộ duyệt tự động từ chối với `blocked by policy`; hai thư mục này còn tại máy, không được đưa lên Git.
 
 ## Lượt mới nhất: phụ đề theo lượt thoại và vị trí chữ nguồn
 

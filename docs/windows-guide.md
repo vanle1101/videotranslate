@@ -33,9 +33,9 @@ Gemini là lựa chọn tùy chọn. Model `gemini-2.5-flash` đã dịch đư�
 
 Chọn **OpenCode Zen · Muse Spark Free** và model `muse-spark-1.3-contributor-free`. Danh mục CLI ngày 06/10/2026 ghi tên **Muse Spark 1.3 Free**, trạng thái active, giá input/output bằng 0. Bản `muse-spark-1.3` không nằm trong danh sách miễn phí được Studio cho phép. Luồng ASR + OCR và luồng chỉ dịch tiếng nói đều dùng model đã chọn; UI ghi đúng OpenCode.
 
-Studio dùng [CLI chính thức](https://opencode.ai/docs/cli/#run), key `opencode` đã lưu hoặc `OPENCODE_API_KEY`, phiên riêng không chạy công cụ. Muse trong OpenCode độc lập với tùy chọn Muse qua Chrome bên dưới. Hiện Studio gửi văn bản ASR/OCR để dịch, không nhận đó là Muse đã trực tiếp xem video.
+Studio dùng [CLI chính thức](https://opencode.ai/docs/cli/#run), agent `plan` có sẵn và key `opencode` đã lưu hoặc `OPENCODE_API_KEY`. Mỗi lượt dịch chạy trong phiên riêng, tách cấu hình và dữ liệu phiên khỏi OpenCode đang mở, có kiểm soát quyền công cụ và gắn một shell native tạm chỉ trả lỗi để chặn lệnh ngoài luồng dịch. Đây không phải sandbox hệ điều hành. Muse trong OpenCode độc lập với tùy chọn Muse qua Chrome bên dưới. Studio gửi văn bản ASR/OCR để dịch, không nhận đó là Muse đã trực tiếp xem video.
 
-Kiểm tra thật ngày 06/10/2026: CLI 1.18.30 trả **FreeTierError** cho model Muse miễn phí qua adapter, agent mặc định và đăng nhập OpenCode đã lưu. Chưa xác nhận dịch thành công bằng model này trên máy. Studio giữ nguyên OpenCode khi gặp lỗi; cần dịch vụ chấp nhận lượt gọi trước khi có thể xuất một bản dịch mới. Không tự đổi sang OpenRouter hoặc model trả phí.
+Kiểm tra thật ngày 06/10/2026 đã dịch thành công bằng Muse Spark 1.3 Free qua CLI 1.18.30 với agent `plan`. Luồng sửa nguồn ASR/OCR → dịch → kiểm tra nghĩa hoàn tất hai câu trong 51,16 giây: thả tim giúp tăng đề xuất; bình luận thu hút người xem tài khoản. Hai câu vẫn giữ trạng thái **Cần kiểm tra**, chưa tạo video mới từ lượt này. Các lần gọi trước bị **FreeTierError** với cấu hình cầu nối khác không chứng minh Muse hoặc phiên OpenCode của người dùng không hoạt động. Studio giữ nguyên provider khi lỗi, không tự đổi sang OpenRouter hoặc model trả phí; hạn mức và khả dụng vẫn do dịch vụ quyết định.
 
 ## OpenRouter Free (lựa chọn riêng)
 
