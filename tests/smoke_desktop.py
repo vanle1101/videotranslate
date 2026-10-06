@@ -252,7 +252,11 @@ def check_original_segment_playback(page):
                 label: button?.textContent,
                 tracks: window.__auditionTracks.map(audio => ({time: audio.currentTime,
                     paused: audio.paused, ready: audio.readyState, error: audio.error?.message})),
-                review: document.getElementById('seg-row-1')?.dataset.needsReview};
+                review: document.getElementById('seg-row-1')?.dataset.needsReview,
+                draftReview: document.getElementById('seg-row-0')?.dataset.needsReview,
+                draftBadge: document.getElementById('seg-badge-0')?.textContent,
+                caption: document.getElementById('subtitle-text').textContent,
+                exportDisabled: document.getElementById('btn-export-hq').disabled};
         })())'''))
 
     try:
@@ -270,7 +274,11 @@ def check_original_segment_playback(page):
                 segments_count: 2, bgm_url: window.__auditionSource,
                 segments: [
                     {id: 0, start: 0, end: 2.8, duration: 2.8, status: 'READY',
-                        final_vi: 'Câu đã tạo giọng.', audio_url: window.__auditionSource},
+                        needs_review: true, review_reason: 'Bản nháp cần nghe lại.',
+                        final_vi: 'Câu đã tạo giọng.', audio_url: window.__auditionSource,
+                        caption_layout: {video_size: [180, 320], cues: [{start: 0, end: 2.8,
+                            text: 'Câu đã tạo giọng.', bbox: [.1,.7,.8,.1], font_size: 10,
+                            video_size: [180,320], background: 'yellow', border_radius: 2}]}},
                     {id: 1, start: 3, end: 4.4, duration: 1.4, status: 'NEEDS_REVIEW',
                         needs_review: true, review_reason: 'Nghe lại âm thanh nguồn.',
                         text_zh: '待确认', final_vi: 'Câu cần kiểm tra.', audio_url: null}
@@ -286,6 +294,9 @@ def check_original_segment_playback(page):
         assert len(active_tracks) == 2, before
         assert all(track['time'] > .05 and not track.get('error') for track in active_tracks), before
         assert before['muted'] and before['review'] == 'true', before
+        assert not before['paused'] and before['draftReview'] == 'true', before
+        assert before['draftBadge'] == 'Bản nháp · Cần kiểm tra', before
+        assert before['caption'] == 'Câu đã tạo giọng.' and before['exportDisabled'], before
         javascript(page, "document.querySelector('#seg-row-1 .transcript-listen-original').click()")
         # Decoder startup varies under headless Qt. Observe playback progress
         # rather than assuming seeking/decoding completes within 350 ms.
@@ -323,7 +334,8 @@ def check_original_segment_playback(page):
         stopped = audition_state()
         assert stopped['paused'] and stopped['muted'] and stopped['volume'] == 0, stopped
         assert stopped['pressed'] == 'false' and all(track['paused'] for track in stopped['tracks']), stopped
-        return {'needs_review_audible': True, 'source_seconds': round(playing['time'] - 3, 3),
+        return {'needs_review_audible': True, 'draft_dub_playback': True, 'draft_captions_visible': True,
+                'draft_review_preserved': True, 'source_seconds': round(playing['time'] - 3, 3),
                 'dub_and_bgm_paused': True, 'stops_at_sentence_end': True,
                 'mute_and_volume_restored': True, 'manual_stop': True}
     finally:

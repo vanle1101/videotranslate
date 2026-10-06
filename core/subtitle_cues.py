@@ -172,7 +172,11 @@ def uncovered_intervals(start, end, screen_texts):
 
 def speech_caption_cues(segment):
     """Keep explicit measured utterances; legacy callers retain their old cues."""
-    if not isinstance(segment, dict) or segment.get("needs_review") or segment.get("confirmed_silence"):
+    if not isinstance(segment, dict) or segment.get("confirmed_silence"):
+        return []
+    # Draft captions are useful while listening and editing. Only a synthesized
+    # preview may opt in; unreviewed export/legacy inputs remain excluded.
+    if segment.get("needs_review") and not segment.get("preview_is_draft"):
         return []
     try:
         start, end = float(segment["start"]), float(segment["end"])

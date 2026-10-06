@@ -79,6 +79,7 @@ class SegmentItem:
             "evidence_mode": self.evidence_mode,
             "needs_review": self.needs_review,
             "review_reason": self.review_reason,
+            "preview_is_draft": bool(self.needs_review and self.status in ("READY", "PLAYED")),
             "confirmed_silence": self.confirmed_silence,
             "subtitle_cues": self.subtitle_cues,
             "subtitle_timing_source": self.subtitle_timing_source,
@@ -199,6 +200,8 @@ class StreamingPipelineSession:
             raise ValueError("Thời lượng câu thoại không hợp lệ.")
         text = text.strip()
         was_review = seg.needs_review or seg.status == "NEEDS_REVIEW"
+        was_playable = seg.status in ("READY", "PLAYED")
+        was_review_error = was_review and self.error == self._review_message()
         if confirm_silence and not was_review:
             if seg.confirmed_silence:
                 return seg.to_dict()
@@ -258,7 +261,10 @@ class StreamingPipelineSession:
                 seg.review_reason = None
                 seg.error = None
                 seg.status = "READY"
-                self.total_processed_duration += seg.duration
+                if not was_playable:
+                    self.total_processed_duration += seg.duration
+                if was_review_error:
+                    self.error = None
             if self.visual_translation and not confirm_silence:
                 updated_screens = []
                 for screen in self.screen_texts:
@@ -296,8 +302,7 @@ class StreamingPipelineSession:
                     self.error = None
                     await self.report_progress("complete", "Đã kiểm tra, dịch và lồng tiếng hoàn tất", 100)
                 elif not self.is_running and pending and not any(s.status == "FAILED" for s in self.segments.values()):
-                    self.error = self._review_message()
-                    await self.emit("progress", self.get_progress())
+                    await self.report_progress("complete", self._review_message(), 100)
                 await self._update_ready()
             return snapshot
         finally:
@@ -335,6 +340,7 @@ class StreamingPipelineSession:
 
     def get_progress(self) -> Dict[str, Any]:
         snapshot = dict(self.progress)
+        snapshot.update(self._review_metadata())
         snapshot["can_pause"] = bool(self.initialized and self.is_running and not self.is_paused and not self.is_stopped and not self.error)
         if self.is_stopped:
             snapshot.update(status="STOPPED", phase="stopped", stage="Đã dừng bởi người dùng")
@@ -642,7 +648,7 @@ class StreamingPipelineSession:
 
     def source_processing_label(self):
         if not self.visual_translation:
-            return self.asr_engine.name
+            return getattr(getattr(self, "asr_engine", None), "name", self.asr_engine_name)
         providers = {source["provider"] for source in self.translation_sources}
         if not providers and self.video_intelligence:
             providers = {self.video_intelligence.provider}
@@ -782,6 +788,7 @@ class StreamingPipelineSession:
             "error": self.error,
             "warnings": list(self.warnings),
             "translation_sources": list(self.translation_sources),
+            **self._review_metadata(),
             "vocal_removal_engine": self.vocal_suppressor.name,
             "suppression_level": f"{self.vocal_suppressor.suppression_level_db:.1f} dB",
             "suppression_rtf": self.suppression_stats.get("throughput_rtf", "0.0x")
@@ -898,18 +905,14 @@ class StreamingPipelineSession:
         if self.visual_translation and seg.source_method not in ("video-ai", "text-ai"):
             raise RuntimeError("Thiếu bản dịch hình ảnh đã kiểm tra; không tự chuyển nhà cung cấp hoặc dịch âm thanh.")
         if self.visual_translation and seg.source_method in ("video-ai", "text-ai"):
-            if seg.needs_review:
-                seg.status = "NEEDS_REVIEW"
-                await self.emit("segment_update", seg.to_dict())
-                return
-            # Gemini prepass supplied the transcript and translation. Do not
+            # The prepass supplied the transcript and translation. Do not
             # run a second ASR/translation pass that could overwrite it.
+            # Review is an editorial flag, independent of playable draft audio.
             return await self._synthesize_segment(seg)
         seg.status = "ASR"
         await self._segment_progress("asr", f"Đang nhận diện câu {seg.id + 1}")
         await self.emit("segment_update", seg.to_dict())
         slice_wav = self.cache_dir / f"slice_{seg.id}.wav"
-        raw_tts_wav = self.cache_dir / f"tts_{seg.id}_raw.wav"
         try:
             if not getattr(seg, "asr_pretranscribed", False):
                 await self._run_ffmpeg([
@@ -937,62 +940,24 @@ class StreamingPipelineSession:
                 if trans.get("needs_review"):
                     seg.needs_review = True
                     seg.review_reason = trans.get("review_reason") or "Nhận dạng câu thoại chưa chắc chắn; hãy kiểm tra và sửa tiếng Việt."
-                    seg.status = "NEEDS_REVIEW"
-                    await self.emit("segment_update", seg.to_dict())
-                    return
-                if not seg.final_vi.strip():
+                if not seg.final_vi.strip() and not seg.needs_review:
                     raise RuntimeError("Dịch thuật trả về nội dung trống.")
-                self.rolling_context.append({"zh": seg.text_zh, "vi": seg.final_vi})
-                self.rolling_context = self.rolling_context[-10:]
-
-                seg.status = "TTS"
-                await self._segment_progress("tts", f"Đang tạo giọng đọc câu {seg.id + 1}")
-                await self.emit("segment_update", seg.to_dict())
-                async with self._tts_lock:
-                    await self._run_blocking(
-                        self.tts_engine.synthesize, text=seg.final_vi,
-                        output_path=raw_tts_wav, voice=self.voice, ref_audio=self.ref_audio,
-                    )
-                    boundaries = take_tts_word_boundaries(self.tts_engine, raw_tts_wav)
-                    await self._run_blocking(trim_tts_padding, raw_tts_wav)
-                seg.status = "ALIGNING"
-                await self._segment_progress("align", f"Đang khớp thời lượng câu {seg.id + 1}")
-                await self.emit("segment_update", seg.to_dict())
-                tts_dur = await self._run_blocking(self.aligner.get_audio_duration, raw_tts_wav)
-                if tts_dur <= 0:
-                    raise RuntimeError("Không đọc được âm thanh từ TTS.")
-                speed_ratio = max(self.aligner.min_speed, tts_dur / max(0.01, seg.duration))
-                if speed_ratio > self.aligner.max_speed:
-                    self.warnings.append(
-                        f"Đoạn {seg.id + 1} cần đọc {speed_ratio:.2f}x để giữ đủ lời trong thời lượng gốc."
-                    )
-                final_seg_wav = self.segments_dir / f"seg_{seg.id}.wav"
-                speed_ratio = await self._run_blocking(
-                    self.aligner.apply_atempo, raw_tts_wav, final_seg_wav,
-                    speed_ratio, fit_duration=seg.duration,
-                )
-                seg.tts_duration = tts_dur
-                seg.speed_ratio = round(speed_ratio, 2)
-                seg.audio_path = str(final_seg_wav.resolve())
-                timing = await self._run_blocking(build_speech_timing, seg.final_vi, seg.start, seg.end,
-                                                  final_seg_wav, speed_ratio, boundaries)
-                for key, value in timing.items():
-                    setattr(seg, key, value)
-                seg.audio_url = f"/api/streaming/audio/{self.task_id}/{seg.id}"
-            seg.status = "READY"
-            self.total_processed_duration += seg.duration
-            await self._segment_progress("translate", "Đang dịch và lồng tiếng")
-            await self.emit("segment_update", seg.to_dict())
-            await self._update_ready()
+                if seg.final_vi.strip() and not seg.needs_review:
+                    self.rolling_context.append({"zh": seg.text_zh, "vi": seg.final_vi})
+                    self.rolling_context = self.rolling_context[-10:]
+            await self._synthesize_segment(seg)
         finally:
             slice_wav.unlink(missing_ok=True)
-            raw_tts_wav.unlink(missing_ok=True)
 
     async def _synthesize_segment(self, seg):
-        """Generate and fit TTS for a validated visual prepass segment."""
+        """Generate playable audio without approving an uncertain translation."""
         raw_tts_wav = self.cache_dir / f"tts_{seg.id}_raw.wav"
         try:
-            if not seg.final_vi.strip() and not seg.text_zh.strip():
+            if not seg.final_vi.strip():
+                if seg.text_zh.strip() and not seg.needs_review:
+                    raise RuntimeError("Dịch thuật trả về nội dung trống.")
+                # An empty uncertain draft has nothing defensible to read.
+                # Keep its review flag, but allow playback past its time span.
                 seg.status = "READY"
                 self.total_processed_duration += seg.duration
                 await self.emit("segment_update", seg.to_dict())
@@ -1000,16 +965,23 @@ class StreamingPipelineSession:
                 return
             seg.status = "TTS"
             await self._segment_progress("tts", f"Đang tạo giọng đọc câu {seg.id + 1}")
+            await self.emit("segment_update", seg.to_dict())
             async with self._tts_lock:
                 await self._run_blocking(self.tts_engine.synthesize, text=seg.final_vi,
                                          output_path=raw_tts_wav, voice=self.voice, ref_audio=self.ref_audio)
                 boundaries = take_tts_word_boundaries(self.tts_engine, raw_tts_wav)
                 await self._run_blocking(trim_tts_padding, raw_tts_wav)
             seg.status = "ALIGNING"
+            await self._segment_progress("align", f"Đang khớp thời lượng câu {seg.id + 1}")
+            await self.emit("segment_update", seg.to_dict())
             tts_dur = await self._run_blocking(self.aligner.get_audio_duration, raw_tts_wav)
             if tts_dur <= 0:
                 raise RuntimeError("Không đọc được âm thanh từ TTS.")
             ratio = max(self.aligner.min_speed, tts_dur / max(0.01, seg.duration))
+            if ratio > self.aligner.max_speed:
+                self.warnings.append(
+                    f"Đoạn {seg.id + 1} cần đọc {ratio:.2f}x để giữ đủ lời trong thời lượng gốc."
+                )
             final_path = self.segments_dir / f"seg_{seg.id}.wav"
             ratio = await self._run_blocking(self.aligner.apply_atempo, raw_tts_wav, final_path, ratio,
                                              fit_duration=seg.duration)
@@ -1030,7 +1002,11 @@ class StreamingPipelineSession:
 
     def _review_message(self):
         count = sum(s.needs_review for s in self.segments.values())
-        return f"Có {count} câu chưa chắc chắn. Hãy kiểm tra và lưu câu tiếng Việt trong Transcript để tạo giọng."
+        return f"Có {count} câu cần kiểm tra. Bạn có thể nghe bản nháp rồi sửa trực tiếp trong Transcript."
+
+    def _review_metadata(self):
+        count = sum(s.needs_review for s in self.segments.values())
+        return {"review_count": count, "review_message": self._review_message() if count else None}
 
     async def _worker_loop(self):
         try:
@@ -1067,10 +1043,9 @@ class StreamingPipelineSession:
         finally:
             self.is_running = False
             self._release_runtime()
-            if not self.is_stopped and not self.error and any(s.needs_review for s in self.segments.values()):
-                self.error = self._review_message()
             if not self.is_stopped and not self.error:
-                await self.report_progress("complete", "Dịch và lồng tiếng hoàn tất", 100)
+                stage = self._review_message() if any(s.needs_review for s in self.segments.values()) else "Dịch và lồng tiếng hoàn tất"
+                await self.report_progress("complete", stage, 100)
             else:
                 await self.emit("progress", self.get_progress())
             await self.emit("finished", self.get_telemetry())

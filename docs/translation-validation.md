@@ -1,5 +1,11 @@
 # Kiểm tra dịch video — 06/10/2026
 
+## Nghe bản nháp trước khi sửa transcript
+
+Câu có cờ `needs_review` nay vẫn được tổng hợp tiếng Việt, căn thời gian và phát phụ đề. Cờ này chỉ nhắc rà nội dung, không làm tác vụ thất bại hoặc dừng video. Nhãn **Bản nháp · Cần kiểm tra** được giữ đến khi lưu xác nhận/sửa câu; thao tác lưu tạo lại tiếng và phụ đề trong đúng thời gian cũ. Nếu chưa có lời Việt để đọc, video tiếp tục qua khoảng câu và hướng dẫn nghe gốc, nhập lời dịch. Xuất MP4 cuối cùng vẫn yêu cầu các câu được xác nhận.
+
+Nhóm pipeline/transcript/visual đạt **163 bài Python và 4 subtest**; nhóm caption/API/thời gian tiếng đạt **63 bài và 15 subtest**, bỏ qua một bài symlink do quyền Windows. **85 bài Node** và Qt desktop smoke đạt, gồm phát audio thật của bản nháp, hiện phụ đề, giữ nhãn cần kiểm tra, nghe tiếng gốc và tạo lại giọng sau sửa. Media và backend của smoke tự dọn; lệnh dọn `pytest-175`/`pytest-176` bị bộ duyệt tự động từ chối (`blocked by policy`), nên hai thư mục còn trong Windows Temp.
+
 ## Cấu hình mới nhất: Muse Spark Free qua OpenCode
 
 Theo lựa chọn của người dùng, Studio dùng `LLM_PROVIDER=opencode` và `OPENCODE_MODEL=muse-spark-1.3-contributor-free`. Danh mục chính thức `opencode models opencode --verbose` trên máy liệt kê Muse Spark 1.3 Free active, giá input/output 0. Đã nối provider này vào luồng ASR + OCR, giữ provenance đúng và ngăn tự gọi OpenRouter khi OpenCode thất bại. Muse qua Chrome là lựa chọn khác, không cần dùng cho luồng này.

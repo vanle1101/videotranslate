@@ -666,6 +666,8 @@ async def export_hq(req: ExportHQRequest):
 
     if getattr(session, "is_editing", False):
         raise HTTPException(status_code=409, detail="Đang lưu lời thoại và tạo lại giọng đọc. Hãy chờ lưu xong trước khi xuất.")
+    if any(getattr(s, "needs_review", False) for s in session.segments.values()):
+        raise HTTPException(status_code=409, detail="Bản nháp đã nghe được. Hãy kiểm tra và lưu các câu được đánh dấu trong Transcript trước khi xuất.")
     if session.is_running or session.error or any(
         s.status not in ("READY", "PLAYED") for s in session.segments.values()
     ):

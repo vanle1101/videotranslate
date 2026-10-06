@@ -452,7 +452,8 @@ def test_contact_sheet_encodes_a_real_tiny_tail_and_cleans_jpeg(config):
     assert not list(settings.TEMP_DIR.iterdir())
 
 
-def test_review_rows_never_reach_asr_translation_or_tts(config):
+def test_review_rows_reach_draft_tts_without_repeating_asr_or_translation(config, monkeypatch):
+    from unittest.mock import AsyncMock
     sess = StreamingPipelineSession("visual-review", config / "video.mp4", visual_translation=True)
     seg = SegmentItem(0, 0, 2, 2)
     seg.source_method, seg.needs_review = "video-ai", True
@@ -462,16 +463,13 @@ def test_review_rows_never_reach_asr_translation_or_tts(config):
     sess.asr_engine = Mock()
     sess.translator = Mock()
     sess.tts_engine = Mock()
-    async def run():
-        sess.is_running = True
-        await sess.queue.put((0, 0))
-        await sess._worker_loop()
-    asyncio.run(run())
-    assert seg.status == "NEEDS_REVIEW" and sess.error
-    assert sess.get_progress()["status"] == "FAILED"
+    synthesize = AsyncMock()
+    monkeypatch.setattr(sess, "_synthesize_segment", synthesize)
+    asyncio.run(sess._process_segment(seg))
+    synthesize.assert_awaited_once_with(seg)
+    assert seg.needs_review and seg.review_reason == "Âm thanh bị che"
     sess.asr_engine.transcribe.assert_not_called()
     sess.translator.translate_single_segment.assert_not_called()
-    sess.tts_engine.synthesize.assert_not_called()
 
 
 def test_validated_rows_bypass_asr_and_translation(config, monkeypatch):

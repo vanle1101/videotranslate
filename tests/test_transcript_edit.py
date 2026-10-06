@@ -134,6 +134,122 @@ def test_reviewed_visual_sentence_can_generate_audio_even_when_text_is_unchanged
     assert not list(session.cache_dir.glob("edit_*"))
 
 
+@pytest.mark.parametrize("source_method", ["video-ai", "text-ai", "audio"])
+def test_uncertain_draft_is_audible_before_edit_and_edit_replaces_audio_without_double_counting(session, source_method):
+    segment = session.segments[0]
+    Path(segment.audio_path).unlink()
+    segment.audio_path = segment.audio_url = None
+    segment.status = "WAITING"
+    segment.source_method = source_method
+    segment.translation_provider = "opencode"
+    segment.translation_model = "muse-spark-1.3-contributor-free"
+    segment.evidence_mode = "asr-ocr-text"
+    segment.needs_review = True
+    segment.review_reason = "Một từ nguồn chưa rõ"
+    session.visual_translation = source_method != "audio"
+    session.asr_engine = Mock()
+    segment.asr_pretranscribed = True
+    session.translator = Mock()
+    session.translator.translate_single_segment.return_value = {
+        "final_vi": segment.final_vi, "needs_review": True, "review_reason": segment.review_reason,
+    }
+
+    async def run():
+        session.is_running = True
+        await session.queue.put((0, 0))
+        await session._worker_loop()
+        draft = segment.to_dict()
+        assert draft["status"] == "READY" and draft["needs_review"] and draft["preview_is_draft"]
+        assert draft["review_reason"] == "Một từ nguồn chưa rõ"
+        assert draft["subtitle_cues"] and draft["speech_start"] is not None
+        assert session.error is None and session.first_play_emitted
+        assert session.playable_until == session.total_duration
+        assert session.get_progress()["status"] == "COMPLETED"
+        assert session.get_telemetry()["status"] == "finished"
+        assert session.get_telemetry()["review_count"] == 1
+        assert session.total_processed_duration == segment.duration
+        async with client() as api:
+            audio = await api.get(draft["audio_url"])
+            assert audio.status_code == 200 and audio.content == "Lời thoại cũ aligned".encode()
+            exported = await api.post("/api/streaming/export-hq", json={"task_id": session.task_id})
+            assert exported.status_code == 409
+            response = await api.patch(route(session), json={"final_vi": "Câu đã nghe và sửa"})
+            assert response.status_code == 200, response.text
+            saved = response.json()["segment"]
+            assert not saved["needs_review"] and not saved["preview_is_draft"]
+            assert saved["review_reason"] is None and saved["revision"] == 1
+            assert (saved["start"], saved["end"]) == (draft["start"], draft["end"])
+            assert saved["translation_provider"] == draft["translation_provider"]
+            assert saved["translation_model"] == draft["translation_model"]
+            assert saved["evidence_mode"] == draft["evidence_mode"]
+            edited_audio = await api.get(saved["audio_url"])
+            assert edited_audio.content == "Câu đã nghe và sửa aligned".encode()
+            assert session.total_processed_duration == segment.duration
+            assert session.get_telemetry()["review_count"] == 0
+            assert session.get_telemetry()["review_message"] is None
+
+    asyncio.run(run())
+    assert session.tts_engine.synthesize.call_count == 2
+    session.asr_engine.transcribe.assert_not_called()
+    if session.visual_translation:
+        session.translator.translate_single_segment.assert_not_called()
+    assert not list(session.cache_dir.glob("tts_*_raw.wav"))
+    assert not list(session.cache_dir.glob("edit_*"))
+
+
+def test_empty_uncertain_draft_keeps_review_without_freezing_playback_or_inventing_voice(session):
+    segment = session.segments[0]
+    Path(segment.audio_path).unlink()
+    segment.audio_path = segment.audio_url = None
+    segment.status = "WAITING"
+    segment.source_method = "text-ai"
+    segment.final_vi = ""
+    segment.needs_review = True
+    segment.review_reason = "Câu này không nghe rõ"
+    session.visual_translation = True
+
+    async def run():
+        session.is_running = True
+        await session.queue.put((0, 0))
+        await session._worker_loop()
+        assert segment.status == "READY" and segment.needs_review
+        assert segment.audio_url is None and not segment.confirmed_silence
+        assert session.error is None and session.first_play_emitted
+        assert session.playable_until == session.total_duration
+        assert session.get_progress()["review_count"] == 1
+        assert session.get_progress()["status"] == "COMPLETED"
+        await session.edit_segment(0, "Bổ sung câu nghe được")
+        assert not segment.needs_review and segment.audio_url
+        assert session.total_processed_duration == segment.duration
+
+    asyncio.run(run())
+    session.tts_engine.synthesize.assert_called_once()
+    assert session.tts_engine.synthesize.call_args.kwargs["text"] == "Bổ sung câu nghe được"
+
+
+def test_editing_one_draft_keeps_other_drafts_playable_and_does_not_fail_the_session(session):
+    first = session.segments[0]
+    first.needs_review = True
+    first.review_reason = "Câu đầu cần nghe lại"
+    second = SegmentItem(1, 5, 8, 3)
+    second.status = "READY"
+    second.needs_review = True
+    second.review_reason = "Câu sau cần nghe lại"
+    second.final_vi = "Bản nháp câu sau"
+    session.segments[1] = second
+    session.total_processed_duration = first.duration + second.duration
+
+    asyncio.run(session.edit_segment(0, "Câu đầu đã sửa"))
+    assert first.needs_review is False and second.needs_review is True
+    assert second.review_reason == "Câu sau cần nghe lại"
+    assert session.total_processed_duration == 6
+    assert session.error is None
+    assert session.get_progress()["status"] == "COMPLETED"
+    assert session.get_progress()["review_count"] == 1
+    assert session.get_telemetry()["status"] == "finished"
+    assert session.playable_until == session.total_duration
+
+
 @pytest.mark.parametrize("draft", ["", "Lời nhận dạng nhầm"])
 def test_explicit_silence_approves_review_without_tts_and_exports_silent_timeline(session, monkeypatch, draft):
     from core.streaming.export import HQExporter

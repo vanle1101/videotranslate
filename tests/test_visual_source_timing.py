@@ -215,7 +215,7 @@ def test_visual_models_released_when_prepass_fails_or_is_cancelled(visual_sessio
     assert not session.initialized
 
 
-def test_text_fallback_review_does_not_synthesize_or_revert_to_legacy_asr(visual_session, monkeypatch):
+def test_text_fallback_review_synthesizes_draft_without_reverting_to_legacy_asr(visual_session, monkeypatch):
     from core.streaming.pipeline import SegmentItem
     segment = SegmentItem(0, 0, 2, 2)
     segment.source_method = "text-ai"
@@ -225,8 +225,8 @@ def test_text_fallback_review_does_not_synthesize_or_revert_to_legacy_asr(visual
     monkeypatch.setattr(visual_session, "_synthesize_segment", synthesize)
     visual_session.asr_engine = Mock()
     asyncio.run(visual_session._process_segment(segment))
-    assert segment.status == "NEEDS_REVIEW"
-    synthesize.assert_not_awaited()
+    assert segment.needs_review
+    synthesize.assert_awaited_once_with(segment)
     visual_session.asr_engine.transcribe.assert_not_called()
 
 

@@ -54,6 +54,14 @@ def test_unreviewed_or_silent_segment_has_no_visible_caption(changes):
     assert layout([speech(**changes)], [region()]) == []
 
 
+def test_synthesized_draft_preview_keeps_measured_caption_and_review_flag():
+    draft = speech(needs_review=True, preview_is_draft=True)
+    cues = layout([draft], [region()])
+    assert [(cue["start"], cue["end"], cue["text"]) for cue in cues] == [(.4, 2.8, "Anh đã đến rồi.")]
+    assert draft["needs_review"] is True
+    assert layout([speech(needs_review=True, preview_is_draft=True, confirmed_silence=True)]) == []
+
+
 @pytest.mark.parametrize("mask_only", [False, True])
 def test_yellow_caption_below_measured_chinese_without_mask_or_stale_ocr(mask_only):
     plan = layout([speech()], [region(mask_only=mask_only, text_vi="")], (1080, 1920))

@@ -1464,7 +1464,8 @@ test('uncertain transcript remains editable, shows review reason and can confirm
   ui.sockets.at(-1).receive({ type: 'segment_update', ...segment });
   const row = ui.el('seg-row-0'), warning = row.querySelector('.transcript-review');
   assert.equal(warning.hidden, false);
-  assert.equal(warning.textContent, segment.review_reason);
+  assert.ok(warning.textContent.startsWith(segment.review_reason));
+  assert.match(warning.textContent, /giọng bản nháp để bạn nghe và sửa/);
   assert.equal(warning.getAttribute('role'), 'status');
   assert.equal(row.dataset.needsReview, 'true');
   assert.equal(ui.el('seg-vi-0').disabled, false);
@@ -1472,7 +1473,7 @@ test('uncertain transcript remains editable, shows review reason and can confirm
   await ui.el('video-player').play();
   assert.equal(ui.el('video-player').paused, true);
   assert.equal(ui.el('subtitle-text').textContent, '');
-  assert.match(ui.el('buffering-text').textContent, /cần kiểm tra/);
+  assert.match(ui.el('buffering-text').textContent, /Đang chờ dịch và tạo giọng/);
   await ui.el('seg-vi-0').click();
   assert.equal(ui.el('seg-input-0').value, segment.final_vi);
   ui.replies.set('/api/streaming/fixture/segments/0', { segment: { ...segment, status: 'READY', needs_review: false,
@@ -1483,6 +1484,62 @@ test('uncertain transcript remains editable, shows review reason and can confirm
   assert.equal(row.dataset.needsReview, 'false');
   assert.equal(ui.el('subtitle-text').textContent, segment.final_vi);
   assert.equal(ui.el('btn-export-hq').disabled, false);
+});
+
+test('ready draft keeps review visible while playing its dub and captions, then regenerates an edited sentence', async () => {
+  const ui = studio(); await ui.start();
+  const video = ui.el('video-player');
+  const segment = captionFixture(ui, { needs_review: true, revision: 0,
+    review_reason: 'Lời nhận dạng chưa rõ; nghe lại trước khi tạo giọng.' });
+  const row = ui.el('seg-row-0'), warning = row.querySelector('.transcript-review');
+  assert.equal(row.dataset.needsReview, 'true');
+  assert.equal(ui.el('seg-badge-0').textContent, 'Bản nháp · Cần kiểm tra');
+  assert.equal(ui.el('btn-export-hq').disabled, true, 'Draft preview must not silently accept an unresolved final export');
+  assert.equal(warning.hidden, false);
+  assert.match(warning.textContent, /Bản nháp đã có giọng: nghe thử/);
+  assert.doesNotMatch(warning.textContent, /trước khi tạo giọng/);
+  ui.sockets.at(-1).receive({ type: 'ready_to_play' });
+  await video.play();
+  video.currentTime = .8; await video.emit('timeupdate');
+  const draftAudio = ui.audio.findLast(item => item.src === '/dub.wav');
+  assert.equal(video.paused, false);
+  assert.equal(draftAudio.paused, false);
+  assert.equal(draftAudio.currentTime, .8);
+  assert.equal(ui.el('subtitle-text').textContent, 'Câu hiện tại');
+  assert.equal(ui.el('buffering-alert').classList.contains('hidden'), true);
+
+  await ui.el('seg-vi-0').click();
+  assert.equal(video.paused, true);
+  const input = ui.el('seg-input-0'); input.value = 'Lời thoại đã sửa.'; await input.emit('input');
+  const updated = { ...segment, needs_review: false, review_reason: '', revision: 1,
+    final_vi: input.value, audio_url: '/edited-draft.wav',
+    caption_layout: { ...segment.caption_layout, cues: [{ ...segment.caption_layout.cues[0], text: input.value }] } };
+  ui.replies.set('/api/streaming/fixture/segments/0', { segment: updated });
+  await row.querySelector('.transcript-editor-actions').children[0].click();
+  const patch = ui.requests.find(item => item.options.method === 'PATCH');
+  assert.deepEqual(JSON.parse(patch.options.body), { final_vi: 'Lời thoại đã sửa.' });
+  assert.equal(warning.hidden, true);
+  assert.equal(ui.el('subtitle-text').textContent, 'Lời thoại đã sửa.');
+  assert.equal(ui.el('btn-export-hq').disabled, false);
+  await video.play();
+  assert.equal(ui.audio.find(item => item.src === '/edited-draft.wav').paused, false);
+  assert.equal(draftAudio.paused, true);
+});
+
+test('empty ready review draft continues video without claiming a generated voice or allowing final export', async () => {
+  const ui = studio(); await ui.start();
+  const video = ui.el('video-player');
+  ui.sockets.at(-1).receive({ type: 'segment_update', id: 0, start: 0, end: 10,
+    status: 'READY', needs_review: true, final_vi: '', audio_url: null });
+  const warning = ui.el('seg-row-0').querySelector('.transcript-review');
+  assert.match(warning.textContent, /Chưa có giọng Việt.*Video vẫn phát tiếp.*Nghe gốc.*nhập bản dịch/);
+  assert.doesNotMatch(warning.textContent, /đã có giọng|Đang chuẩn bị giọng/);
+  await video.play();
+  assert.equal(video.paused, false);
+  assert.equal(ui.el('subtitle-text').textContent, '');
+  assert.equal(ui.audio.filter(item => item.src === '/dub.wav').every(item => item.paused), true);
+  assert.equal(ui.el('btn-export-hq').disabled, true);
+  assert.equal(ui.el('seg-vi-0').disabled, false);
 });
 
 test('original audition plays an uncertain source segment without translated audio or review gate and stops at its end', async () => {

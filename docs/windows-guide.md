@@ -80,7 +80,7 @@ Với **OpenRouter Free**, tùy chọn này dùng Faster-Whisper và RapidOCR t�
 
 Nếu chọn Gemini và gặp lỗi hạn mức, Studio vẫn có thể dùng OpenRouter làm dự phòng. Trong trường hợp chuyển dịch vụ dự phòng này, toàn bộ bản dịch cần được duyệt trước khi sử dụng. Lỗi key, bộ lọc nội dung hoặc yêu cầu không hợp lệ không kích hoạt nhánh dự phòng. File nén gửi Gemini tối đa 14 MB mỗi đoạn được dọn sau khi xử lý; video nguồn giữ nguyên.
 
-Câu thiếu căn cứ được ghi **Cần kiểm tra**, kèm lý do trong transcript. Toàn bộ câu từ nhánh OpenRouter dự phòng cũng cần rà: kiểm thử thực tế phát hiện model vẫn tự tin với câu sai nghĩa dù đã tự kiểm tra. Studio chưa tạo giọng cho câu cần kiểm tra và khóa xuất video đến khi bạn nghe/xem lại rồi bấm **Lưu và tạo lại giọng**. Có thể giữ nguyên bản nháp và bấm lưu sau khi đã kiểm tra. Các câu chắc chắn từ luồng Gemini vẫn được xử lý. Chữ trên hình không đọc chắc, không xác định được vùng chữ hoặc được dịch qua nhánh OpenRouter dự phòng sẽ giữ nguyên, không tự che. Sửa lời thoại không duyệt thay bản dịch chữ trên hình; hiện chưa có trình duyệt OCR riêng.
+Câu thiếu căn cứ được ghi **Cần kiểm tra**, kèm lý do trong transcript. Toàn bộ câu từ nhánh OpenRouter dự phòng cũng cần rà: kiểm thử thực tế phát hiện model vẫn tự tin với câu sai nghĩa dù đã tự kiểm tra. Studio vẫn tạo và phát giọng nháp cho câu cần kiểm tra, kèm phụ đề theo tiếng đọc và nhãn **Bản nháp · Cần kiểm tra**. Bạn nghe trước, bấm bản dịch để sửa rồi **Lưu và tạo lại giọng**. Nếu bản nháp đã đúng, giữ nguyên chữ và bấm lưu để xác nhận. Chỉ phần xuất MP4 cuối cùng đợi các câu này được xác nhận. Câu chưa có nội dung tiếng Việt để đọc vẫn cho video chạy qua; có thể bấm **Nghe gốc** rồi nhập lời Việt. Chữ trên hình không đọc chắc, không xác định được vùng chữ hoặc được dịch qua nhánh OpenRouter dự phòng sẽ giữ nguyên, không tự che. Sửa lời thoại không duyệt thay bản dịch chữ trên hình; hiện chưa có trình duyệt OCR riêng.
 
 Phụ đề hiển thị **trọn câu đang được đọc**, không chạy từng chữ và không gộp lời đáp của nhân vật tiếp theo lên trước. Faster-Whisper giữ các câu riêng, dùng mốc từ, dấu kết câu và khoảng nghỉ để tách lời thoại; không còn chia video thành khối tám giây rồi ghép nhiều câu lại. Chưa có mô hình nhận diện người nói riêng nên cảnh nói chồng tiếng hoặc không có khoảng nghỉ vẫn cần rà transcript.
 
@@ -105,7 +105,7 @@ Khi tải, phần trăm, dung lượng đã nhận/tổng dung lượng, tốc �
 
 Nếu nghe lại xác nhận câu **Cần kiểm tra** thực sự không có người nói, bấm **Không có lời thoại**. Thao tác này bỏ lời và giọng nháp trong đúng khoảng câu, giữ thời gian và chữ nguồn để đối chiếu; có thể sửa lại thành lời thoại sau đó. Để trống ô sửa rồi lưu thông thường vẫn bị từ chối nhằm tránh xóa nhầm lời. Xác nhận im lặng không duyệt hoặc che chữ OCR trên hình.
 
-**Xuất Video Hoàn Chỉnh** bị khóa khi còn bản sửa chưa lưu hoặc đang tạo lại giọng. Lưu hoặc hủy bản sửa trước khi xuất. Mốc tua vẫn theo **câu**; mốc sub lấy theo giọng tổng hợp như mô tả ở trên. Vị trí chữ được bấm dùng để đặt con trỏ soạn thảo.
+**Xuất Video Hoàn Chỉnh** bị khóa khi còn câu cần kiểm tra, bản sửa chưa lưu hoặc đang tạo lại giọng. Lưu hoặc hủy bản sửa trước khi xuất. Mốc tua vẫn theo **câu**; mốc sub lấy theo giọng tổng hợp như mô tả ở trên. Vị trí chữ được bấm dùng để đặt con trỏ soạn thảo.
 
 ### Chọn và nghe thử giọng
 

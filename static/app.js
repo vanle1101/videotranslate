@@ -504,7 +504,7 @@ document.addEventListener("DOMContentLoaded", () => {
     const items = Object.values(segments);
     btnExportHQ.disabled = !currentTaskId || !items.length ||
       transcriptDrafts.size > 0 || pendingTranscriptSaves > 0 ||
-      items.some(segment => !["READY", "PLAYED"].includes(segment.status)) ||
+      items.some(segment => segment.needs_review || !["READY", "PLAYED"].includes(segment.status)) ||
       ["FAILED", "STOPPED", "CANCELLED", "CANCELLING"].includes(currentProgress?.status);
   }
 
@@ -914,7 +914,7 @@ document.addEventListener("DOMContentLoaded", () => {
   function renderSpeechCaption(segment, time) {
     const plan = toggleScreenText.checked ? segment?.caption_layout : segment?.caption_bottom_layout;
     const cue = plan?.cues?.find(item => time >= item.start && time < item.end);
-    const ready = segment && ["READY", "PLAYED"].includes(segment.status) && !segment.needs_review;
+    const ready = segment && ["READY", "PLAYED"].includes(segment.status);
     const text = ready && toggleSubtitles.checked && !sourceAudition
       ? (plan ? cue?.text || "" : subtitleAtTime(segment, time)) : "";
     subtitleText.textContent = text;
@@ -1717,7 +1717,9 @@ document.addEventListener("DOMContentLoaded", () => {
       if (!["READY", "PLAYED"].includes(matchedSeg.status) && !videoPlayer.paused) {
         isBufferingUnderrun = true;
         videoPlayer.pause();
-        bufferingText.textContent = matchedSeg.needs_review ? "Câu này cần kiểm tra. Bấm bản dịch bên cạnh để sửa và tạo giọng." : "Đang chờ dịch và tạo giọng cho câu tiếp theo...";
+        bufferingText.textContent = matchedSeg.status === "FAILED"
+          ? "Không tạo được giọng cho câu này. Xem Diagnostics rồi thử lại."
+          : "Đang chờ dịch và tạo giọng cho câu tiếp theo…";
         bufferingAlert.classList.remove("hidden");
       }
 
@@ -2073,20 +2075,29 @@ document.addEventListener("DOMContentLoaded", () => {
   function updateSegmentDrawerItem(segment) {
     if (!transcriptRows.has(segment.id)) { createTranscriptRow(segment); return; }
     const item = transcriptRows.get(segment.id);
-    item.badge.textContent = segmentStatusLabel(segment.status);
+    const ready = ["READY", "PLAYED"].includes(segment.status);
+    item.badge.textContent = ready && segment.needs_review
+      ? "Bản nháp · Cần kiểm tra" : segmentStatusLabel(segment.status);
     if (segment.source_method === "video-ai" && !segment.needs_review) item.badge.textContent += " · AI hình + tiếng";
     if (segment.source_method === "text-ai" && !segment.needs_review) {
       const provider = {opencode: "OpenCode", "openrouter-free": "OpenRouter"}[segment.translation_provider] || "AI";
       item.badge.textContent += ` · ${provider} · bản chép + OCR`;
     }
-    item.badge.dataset.ready = String(["READY", "PLAYED"].includes(segment.status));
+    item.badge.dataset.ready = String(ready);
     item.row.dataset.needsReview = String(Boolean(segment.needs_review));
     item.original.textContent = segment.text_zh || (segment.confirmed_silence ? "Không có lời thoại" : "Đang nhận dạng lời thoại…");
     item.translation.textContent = segment.confirmed_silence ? "Đã xác nhận không có lời thoại" : segmentTranslation(segment) || "Bản dịch sẽ xuất hiện sau khi xử lý.";
     item.translation.disabled = !["READY", "PLAYED", "NEEDS_REVIEW"].includes(segment.status);
     item.review.hidden = !segment.needs_review;
     item.silence.hidden = !(segment.needs_review || segment.status === "NEEDS_REVIEW");
-    item.review.textContent = segment.needs_review ? segment.review_reason || "AI chưa chắc nội dung câu này. Kiểm tra video rồi sửa bản dịch trước khi tạo giọng." : "";
+    const reviewReason = String(segment.review_reason || "AI chưa chắc nội dung câu này.")
+      .replace(/;?\s*nghe lại trước khi tạo giọng\.?/gi, ".")
+      .replace(/\s*Kiểm tra video rồi sửa bản dịch trước khi tạo giọng\.?/gi, "");
+    const draftHint = ready
+      ? (segment.audio_url ? "Bản nháp đã có giọng: nghe thử rồi bấm bản dịch để sửa nếu cần."
+        : "Chưa có giọng Việt cho câu này. Video vẫn phát tiếp; bấm Nghe gốc rồi nhập bản dịch để tạo giọng.")
+      : "Đang chuẩn bị giọng bản nháp để bạn nghe và sửa.";
+    item.review.textContent = segment.needs_review ? `${reviewReason} ${draftHint}` : "";
     // Never replace text in an open editor: another worker update must not erase a draft.
     if (item.editor.hidden) item.input.value = segmentTranslation(segment);
   }
