@@ -6,6 +6,8 @@ Máy đã kiểm tra ngày 05/10/2026: Intel i5-13420H (8 nhân / 12 luồng), R
 
 Nhấp đúp **Douyin2TikTok AI Studio.lnk** (logo Studio) hoặc **start.bat**, chọn video MP4, chọn giọng Hoài My hoặc Nam Minh, rồi bấm **Bắt đầu dịch & phát realtime**. Chờ xử lý xong trước khi bấm xuất MP4. Thành phẩm nằm trong `workspace/outputs`. Nếu chuyển thư mục, chạy `create_shortcut.ps1` để tạo lại lối mở; `setup.ps1` cũng tạo lối mở này sau cài đặt.
 
+Bấm **X** chỉ ẩn cửa sổ xuống khay hệ thống; tác vụ tải, dịch, kiểm tra và xuất video tiếp tục chạy. Bấm biểu tượng Studio ở khay (có thể nằm trong nút **^**) hoặc mở lại shortcut để hiện cửa sổ. Chuột phải biểu tượng, chọn **Thoát hoàn toàn** để tắt; nếu còn tác vụ, Studio hỏi trước khi dừng. Khi máy không có khay hệ thống khả dụng, X sẽ đóng ứng dụng như bình thường.
+
 Môi trường `venv`, cấu hình `.env` và model Whisper Small đã được cài ở máy này. Sau khi khởi động lại Windows không cần cài lại. Nếu chuyển sang máy khác hoặc bị thiếu thư viện, chạy **setup.bat**. Script dùng Python 3.12, tái sử dụng package hệ thống phù hợp, chỉ bổ sung package thiếu vào venv và không sửa Python toàn cục. FFmpeg và FFprobe phải có trong PATH. Dung lượng cài mới khoảng 1–2 GB.
 
 ## Cấu hình đang dùng

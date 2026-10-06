@@ -304,6 +304,8 @@ class StudioMainWindow(QMainWindow):
         self.backend_url = f"http://127.0.0.1:{self.port}"
         self.app_icon = create_app_icon()
         self._fullscreen_restore_state = None
+        self._exit_requested = False
+        self._tray_notice_shown = False
 
         self.setWindowTitle("Douyin2TikTok AI Studio")
         self.setWindowIcon(self.app_icon)
@@ -369,7 +371,7 @@ class StudioMainWindow(QMainWindow):
         menu.addSeparator()
 
         act_exit = QAction("Thoát hoàn toàn", self)
-        act_exit.triggered.connect(self.close)
+        act_exit.triggered.connect(self.request_exit)
         menu.addAction(act_exit)
 
         self.tray_icon.setContextMenu(menu)
@@ -379,6 +381,11 @@ class StudioMainWindow(QMainWindow):
     def _on_tray_activated(self, reason):
         if reason == QSystemTrayIcon.ActivationReason.DoubleClick or reason == QSystemTrayIcon.ActivationReason.Trigger:
             self.restore_window()
+
+    def request_exit(self):
+        """Only the explicit tray action ends processing and the application."""
+        self._exit_requested = True
+        self.close()
 
     def restore_window(self):
         if self._fullscreen_restore_state is not None:
@@ -443,11 +450,26 @@ class StudioMainWindow(QMainWindow):
                 return
         event.ignore()
 
-    # Close confirmation & clean process shutdown
+    # Closing the window leaves the backend and its active page in the tray.
     def closeEvent(self, event):
+        if (not self._exit_requested and self.tray_icon is not None
+                and self.tray_icon.isVisible() and QSystemTrayIcon.isSystemTrayAvailable()):
+            event.ignore()
+            self.hide()
+            if not self._tray_notice_shown:
+                self._tray_notice_shown = True
+                self.tray_icon.showMessage(
+                    "Studio vẫn chạy ngầm",
+                    "Tác vụ tiếp tục chạy. Bấm biểu tượng Studio để mở lại; chọn Thoát hoàn toàn để tắt.",
+                    QSystemTrayIcon.MessageIcon.Information,
+                    4000,
+                )
+            return
+
         from core.streaming.pipeline import active_streaming_sessions
         from main import active_export_tasks
-        running_sessions = [s for s in active_streaming_sessions.values() if getattr(s, "is_running", False)]
+        running_sessions = [s for s in active_streaming_sessions.values()
+                            if getattr(s, "is_running", False) or getattr(s, "is_editing", False)]
         is_processing = bool(running_sessions) or any(
             task.get("status") in {"RUNNING", "CANCELLING"}
             for task in active_export_tasks.values()
@@ -462,7 +484,9 @@ class StudioMainWindow(QMainWindow):
                 QMessageBox.StandardButton.Cancel
             )
             if reply != QMessageBox.StandardButton.Yes:
+                self._exit_requested = False
                 event.ignore()
+                self.restore_window()
                 return
 
         logger.info("Main window closing, shutting down all services...")
@@ -470,6 +494,9 @@ class StudioMainWindow(QMainWindow):
             self.tray_icon.hide()
         service_manager.shutdown_all()
         event.accept()
+        app = QApplication.instance()
+        if app is not None:
+            app.quit()
 
 # -------------------------------------------------------------
 # MAIN ENTRY POINT
@@ -481,6 +508,7 @@ def main():
     app.setApplicationName("Douyin2TikTok AI Studio")
     app.setOrganizationName("Douyin2TikTok")
     app.setWindowIcon(create_app_icon())
+    app.setQuitOnLastWindowClosed(False)
 
     # 1. Single Instance Check via QLocalSocket / QLocalServer
     local_socket = QLocalSocket()
