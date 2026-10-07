@@ -92,13 +92,29 @@ def test_exact_nested_evidence_and_measured_cues_survive(persisted):
     assert restored.caption_metadata(restored.segments[0].to_dict())["caption_layout"]["source_masks"]
 
 
-def test_address_evidence_pacing_and_context_survive_repeated_restore(persisted):
+@pytest.mark.parametrize("applicable,neutral_faithful,address_verified", [
+    pytest.param(True, False, True, id="source-grounded-address"),
+    pytest.param(False, True, False, id="faithful-neutral-no-address-claim"),
+    pytest.param(True, False, False, id="applicable-but-unresolved"),
+])
+def test_address_evidence_pacing_and_context_survive_repeated_restore(
+        persisted, applicable, neutral_faithful, address_verified):
     segment = persisted.segments[0]
+    unresolved = applicable and not address_verified
+    segment.needs_review = unresolved
+    segment.review_reason = "Chưa xác minh được chiều xưng hô." if unresolved else None
     reading = {"id": 0, "self_address": "em", "listener_address": "chị", "uncertain": False,
                "reason": "Người đang nói gọi người nghe là chị.",
                "evidence": [{"id": 0, "quote": "拜托姐"}]}
-    segment.verification = {"status": "corrected", "source_supported": True, "semantic_verified": True,
-        "address_verified": True, "address_reason": "Giữ đúng chiều em gọi chị.", "address_context": reading,
+    segment.verification = {"status": "unresolved" if unresolved else "corrected",
+        "source_supported": True, "semantic_verified": not unresolved,
+        "address_applicable": applicable, "address_neutral_faithful": neutral_faithful,
+        "address_verified": address_verified, "address_reason": "Đã rà cách diễn đạt theo nguồn.",
+        "address_context": reading,
+        "evidence_ids": ["r0"],
+        "evidence": [{"id": "r0", "start": 0.0, "end": 2.0, "text_zh": "拜托姐",
+                      "confidence": .98, "bbox": [.1, .8, .8, .05]}],
+        "address_context_sources": {"0": "拜托姐"},
         "pacing": {"status": "verified", "provider": "opencode", "text": segment.final_vi,
                    "reason": "Giữ cách xưng hô đã đối chiếu.", "address_preserved": True}}
     persisted.rolling_context = [{"id": 0, "start": 0.0, "end": 2.0, "zh": "拜托姐", "vi": "Thôi mà chị.",
@@ -109,6 +125,12 @@ def test_address_evidence_pacing_and_context_survive_repeated_restore(persisted)
         active_streaming_sessions.clear()
         restored = restore_saved_session(persisted.task_id)
         assert restored.segments[0].verification == segment.verification
+        audit = restored.segments[0].verification
+        assert audit["address_applicable"] is applicable
+        assert audit["address_neutral_faithful"] is neutral_faithful
+        assert audit["address_verified"] is address_verified
+        assert restored.segments[0].needs_review is unresolved
+        assert audit["status"] == ("unresolved" if unresolved else "corrected")
         assert restored.rolling_context == persisted.rolling_context
         restored.persist()
 

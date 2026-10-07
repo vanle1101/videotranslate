@@ -431,7 +431,8 @@ def candidate_response(*, needs_review=False):
 def test_rewrite_verifies_exact_candidate_in_a_separate_provider_request(monkeypatch):
     translator = SemanticTranslator(provider="opencode")
     request = Mock(side_effect=[candidate_response(), json.dumps({
-        "equivalent": True, "natural": True, "reason": "Giữ chủ thể và ý chưa thực hiện."})])
+        "equivalent": True, "natural": True, "address_preserved": True,
+        "reason": "Giữ chủ thể và ý chưa thực hiện."})])
     monkeypatch.setattr(translator, "_opencode_request", request)
 
     result = translator.rewrite_for_pacing("我还没做。", "Tôi vẫn chưa làm việc đó.", 1.5,

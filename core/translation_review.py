@@ -22,7 +22,7 @@ from core.video_intelligence import VideoIntelligence, VideoIntelligenceError
 from core.runtime_context import current_execution_context
 from core.chinese_text import comparable_chinese
 from core.translation_context import (
-    VIETNAMESE_ADDRESS_POLICY, dialogue_context, needs_address_audit,
+    VIETNAMESE_ADDRESS_POLICY, dialogue_context, needs_address_audit, contains_address_expression,
     address_reading_prompt, validate_address_reading, address_review_instruction,
 )
 
@@ -208,6 +208,33 @@ class AutomaticTranslationReviewer:
                 and isinstance(audit.get("address_reason"), str) and bool(audit["address_reason"].strip()))
 
     @staticmethod
+    def _address_applicable(audit, source, candidate):
+        """Use provider applicability; conservative fallback keeps old replies safe."""
+        lexical = contains_address_expression(candidate)
+        # Provider replies may omit this field or incorrectly call a relation
+        # neutral. A visible relational form remains applicable regardless of
+        # the provider's false claim; only clearly third-person/noun spans are
+        # removed above.
+        if audit.get("address_applicable") is False:
+            return lexical
+        if isinstance(audit.get("address_applicable"), bool):
+            return True
+        return lexical
+
+    @classmethod
+    def _address_gate(cls, reading, sid, audit, source, candidate):
+        if not cls._address_applicable(audit, source, candidate):
+            if sid in reading and reading[sid]["uncertain"]:
+                return not (audit.get("address_applicable") is False
+                    and audit.get("address_neutral_faithful") is True
+                    and audit.get("semantic_verified") is True
+                    and isinstance(audit.get("address_reason"), str) and bool(audit["address_reason"].strip()))
+            return False
+        if sid not in reading:
+            return True
+        return not cls._address_verified(reading, sid, audit)
+
+    @staticmethod
     def _address_cites_changed_source(reading, sid, changed_ids):
         """A source correction invalidates every address verdict citing it."""
         item = reading.get(sid)
@@ -226,6 +253,8 @@ class AutomaticTranslationReviewer:
         """Compare actual accepted source versions, not proposed corrections."""
         for row in output.values():
             audit = row.get("verification") or {}
+            if audit.get("address_applicable") is False:
+                continue
             snapshot = audit.get("address_context_sources")
             if not isinstance(snapshot, dict):
                 continue
@@ -432,7 +461,9 @@ class AutomaticTranslationReviewer:
                 sid = source["id"]
                 proposed, audit = validated["segments"][sid], audits[sid]
                 supported = self._audio_text(proposed["text_zh"]) == self._audio_text(transcript)
-                address_uncertain = not self._address_verified(address_reading, sid, audit)
+                address_applicable = self._address_applicable(audit, proposed.get("text_zh", transcript), proposed.get("final_vi", ""))
+                address_uncertain = self._address_gate(address_reading, sid, audit,
+                    proposed.get("text_zh", transcript), proposed.get("final_vi", ""))
                 verified = supported and audit["semantic_verified"] and not proposed["needs_review"] and not address_uncertain
                 changed = proposed["final_vi"] != source.get("final_vi") or self._audio_text(proposed["text_zh"]) != self._audio_text(source.get("text_zh"))
                 target = {**source, **proposed} if supported else dict(source)
@@ -450,8 +481,13 @@ class AutomaticTranslationReviewer:
                 if sid in address_reading:
                     target["verification"]["address_context"] = address_reading[sid]
                     target["verification"]["address_context_sources"] = self._address_source_snapshot(address_reading, sid, context)
-                    target["verification"]["address_verified"] = not address_uncertain
-                    target["verification"]["address_reason"] = audit.get("address_reason", "")
+                else:
+                    for key in ("address_context", "address_context_sources", "address_stale_source_ids"):
+                        target["verification"].pop(key, None)
+                target["verification"]["address_applicable"] = bool(address_applicable)
+                target["verification"]["address_neutral_faithful"] = audit.get("address_neutral_faithful") is True
+                target["verification"]["address_verified"] = bool(address_applicable and not address_uncertain)
+                target["verification"]["address_reason"] = audit.get("address_reason", "")
                 result["segments"][sid] = target
             if progress_callback:
                 progress_callback(60 + 40 * (index + 1) / batches)
@@ -770,10 +806,15 @@ class AutomaticTranslationReviewer:
                 changed_source, invalid_refs, usable, supported, accepted = source_facts[sid]
                 verified = bool(second_pass_complete and supported and audit["semantic_verified"] and not proposed["needs_review"])
                 reason = audit["verification_reason"].strip()[:500]
-                address_uncertain = (not self._address_verified(address_reading, sid, audit)
-                                     or self._address_cites_changed_source(
-                                         address_reading, sid, accepted_changes)
-                                     or (sid in address_reading and sid in accepted_changes))
+                address_applicable = self._address_applicable(audit, proposed.get("text_zh", source.get("text_zh", "")), proposed.get("final_vi", ""))
+                address_uncertain = (self._address_gate(address_reading, sid, audit,
+                                         proposed.get("text_zh", source.get("text_zh", "")),
+                                         proposed.get("final_vi", ""))
+                                     or (address_applicable and self._address_cites_changed_source(
+                                         address_reading, sid, accepted_changes))
+                                     or (sid in address_reading and sid in accepted_changes
+                                         and self._address_applicable(audit, proposed.get("text_zh", ""),
+                                                                       proposed.get("final_vi", ""))))
                 if address_uncertain:
                     verified = False
                     reason = (
@@ -811,8 +852,10 @@ class AutomaticTranslationReviewer:
                 if sid in address_reading:
                     target["verification"]["address_context"] = address_reading[sid]
                     target["verification"]["address_context_sources"] = self._address_source_snapshot(address_reading, sid, context)
-                    target["verification"]["address_verified"] = not address_uncertain
-                    target["verification"]["address_reason"] = audit.get("address_reason", "")
+                target["verification"]["address_applicable"] = bool(address_applicable)
+                target["verification"]["address_neutral_faithful"] = audit.get("address_neutral_faithful") is True
+                target["verification"]["address_verified"] = bool(address_applicable and not address_uncertain)
+                target["verification"]["address_reason"] = audit.get("address_reason", "")
                 if second_failure:
                     target["verification"]["diagnostic"] = second_failure
                 output[sid] = target

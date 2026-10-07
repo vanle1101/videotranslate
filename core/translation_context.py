@@ -10,7 +10,7 @@ import json
 import re
 
 
-ADDRESS_POLICY_REVISION = 2
+ADDRESS_POLICY_REVISION = 3
 
 VIETNAMESE_ADDRESS_POLICY = """
 QUY TẮC XƯNG HÔ THEO NGỮ CẢNH (áp dụng cả dịch, kiểm định và rút gọn lời đọc):
@@ -81,8 +81,12 @@ def dialogue_context(rows, focus=(), *, max_rows=64, max_chars=18000):
         # the same row look more certain on the second pass.
         if row.get("source_truncated") or len(source) > 1500:
             item["source_truncated"] = True
-        if (row.get("source_needs_review") or row.get("needs_review")
-                or ("asr_text" in row and not row.get("text_zh"))):
+        source_audit = row.get("verification") or {}
+        if not isinstance(source_audit, dict):
+            source_audit = {}
+        if (row.get("source_needs_review") or row.get("source_truncated")
+                or ("asr_text" in row and not row.get("text_zh"))
+                or (row.get("needs_review") and source_audit.get("source_supported") is not True)):
             item["source_needs_review"] = True
         draft = row.get("final_vi", row.get("vi", ""))
         if isinstance(draft, str) and draft:
@@ -139,11 +143,28 @@ def focus_identity(rows):
     return {key: focus[0][key] for key in ("id", "start", "end") if key in focus[0]}
 
 
+def contains_address_expression(candidate):
+    """Select text needing a pronoun audit; never infer roles or translate it.
+
+    Selection and verification must use the same vocabulary. Remove ordinary
+    noun/third-person spans only, preserving any other pronoun in the sentence.
+    """
+    text = re.sub(r"\b(?:cô ấy|anh ấy|chị ấy|ông ấy|bà ấy)\b", "", str(candidate or ""), flags=re.I)
+    text = re.sub(r"\bcon\s+(?:mèo|vật|số|đường|người)\b", "", text, flags=re.I)
+    text = re.sub(r"\bmột\s+mình\b", "", text, flags=re.I)
+    # A small set of unambiguous numeric-unit spans is not an address. Keep
+    # the rest of the sentence: 'Ba chờ ba phút' still contains the parent.
+    text = re.sub(r"\bba\s+(?:phút|giây|giờ|ngày|tuần|tháng|năm|lần|chiếc|cái)\b", "", text, flags=re.I)
+    return bool(re.search(
+        r"(?<!\w)(?:tôi|tao|tớ|mình|bạn|mày|chị|em|anh|cô|chú|bác|con|bố|ba|mẹ|má|"
+        r"thầy|cậu|ông|bà|ta|cháu|dì|cụ|cưng|ngươi|mi)(?!\w)", text, re.I))
+
+
 def needs_address_audit(rows, context=()):
     """Select contextual dialogue for a semantic audit, never choose pronouns."""
     all_rows = list(rows) + list(context)
     return any(_ADDRESS_CUE.search(str(row.get("text_zh", row.get("zh", ""))))
-               or re.search(r"\b(?:chị|em|anh|con|bố|mẹ|tao|mày)\b", str(row.get("final_vi", row.get("vi", ""))), re.I)
+               or contains_address_expression(row.get("final_vi", row.get("vi", "")))
                for row in all_rows)
 
 
@@ -204,11 +225,18 @@ def address_review_instruction(reading):
         return ""
     return ("\nĐã có lượt đọc ngữ cảnh RIÊNG chỉ từ nguồn Trung, không nhìn bản Việt: "
         + json.dumps(list(reading.values()), ensure_ascii=False)
-        + "\nĐối chiếu lại kết luận này với nguồn, không chấp thuận máy móc. Kiểm tra final_vi theo "
+        + "\nĐối chiếu lại kết luận này với nguồn, không chấp thuận máy móc. Với MỖI segment, thêm "
+          "address_applicable (boolean): true chỉ khi final_vi thực sự chọn/đổi một quan hệ hoặc "
+          "chiều xưng hô; câu trung tính, số, tên riêng, thán từ và lời kể không áp dụng. "
+          "Kiểm tra final_vi theo "
           "vai người nói/người nghe và nối câu liên tục, sửa bản Việt nếu sai chiều. "
-          "Mỗi segment phải thêm address_verified (boolean) và address_reason (lý do cụ thể). "
+          "Mỗi segment phải thêm address_verified (boolean) và address_reason (lý do cụ thể) nếu áp dụng. "
           "address_verified=true chỉ khi cách xưng hô của final_vi thực tế phù hợp nguồn/mạch thoại; "
-          "OCR trùng chữ không đủ. Nếu uncertain=true hoặc còn hai cách phân vai, "
+          "Nếu address_applicable=false, thêm address_neutral_faithful=true chỉ khi đã kiểm tra "
+          "câu nguồn và final_vi giữ đủ ý/người làm/người chịu tác động mà không cần phân vai; "
+          "nêu đối chiếu cụ thể trong address_reason. Không được đặt true chỉ vì đã bỏ đại từ; "
+          "bỏ người thực hiện hoặc mất đối lập 'tôi mới là người hỏi' phải false và needs_review=true. "
+          "OCR trùng chữ không đủ. Nếu address_applicable=true và uncertain=true hoặc còn hai cách phân vai, "
           "address_verified=false, needs_review=true; không xác nhận chỉ vì bỏ đại từ. "
           "Nếu lời nguồn mới được sửa làm thay đổi căn cứ, address_verified=false để đọc lại nguồn.")
 

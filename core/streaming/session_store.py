@@ -39,7 +39,7 @@ META_FIELDS = frozenset((
     "checked corrected unresolved manual incomplete version method speech_id duration ratio "
     "background_color text_color position blur_original suppression_level_db throughput_rtf "
     "zh vi source_evidence_ids speaker theme terms pronouns name src tgt note "
-    "address_context address_context_sources address_stale_source_ids address_verified address_reason address_preserved self_address listener_address uncertain quote "
+    "address_context address_context_sources address_stale_source_ids address_applicable address_neutral_faithful address_verified address_reason address_preserved self_address listener_address uncertain quote "
     "reviewed_address_context is_focus speaker_id addressee_id source_needs_review source_truncated translation_is_draft "
     "tts_seconds slot_seconds fit_ratio semantic_status acoustic_status source_region_verified "
     "reference_zh reference_vi equivalent different_source same_meaning text_preserved "

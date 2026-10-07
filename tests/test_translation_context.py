@@ -217,6 +217,13 @@ def test_dialogue_context_sorts_timestamps_and_retains_reviewed_direction():
     assert context[1]["reviewed_address_context"]["self_address"] == "con"
 
 
+def test_needs_review_for_address_does_not_mark_source_uncertain_when_source_supported():
+    rows = [{**source(0, "这话应该我来问吧", "Câu này phải để em hỏi."), "needs_review": True,
+        "verification": {"source_supported": True}}]
+    context = dialogue_context(rows)
+    assert "source_needs_review" not in context[0]
+
+
 def test_duplicate_source_turns_keep_explicit_target_identity_in_pacing(monkeypatch):
     translator = SemanticTranslator("opencode")
     candidate = {"literal_vi": "Con chưa làm xong.", "natural_vi": "Con chưa xong.", "final_vi": "Con chưa xong."}
