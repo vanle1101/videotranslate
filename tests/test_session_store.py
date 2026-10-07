@@ -92,6 +92,71 @@ def test_exact_nested_evidence_and_measured_cues_survive(persisted):
     assert restored.caption_metadata(restored.segments[0].to_dict())["caption_layout"]["source_masks"]
 
 
+def test_address_evidence_pacing_and_context_survive_repeated_restore(persisted):
+    segment = persisted.segments[0]
+    reading = {"id": 0, "self_address": "em", "listener_address": "chị", "uncertain": False,
+               "reason": "Người đang nói gọi người nghe là chị.",
+               "evidence": [{"id": 0, "quote": "拜托姐"}]}
+    segment.verification = {"status": "corrected", "source_supported": True, "semantic_verified": True,
+        "address_verified": True, "address_reason": "Giữ đúng chiều em gọi chị.", "address_context": reading,
+        "pacing": {"status": "verified", "provider": "opencode", "text": segment.final_vi,
+                   "reason": "Giữ cách xưng hô đã đối chiếu.", "address_preserved": True}}
+    persisted.rolling_context = [{"id": 0, "start": 0.0, "end": 2.0, "zh": "拜托姐", "vi": "Thôi mà chị.",
+        "is_focus": True, "speaker_id": "A", "addressee_id": "B", "source_needs_review": True,
+        "source_truncated": True, "translation_is_draft": True, "reviewed_address_context": reading}]
+    persisted.persist()
+    for _ in range(2):
+        active_streaming_sessions.clear()
+        restored = restore_saved_session(persisted.task_id)
+        assert restored.segments[0].verification == segment.verification
+        assert restored.rolling_context == persisted.rolling_context
+        restored.persist()
+
+
+def test_address_source_snapshot_and_stale_ids_round_trip(persisted):
+    persisted.segments[0].verification = {
+        "status": "unresolved", "address_verified": False,
+        "address_context_sources": {"0": "拜托姐", "12": "妈妈，我饿了"},
+        "address_stale_source_ids": [12],
+        "address_reason": "Nguồn được dùng làm căn cứ đã thay đổi.",
+    }
+    persisted.persist()
+    restored = restore_saved_session(persisted.task_id)
+    audit = restored.segments[0].verification
+    assert audit["address_context_sources"] == {"0": "拜托姐", "12": "妈妈，我饿了"}
+    assert audit["address_stale_source_ids"] == [12]
+
+
+def test_address_source_snapshot_rejects_non_numeric_keys(persisted):
+    persisted.segments[0].verification = {
+        "status": "unresolved", "address_context_sources": {"source": "private"},
+    }
+    with pytest.raises(ValueError, match="Ảnh chụp nguồn xưng hô"):
+        persisted.persist()
+
+
+def test_address_metadata_filters_credentials_and_redacts_configured_secret(persisted, monkeypatch):
+    secret = "address-storage-test-private-key"
+    monkeypatch.setattr(settings, "OPENCODE_API_KEY", secret)
+    persisted.segments[0].verification = {"status": "verified", "address_verified": True,
+        "address_reason": f"Giữ lời gọi {secret}", "address_context": {
+            "id": 0, "self_address": "em", "listener_address": "chị", "uncertain": False,
+            "reason": "Nguồn lời gọi chị", "api_key": secret,
+            "headers": {"Authorization": "Bearer unconfigured-private-token"},
+            "evidence": [{"id": 0, "quote": f"拜托姐 {secret}", "credentials": "private-session"}]},
+        "pacing": {"status": "verified", "address_preserved": True, "authorization": "Bearer private-token"}}
+    persisted.persist()
+    text = _project_path(persisted.task_id).read_text(encoding="utf-8")
+    for omitted in (secret, "private-token", "private-session", "Authorization", "authorization",
+                    "headers", "credentials", "api_key"):
+        assert omitted not in text
+    audit = restore_saved_session(persisted.task_id).segments[0].verification
+    assert audit["address_verified"] is True
+    assert audit["pacing"]["address_preserved"] is True
+    assert audit["address_reason"] == "Giữ lời gọi [redacted]"
+    assert audit["address_context"]["evidence"] == [{"id": 0, "quote": "拜托姐 [redacted]"}]
+
+
 @pytest.mark.parametrize("stage,code,consensus", [
     ("audio_evidence", "asr_failed", False),
     ("audio_semantic_review", "provider_timeout", True),

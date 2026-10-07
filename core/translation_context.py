@@ -10,7 +10,7 @@ import json
 import re
 
 
-ADDRESS_POLICY_REVISION = 1
+ADDRESS_POLICY_REVISION = 2
 
 VIETNAMESE_ADDRESS_POLICY = """
 QUY TẮC XƯNG HÔ THEO NGỮ CẢNH (áp dụng cả dịch, kiểm định và rút gọn lời đọc):
@@ -61,6 +61,10 @@ def dialogue_context(rows, focus=(), *, max_rows=64, max_chars=18000):
     remains explicitly untrusted. Older evidence includes its adjacent turns
     so an isolated kinship keyword is less likely to be mistaken for a speaker.
     """
+    rows = list(rows)
+    # Timestamp order, never mapping/insertion order, governs continuity.
+    if rows and all(isinstance(row.get("start"), (int, float)) for row in rows):
+        rows = sorted(rows, key=lambda row: (row["start"], row.get("end", row["start"])))
     normalized = []
     for index, row in enumerate(rows):
         source = row.get("text_zh") or row.get("asr_text") or row.get("zh", "")
@@ -69,6 +73,8 @@ def dialogue_context(rows, focus=(), *, max_rows=64, max_chars=18000):
         item = {key: row[key] for key in ("id", "start", "end", "speaker_id", "addressee_id")
                 if key in row and isinstance(row[key], (str, int, float))}
         item["text_zh"] = source[:1500]
+        if row.get("is_focus") is True:
+            item["is_focus"] = True
         # The selector can be called more than once (for example when a
         # reviewed context is formatted for a second provider request). Keep
         # source-risk markers from the first pass instead of silently making
@@ -84,6 +90,12 @@ def dialogue_context(rows, focus=(), *, max_rows=64, max_chars=18000):
             item["translation_is_draft"] = True
         elif row.get("translation_is_draft"):
             item["translation_is_draft"] = True
+        verification = row.get("verification") or {}
+        if (isinstance(verification, dict) and verification.get("address_verified") is True
+                and isinstance(verification.get("address_context"), dict)):
+            item["reviewed_address_context"] = verification["address_context"]
+        elif isinstance(row.get("reviewed_address_context"), dict):
+            item["reviewed_address_context"] = row["reviewed_address_context"]
         normalized.append((index, item))
     if not normalized:
         return []
@@ -120,6 +132,87 @@ def format_dialogue_context(rows, focus=()):
     return json.dumps(dialogue_context(rows, focus), ensure_ascii=False)
 
 
+def focus_identity(rows):
+    focus = [row for row in rows if row.get("is_focus") is True]
+    if len(focus) != 1:
+        return {}
+    return {key: focus[0][key] for key in ("id", "start", "end") if key in focus[0]}
+
+
+def needs_address_audit(rows, context=()):
+    """Select contextual dialogue for a semantic audit, never choose pronouns."""
+    all_rows = list(rows) + list(context)
+    return any(_ADDRESS_CUE.search(str(row.get("text_zh", row.get("zh", ""))))
+               or re.search(r"\b(?:chị|em|anh|con|bố|mẹ|tao|mày)\b", str(row.get("final_vi", row.get("vi", ""))), re.I)
+               for row in all_rows)
+
+
+def source_dialogue(rows):
+    """Remove every Vietnamese draft before the independent source reading."""
+    return [{key: value for key, value in row.items()
+             if key in {"id", "start", "end", "text_zh", "asr_text", "speaker_id", "addressee_id",
+                        "source_needs_review", "source_truncated"}}
+            for row in rows]
+
+
+def address_reading_prompt(rows, context):
+    return (VIETNAMESE_ADDRESS_POLICY + "\nĐỌC NGỮ CẢNH XƯNG HÔ TỪ NGUỒN, CHƯA CÓ BẢN VIỆT. "
+        "Đọc theo thứ tự thời gian. Xác định nối tiếp cùng người nói hay đổi lượt bằng lời nguồn; "
+        "không bắt buộc có speaker_id, không tự gán danh tính, giới tính hoặc luân phiên theo segment. "
+        "OCR chỉ chứng minh chữ nguồn, KHÔNG tự chứng minh ai nói. Được kết luận từ mạch đối thoại "
+        "và lời gọi/đáp nếu đủ rõ; nếu hai cách phân vai vẫn hợp lý thì uncertain=true. "
+        "Chưa dịch câu; chỉ đề xuất xưng hô cho từng ID cần kiểm định, dẫn câu nguồn chính xác. "
+        "Trả JSON {\"address_context\":[{\"id\":0,\"self_address\":\"\","
+        "\"listener_address\":\"\",\"uncertain\":false,\"reason\":\"lý do nối người nói\","
+        "\"evidence\":[{\"id\":0,\"quote\":\"câu nguồn thực có\"}]}]}. "
+        "Đại từ có thể rỗng nếu không cần; không chèn lời Việt nháp hay sửa lời nguồn. "
+        "Mỗi ID trả đúng một lần. Dẫn đủ bằng chứng nối cách gọi với câu hiện tại, không chỉ trích một từ rời.\n"
+        + "ID cần kiểm định: " + json.dumps([row["id"] for row in rows])
+        + "\nNguồn thoại theo thời gian: " + json.dumps(source_dialogue(context), ensure_ascii=False))
+
+
+def validate_address_reading(data, rows, context):
+    """Validate cited source text; this is not itself proof of interpretation."""
+    if not isinstance(data, dict) or not isinstance(data.get("address_context"), list):
+        raise ValueError("Thiếu kết quả đọc ngữ cảnh xưng hô.")
+    expected = {row["id"] for row in rows}
+    by_id = {row["id"]: str(row.get("text_zh", row.get("asr_text", "")))
+             for row in context if "id" in row}
+    result = {}
+    for row in data["address_context"]:
+        if (not isinstance(row, dict) or type(row.get("id")) is not int
+                or row["id"] not in expected or row["id"] in result
+                or type(row.get("uncertain")) is not bool
+                or not all(isinstance(row.get(key), str) for key in ("self_address", "listener_address", "reason"))
+                or not row["reason"].strip() or not isinstance(row.get("evidence"), list)):
+            raise ValueError("Kết quả ngữ cảnh xưng hô không đúng cấu trúc.")
+        if not row["uncertain"] and not row["evidence"]:
+            raise ValueError("Chưa có bằng chứng cho kết luận xưng hô.")
+        for citation in row["evidence"]:
+            if (not isinstance(citation, dict) or type(citation.get("id")) is not int
+                    or citation["id"] not in by_id or not isinstance(citation.get("quote"), str)
+                    or not citation["quote"].strip() or citation["quote"] not in by_id[citation["id"]]):
+                raise ValueError("Dẫn chứng xưng hô không khớp lời nguồn.")
+        result[row["id"]] = row
+    if set(result) != expected:
+        raise ValueError("Thiếu câu khi đọc ngữ cảnh xưng hô.")
+    return result
+
+
+def address_review_instruction(reading):
+    if not reading:
+        return ""
+    return ("\nĐã có lượt đọc ngữ cảnh RIÊNG chỉ từ nguồn Trung, không nhìn bản Việt: "
+        + json.dumps(list(reading.values()), ensure_ascii=False)
+        + "\nĐối chiếu lại kết luận này với nguồn, không chấp thuận máy móc. Kiểm tra final_vi theo "
+          "vai người nói/người nghe và nối câu liên tục, sửa bản Việt nếu sai chiều. "
+          "Mỗi segment phải thêm address_verified (boolean) và address_reason (lý do cụ thể). "
+          "address_verified=true chỉ khi cách xưng hô của final_vi thực tế phù hợp nguồn/mạch thoại; "
+          "OCR trùng chữ không đủ. Nếu uncertain=true hoặc còn hai cách phân vai, "
+          "address_verified=false, needs_review=true; không xác nhận chỉ vì bỏ đại từ. "
+          "Nếu lời nguồn mới được sửa làm thay đổi căn cứ, address_verified=false để đọc lại nguồn.")
+
+
 def added_rude_address(previous, candidate):
     """A timing rewrite cannot introduce an unrequested hostile register."""
     def terms(text):
@@ -130,71 +223,3 @@ def added_rude_address(previous, candidate):
         value = re.sub(r"\b(?:(?:lông|chân|hàng|nhíu|chau)\s+mày|mày\s+mò|thanh\s+tao|tao\s+nhã)\b", "", value)
         return set(re.findall(r"\b(?:tao|mày)\b", value))
     return sorted(terms(candidate) - terms(previous))
-
-
-_VI_ADDRESS = r"(?:chị|em|anh|cô|chú|bác|con|bố|ba|mẹ|má|tao|mày)"
-# Deliberately narrow negative check: pronoun-like positions, not every family
-# word. It is not a Vietnamese parser or a positive semantic verification.
-_ADDRESS_AS_ACTOR = re.compile(
-    rf"\b({_VI_ADDRESS})\s+(?:đã|đang|sẽ|chưa|không|cũng|vẫn|phải|cần|muốn|"
-    r"hỏi|nói|đi|đến|về|làm|ăn|biết|hiểu|nghĩ|thấy|nghe|bảo|gọi|đói|khát|mấy|bao nhiêu)\b", re.I)
-_ADDRESS_AS_OBJECT = re.compile(
-    rf"\b(?:theo|hỏi|bảo|với|cho|giúp|đợi|chờ)\s+({_VI_ADDRESS})\b", re.I)
-_LOCAL_VOCATIVE = re.compile(
-    r"^\s*(?:拜托|求求|请问|喂|嗨|嘿)?\s*"
-    r"(?:妈妈|媽媽|爸爸|姐姐|哥哥|弟弟|妹妹|老师|老師|师傅|師傅|师父|師父|"
-    r"爷爷|爺爺|奶奶|叔叔|阿姨|妈|媽|爸|姐|哥)"
-    r"[啊呀哎诶唉哦，,！!：:\s]*(?:我|你|您|别|別|请|請|快|能不能|可不可以|帮|幫|让|讓)")
-
-
-def unproven_relationship_address(source, candidate, context=()):
-    """Flag a narrow, known evidence gap in pronoun-bearing dialogue.
-
-    A neutral Chinese pronoun plus a Vietnamese relationship in a pronoun-like
-    position needs contextual grounding. Direct source address already provides
-    that grounding without speaker metadata. A random ID elsewhere proves
-    nothing and must not bypass this guard. ``False`` is NOT an approval of
-    equivalence or of the selected direction: independent semantic review is
-    still required, including for directly addressed or quoted speech.
-    """
-    source_text = str(source or "")
-    candidate_text = str(candidate or "")
-    if not re.search(r"[我你您]", source_text):
-        return False
-    # These are clear, local vocatives. Merely mentioning someone's mother or
-    # quoting a different character is deliberately not the same evidence.
-    if _LOCAL_VOCATIVE.search(source_text):
-        return False
-    # A real matching speaker AND addressee can connect an explicit earlier
-    # vocative to this turn. An ID on an unrelated row, gender label, or merely
-    # the same words spoken by somebody else cannot authorize that transfer.
-    rows = [row for row in (context or []) if isinstance(row, dict)]
-    text = lambda row: str(row.get("text_zh") or row.get("asr_text") or row.get("zh", ""))
-    current = [row for row in rows if text(row) == source_text]
-    if len(current) == 1:
-        current = current[0]
-        speaker, listener = current.get("speaker_id"), current.get("addressee_id")
-        if speaker not in (None, "") and listener not in (None, ""):
-            if any(row.get("speaker_id") == speaker and row.get("addressee_id") == listener
-                   and _LOCAL_VOCATIVE.search(text(row)) for row in rows):
-                return False
-    # Ordinary noun uses must not be turned into pronoun warnings. Source
-    # kinship nouns also leave judgement with the semantic reviewer: this guard
-    # targets pronoun assignments when Chinese does not name that relationship.
-    # A named source noun can ground a matching Vietnamese noun object (我问
-    # 妈妈 -> tôi hỏi mẹ), but it does not ground a new speaker pronoun. Keep
-    # this mapping intentionally small; it is not a relationship classifier.
-    noun_pairs = (("妈妈", "mẹ"), ("媽媽", "mẹ"), ("妈", "mẹ"), ("媽", "mẹ"),
-                  ("爸爸", "bố"), ("爸", "bố"), ("姐姐", "chị"), ("姐", "chị"),
-                  ("哥哥", "anh"), ("哥", "anh"), ("弟弟", "em"), ("弟", "em"),
-                  ("妹妹", "em"), ("妹", "em"), ("老师", "thầy"), ("老師", "thầy"))
-    candidate_folded = candidate_text.casefold()
-    if any(source_term in source_text and vietnamese_term in candidate_folded
-           for source_term, vietnamese_term in noun_pairs):
-        # The matching word is grounded as a referent; an unrelated actor
-        # pronoun in the same candidate is still checked by the patterns below.
-        if not _ADDRESS_AS_ACTOR.search(candidate_folded):
-            return False
-    return bool(_ADDRESS_AS_ACTOR.search(candidate_text) or _ADDRESS_AS_OBJECT.search(candidate_text))
-
-

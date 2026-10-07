@@ -74,6 +74,26 @@ def test_asr_only_future_source_stays_marked_uncertain():
     assert context[1]["source_needs_review"] is True
 
 
+def test_review_snapshot_keeps_session_timeline_and_does_not_publish_future_source():
+    current = _segment(0, 0, "这话应该我来问吧", "Bản cũ")
+    later = _segment(1, 1, "错误识别", "Câu sau cũ")
+    snapshot = {0: {"id": 0, "text_zh": current.text_zh, "final_vi": "Bản rà"},
+                1: {"id": 1, "start": 90, "end": 100, "text_zh": "姐你听我说",
+                    "final_vi": "Chị nghe em nói này.", "source_needs_review": True},
+                9: {"id": 9, "text_zh": "额外的句子", "final_vi": "Không có trong timeline"}}
+
+    context = _session(current, later)._dialogue_context_before(current, _review_context=snapshot)
+
+    assert [row["id"] for row in context] == [0, 1]
+    assert context[1]["text_zh"] == "姐你听我说"
+    assert context[1]["final_vi"] == "Chị nghe em nói này."
+    assert (context[1]["start"], context[1]["end"]) == (1.0, 2.0)
+    assert context[1]["source_needs_review"] is True
+    assert context[1]["translation_is_draft"] is True
+    assert later.text_zh == "错误识别" and later.final_vi == "Câu sau cũ"
+    assert snapshot[1]["start"] == 90
+
+
 def test_dialogue_context_preserves_source_risk_flags_when_normalized_twice():
     rows = [{
         "id": 0,

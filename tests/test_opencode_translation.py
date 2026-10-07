@@ -8,7 +8,7 @@ from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from core.engines.translation.semantic_translator import SemanticTranslator
+from core.engines.translation.semantic_translator import SemanticTranslator, PacingReviewRejected
 from core.translator import VideoTranslator
 
 
@@ -106,6 +106,22 @@ class OpenCodeTranslationTests(unittest.TestCase):
         with patch.object(self.translator, "_opencode_request", side_effect=AssertionError("No request expected")):
             self.assertEqual(self.translator.translate([]), [])
             self.assertEqual(self.translator.translate_single_segment("  ", 2), {"literal_vi": "", "natural_vi": "", "final_vi": ""})
+
+    def test_candidate_only_address_requires_independent_preservation_proof(self):
+        draft, candidate = "Đi trước đi.", "Em đi trước nhé."
+        proposed = {"literal_vi": candidate, "natural_vi": candidate, "final_vi": candidate,
+                    "needs_review": False, "review_reason": ""}
+        for address_preserved in (False, None):
+            verdict = {"equivalent": True, "natural": True,
+                       "reason": "Câu trôi chảy nhưng chưa xác định vai em."}
+            if address_preserved is not None:
+                verdict["address_preserved"] = address_preserved
+            responses = [json.dumps(proposed), json.dumps(verdict)]
+            with self.subTest(address_preserved=address_preserved), \
+                    patch.object(self.translator, "_opencode_request", side_effect=responses) as request, \
+                    self.assertRaises(PacingReviewRejected):
+                self.translator.rewrite_for_pacing("你先走吧", draft, 1.0)
+            self.assertEqual(request.call_count, 2)
 
     def test_legacy_facade_honors_selected_provider(self):
         with patch("core.translator.SemanticTranslator") as engine:

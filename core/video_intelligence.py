@@ -164,6 +164,11 @@ class VideoIntelligence:
         return hashlib.sha256(json.dumps(canonical, ensure_ascii=False, sort_keys=True,
                                          separators=(",", ":"), allow_nan=False).encode("utf-8")).hexdigest()
 
+    @classmethod
+    def _text_batch_context_digest(cls, payload, observed, summary, context_payload):
+        """Hash every input that can change a text-only batch decision."""
+        return cls._checkpoint_digest([payload, observed, summary, context_payload])
+
     def _checkpoint_identity(self, video_path, segments, total_duration):
         """Identify reusable work independently of ephemeral pipeline session IDs.
 
@@ -552,11 +557,28 @@ class VideoIntelligence:
                 reason = "AI dẫn chứng chữ ở sai thời điểm; giữ bản nhận giọng để nghe lại."
             original = source.get("asr_text", "")
             changed = self._compact_text(text) != self._compact_text(original)
+            source_supported = not changed
+            if changed and refs:
+                cited = [evidence[ref] for ref in refs
+                         if isinstance(ref, str) and ref in evidence
+                         and (self._number(evidence[ref].get("confidence")) or 0) >= .90
+                         and not evidence[ref].get("needs_review")
+                         and evidence[ref].get("kind") not in {"title", "ignore"}]
+                if not self._ocr_supports_text(text, cited):
+                    # A valid ID and overlapping timestamp alone do not prove
+                    # a changed ASR string. Keep the measured recognition as
+                    # the only source-safe context and surface uncertainty.
+                    text, refs = original, []
+                    reason = "Chữ OCR được dẫn chưa xác nhận đủ toàn bộ câu; giữ bản nhận giọng để nghe lại."
+                    invalid_evidence = True
+                else:
+                    source_supported = True
             review = invalid_evidence or row["needs_review"] or (changed and not refs) or (bool(original.strip()) and not text.strip())
             if review and not reason.strip():
                 reason = "Chưa đủ bằng chứng OCR để xác minh câu nhận dạng."
             corrections[row["id"]] = {"text_zh": text.strip(), "evidence_ids": list(dict.fromkeys(refs)),
-                                       "needs_review": bool(review), "review_reason": reason.strip()[:500]}
+                                       "needs_review": bool(review), "review_reason": reason.strip()[:500],
+                                       "source_supported": bool(source_supported and not review)}
         if set(corrections) != set(expected):
             raise VideoIntelligenceError("Bước sửa nhận dạng trả thiếu câu.")
         return corrections
@@ -574,6 +596,54 @@ class VideoIntelligence:
             row["text_zh"] = correction["text_zh"]
             row["source_evidence_ids"] = correction["evidence_ids"]
         return result
+
+    @staticmethod
+    def _apply_source_corrections_to_context(source_dialogue, corrections):
+        """Carry only validated ASR/OCR corrections into later batch context.
+
+        A later batch must see a preceding corrected source turn, but source
+        uncertainty remains sticky. This mutates the private per-prepass
+        snapshot only; it never changes the caller's SegmentItem or payload.
+        """
+        by_id = {row.get("id"): row for row in source_dialogue
+                 if isinstance(row, dict) and isinstance(row.get("id"), int)}
+        for sid, correction in (corrections or {}).items():
+            row = by_id.get(sid)
+            if row is None or not isinstance(correction, dict):
+                continue
+            text = correction.get("text_zh")
+            original = str(row.get("asr_text") or "").strip()
+            changed = isinstance(text, str) and VideoIntelligence._compact_text(text) != VideoIntelligence._compact_text(original)
+            # A changed source is context-safe only after the correction pass
+            # has corroborated it. Uncertain corrections remain ASR text.
+            if changed and (correction.get("needs_review") or correction.get("source_supported") is not True):
+                row["source_needs_review"] = True
+                text = original
+            if isinstance(text, str) and text.strip():
+                row["text_zh"] = text.strip()
+            if correction.get("needs_review"):
+                row["source_needs_review"] = True
+            refs = correction.get("evidence_ids")
+            if isinstance(refs, list):
+                row["source_evidence_ids"] = list(refs)
+
+    @classmethod
+    def _merge_chunk_source_context(cls, source_dialogue, result):
+        """Carry accepted source corrections across chunk boundaries only."""
+        corrections = {}
+        for sid, item in (result.get("segments", {}) if isinstance(result, dict) else {}).items():
+            if not isinstance(item, dict):
+                continue
+            refs = item.get("source_evidence_ids")
+            if isinstance(refs, list):
+                corrections[int(sid)] = {
+                    "text_zh": item.get("text_zh", ""),
+                    "evidence_ids": refs,
+                    "needs_review": bool(item.get("needs_review")),
+                    "source_supported": bool(item.get("source_evidence_ids")
+                                              and not item.get("needs_review")),
+                }
+        cls._apply_source_corrections_to_context(source_dialogue, corrections)
 
     @staticmethod
     def _compact_text(value):
@@ -787,19 +857,25 @@ class VideoIntelligence:
             # Bound response size even when rapid subtitle changes produce many
             # local OCR IDs. Every requested ID belongs to exactly one batch.
             batches = max(1, math.ceil(len(payload) / 12), math.ceil(len(representatives) / 24))
-            context = json.dumps({"speech": [{"start": row["start"], "end": row["end"],
-                                             "asr_text": row.get("asr_text", "")} for row in payload],
-                                  "wider_source_dialogue": dialogue_context(
-                                      getattr(self, "_source_dialogue", []) or payload, payload),
-                                  "ocr": [{"start": row["start"], "end": row["end"],
-                                            "text_zh": row["text_zh"]} for row in representatives]}, ensure_ascii=False)
+            source_dialogue = [dict(row) for row in (getattr(self, "_source_dialogue", []) or payload)
+                               if isinstance(row, dict)]
             for index in range(batches):
                 self._check_cancelled(cancel_check)
                 batch_payload = payload[index * 12:(index + 1) * 12]
                 batch_screens = representatives[index * 24:(index + 1) * 24]
+                context_payload = {"speech": [{"start": row["start"], "end": row["end"],
+                                                "asr_text": row.get("asr_text", "")} for row in payload],
+                                   "wider_source_dialogue": dialogue_context(source_dialogue, payload),
+                                   "ocr": [{"start": row["start"], "end": row["end"],
+                                             "text_zh": row["text_zh"]} for row in representatives]}
+                context = json.dumps(context_payload, ensure_ascii=False)
                 batch_stage = {"kind": "text_batch", "start": start, "end": end, "index": index,
                                "provider": provider, "model": model_setting, "quota_fallback": quota_fallback,
-                               "context": self._checkpoint_digest([payload, observed, combined["summary"]])}
+                               # Include the complete wider dialogue. A prior
+                               # cache entry must not survive a changed remote
+                               # address cue or corrected source turn.
+                               "context": self._text_batch_context_digest(
+                                   payload, observed, combined["summary"], context_payload)}
                 saved_batch = self._read_checkpoint(batch_stage)
                 if isinstance(saved_batch, dict):
                     try:
@@ -822,12 +898,20 @@ class VideoIntelligence:
                         pass
                     else:
                         all_corrections.update({int(key): value for key, value in saved_corrections.items()})
+                        self._apply_source_corrections_to_context(source_dialogue,
+                            {int(key): value for key, value in saved_corrections.items()})
                         combined["segments"].update(saved_result["segments"])
                         combined["screen_texts"].extend(saved_result["screen_texts"])
                         combined["summary"] = saved_result["summary"] or combined["summary"]
                         continue
                 corrections = self._correct_source(client, batch_payload, observed, context, cancel_check)
                 all_corrections.update(corrections)
+                self._apply_source_corrections_to_context(source_dialogue, corrections)
+                # The translation request must see the corrected current batch
+                # and any prior corrected turns, while the cache key above
+                # remains tied to the pre-correction request inputs.
+                context_payload["wider_source_dialogue"] = dialogue_context(source_dialogue, payload)
+                context = json.dumps(context_payload, ensure_ascii=False)
                 corrected_payload = [{**row, "corrected_text_zh": corrections[row["id"]]["text_zh"],
                                       "source_needs_review": corrections[row["id"]]["needs_review"],
                                       "source_review_reason": corrections[row["id"]]["review_reason"]}
@@ -1134,6 +1218,10 @@ class VideoIntelligence:
                 break
             output.update(result["segments"])
             screens.extend(result["screen_texts"])
+            # Restored chunks may contain source corrections accepted by their
+            # earlier batch. Rebuild the private wider dialogue before asking
+            # the next fresh chunk for context.
+            self._merge_chunk_source_context(self._source_dialogue, result)
             for source in result.get("translation_sources", []):
                 if source not in sources:
                     sources.append(source)
@@ -1180,6 +1268,7 @@ class VideoIntelligence:
             # Only complete, validated chunk results become resume points.
             # Keep prior successful chunks when a later provider call fails.
             result = self._checked_checkpoint_result(result, chunk_segments, cursor, end)
+            self._merge_chunk_source_context(self._source_dialogue, result)
             completed.append({"start": cursor, "end": end, "previous_summary": summary, "result": result})
             self._write_checkpoint({"kind": "chunks"}, completed, cancel_check)
             output.update(result["segments"])

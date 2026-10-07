@@ -247,7 +247,8 @@ class StreamingPipelineSession:
                 self.warnings.append(message)
             logging.getLogger("errors").error("[%s] PROJECT_SAVE_FAILED error_type=%s", self.task_id, type(exc).__name__)
 
-    def _dialogue_context_before(self, segment, *, focus_source=None, focus_vi=None):
+    def _dialogue_context_before(self, segment, *, focus_source=None, focus_vi=None,
+                                 _review_context=None):
         """Return bounded source-first context for the whole known exchange.
 
         A fixed preceding window can discard the only evidence that
@@ -260,24 +261,44 @@ class StreamingPipelineSession:
         from core.translation_context import dialogue_context
         rows = []
         for item in sorted(self.segments.values(), key=lambda value: (value.start, value.id)):
-            text_source = getattr(item, "text_zh", "")
-            source = str(text_source or getattr(item, "asr_text", "") or "").strip()
+            reviewed = (_review_context or {}).get(item.id, {})
+            if not isinstance(reviewed, dict) or reviewed.get("id") != item.id:
+                reviewed = {}
+            # Review can correct a later source before this earlier sentence
+            # is fitted. Use that immutable review snapshot for context without
+            # publishing later text/audio or accepting different timeline IDs.
+            text_source = reviewed.get("text_zh", getattr(item, "text_zh", ""))
+            asr_source = reviewed.get("asr_text", getattr(item, "asr_text", ""))
+            source = str(text_source or asr_source or "").strip()
             if item.id == segment.id and isinstance(focus_source, str) and focus_source.strip():
                 source = focus_source.strip()
             if not source:
                 continue
             row = {"id": item.id, "start": item.start, "end": item.end,
-                   "text_zh": source, "asr_text": getattr(item, "asr_text", "")}
-            draft = focus_vi if item.id == segment.id and isinstance(focus_vi, str) else getattr(item, "final_vi", "")
+                   "text_zh": source, "asr_text": asr_source}
+            # Keep the focused review's independent address verdict in the
+            # private context used by pacing.  It is evidence for the model,
+            # never a replacement for the source-only reading.
+            if isinstance(reviewed.get("verification"), dict):
+                row["verification"] = reviewed["verification"]
+            elif isinstance(getattr(item, "verification", None), dict):
+                row["verification"] = dict(item.verification)
+            if item.id == segment.id:
+                row["is_focus"] = True
+            draft = (focus_vi if item.id == segment.id and isinstance(focus_vi, str)
+                     else reviewed.get("final_vi", getattr(item, "final_vi", "")))
             if isinstance(draft, str) and draft:
                 row["final_vi"] = draft
-            if getattr(item, "needs_review", False):
+            if reviewed.get("needs_review", getattr(item, "needs_review", False)):
                 row["needs_review"] = True
-            if not text_source and getattr(item, "asr_text", ""):
+            if reviewed.get("source_needs_review") or (not text_source and asr_source):
                 row["source_needs_review"] = True
+            if reviewed.get("source_truncated"):
+                row["source_truncated"] = True
             rows.append(row)
         focus_rows = [{"id": segment.id, "start": segment.start, "end": segment.end,
-                       "text_zh": focus_source or getattr(segment, "text_zh", "") or getattr(segment, "asr_text", "") or ""}]
+                       "text_zh": focus_source or getattr(segment, "text_zh", "") or getattr(segment, "asr_text", "") or "",
+                       "is_focus": True}]
         selected = dialogue_context(rows, focus_rows, max_rows=64)
         # Keep the long-lived pipeline contract (`zh`/`vi`) alongside the
         # stable IDs/timestamps now used by the selector. Draft translations
@@ -397,7 +418,8 @@ class StreamingPipelineSession:
         return self.get_progress()
 
     async def edit_segment(self, segment_id: int, text: str, *, confirm_silence: bool = False,
-                           _review_result: Optional[Dict[str, Any]] = None):
+                           _review_result: Optional[Dict[str, Any]] = None,
+                           _review_context: Optional[Dict[int, Dict[str, Any]]] = None):
         """Publish text and fitted audio together only after synthesis succeeds."""
         review_empty = (isinstance(_review_result, dict) and isinstance(text, str) and not text.strip()
                         and _review_result.get("final_vi") == "" and _review_result.get("needs_review") is True)
@@ -465,6 +487,7 @@ class StreamingPipelineSession:
                             seg,
                             focus_source=review_result.get("text_zh", old_source),
                             focus_vi=text,
+                            _review_context=_review_context,
                         ) if review_result is not None else None))
                 spoken_text = spoken.get("text", text)
                 if spoken_text != text:
@@ -621,10 +644,15 @@ class StreamingPipelineSession:
                 force_review=force_review)
         finally:
             semantic_active = False
+        # Audio edits publish one row at a time. Every pacing request must see
+        # the same complete reviewed exchange, including future source fixes,
+        # while each row's visible text/audio still commits transactionally.
+        review_context = deepcopy(result["segments"])
         for sid, row in sorted(result["segments"].items(), key=lambda item: (self.segments[item[0]].start, item[0])):
             segment = self.segments[sid]
             if regenerate_audio and row["final_vi"] != segment.final_vi:
-                await self.edit_segment(sid, row["final_vi"], _review_result=row)
+                await self.edit_segment(sid, row["final_vi"], _review_result=row,
+                                        _review_context=review_context)
             else:
                 self._apply_review_metadata(segment, row)
                 if regenerate_audio:

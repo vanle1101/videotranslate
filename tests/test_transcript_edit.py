@@ -910,6 +910,71 @@ def test_automatic_review_fits_revised_source_and_publishes_only_verified_spoken
     assert not list(session.segments_dir.glob("edit_*"))
 
 
+@pytest.mark.parametrize("fail_first", [False, True])
+def test_review_audio_uses_complete_reviewed_exchange_before_future_rows_commit(session, monkeypatch, fail_first):
+    from core.translation_review import AutomaticTranslationReviewer
+    monkeypatch.setattr(settings, "LLM_PROVIDER", "opencode")
+    first = session.segments[0]
+    later = SegmentItem(1, 6, 9, 3)
+    later.status, later.text_zh, later.final_vi = "READY", "错误识别", "Câu sau cũ."
+    session.segments[1] = later
+    rows = {
+        0: dict(first.to_dict(), text_zh="这话应该我来问吧", final_vi="Bản rà câu đầu.",
+                verification={"status": "corrected"}),
+        1: dict(later.to_dict(), text_zh="姐你听我说", final_vi="Chị nghe em nói này.",
+                verification={"status": "corrected"}),
+    }
+    untouched = deepcopy(rows)
+    before = {sid: deepcopy(seg.to_dict()) for sid, seg in session.segments.items()}
+    received = []
+
+    def synthesis(*, text, source, output_path, context, **kwargs):
+        received.append(deepcopy(context))
+        if len(received) == 1:
+            # Pacing sees the reviewed future source, but the visible future
+            # row must stay unchanged until its own audio transaction succeeds.
+            assert later.to_dict() == before[1]
+            future = next(row for row in context if row["id"] == 1)
+            assert future["text_zh"] == rows[1]["text_zh"]
+            assert future["final_vi"] == rows[1]["final_vi"]
+            if fail_first:
+                raise RuntimeError("isolated speech failure")
+        Path(output_path).write_bytes(text.encode())
+        return {"text": text, "tts_duration": 3.0, "speed_ratio": 1.0, "boundaries": []}
+
+    monkeypatch.setattr("core.streaming.pipeline.synthesize_natural_speech", synthesis)
+    monkeypatch.setattr("core.streaming.pipeline.build_speech_timing", lambda *args: {
+        "subtitle_cues": [], "subtitle_timing_source": "test", "speech_start": 0, "speech_end": 3})
+    monkeypatch.setattr(AutomaticTranslationReviewer, "review", lambda *args, **kwargs: {
+        "segments": rows, "summary": {"checked": 2, "verified": 0, "corrected": 2, "unresolved": 0}})
+
+    async def run():
+        await session.start_automatic_review()
+        await session.review_task
+    asyncio.run(run())
+
+    assert rows == untouched
+    assert [row["id"] for row in received[0]] == [0, 1]
+    if fail_first:
+        assert session.review_summary["status"] == "failed"
+        assert {sid: seg.to_dict() for sid, seg in session.segments.items()} == before
+        assert len(received) == 1
+    else:
+        assert session.review_summary["status"] == "completed"
+        # The reviewed exchange is stable, while the focused ID is allowed to
+        # move with the sentence currently being synthesized.
+        normalize = lambda context: [
+            {key: value for key, value in row.items() if key != "is_focus"}
+            for row in context
+        ]
+        assert normalize(received[0]) == normalize(received[1]), "Each row must use one stable reviewed dialogue snapshot"
+        assert next(row.get("is_focus") for row in received[0] if row["id"] == 0) is True
+        assert next(row.get("is_focus") for row in received[1] if row["id"] == 1) is True
+        assert first.text_zh == rows[0]["text_zh"] and later.text_zh == rows[1]["text_zh"]
+        assert first.final_vi == rows[0]["final_vi"] and later.final_vi == rows[1]["final_vi"]
+    assert not list(session.segments_dir.glob("edit_*"))
+
+
 @pytest.mark.parametrize("failure", ["pacing", "timing", "publication"])
 def test_review_pacing_failure_rolls_back_text_source_audio_proof_context_and_output(session, monkeypatch, failure):
     long_text, shorter = "Bản kiểm tra quá dài để đọc tự nhiên.", "Bản ngắn đủ nghĩa."

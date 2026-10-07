@@ -22,7 +22,8 @@ from core.video_intelligence import VideoIntelligence, VideoIntelligenceError
 from core.runtime_context import current_execution_context
 from core.chinese_text import comparable_chinese
 from core.translation_context import (
-    VIETNAMESE_ADDRESS_POLICY, dialogue_context, unproven_relationship_address,
+    VIETNAMESE_ADDRESS_POLICY, dialogue_context, needs_address_audit,
+    address_reading_prompt, validate_address_reading, address_review_instruction,
 )
 
 
@@ -166,6 +167,79 @@ class AutomaticTranslationReviewer:
                     AutomaticTranslationReviewer._diagnostic(error, "semantic_schema", batch)
                     raise
 
+    @staticmethod
+    def _address_reading(client, batch, context, check, checkpoint=None):
+        if not needs_address_audit(batch, context):
+            return {}
+        from core.translation_context import source_dialogue
+        stage = {"kind": "address_context", "ids": [row["id"] for row in batch],
+                 "source": source_dialogue(context)}
+        saved = checkpoint.load(stage) if checkpoint else None
+        if saved is not None:
+            try:
+                return validate_address_reading(saved, batch, context)
+            except ValueError:
+                pass
+        prompt = address_reading_prompt(batch, context)
+        for attempt in range(2):
+            check()
+            logging.getLogger("ai").info("ADDRESS_CONTEXT_REQUEST run_id=%s segment_ids=%s attempt=%s",
+                current_execution_context().run_id, [row["id"] for row in batch], attempt + 1)
+            raw = client.translate(prompt, max_tokens=7000)
+            check()
+            try:
+                data = VideoIntelligence._parse_json(raw)
+                reading = validate_address_reading(data, batch, context)
+            except (ValueError, VideoIntelligenceError) as error:
+                if attempt:
+                    raise VideoIntelligenceError("AI chưa trả kết luận ngữ cảnh xưng hô có dẫn chứng hợp lệ.") from error
+                continue
+            if checkpoint:
+                checkpoint.store(stage, data)
+            logging.getLogger("ai").info("ADDRESS_CONTEXT_READ run_id=%s segment_ids=%s uncertain_ids=%s",
+                current_execution_context().run_id, list(reading), [sid for sid, row in reading.items() if row["uncertain"]])
+            return reading
+
+    @staticmethod
+    def _address_verified(reading, sid, audit):
+        if sid not in reading:
+            return True
+        return (not reading[sid]["uncertain"] and audit.get("address_verified") is True
+                and isinstance(audit.get("address_reason"), str) and bool(audit["address_reason"].strip()))
+
+    @staticmethod
+    def _address_cites_changed_source(reading, sid, changed_ids):
+        """A source correction invalidates every address verdict citing it."""
+        item = reading.get(sid)
+        if not isinstance(item, dict):
+            return False
+        return any(isinstance(ref, dict) and ref.get("id") in changed_ids
+                   for ref in item.get("evidence", []))
+
+    @staticmethod
+    def _address_source_snapshot(reading, sid, context):
+        refs = {sid} | {ref["id"] for ref in reading[sid].get("evidence", [])}
+        return {str(row["id"]): row.get("text_zh", "") for row in context if row.get("id") in refs}
+
+    @staticmethod
+    def _invalidate_changed_address_sources(output):
+        """Compare actual accepted source versions, not proposed corrections."""
+        for row in output.values():
+            audit = row.get("verification") or {}
+            snapshot = audit.get("address_context_sources")
+            if not isinstance(snapshot, dict):
+                continue
+            changed = [int(sid) for sid, source in snapshot.items()
+                       if str(sid).isdigit() and int(sid) in output and isinstance(source, str)
+                       and VideoIntelligence._compact_text(source)
+                       != VideoIntelligence._compact_text(output[int(sid)].get("text_zh", ""))]
+            if not changed:
+                continue
+            reason = "Lời nguồn dùng để xác định xưng hô đã được sửa; cần đọc lại mạch thoại trước khi xác nhận."
+            row.update(needs_review=True, review_reason=reason)
+            audit.update(address_verified=False, semantic_verified=False,
+                         status="unresolved", reason=reason, address_stale_source_ids=changed)
+
     def __init__(self, client=None, screen_ocr=None, audio_evidence=None, *, checkpoint_dir=None):
         # Injected test/plugin adapters cannot populate or consume production cache.
         self._checkpoint_enabled = (client is None and screen_ocr is None and audio_evidence is None) or checkpoint_dir is not None
@@ -291,7 +365,10 @@ class AutomaticTranslationReviewer:
                        for row in sources]
             for item, (_, transcript) in zip(payload, batch):
                 item["agreed_audio_transcript"] = transcript
-            context = dialogue_context(result["segments"].values(), sources)
+            agreed_sources = {row["id"]: transcript for row, transcript in agreed}
+            context = dialogue_context([{**row, "text_zh": agreed_sources.get(row["id"], row.get("text_zh", ""))}
+                for row in result["segments"].values()], sources)
+            address_reading = self._address_reading(client, sources, context, check)
             prompt = (VIETNAMESE_ADDRESS_POLICY + "\n" +
                 "Bạn kiểm định lại bản dịch Trung-Việt dựa trên hai bộ nhận giọng tại máy độc lập "
                 "SenseVoice và Faster-Whisper-small. Hai bộ đã trả cùng câu sau khi chỉ bỏ dấu câu. "
@@ -313,7 +390,7 @@ class AutomaticTranslationReviewer:
                 "\"verification_reason\":\"đối chiếu nghĩa cụ thể\"}],\"screen_texts\":[],\"summary\":\"\"}. "
                 "Giữ đúng ID và thời gian; trả đủ mọi câu.\n" + json.dumps(payload, ensure_ascii=False)
                 + "\nNgữ cảnh thoại nguồn, không tạo thêm ID; bản Việt kèm theo có thể sai:\n"
-                + json.dumps(context, ensure_ascii=False))
+                + json.dumps(context, ensure_ascii=False) + address_review_instruction(address_reading))
             check()
             try:
                 data = VideoIntelligence._parse_json(client.translate(prompt, max_tokens=10000))
@@ -355,8 +432,7 @@ class AutomaticTranslationReviewer:
                 sid = source["id"]
                 proposed, audit = validated["segments"][sid], audits[sid]
                 supported = self._audio_text(proposed["text_zh"]) == self._audio_text(transcript)
-                address_uncertain = unproven_relationship_address(
-                    proposed["text_zh"], proposed["final_vi"], context)
+                address_uncertain = not self._address_verified(address_reading, sid, audit)
                 verified = supported and audit["semantic_verified"] and not proposed["needs_review"] and not address_uncertain
                 changed = proposed["final_vi"] != source.get("final_vi") or self._audio_text(proposed["text_zh"]) != self._audio_text(source.get("text_zh"))
                 target = {**source, **proposed} if supported else dict(source)
@@ -371,9 +447,15 @@ class AutomaticTranslationReviewer:
                     "semantic_verified": bool(audit["semantic_verified"] and proposed["final_vi"].strip() and not address_uncertain),
                     "reason": reason, "translation_changed": target.get("final_vi") != source.get("final_vi"),
                     "audio_consensus": True}
+                if sid in address_reading:
+                    target["verification"]["address_context"] = address_reading[sid]
+                    target["verification"]["address_context_sources"] = self._address_source_snapshot(address_reading, sid, context)
+                    target["verification"]["address_verified"] = not address_uncertain
+                    target["verification"]["address_reason"] = audit.get("address_reason", "")
                 result["segments"][sid] = target
             if progress_callback:
                 progress_callback(60 + 40 * (index + 1) / batches)
+        self._invalidate_changed_address_sources(result["segments"])
         if completed_audits and provenance not in result["translation_sources"]:
             result["translation_sources"].append(provenance)
         if progress_callback:
@@ -614,12 +696,16 @@ class AutomaticTranslationReviewer:
             # window. Draft Vietnamese is never proof of a relationship.
             lo, hi = min(row["start"] for row in batch), max(row["end"] for row in batch)
             context = dialogue_context(
-                [self._qualified_context(row, output[row["id"]]) for row in rows], batch)
-            prompt = self._prompt(prompt_rows, relevant, context)
+                [output[row["id"]] if ((output[row["id"]].get("verification") or {}).get("source_accepted")
+                    and (output[row["id"]].get("verification") or {}).get("source_supported"))
+                 else self._qualified_context(row, output[row["id"]]) for row in rows], batch)
+            address_reading = self._address_reading(client, batch, context, check, checkpoint)
+            prompt = self._prompt(prompt_rows, relevant, context) + address_review_instruction(address_reading)
             # Hash structured prompt inputs rather than rendered JSON. OCR key
             # ordering may differ between fresh and cached extraction.
             stage = {"kind": "review_batch", "rows": prompt_rows,
-                     "evidence": relevant, "context": context, "batch_size": self.BATCH_SIZE}
+                     "evidence": relevant, "context": context, "batch_size": self.BATCH_SIZE,
+                     "address_context": list(address_reading.values())}
             saved = checkpoint.load(stage) if checkpoint else None
             cached_pair = self._cached_pair(saved, batch, lo, hi)
             if cached_pair:
@@ -656,6 +742,9 @@ class AutomaticTranslationReviewer:
             except Exception as error:
                 check()
                 second_failure = self._diagnostic(error, "semantic_second_pass", batch)
+            # Validate the complete batch before publishing any row. A later
+            # row can be the source evidence used by an earlier address audit.
+            source_facts = {}
             for source in batch:
                 sid = source["id"]
                 proposed, audit = validated["segments"][sid], audit_rows[sid]
@@ -672,13 +761,19 @@ class AutomaticTranslationReviewer:
                 usable = [item for item in cited if self._speech_evidence(item, source, screen_texts, changed_source=changed_source)]
                 coverage = self._coverage_evidence(usable, source, proposed["text_zh"])
                 supported = not invalid_refs and VideoIntelligence._ocr_supports_text(proposed["text_zh"], coverage)
+                accepted = second_pass_complete and not invalid_refs and (not changed_source or supported)
+                source_facts[sid] = (changed_source, invalid_refs, usable, supported, accepted)
+            accepted_changes = {sid for sid, facts in source_facts.items() if facts[0] and facts[4]}
+            for source in batch:
+                sid = source["id"]
+                proposed, audit = validated["segments"][sid], audit_rows[sid]
+                changed_source, invalid_refs, usable, supported, accepted = source_facts[sid]
                 verified = bool(second_pass_complete and supported and audit["semantic_verified"] and not proposed["needs_review"])
                 reason = audit["verification_reason"].strip()[:500]
-                address_uncertain = unproven_relationship_address(
-                    proposed.get("text_zh", source.get("text_zh", "")),
-                    proposed.get("final_vi", ""),
-                    context,
-                )
+                address_uncertain = (not self._address_verified(address_reading, sid, audit)
+                                     or self._address_cites_changed_source(
+                                         address_reading, sid, accepted_changes)
+                                     or (sid in address_reading and sid in accepted_changes))
                 if address_uncertain:
                     verified = False
                     reason = (
@@ -697,7 +792,6 @@ class AutomaticTranslationReviewer:
                     reason = proposed.get("review_reason") or reason or "AI chưa xác minh chắc chắn nghĩa của câu."
                 # Unsupported source rewrites would detach the translation
                 # from the measured speech; keep both original texts together.
-                accepted = second_pass_complete and not invalid_refs and (not changed_source or supported)
                 target = {**source, **proposed} if accepted else dict(source)
                 changed_translation = target.get("final_vi", "") != source.get("final_vi", "")
                 status = (("corrected" if changed_translation or changed_source else "verified") if verified
@@ -705,6 +799,7 @@ class AutomaticTranslationReviewer:
                 target.update(needs_review=not verified, review_reason=None if verified else reason)
                 target["verification"] = {
                     "status": status, **provenance, "source_supported": bool(supported),
+                    "source_accepted": bool(accepted),
                     "semantic_verified": bool(second_pass_complete and audit["semantic_verified"] and proposed["final_vi"].strip() and not address_uncertain),
                     "second_pass_status": "completed" if second_pass_complete else "failed",
                     "evidence_ids": [item["id"] for item in usable],
@@ -713,11 +808,18 @@ class AutomaticTranslationReviewer:
                     "reason": reason or "AI đã đối chiếu nghĩa và chữ OCR mới cùng thời điểm.",
                     "translation_changed": changed_translation,
                 }
+                if sid in address_reading:
+                    target["verification"]["address_context"] = address_reading[sid]
+                    target["verification"]["address_context_sources"] = self._address_source_snapshot(address_reading, sid, context)
+                    target["verification"]["address_verified"] = not address_uncertain
+                    target["verification"]["address_reason"] = audit.get("address_reason", "")
                 if second_failure:
                     target["verification"]["diagnostic"] = second_failure
                 output[sid] = target
                 summary["checked"] += 1
                 summary[status] = summary.get(status, 0) + 1
+            # Includes earlier batches citing a source corrected only now.
+            self._invalidate_changed_address_sources(output)
             if checkpoint and not cached_pair and all(
                     self._qualified_context({}, output[row["id"]]) for row in batch):
                 checkpoint.store(stage, {"first": first_data, "second": data})

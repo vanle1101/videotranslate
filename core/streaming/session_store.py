@@ -39,6 +39,8 @@ META_FIELDS = frozenset((
     "checked corrected unresolved manual incomplete version method speech_id duration ratio "
     "background_color text_color position blur_original suppression_level_db throughput_rtf "
     "zh vi source_evidence_ids speaker theme terms pronouns name src tgt note "
+    "address_context address_context_sources address_stale_source_ids address_verified address_reason address_preserved self_address listener_address uncertain quote "
+    "reviewed_address_context is_focus speaker_id addressee_id source_needs_review source_truncated translation_is_draft "
     "tts_seconds slot_seconds fit_ratio semantic_status acoustic_status source_region_verified "
     "reference_zh reference_vi equivalent different_source same_meaning text_preserved "
     "mode input_duration output_duration sample_rate channels elapsed_seconds rtf "
@@ -106,6 +108,20 @@ def _clean_audio_evidence(value, *, depth):
     return result
 
 
+def _clean_address_context_sources(value, *, depth):
+    """Keep the source snapshot keyed by segment ID, never arbitrary metadata."""
+    if not isinstance(value, dict) or len(value) > 10000:
+        raise ValueError("Ảnh chụp nguồn xưng hô không hợp lệ.")
+    result = {}
+    for key, item in value.items():
+        # JSON object keys are strings after persistence. Reject booleans,
+        # negative IDs and non-numeric provider payload keys.
+        if not isinstance(key, str) or not re.fullmatch(r"[0-9]{1,10}", key) or not isinstance(item, str):
+            raise ValueError("Ảnh chụp nguồn xưng hô chứa ID không hợp lệ.")
+        result[key] = _clean(item, depth=depth + 1)
+    return result
+
+
 def _clean(value, *, depth=0):
     if depth > 12:
         raise ValueError("Dữ liệu dự án lồng quá sâu.")
@@ -134,6 +150,8 @@ def _clean(value, *, depth=0):
                 result[key] = _clean_diagnostic(item, depth=depth + 1)
             elif key == "audio_evidence":
                 result[key] = _clean_audio_evidence(item, depth=depth + 1)
+            elif key == "address_context_sources":
+                result[key] = _clean_address_context_sources(item, depth=depth + 1)
             elif key == "audio_consensus":
                 if type(item) is bool:
                     result[key] = item

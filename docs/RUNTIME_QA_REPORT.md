@@ -2,6 +2,17 @@
 
 Date: 2026-10-07, Asia/Saigon. **Overall verdict: FAIL / broader audit remains incomplete.** Historical sections below retain their original evidence; the latest retests in this section supersede their pending statuses only for the listed scenarios.
 
+## Context, address review and short-speech retest — October 7, 22:29–22:32
+
+| Test and exact steps | Expected | Actual, cause and retest |
+| --- | --- | --- |
+| Real Muse address-context review on persisted `17736b77` source and 14 segments | Review reads the chronological Chinese source separately from OCR agreement; it must not mark pronouns correct solely because OCR matches | **PASS provider path:** OpenCode Muse `muse-spark-1.3-contributor-free` completed the address-context requests and independent semantic passes. `拜托姐` and the following `这话应该我来问吧` were both assigned the same speaker direction **em–chị**; the latter was corrected from the old neutral “tôi”. OCR evidence remained a source-text citation only. 1 verified / 1 corrected / 12 unresolved; unresolved rows remained explicitly flagged rather than falsely approved. |
+| Sequential reviewed-context pacing regression | The first regenerated sentence sees later corrected source rows, while later UI rows remain unchanged until their own audio commits | **PASS focused:** immutable reviewed snapshot is passed by ID/time; 89 focused transcript/pipeline tests pass, including synthesis failure rollback. |
+| Exact 0.4-second speech slot with real Edge Hoài My | Preserve complete speech and fit the slot without exceeding 1.15× or rewriting verified text | **PASS real audio:** “Hả?” measured 0.460s; `atempo` alone produced 0.410208s, while FFmpeg Rubber Band at the same 1.15× ceiling produced 0.400000s and decoded successfully. No clipping, text rewrite, or fake success. |
+| Persistence of address evidence | Save/reopen keeps address verdict, source citations and stale-source invalidation | **PASS focused:** schema round-trip/security tests retain `address_context_sources`, `address_stale_source_ids`, and `address_verified` without credentials. |
+
+Focused regression suite after these changes: **344 passed, 17 subtests**. Full suite immediately before the final persistence-only additions: **1,440 passed, 1 skipped, 2 warnings, 127 subtests**. Native Studio was not restarted for this patch because the Windows action to stop/relaunch the idle process was blocked by automatic policy; the currently open UI therefore is not evidence for the new code. The persisted task `17736b77` still has an older failed TTS snapshot and was not overwritten by the provider-only retest.
+
 ## Runtime follow-up — October 7, 18:07 onward
 
 User requested autonomous retesting, with no questions. Scope remains Douyin Studio, OpenCode Muse and existing project `755a2fe4`.

@@ -36,6 +36,71 @@ def result_for(rows, summary="previous context"):
             "translation_sources": [{"provider": "opencode", "model": "test-model", "evidence_mode": "asr-ocr-text"}]}
 
 
+def test_text_batch_cache_key_includes_wider_dialogue_and_source_corrections():
+    payload = [{"id": 1, "start": 1.0, "end": 2.0, "asr_text": "这话应该我来问吧"}]
+    observed = []
+    base = {"speech": payload, "wider_source_dialogue": [
+        {"id": 0, "start": 0.0, "end": 1.0, "text_zh": "拜托姐"},
+        {"id": 1, "start": 1.0, "end": 2.0, "text_zh": payload[0]["asr_text"]},
+    ], "ocr": []}
+    changed = {**base, "wider_source_dialogue": [
+        {"id": 0, "start": 0.0, "end": 1.0, "text_zh": "拜托哥"},
+        base["wider_source_dialogue"][1],
+    ]}
+
+    first = VideoIntelligence._text_batch_context_digest(payload, observed, "", base)
+    second = VideoIntelligence._text_batch_context_digest(payload, observed, "", changed)
+    assert first != second
+
+
+def test_source_correction_updates_private_context_without_mutating_input_rows():
+    source_dialogue = [{"id": 0, "start": 0.0, "end": 1.0, "asr_text": "旧识别"},
+                       {"id": 1, "start": 1.0, "end": 2.0, "asr_text": "拜托姐"}]
+    original = json.loads(json.dumps(source_dialogue, ensure_ascii=False))
+    corrections = {0: {"text_zh": "修正后的句子", "evidence_ids": ["ocr0"],
+                       "needs_review": False, "review_reason": ""}}
+
+    VideoIntelligence._apply_source_corrections_to_context(source_dialogue, corrections)
+
+    assert source_dialogue[0]["text_zh"] == "修正后的句子"
+    assert source_dialogue[0]["asr_text"] == "旧识别"
+    assert source_dialogue[1]["asr_text"] == "拜托姐"
+    assert source_dialogue[0].get("source_needs_review") is None
+    assert source_dialogue[0].get("source_evidence_ids") == ["ocr0"]
+    assert original[0].get("text_zh") is None
+
+
+def test_source_correction_with_unrelated_ocr_id_stays_asr_and_uncertain():
+    intelligence = VideoIntelligence()
+    client = Mock()
+    client.translate.return_value = json.dumps({"segments": [{
+        "id": 0, "text_zh": "拜托哥", "evidence_ids": ["ocr0"],
+        "needs_review": False, "review_reason": "",
+    }]}, ensure_ascii=False)
+    payload = [{"id": 0, "start": 0.0, "end": 2.0, "asr_text": "拜托姐"}]
+    observed = [{"id": "ocr0", "start": 0.0, "end": 2.0,
+                 "text_zh": "拜托姐", "confidence": .99, "kind": "subtitle"}]
+
+    result = intelligence._correct_source_checked(client, payload, observed, "context")
+
+    assert result[0]["text_zh"] == "拜托姐"
+    assert result[0]["evidence_ids"] == []
+    assert result[0]["needs_review"] is True
+
+
+def test_accepted_chunk_source_correction_reaches_next_chunk_context_only():
+    source_dialogue = [{"id": 0, "start": 0.0, "end": 1.0, "asr_text": "旧识别"},
+                       {"id": 1, "start": 24.0, "end": 25.0, "asr_text": "下一句"}]
+    result = {"segments": {0: {"id": 0, "text_zh": "拜托姐", "needs_review": False,
+                               "source_evidence_ids": ["ocr0"]}}}
+
+    VideoIntelligence._merge_chunk_source_context(source_dialogue, result)
+
+    assert source_dialogue[0]["text_zh"] == "拜托姐"
+    assert source_dialogue[0]["source_evidence_ids"] == ["ocr0"]
+    assert source_dialogue[1].get("text_zh") is None
+
+
 def interrupt_after_first(source, monkeypatch):
     first = VideoIntelligence()
     calls = []

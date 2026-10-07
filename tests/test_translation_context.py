@@ -9,7 +9,7 @@ from config import settings
 from core.engines.translation.semantic_translator import SemanticTranslator, PacingReviewRejected
 from core.translation_context import (
     VIETNAMESE_ADDRESS_POLICY, added_rude_address,
-    dialogue_context, unproven_relationship_address,
+    dialogue_context, address_reading_prompt, validate_address_reading,
 )
 from core.translation_review import AutomaticTranslationReviewer
 from core.video_intelligence import VISUAL_TRANSLATION_PROMPT
@@ -48,59 +48,13 @@ def test_address_guard_does_not_confuse_pronouns_with_other_vietnamese_words():
     assert added_rude_address("Em thử xem.", "Mày mò rồi mày biết.") == ["mày"]
 
 
-@pytest.mark.parametrize(("source", "candidate"), [
-    ("我问你几岁了快说", "Chị hỏi em bao nhiêu tuổi rồi."),
-    ("跟我走", "Đi theo chị."),
-    ("这话应该我来问吧", "Câu này phải để chị hỏi mới đúng chứ."),
-])
-def test_relationship_pronoun_without_speaker_evidence_stays_unverified(source, candidate):
-    assert unproven_relationship_address(source, candidate, [{"text_zh": "拜托姐"}])
-    assert unproven_relationship_address(source, candidate, [{"speaker_id": "female"}])
-    assert unproven_relationship_address(source, candidate, [{"speaker_id": "female", "text_zh": source}])
-
-
-@pytest.mark.parametrize(("source", "candidate"), [
-    ("妈妈我饿了", "Mẹ ơi, con đói rồi."),
-    ("爸爸，我还没做完", "Bố ơi, con chưa làm xong."),
-    ("姐你听我说", "Chị nghe em nói này."),
-    ("老师我不明白", "Thầy ơi, em chưa hiểu."),
-    ("我有一只猫", "Tôi có một con mèo."),
-    ("我喜欢那个女孩", "Tôi thích cô gái đó."),
-    ("我皱起眉毛", "Tôi nhíu mày."),
-    ("我还有三个", "Tôi còn ba cái."),
-    ("我哥哥说他会回来", "Anh trai tôi nói sẽ về."),
-    ("我问妈妈", "Tôi hỏi mẹ."),
-])
-def test_local_source_address_and_noun_uses_do_not_need_speaker_ids(source, candidate):
-    assert not unproven_relationship_address(source, candidate)
-
-
-def test_neutral_wording_does_not_receive_a_relationship_warning():
-    assert not unproven_relationship_address("这话应该我来问吧", "Câu này phải để tôi hỏi mới đúng chứ.")
-    assert not unproven_relationship_address("跟我走", "Đi theo tôi.")
-
-
-def test_explicit_source_noun_can_ground_only_the_matching_object():
-    assert not unproven_relationship_address("我问妈妈", "Tôi hỏi mẹ.")
-    assert unproven_relationship_address("我问妈妈", "Con hỏi mẹ.")
-    assert unproven_relationship_address("我问妈妈", "Chị hỏi mẹ.")
-
-
-def test_matching_speaker_and_listener_may_continue_source_grounded_address():
-    context = [{"text_zh": "妈妈我饿了", "speaker_id": "child", "addressee_id": "mother"},
-               {"text_zh": "我先吃了", "speaker_id": "child", "addressee_id": "mother"}]
-    assert not unproven_relationship_address("我先吃了", "Con ăn trước đây.", context)
-    context[1]["speaker_id"] = "other"
-    assert unproven_relationship_address("我先吃了", "Con ăn trước đây.", context)
-
-
 def test_same_policy_reaches_initial_translation_and_both_pacing_requests(monkeypatch):
     assert VIETNAMESE_ADDRESS_POLICY in VISUAL_TRANSLATION_PROMPT
     translator = SemanticTranslator("opencode")
     candidate = {"literal_vi": "Câu này phải để em hỏi mới đúng chứ.",
                  "natural_vi": "Để em hỏi mới đúng.", "final_vi": "Để em hỏi mới đúng."}
     request = Mock(side_effect=[json.dumps(candidate), json.dumps({
-        "equivalent": True, "natural": True, "reason": "Giữ lời đáp xưng em khi gọi chị."})])
+        "equivalent": True, "natural": True, "address_preserved": True, "reason": "Giữ lời đáp xưng em khi gọi chị."})])
     monkeypatch.setattr(translator, "_opencode_request", request)
     context = [{"zh": "拜托姐", "vi": "Thôi mà chị."}] + [
         {"zh": "这是普通的句子", "vi": "Lời thoại."} for _ in range(8)]
@@ -155,8 +109,15 @@ def test_reviewer_receives_early_source_context_in_both_passes(monkeypatch):
     prompts = []
     def respond(prompt, **kwargs):
         prompts.append(prompt)
+        if "ID cần kiểm định: " in prompt:
+            ids = json.loads(prompt.split("ID cần kiểm định: ", 1)[1].split("\nNguồn thoại", 1)[0])
+            assert "Lời nháp" not in prompt and "Câu này phải để tao" not in prompt
+            return {"address_context": [{"id": sid, "self_address": "em", "listener_address": "chị",
+                "uncertain": False, "reason": "Lời gọi chị trong mạch thoại.",
+                "evidence": [{"id": 0, "quote": "拜托姐"}]} for sid in ids]}
         batch = json.loads(prompt.split("Câu cần kiểm định: ", 1)[1].split("\nOCR mới tại máy", 1)[0])
         return {"segments": [{**row, "semantic_verified": True,
+                 "address_verified": True, "address_reason": "Đã kiểm tra chiều xưng hô theo nguồn.",
                  "verification_reason": "Đã đối chiếu lời nguồn và quan hệ xưng hô.",
                  "source_evidence_ids": [f"review{row['id']}"]} for row in batch],
                 "screen_texts": [], "summary": ""}
@@ -169,10 +130,95 @@ def test_reviewer_receives_early_source_context_in_both_passes(monkeypatch):
         if row["start"] < end and row["end"] > start]
     reviewer = AutomaticTranslationReviewer(client, scanner, audio_evidence=False)
     reviewer.review("unused", rows, [])
-    assert len(prompts) == 4
-    for prompt in prompts[2:]:
+    assert len(prompts) == 6
+    for prompt in prompts[4:]:
         assert VIETNAMESE_ADDRESS_POLICY in prompt
-        context_text = prompt.split("Ngữ cảnh lân cận (không tạo thêm ID): ", 1)[1].split("\nĐÂY LÀ", 1)[0]
+        context_text = prompt.split("Ngữ cảnh lân cận (không tạo thêm ID): ", 1)[1].split("\nĐã có lượt", 1)[0]
         context = json.loads(context_text)
         assert any(row["id"] == 0 and row["text_zh"] == "拜托姐" for row in context)
         assert any(row["id"] == 12 and row["translation_is_draft"] for row in context)
+
+
+def test_source_only_address_reading_accepts_continuity_without_speaker_metadata():
+    rows = [source(0, "妈妈我回来了", "Mẹ ơi, con về rồi."), source(1, "我饿了", "Tôi đói.")]
+    context = dialogue_context(rows, rows)
+    prompt = address_reading_prompt(rows, context)
+    assert "Tôi đói." not in prompt
+    data = {"address_context": [{"id": row["id"], "self_address": "con", "listener_address": "mẹ",
+        "uncertain": False, "reason": "Lời gọi mẹ rồi tiếp tục nói mình đói.",
+        "evidence": [{"id": 0, "quote": "妈妈我回来了"}, {"id": 1, "quote": "我饿了"}]} for row in rows]}
+    reading = validate_address_reading(data, rows, context)
+    assert not reading[1]["uncertain"]
+    assert AutomaticTranslationReviewer._address_verified(reading, 1,
+        {"semantic_verified": True, "address_verified": True, "address_reason": "Cùng mạch con nói với mẹ."})
+    assert not AutomaticTranslationReviewer._address_verified(reading, 1, {"semantic_verified": True})
+    data["address_context"][1]["evidence"][0]["quote"] = "爸爸"
+    with pytest.raises(ValueError):
+        validate_address_reading(data, rows, context)
+
+
+def test_ocr_semantic_success_cannot_clear_uncertain_or_failed_address_review():
+    reading = {3: {"uncertain": True}}
+    assert not AutomaticTranslationReviewer._address_verified(reading, 3,
+        {"semantic_verified": True, "address_verified": True, "address_reason": "OCR trùng chữ."})
+    reading[3]["uncertain"] = False
+    assert not AutomaticTranslationReviewer._address_verified(reading, 3,
+        {"semantic_verified": True, "address_verified": False, "address_reason": "Chưa biết ai đang nói."})
+
+
+@pytest.mark.parametrize("address_verified", [True, False, None])
+def test_actual_reviewer_keeps_ocr_and_address_decisions_separate(monkeypatch, address_verified):
+    monkeypatch.setattr(settings, "LLM_PROVIDER", "opencode")
+    rows = [source(0, "妈妈我回来了", "Mẹ ơi, con về rồi."), source(1, "我饿了", "Con đói rồi.")]
+    def respond(prompt, **kwargs):
+        if "ID cần kiểm định: " in prompt:
+            assert "Con đói rồi." not in prompt
+            return {"address_context": [{"id": row["id"], "self_address": "con", "listener_address": "mẹ",
+                "uncertain": False, "reason": "Cùng mạch về nhà rồi nói đói với mẹ.",
+                "evidence": [{"id": 0, "quote": "妈妈我回来了"}, {"id": 1, "quote": "我饿了"}]} for row in rows]}
+        return {"segments": [{**row, "semantic_verified": True, "verification_reason": "OCR xác nhận lời nguồn.",
+            "source_evidence_ids": [f"review{row['id']}"], "address_verified": address_verified,
+            "address_reason": "Lượt nói tiếp tục cùng người con."} for row in rows], "screen_texts": [], "summary": ""}
+    client = Mock(has_credentials=True, model="offline-context-probe", translate=Mock(side_effect=respond))
+    scanner = Mock(extract=Mock(return_value=[{"start": row["start"], "end": row["end"],
+        "text_zh": row["text_zh"], "confidence": .99, "bbox": [.2, .7, .5, .1]} for row in rows]))
+    reviewer = AutomaticTranslationReviewer(client, scanner, audio_evidence=False)
+    result = reviewer.review("unused", rows, [])
+    for row in result["segments"].values():
+        assert row["verification"]["source_supported"] is True
+        assert row["verification"]["address_verified"] is (address_verified is True)
+        assert row["needs_review"] is (address_verified is not True)
+        assert row["verification"]["semantic_verified"] is (address_verified is True)
+    assert client.translate.call_count == 3
+
+
+def test_dialogue_context_sorts_timestamps_and_retains_reviewed_direction():
+    rows = [source(1, "我饿了"), source(0, "妈妈我回来了")]
+    rows[0]["verification"] = {"address_verified": True,
+        "address_context": {"id": 1, "self_address": "con", "listener_address": "mẹ", "uncertain": False}}
+    context = dialogue_context(rows)
+    assert [row["id"] for row in context] == [0, 1]
+    assert context[1]["reviewed_address_context"]["self_address"] == "con"
+
+
+def test_duplicate_source_turns_keep_explicit_target_identity_in_pacing(monkeypatch):
+    translator = SemanticTranslator("opencode")
+    candidate = {"literal_vi": "Con chưa làm xong.", "natural_vi": "Con chưa xong.", "final_vi": "Con chưa xong."}
+    request = Mock(side_effect=[json.dumps(candidate), json.dumps({"equivalent": True, "natural": True,
+        "address_preserved": True, "reason": "Giữ con ở đúng lượt trả lời mẹ."})])
+    monkeypatch.setattr(translator, "_opencode_request", request)
+    context = [{**source(0, "我还没做完"), "is_focus": False},
+               {**source(1, "我还没做完"), "is_focus": True}]
+    translator.rewrite_for_pacing("我还没做完", "Con chưa làm xong.", 1.2, context)
+    assert '"id": 1' in request.call_args_list[0].args[1]
+    assert json.loads(request.call_args_list[1].args[1])["target"] == {"id": 1, "start": 3.0, "end": 5.0}
+
+
+def test_fluent_pacing_cannot_pass_without_separate_address_preservation(monkeypatch):
+    translator = SemanticTranslator("opencode")
+    candidate = {"literal_vi": "Chị phải hỏi chứ.", "natural_vi": "Chị phải hỏi chứ.", "final_vi": "Chị phải hỏi chứ."}
+    request = Mock(side_effect=[json.dumps(candidate), json.dumps({"equivalent": True, "natural": True,
+        "address_preserved": False, "reason": "Đã đổi người đang nói từ em sang chị."})])
+    monkeypatch.setattr(translator, "_opencode_request", request)
+    with pytest.raises(PacingReviewRejected):
+        translator.rewrite_for_pacing("这话应该我来问吧", "Câu này phải để em hỏi mới đúng chứ.", 1.2)
