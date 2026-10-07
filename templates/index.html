@@ -6,7 +6,7 @@
   <title>Douyin2TikTok AI Studio - Desktop Application</title>
   <script src="https://cdn.tailwindcss.com"></script>
   <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
-  <link rel="stylesheet" href="/static/style.css">
+  <link rel="stylesheet" href="/static/style.css?v={{ settings.BASE_DIR.joinpath('static', 'style.css').stat().st_mtime_ns }}">
 </head>
 <body data-asr-engine="{{ settings.ASR_ENGINE }}" data-tts-engine="{{ settings.TTS_ENGINE }}" class="bg-[#0b0d13] text-gray-100 min-h-screen font-sans antialiased selection:bg-pink-500 selection:text-white">
   
@@ -569,6 +569,6 @@
   </div>
 
   <script src="/qtwebchannel.js"></script>
-  <script src="/static/app.js"></script>
+  <script src="/static/app.js?v={{ settings.BASE_DIR.joinpath('static', 'app.js').stat().st_mtime_ns }}"></script>
 </body>
 </html>

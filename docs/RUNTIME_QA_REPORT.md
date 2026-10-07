@@ -2,6 +2,18 @@
 
 Date: 2026-10-07, Asia/Saigon. **Overall verdict: FAIL / broader audit remains incomplete.** Historical sections below retain their original evidence; the latest retests in this section supersede their pending statuses only for the listed scenarios.
 
+## Runtime follow-up — October 7, 18:07 onward
+
+User requested autonomous retesting, with no questions. Scope remains Douyin Studio, OpenCode Muse and existing project `755a2fe4`.
+
+| Test and exact steps | Expected | Actual, cause and retest |
+| --- | --- | --- |
+| Reload Studio → Tác vụ & Lịch sử → Mở trong Studio, without Play | Restore paused editable project | **FAIL reproduced:** player advanced to 00:15 and 00:30. Codec conversion treated `translationReady` as playback permission. Explicit playback intent now survives only Start/Play; history/reconnect remain paused, cancellation and stale replies clear intent. Normal Qt Reload first retained old JavaScript. Added file-metadata versions to JS/CSS URLs. **PASS native retest 18:26–18:27:** ready source remained at 00:00 across observations; explicit Play advanced with correct Vietnamese caption. Six asynchronous JS regressions and asset-version route regression passed. |
+| Open saved project with changed subtitle style → Xuất video MP4 → Bắt đầu xuất video HQ → wait → Xem trước kết quả | Full playable MP4 with current style, enable full-video save | **PASS native/media:** exported at18:18:28,137,040,430bytes,73.7s,1920×1080. Full video/audio FFmpeg decode exit0. Result player showed footage and reached00:52; seeking to first cue showed yellow Vietnamese below preserved Chinese. Output HTTP Range returned206, `video/mp4`, matching137,040,430-byte total and MP4 signature. No provider rerun needed for style-only export. Save dialog/copy was not repeated in this retest. |
+| Reload successful review | Resolved review warning disappears | **PASS native:** obsolete incomplete-review warning disappeared; the separate warning about19uncertain OCR regions remained. No uncertain title/region was falsely certified. |
+
+Changed in this group: `static/app.js`, `templates/index.html`, `tests/test_ui_interactions.mjs`, `tests/test_static_asset_versions.py`. JavaScript suite: **201passed**. Python asset-version route test: **1passed**. Native result playback and file validation above are separate from mocked regressions. Saved-output corruption/audio-route investigations continue below; broader audit is not declared complete.
+
 ## Publication checkpoint — October 7, after 15:29
 
 User requested pushing the current changes before continuing acceptance. This checkpoint is **not an overall completion claim**.

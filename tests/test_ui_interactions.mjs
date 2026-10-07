@@ -3007,6 +3007,137 @@ test('fresh explicit start still autoplays once but duplicate ready events never
   assert.equal(ui.el('video-player').paused, true);
 });
 
+test('history codec conversion stays paused when ready replay arrives before during or after conversion', async () => {
+  for (const timing of ['before', 'during', 'after']) {
+    const ui = studio(); await ui.flush();
+    ui.replies.set('/api/streaming/fixture', recoverySnapshot());
+    await ui.window.openTaskInStudio('fixture');
+    const video = ui.el('video-player'), socket = ui.sockets.at(-1);
+    let finish;
+    ui.replies.set('/api/preview', () => new Promise(resolve => { finish = resolve; }));
+    if (timing === 'before') socket.receive({type: 'ready_to_play'});
+    video.error = {code: 4}; await video.emit('error'); await ui.flush();
+    if (timing === 'during') socket.receive({type: 'ready_to_play'});
+    finish({ok: true, json: async () => ({status: 'READY', video_url: '/api/preview/history.webm'})});
+    await ui.flush(); await video.emit('loadedmetadata'); await video.emit('canplay');
+    if (timing === 'after') socket.receive({type: 'ready_to_play'});
+    socket.receive({type: 'ready_to_play'}); await video.emit('canplay');
+    assert.equal(video.playCount, 0, timing);
+    assert.equal(video.paused, true, timing);
+    assert.equal(ui.requests.filter(request => request.url.includes('/start-')).length, 0);
+  }
+});
+
+test('fresh Start keeps one playback intent across codec conversion and duplicate ready events', async () => {
+  for (const timing of ['before', 'during', 'after']) {
+    const ui = studio(); await ui.start();
+    const video = ui.el('video-player'), socket = ui.sockets.at(-1);
+    socket.receive({type: 'init', duration: 10, segments_count: 0, segments: []});
+    let finish;
+    ui.replies.set('/api/preview', () => new Promise(resolve => { finish = resolve; }));
+    if (timing === 'before') { socket.receive({type: 'ready_to_play'}); await ui.flush(); }
+    const previousPlays = video.playCount;
+    video.error = {code: 4}; await video.emit('error'); await ui.flush();
+    if (timing === 'during') {
+      socket.receive({type: 'ready_to_play'});
+      socket.receive({type: 'ready_to_play'});
+    }
+    finish({ok: true, json: async () => ({status: 'READY', video_url: '/api/preview/fresh.webm'})});
+    await ui.flush(); await video.emit('loadedmetadata'); await video.emit('canplay');
+    if (timing === 'after') socket.receive({type: 'ready_to_play'});
+    await ui.flush();
+    assert.equal(video.playCount, previousPlays + 1, timing);
+    video.pause();
+    socket.receive({type: 'ready_to_play'}); await video.emit('canplay');
+    assert.equal(video.playCount, previousPlays + 1, timing);
+    assert.equal(video.paused, true, timing);
+  }
+});
+
+test('pause Stop pagehide and a new source revoke pending conversion playback without late restart', async () => {
+  for (const action of ['pause', 'worker-pause', 'stop', 'pagehide', 'new-source']) {
+    const ui = studio(); await ui.start();
+    const video = ui.el('video-player'), socket = ui.sockets.at(-1);
+    let finish;
+    ui.replies.set('/api/preview', () => new Promise(resolve => { finish = resolve; }));
+    video.error = {code: 4}; await video.emit('error'); await ui.flush();
+    socket.receive({type: 'ready_to_play'});
+    if (action === 'pause') await ui.el('player-play-toggle').click();
+    if (action === 'worker-pause') await ui.window.studioPause();
+    if (action === 'stop') await ui.window.studioStop();
+    if (action === 'pagehide') await ui.window.emit('pagehide');
+    if (action === 'new-source') {
+      socket.receive({type: 'progress', status: 'COMPLETED', phase: 'complete'});
+      ui.window.loadDroppedLocalVideo('D:/new-source.mp4');
+    }
+    finish({ok: true, json: async () => ({status: 'READY', video_url: '/api/preview/stale.webm'})});
+    await ui.flush(); await video.emit('canplay');
+    socket.receive({type: 'ready_to_play'}); await ui.flush();
+    assert.equal(video.playCount, 0, action);
+    assert.equal(video.paused, true, action);
+    if (action === 'new-source') assert.match(video.src, /new-source/);
+  }
+});
+
+test('reconnect during codec conversion clears an unconsumed Start intent', async () => {
+  const ui = studio(); await ui.start();
+  const video = ui.el('video-player'), socket = ui.sockets.at(-1);
+  let finish;
+  ui.replies.set('/api/preview', () => new Promise(resolve => { finish = resolve; }));
+  video.error = {code: 4}; await video.emit('error'); await ui.flush();
+  socket.receive({type: 'ready_to_play'});
+  ui.replies.set('/api/streaming/fixture', recoverySnapshot());
+  socket.close(); socket.onclose(); await ui.tickTimeouts(1500);
+  ui.sockets.at(-1).receive({type: 'ready_to_play'});
+  finish({ok: true, json: async () => ({status: 'READY', video_url: '/api/preview/reconnect.webm'})});
+  await ui.flush(); await video.emit('canplay');
+  assert.equal(video.playCount, 0);
+  assert.equal(video.paused, true);
+});
+
+test('fresh autoplay codec rejection retains intent but a late rejection cannot change a new source', async () => {
+  for (const changeSource of [false, true]) {
+    const ui = studio(); await ui.start();
+    const video = ui.el('video-player'), socket = ui.sockets.at(-1);
+    socket.receive({type: 'init', duration: 10, segments_count: 0, segments: []});
+    const realPlay = video.play.bind(video);
+    let rejectPlay;
+    video.play = () => new Promise((_, reject) => { rejectPlay = reject; });
+    ui.replies.set('/api/preview', {status: 'READY', video_url: '/api/preview/play-rejection.webm'});
+    socket.receive({type: 'ready_to_play'});
+    if (changeSource) {
+      socket.receive({type: 'progress', status: 'COMPLETED', phase: 'complete'});
+      ui.window.loadDroppedLocalVideo('D:/new-source.mp4');
+    }
+    video.play = realPlay;
+    rejectPlay(Object.assign(new Error('codec unsupported'), {name: 'NotSupportedError'}));
+    await ui.flush(); await video.emit('canplay');
+    assert.equal(video.playCount, changeSource ? 0 : 1);
+    assert.equal(ui.requests.filter(request => request.url === '/api/preview').length, changeSource ? 0 : 1);
+    if (changeSource) assert.match(video.src, /new-source/);
+  }
+});
+
+test('manual Play during history conversion resumes once while its Pause cancels that intent', async () => {
+  for (const pause of [false, true]) {
+    const ui = studio(); await ui.flush();
+    ui.replies.set('/api/streaming/fixture', recoverySnapshot({segments: [], segments_count: 0}));
+    await ui.window.openTaskInStudio('fixture');
+    const video = ui.el('video-player');
+    let finish;
+    ui.replies.set('/api/preview', () => new Promise(resolve => { finish = resolve; }));
+    video.error = {code: 4}; await video.emit('error'); await ui.flush();
+    await ui.el('player-play-toggle').click();
+    assert.equal(ui.el('player-play-toggle').getAttribute('aria-label'), 'Tạm dừng video');
+    if (pause) await ui.el('player-play-toggle').click();
+    finish({ok: true, json: async () => ({status: 'READY', video_url: '/api/preview/explicit.webm'})});
+    await ui.flush(); await video.emit('canplay'); await ui.flush();
+    assert.equal(video.playCount, pause ? 0 : 1);
+    await video.emit('canplay');
+    assert.equal(video.playCount, pause ? 0 : 1);
+  }
+});
+
 test('late pause or resume acknowledgements cannot overwrite newer terminal progress', async () => {
   for (const action of ['pause', 'resume']) {
     const ui = studio(); await ui.start();

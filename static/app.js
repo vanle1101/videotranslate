@@ -207,6 +207,8 @@ document.addEventListener("DOMContentLoaded", () => {
   let previewPending = false;
   let previewResumeTime = null;
   let playWhenPreviewReady = false;
+  let autoPlayTaskId = null;
+  let internalPreviewPauseEvents = 0;
   let translationReady = false;
   let audioPermissionNeeded = false;
   let pendingStart = null;
@@ -1183,6 +1185,8 @@ document.addEventListener("DOMContentLoaded", () => {
   }
 
   function stopPreviewAudio() {
+    autoPlayTaskId = null;
+    playWhenPreviewReady = false;
     cancelDubPlaybackWait();
     stopPlaybackFrames();
     stopSourceAudition();
@@ -1209,7 +1213,9 @@ document.addEventListener("DOMContentLoaded", () => {
       videoPlayer.currentSrc?.includes("/api/preview/") && descriptor?.task_id &&
       ((previewDescriptor?.file_path && previewDescriptor.file_path === window.currentLocalFilePath) ||
        (previewDescriptor?.file && previewDescriptor.file === selectedFile));
+    const freshStartIntent = descriptor?.task_id === currentTaskId ? autoPlayTaskId : null;
     stopPreviewAudio();
+    autoPlayTaskId = freshStartIntent;
     previewGeneration++;
     previewDescriptor = descriptor || (typeof source === "string" ? { file_path: window.currentLocalFilePath } : { file: source });
     previewSource = source;
@@ -1234,6 +1240,8 @@ document.addEventListener("DOMContentLoaded", () => {
   function showMediaError(message) {
     cancelDubPlaybackWait();
     previewPending = false;
+    autoPlayTaskId = null;
+    playWhenPreviewReady = false;
     videoPlayer.pause();
     bufferingText.textContent = message;
     bufferingAlert.dataset.state = "error";
@@ -1250,8 +1258,13 @@ document.addEventListener("DOMContentLoaded", () => {
     bufferingAlert.dataset.state = "loading";
     const generation = previewGeneration;
     const resumeTime = videoPlayer.currentTime || 0;
-    const shouldPlay = !videoPlayer.paused || translationReady;
-    videoPlayer.pause();
+    // Readiness means media exists; only explicit Start/Play or interrupted
+    // playback grants permission to resume after codec conversion.
+    playWhenPreviewReady = !videoPlayer.paused || playWhenPreviewReady;
+    if (!videoPlayer.paused) {
+      internalPreviewPauseEvents++;
+      videoPlayer.pause();
+    }
     bufferingText.textContent = "Đang chuẩn bị bản xem trước tương thích… Video gốc vẫn được giữ nguyên.";
     bufferingAlert.classList.remove("hidden");
     try {
@@ -1275,7 +1288,6 @@ document.addEventListener("DOMContentLoaded", () => {
       if (generation !== previewGeneration) return;
       if (data.status !== "READY") throw new Error(data.error || "Không thể tạo bản xem trước");
       previewResumeTime = resumeTime;
-      playWhenPreviewReady = shouldPlay || translationReady;
       videoPlayer.src = data.video_url;
       videoPlayer.load();
     } catch (error) {
@@ -1529,7 +1541,9 @@ document.addEventListener("DOMContentLoaded", () => {
     previewPending = false;
     if (!currentTaskId || translationReady) bufferingAlert.classList.add("hidden");
     else bufferingText.textContent = "Đang chờ các câu dịch đầu tiên...";
-    if (playWhenPreviewReady && !resultPreviewActive) videoPlayer.play().catch(reportPlayFailure);
+    const shouldPlay = playWhenPreviewReady;
+    playWhenPreviewReady = false;
+    if (shouldPlay && !resultPreviewActive) videoPlayer.play().catch(reportPlayFailure);
   });
 
   function selectPreviewSource(source) {
@@ -1792,13 +1806,19 @@ document.addEventListener("DOMContentLoaded", () => {
   }
   function updatePlayerControls() {
     if (playerPlayToggle) {
-      const playing = !videoPlayer.paused || !!dubPlaybackWait;
+      const playing = !videoPlayer.paused || !!dubPlaybackWait || (previewPending && playWhenPreviewReady);
       playerPlayToggle.innerHTML = `<i class="fa-solid ${playing ? "fa-pause" : "fa-play"}" aria-hidden="true"></i>`;
       playerPlayToggle.setAttribute("aria-label", playing ? "Tạm dừng video" : "Phát video");
     }
   }
   playerPlayToggle?.addEventListener("click", () => {
     if (!videoPlayer.currentSrc && !videoPlayer.getAttribute("src")) return;
+    if (previewPending) {
+      autoPlayTaskId = null;
+      playWhenPreviewReady = !playWhenPreviewReady;
+      updatePlayerControls();
+      return;
+    }
     if (dubPlaybackWait) {
       cancelDubPlaybackWait();
       bufferingAlert.classList.add("hidden");
@@ -1883,6 +1903,9 @@ document.addEventListener("DOMContentLoaded", () => {
     // pause() dispatches asynchronously in a browser. A buffering pause must
     // not cancel its own intent, nor pause audio resumed before this event.
     if (internalDubPauseEvents) { internalDubPauseEvents--; return; }
+    if (internalPreviewPauseEvents) { internalPreviewPauseEvents--; return; }
+    autoPlayTaskId = null;
+    playWhenPreviewReady = false;
     cancelDubPlaybackWait();
     stopPlaybackFrames();
     if (bgmAudio) bgmAudio.pause();
@@ -2180,6 +2203,8 @@ document.addEventListener("DOMContentLoaded", () => {
   });
 
   function setupStreamingWebSocket(taskId, { allowAutoPlay = false } = {}) {
+    autoPlayTaskId = allowAutoPlay ? taskId : null;
+    if (!allowAutoPlay) playWhenPreviewReady = false;
     clearTimeout(reconnectTimer);
     reconnectTimer = null;
     const previousSocket = currentWs;
@@ -2276,15 +2301,22 @@ document.addEventListener("DOMContentLoaded", () => {
       }
       else if (msg.type === "ready_to_play") {
         translationReady = true;
-        if (resultPreviewActive) allowAutoPlay = false;
-        if (!allowAutoPlay) playWhenPreviewReady = false;
         if (!previewPending) bufferingAlert.classList.add("hidden");
-        if (allowAutoPlay && !previewPending) {
-          allowAutoPlay = false;
-          videoPlayer.play().catch(error => {
-            if (error.name === "NotSupportedError") loadCompatiblePreview();
-            else reportPlayFailure(error);
-          });
+        if (autoPlayTaskId === taskId) {
+          autoPlayTaskId = null;
+          if (!resultPreviewActive) {
+            playWhenPreviewReady = true;
+            if (!previewPending) {
+              const generation = previewGeneration;
+              videoPlayer.play().then(() => {
+                if (generation === previewGeneration && !previewPending) playWhenPreviewReady = false;
+              }).catch(error => {
+                if (generation !== previewGeneration) return;
+                if (error.name === "NotSupportedError" && playWhenPreviewReady) loadCompatiblePreview();
+                else { playWhenPreviewReady = false; reportPlayFailure(error); }
+              });
+            }
+          }
         }
       }
       else if (msg.type === "review_complete") {
@@ -3009,6 +3041,10 @@ document.addEventListener("DOMContentLoaded", () => {
 
   async function controlTask(id, action) {
     if (!id) return;
+    if (id === currentTaskId && ["pause", "stop"].includes(action)) {
+      autoPlayTaskId = null;
+      playWhenPreviewReady = false;
+    }
     const revision = progressRevision;
     try {
       const response = await fetch(`/api/tasks/${encodeURIComponent(id)}/${action}`, { method: "POST" });
