@@ -14,6 +14,15 @@ User requested autonomous retesting, with no questions. Scope remains Douyin Stu
 
 Changed in this group: `static/app.js`, `templates/index.html`, `tests/test_ui_interactions.mjs`, `tests/test_static_asset_versions.py`. JavaScript suite: **201passed**. Python asset-version route test: **1passed**. Native result playback and file validation above are separate from mocked regressions. Saved-output corruption/audio-route investigations continue below; broader audit is not declared complete.
 
+## Backend validation follow-up — October 7, 18:07 onward
+
+- Saved-output history now checks MP4 container boundaries, ffprobe duration and streams, and short decoded samples. The check is cached by file identity and sampled content, so a missing, truncated, replaced or unreadable export cannot appear as a completed downloadable result. The editable transcript and audio remain available so the user can export again.
+- Segment audio is now served only for a loaded `READY`/`PLAYED` segment whose manifest path exactly matches its own cache file. Invalid task IDs, orphan files, foreign paths, symlinks, junctions and reparse points return 404. HTTP Range and `audio/wav`/`no-store` behavior remain intact.
+- Saved-session discovery and restore probes run off the ASGI event loop. Production snapshot and audio checks against `755a2fe4` returned HTTP200/206, valid output URL, and 44-byte WAV range responses; a traversal-shaped task ID returned404.
+- Full unfiltered Python suite after these changes: **1,405 passed, 1 skipped, 2 warnings, 125 subtests**. Runtime dependency check passed with OpenCode Muse, `muse-spark-1.3-contributor-free`, Faster-Whisper small/int8 CPU and Edge-TTS. JavaScript suite after the autoplay fix: **201 passed**.
+
+This remains a bounded runtime audit. Provider/network fault injection, cache-off matrix, drag/drop matrix, and a full stop during a fresh Muse request were not rerun in this session. The valid native MP4, its result preview and the saved editable session were verified; this does not justify an “all possible errors fixed” claim.
+
 ## Publication checkpoint — October 7, after 15:29
 
 User requested pushing the current changes before continuing acceptance. This checkpoint is **not an overall completion claim**.

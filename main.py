@@ -7,6 +7,7 @@ import stat
 import uuid
 import time
 import logging
+import re
 from pathlib import Path
 from urllib.parse import quote
 from typing import Dict, Any, Optional, List, Literal
@@ -451,12 +452,15 @@ def session_output_details(session):
             **review_result_details(session)}
 
 
-def editable_session(task_id):
+async def editable_session(task_id):
     session = get_streaming_session(task_id)
     if session is None:
         try:
-            session = restore_saved_session(task_id, event_callback=lambda event, data:
-                broadcast_session_event(task_id, event, data))
+            # Restore probes saved media; keep that synchronous work off the
+            # ASGI event loop so history cannot block websocket/cancel traffic.
+            session = await asyncio.to_thread(
+                restore_saved_session, task_id,
+                event_callback=lambda event, data: broadcast_session_event(task_id, event, data))
         except FileNotFoundError:
             return None
         except (ValueError, OSError, TypeError, KeyError):
@@ -585,7 +589,8 @@ async def list_tasks():
             tasks.append(hist)
 
     existing = {task["task_id"] for task in tasks}
-    for saved in list_saved_sessions():
+    saved_sessions = await asyncio.to_thread(list_saved_sessions)
+    for saved in saved_sessions:
         if saved["task_id"] not in existing:
             tasks.append({**saved, "saved": True, "task_type": "Phiên đã lưu",
                           "video_url": saved.get("output_video_url", ""),
@@ -826,15 +831,66 @@ async def start_streaming_upload(
 
 @app.get("/api/streaming/audio/{task_id}/{seg_id}")
 async def get_segment_audio(task_id: str, seg_id: int):
-    wav_path = settings.BASE_DIR / "workspace" / "cache" / task_id / "segments" / f"seg_{seg_id}.wav"
-    if not wav_path.exists():
+    # Audio is an output of a live/saved session, not a public file server.
+    # Validate both the task/segment state and the exact path recorded by that
+    # session before handing it to FileResponse.  This also prevents Windows
+    # backslashes in a task id from escaping the cache directory.
+    if (not isinstance(task_id, str)
+            or not re.fullmatch(r"[A-Za-z0-9_-]{1,80}", task_id)
+            or not isinstance(seg_id, int) or isinstance(seg_id, bool)
+            or not 0 <= seg_id <= 2147483647):
         raise HTTPException(status_code=404, detail="Segment audio not found or not yet synthesized")
-    return FileResponse(wav_path, media_type="audio/wav", headers={"Cache-Control": "no-store"})
+    session = get_streaming_session(task_id)
+    segment = getattr(session, "segments", {}).get(seg_id) if session is not None else None
+    if segment is None or getattr(segment, "status", "") not in {"READY", "PLAYED"}:
+        raise HTTPException(status_code=404, detail="Segment audio not found or not yet synthesized")
+    recorded = getattr(segment, "audio_path", None)
+    if not isinstance(recorded, str) or not recorded:
+        raise HTTPException(status_code=404, detail="Segment audio not found or not yet synthesized")
+
+    cache_root = (settings.BASE_DIR / "workspace" / "cache").absolute()
+    expected = cache_root / task_id / "segments" / f"seg_{seg_id}.wav"
+    try:
+        path = Path(recorded)
+        # Session manifests record absolute paths.  Refuse relative values so
+        # the route never interprets a path relative to the process CWD.
+        lexical = path if path.is_absolute() else None
+        # Do not resolve before checking: resolve() hides a lexical symlink or
+        # Windows junction and would make an escape look like an in-cache file.
+        if lexical is None or os.path.normcase(str(lexical)) != os.path.normcase(str(expected)):
+            raise ValueError("audio path is not the current session segment")
+
+        # Walk the original lexical path all the way to the filesystem root.
+        # This catches a symlink/junction at cache, task, workspace, or any
+        # other ancestor before resolve() can hide the redirection.
+        current = lexical
+        while True:
+            info = current.lstat()
+            if (current.is_symlink() or bool(getattr(current, "is_junction", lambda: False)())
+                    or bool(getattr(info, "st_file_attributes", 0) & 0x400)):
+                raise ValueError("audio path uses a redirected filesystem entry")
+            if current.parent == current:
+                break
+            current = current.parent
+        if not lexical.is_relative_to(cache_root):
+            raise ValueError("audio path is outside the cache")
+        resolved = lexical.resolve(strict=True)
+        expected_resolved = expected.resolve(strict=True)
+        resolved_cache = cache_root.resolve(strict=True)
+        resolved_task = (resolved_cache / task_id / "segments").resolve(strict=True)
+        if (resolved != expected_resolved
+                or not resolved.is_relative_to(resolved_task)
+                or not resolved.is_relative_to(resolved_cache)
+                or not resolved.is_file() or resolved.stat().st_size <= 0):
+            raise ValueError("audio path is not the current session segment")
+    except (OSError, RuntimeError, ValueError):
+        raise HTTPException(status_code=404, detail="Segment audio not found or not yet synthesized")
+    return FileResponse(resolved, media_type="audio/wav", headers={"Cache-Control": "no-store"})
 
 
 @app.get("/api/streaming/{task_id}")
 async def streaming_snapshot(task_id: str):
-    session = editable_session(task_id)
+    session = await editable_session(task_id)
     if not session:
         raise HTTPException(status_code=404, detail="Phiên dịch không còn tồn tại.")
     return {

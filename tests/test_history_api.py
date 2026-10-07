@@ -1,6 +1,8 @@
 """Opening saved projects does not start the translation workflow."""
 import asyncio
 import wave
+import threading
+import time
 from pathlib import Path
 from unittest.mock import Mock
 
@@ -75,3 +77,33 @@ def test_removed_source_is_reported_in_history(saved_project):
     snapshot = asyncio.run(main.streaming_snapshot(saved_project.task_id))
     assert snapshot["progress"]["status"] == "FAILED"
     assert snapshot["output_video_url"] == ""
+
+
+def test_history_media_probe_runs_off_event_loop(saved_project, monkeypatch):
+    entered, release = threading.Event(), threading.Event()
+    def blocked_history():
+        entered.set()
+        release.wait(3)
+        return []
+    monkeypatch.setattr(main, "list_saved_sessions", blocked_history)
+
+    async def run():
+        listing = asyncio.create_task(main.list_tasks())
+        for _ in range(100):
+            if entered.is_set():
+                break
+            await asyncio.sleep(.005)
+        assert entered.is_set()
+        pulse = asyncio.Event()
+        async def tick():
+            await asyncio.sleep(.03)
+            pulse.set()
+        ticker = asyncio.create_task(tick())
+        started = time.monotonic()
+        await asyncio.wait_for(pulse.wait(), .25)
+        assert time.monotonic() - started < .25
+        release.set()
+        await ticker
+        assert isinstance((await listing)["tasks"], list)
+
+    asyncio.run(run())

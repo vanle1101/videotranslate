@@ -1,12 +1,16 @@
 """Durable editable projects. Runtime tasks, engines and credentials never enter a manifest."""
 import json
+import hashlib
 import math
 import numbers
 import os
 import re
+import subprocess
 import tempfile
+import threading
 import time
 import wave
+from collections import OrderedDict
 from pathlib import Path
 from urllib.parse import quote, urlsplit, urlunsplit, parse_qsl, urlencode
 
@@ -47,6 +51,10 @@ DIAGNOSTIC_CODES = frozenset((
     "invalid_response provider_configuration provider_model provider_timeout asr_timeout "
     "asr_unavailable runtime_unavailable asr_failed provider_failed"
 ).split())
+_OUTPUT_CHECKS = OrderedDict()
+_OUTPUT_CHECK_LOCK = threading.Lock()
+OUTPUT_FAILURE_WARNING = ("Chưa xác minh được video đã xuất (có thể thiếu, hỏng hoặc kiểm tra hết thời gian); "
+                          "bản dịch và giọng đọc vẫn được giữ. Hãy xuất MP4 lại.")
 
 
 def _project_path(task_id):
@@ -180,6 +188,10 @@ def save_session(session):
         path = getattr(session, key, None)
         fields[key] = _local_path(str(Path(path).resolve()), generated=key in ("raw_audio_16k", "bgm_audio_path")) if path else None
     fields["source_url"] = _source_url(getattr(session, "source_url", None))
+    # Output validation is transient: a history scan must never write its
+    # current probe warning back into the project manifest.
+    if "warnings" in fields:
+        fields["warnings"] = [warning for warning in fields["warnings"] if warning != OUTPUT_FAILURE_WARNING]
     fields["output_filename"] = _filename(getattr(session, "output_filename", ""))
     review_url = getattr(session, "output_review_url", "")
     fields["review_filename"] = _filename(review_url.rsplit("/", 1)[-1]) if review_url else ""
@@ -360,6 +372,116 @@ def _valid_audio(value):
         return False
 
 
+def _output_identity(path, expected_duration):
+    """Cheap change detection; never hash or decode a whole multi-GB export."""
+    info = path.stat()
+    if path.is_symlink() or not path.is_file() or info.st_size < 32:
+        return None
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for offset in sorted({0, max(0, info.st_size // 2 - 16384), max(0, info.st_size - 32768)}):
+            handle.seek(offset)
+            digest.update(handle.read(32768))
+    return (str(path.resolve()), info.st_dev, info.st_ino, info.st_size,
+            info.st_mtime_ns, info.st_ctime_ns, digest.digest(), expected_duration)
+
+
+def _complete_mp4_container(path):
+    """A faststart moov may still probe successfully after mdat was truncated."""
+    size = path.stat().st_size
+    offset, seen = 0, set()
+    with path.open("rb") as handle:
+        for _ in range(4096):
+            if offset == size:
+                return {b"ftyp", b"moov", b"mdat"}.issubset(seen)
+            if size - offset < 8:
+                return False
+            handle.seek(offset)
+            header = handle.read(8)
+            if len(header) != 8:
+                return False
+            length, kind = int.from_bytes(header[:4], "big"), header[4:]
+            header_size = 8
+            if length == 1:
+                extended = handle.read(8)
+                if len(extended) != 8:
+                    return False
+                length, header_size = int.from_bytes(extended, "big"), 16
+            elif length == 0:
+                length = size - offset
+            if length < header_size or length > size - offset:
+                return False
+            if kind in {b"ftyp", b"moov", b"mdat"}:
+                if length <= header_size:
+                    return False
+                seen.add(kind)
+            offset += length
+    return False
+
+
+def _probe_saved_output(path, expected_duration):
+    if not _complete_mp4_container(path):
+        return False
+    command = ["ffprobe", "-v", "error", "-protocol_whitelist", "file,pipe",
+               "-probesize", "4194304", "-analyzeduration", "2000000", "-show_entries",
+               "format=duration,format_name:stream=codec_type,width,height", "-of", "json", str(path)]
+    flags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+    result = subprocess.run(command, capture_output=True, timeout=4, creationflags=flags)
+    if result.returncode or result.stderr.strip():
+        return False
+    data = json.loads(result.stdout)
+    actual = float(data["format"]["duration"])
+    streams = data["streams"]
+    if (not math.isfinite(actual) or actual <= 0
+            or abs(actual - expected_duration) > max(.5, expected_duration * .01)
+            or "mp4" not in data["format"].get("format_name", "").split(",")
+            or not any(item.get("codec_type") == "video" and item.get("width", 0) > 0
+                       and item.get("height", 0) > 0 for item in streams)
+            or not any(item.get("codec_type") == "audio" for item in streams)):
+        return False
+    # Decode short beginning/tail samples once per file identity. This catches
+    # unreadable streams without repeatedly decoding long exports in history.
+    for start in sorted({0.0, max(0.0, actual - .5)}):
+        command = ["ffmpeg", "-v", "error", "-xerror", "-nostdin", "-threads", "1",
+                   "-protocol_whitelist", "file,pipe", "-ss", str(start), "-i", str(path),
+                   "-t", "0.25", "-map", "0:v:0", "-map", "0:a:0", "-f", "null", "-"]
+        result = subprocess.run(command, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
+                                timeout=3, creationflags=flags)
+        if result.returncode or result.stderr.strip():
+            return False
+    return True
+
+
+def _valid_output(path, expected_duration):
+    try:
+        if not _finite(expected_duration) or expected_duration <= 0:
+            return False
+        identity = _output_identity(path, expected_duration)
+        if identity is None:
+            return False
+        with _OUTPUT_CHECK_LOCK:
+            cached = _OUTPUT_CHECKS.get(identity)
+            if cached and (cached[0] or time.monotonic() - cached[1] < 30):
+                _OUTPUT_CHECKS.move_to_end(identity)
+                return cached[0]
+        # Do not hold the cache mutex while ffprobe/ffmpeg runs: opening one
+        # large history entry must not serialize every other history row.
+        try:
+            valid = _probe_saved_output(path, expected_duration)
+        except (OSError, ValueError, TypeError, KeyError, subprocess.SubprocessError):
+            valid = False
+        if identity != _output_identity(path, expected_duration):
+            return False
+        with _OUTPUT_CHECK_LOCK:
+            _OUTPUT_CHECKS[identity] = (valid, time.monotonic())
+            _OUTPUT_CHECKS.move_to_end(identity)
+            while len(_OUTPUT_CHECKS) > 128:
+                _OUTPUT_CHECKS.popitem(last=False)
+            return valid
+    except (OSError, ValueError, TypeError):
+        return False
+
+
 def _availability(data):
     fields, rows = data["session"], data["segments"]
     missing = []
@@ -377,9 +499,11 @@ def _availability(data):
     if fields.get("review_summary", {}).get("status") in {"failed", "incomplete", "running"}:
         ready = False
     output = fields.get("output_filename", "")
-    valid_output = bool(output and not fields.get("caption_output_outdated") and _exists(settings.OUTPUT_DIR / output))
+    current_output = bool(output and not fields.get("caption_output_outdated"))
+    valid_output = bool(current_output and _valid_output(settings.OUTPUT_DIR / output, fields.get("total_duration", 0)))
+    output_warning = OUTPUT_FAILURE_WARNING if current_output and not valid_output else ""
     review_incomplete = fields.get("review_summary", {}).get("status") in {"failed", "incomplete", "running"}
-    status = "COMPLETED" if ready else "FAILED" if missing or data["state"] == "FAILED" or review_incomplete else "STOPPED"
+    status = "FAILED" if output_warning else "COMPLETED" if ready else "FAILED" if missing or data["state"] == "FAILED" or review_incomplete else "STOPPED"
     message = " ".join(missing)
     if pending_download:
         message = "Tải video chưa xong; mở dự án và bấm Tiếp tục để khôi phục phần đã tải."
@@ -391,8 +515,10 @@ def _availability(data):
         message = "Phần tạo giọng chưa xong; bấm Tiếp tục. Video và bản dịch đã kiểm tra được giữ nguyên."
     if not ready and not message:
         message = "Tác vụ trước đã gián đoạn; mở dự án để xem phần đã lưu và tiếp tục."
+    if output_warning:
+        message = " ".join(filter(None, (message, output_warning)))
     return {"status": status, "missing_media": message, "ready": ready, "source_exists": _exists(fields.get("video_path")),
-            "pending_download": pending_download,
+            "pending_download": pending_download, "output_warning": output_warning,
             "missing_audio_ids": absent_audio, "output_filename": output if valid_output and ready else ""}
 
 
@@ -411,7 +537,7 @@ def list_saved_sessions():
             title = Path(fields["video_path"]).name if fields.get("video_path") else fields.get("source_url") or path.stem
             result.append({"task_id": path.stem, "title": title, "updated_at": data["updated_at"],
                 "status": available["status"], "can_open": available["source_exists"] or available["pending_download"], "duration": fields.get("total_duration", 0),
-                "saved": True, "task_type": "Phiên đã lưu", "progress_pct": 100 if available["ready"] else None,
+                "saved": True, "task_type": "Phiên đã lưu", "progress_pct": 100 if available["ready"] and not available["output_warning"] else None,
                 "missing_media": available["missing_media"], "stage": available["missing_media"] or "Dự án đã lưu",
                 "output_filename": available["output_filename"],
                 "output_video_url": f"/api/outputs/{available['output_filename']}" if available["output_filename"] else "",
@@ -497,11 +623,13 @@ def restore_saved_session(task_id, event_callback=None):
     session._restored_source_missing = source_missing and not available["pending_download"]
     if incomplete or source_missing:
         session.error = available["missing_media"] or "Tác vụ trước bị gián đoạn; bấm Tiếp tục để xử lý phần còn lại."
-    elif available["missing_media"]:
-        session.warnings.append(available["missing_media"])
+    else:
+        session.warnings[:] = [warning for warning in session.warnings if warning != OUTPUT_FAILURE_WARNING]
+        if available["output_warning"]:
+            session.warnings.append(available["output_warning"])
     session.progress = {"phase": "complete" if available["ready"] else "restored",
         "stage": available["missing_media"] or "Đã khôi phục bản dịch và giọng đọc đã lưu.",
-        "progress_pct": 100 if available["ready"] else None, "status": available["status"]}
+        "progress_pct": 100 if available["ready"] and not available["output_warning"] else None, "status": available["status"]}
     # Fully prepared translations can retry TTS without ASR or a provider request.
     # Earlier interrupted preparation is restarted explicitly using the same source/checkpoints.
     session._restored_can_resume = bool(session.initialized and not source_missing

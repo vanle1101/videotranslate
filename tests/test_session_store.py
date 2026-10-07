@@ -1,6 +1,8 @@
 """Persistence boundaries: corruption and missing media never become success."""
 import json
 import asyncio
+import os
+import shutil
 import subprocess
 import sys
 import wave
@@ -373,6 +375,142 @@ def test_deleted_source_is_not_reported_as_completed(persisted):
     persisted.video_path.unlink()
     row = next(item for item in list_saved_sessions() if item["task_id"] == persisted.task_id)
     assert row["can_open"] is False and row["status"] == "FAILED"
+
+
+def test_truncated_nonempty_mp4_is_not_published_after_restore(persisted):
+    output = settings.OUTPUT_DIR / "truncated.mp4"
+    output.write_bytes(b"\x00\x00\x00\x18ftypisom\x00\x00\x02\x00isomiso2\x00\x10\x00\x00mdatcut")
+    persisted.output_filename = output.name
+    persisted.persist()
+    row = list_saved_sessions()[0]
+    assert row["output_video_url"] == ""
+    assert row["video_url"] == ""
+    assert row["can_open"] is True
+    restored = restore_saved_session(persisted.task_id)
+    assert restored.output_video_url == "" and restored.output_filename == ""
+    assert restored.segments[0].final_vi == "Xin chào."
+    assert restored.segments[0].status == "READY" and not restored.error
+
+
+@pytest.fixture
+def saved_mp4(persisted):
+    if not shutil.which("ffmpeg") or not shutil.which("ffprobe"):
+        pytest.skip("FFmpeg and FFprobe required for real saved media validation")
+    output = settings.OUTPUT_DIR / "saved.mp4"
+    result = subprocess.run(["ffmpeg", "-v", "error", "-nostdin", "-f", "lavfi", "-i",
+        "testsrc2=size=96x64:rate=12", "-f", "lavfi", "-i", "sine=frequency=440:sample_rate=24000",
+        "-t", "2", "-c:v", "libx264", "-preset", "ultrafast", "-pix_fmt", "yuv420p",
+        "-c:a", "aac", "-movflags", "+faststart", str(output)],
+        capture_output=True, timeout=15, creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+    assert result.returncode == 0, result.stderr.decode("utf-8", "replace")
+    persisted.output_filename = output.name
+    persisted.output_review_url = "/api/outputs/saved.review.json"
+    (settings.OUTPUT_DIR / "saved.review.json").write_text("{}")
+    persisted.persist()
+    return output
+
+
+def test_saved_mp4_probes_and_decodes_once_then_history_reuses_fingerprint(persisted, saved_mp4, monkeypatch):
+    from core.streaming import session_store as store
+    probe = Mock(wraps=store._probe_saved_output)
+    monkeypatch.setattr(store, "_probe_saved_output", probe)
+    for _ in range(3):
+        row = list_saved_sessions()[0]
+        assert row["output_video_url"] == "/api/outputs/saved.mp4"
+        assert row["review_url"] == "/api/outputs/saved.review.json"
+        assert row["status"] == "COMPLETED"
+    restored = restore_saved_session(persisted.task_id)
+    assert restored.output_video_url == "/api/outputs/saved.mp4"
+    assert restored.segments[0].final_vi == persisted.segments[0].final_vi
+    assert probe.call_count == 1
+
+
+@pytest.mark.parametrize("damage", ["truncate", "missing", "wrong_duration", "corrupt_samples"])
+def test_bad_saved_result_never_hides_editable_translation_or_publishes_url(persisted, saved_mp4, damage):
+    if damage == "missing":
+        saved_mp4.unlink()
+    elif damage == "truncate":
+        data = saved_mp4.read_bytes()
+        saved_mp4.write_bytes(data[:len(data) // 2])
+        # The intact faststart moov still advertises the full source duration;
+        # metadata-only validation would incorrectly pass this damaged output.
+        probe = subprocess.run(["ffprobe", "-v", "error", "-show_entries", "format=duration", "-of", "json", str(saved_mp4)],
+            capture_output=True, timeout=4, creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+        assert probe.returncode == 0 and float(json.loads(probe.stdout)["format"]["duration"]) == 2
+    elif damage == "wrong_duration":
+        persisted.total_duration = 20
+        persisted.persist()
+    else:
+        data = bytearray(saved_mp4.read_bytes())
+        start = data.index(b"mdat") + 4
+        data[start:start + 5000] = bytes(min(5000, len(data) - start))
+        saved_mp4.write_bytes(data)
+    row = list_saved_sessions()[0]
+    assert row["output_filename"] == row["output_video_url"] == row["video_url"] == row["review_url"] == ""
+    assert row["can_open"] and row["status"] == "FAILED" and row["progress_pct"] is None
+    assert "xuất MP4 lại" in row["stage"]
+    restored = restore_saved_session(persisted.task_id)
+    assert restored.output_video_url == restored.output_filename == restored.output_review_url == ""
+    assert restored.segments[0].final_vi == persisted.segments[0].final_vi
+    assert restored.segments[0].status == "READY" and restored.error is None
+    assert restored.segments[0].audio_path == persisted.segments[0].audio_path
+    assert any("Chưa xác minh được video đã xuất" in warning for warning in restored.warnings)
+    restored.persist()
+    manifest = json.loads(_project_path(persisted.task_id).read_text(encoding="utf-8"))
+    assert all("Chưa xác minh được video đã xuất" not in warning for warning in manifest["session"].get("warnings", []))
+
+
+def test_output_validation_cache_rejects_same_size_replacement_even_with_same_stat_identity(persisted, saved_mp4, monkeypatch):
+    from core.streaming import session_store as store
+    assert list_saved_sessions()[0]["output_video_url"]
+    original = saved_mp4.stat()
+    old_identity = store._output_identity(saved_mp4, 2)
+    data = bytearray(saved_mp4.read_bytes())
+    data[:4] = b"\x00\x00\x00\x00"
+    saved_mp4.write_bytes(data)
+    os.utime(saved_mp4, ns=(original.st_atime_ns, original.st_mtime_ns))
+    real_stat = Path.stat
+    monkeypatch.setattr(Path, "stat", lambda path, **kwargs: original if path == saved_mp4 else real_stat(path, **kwargs))
+    new_identity = store._output_identity(saved_mp4, 2)
+    assert old_identity[:-2] == new_identity[:-2]
+    assert old_identity[-2] != new_identity[-2], "Sampled content detects unchanged size/stat metadata"
+    assert list_saved_sessions()[0]["output_video_url"] == ""
+
+
+def test_output_validation_timeout_is_cached_briefly_and_recovers_without_losing_project(persisted, saved_mp4, monkeypatch):
+    from core.streaming import session_store as store
+    real_probe = store._probe_saved_output
+    probe = Mock(side_effect=subprocess.TimeoutExpired("ffprobe", 4))
+    clock = [0.0]
+    monkeypatch.setattr(store.time, "monotonic", lambda: clock[0])
+    monkeypatch.setattr(store, "_probe_saved_output", probe)
+    for _ in range(3):
+        assert list_saved_sessions()[0]["output_video_url"] == ""
+    assert probe.call_count == 1
+    monkeypatch.setattr(store, "_probe_saved_output", real_probe)
+    clock[0] = 31
+    assert list_saved_sessions()[0]["output_video_url"] == "/api/outputs/saved.mp4"
+
+
+def test_old_caption_output_is_not_probed_or_republished(persisted, saved_mp4, monkeypatch):
+    from core.streaming import session_store as store
+    persisted.caption_output_outdated = True
+    persisted.persist()
+    probe = Mock(side_effect=AssertionError("Outdated caption output must stay unpublished"))
+    monkeypatch.setattr(store, "_probe_saved_output", probe)
+    row = list_saved_sessions()[0]
+    assert row["output_video_url"] == "" and row["can_open"]
+    assert row["missing_media"] == ""
+    probe.assert_not_called()
+
+
+def test_valid_reexport_removes_only_stale_output_warning(persisted, saved_mp4):
+    from core.streaming import session_store as store
+    persisted.warnings = [store.OUTPUT_FAILURE_WARNING, "Cảnh báo khác."]
+    persisted.persist()
+    restored = restore_saved_session(persisted.task_id)
+    assert restored.output_video_url == "/api/outputs/saved.mp4"
+    assert restored.warnings == ["Cảnh báo khác."]
 
 
 def test_real_failure_shape_resumes_tts_with_completed_review_and_auto_export(persisted, monkeypatch):
