@@ -2,11 +2,29 @@
 
 Date: 2026-10-07, Asia/Saigon. **Overall verdict: FAIL / broader audit remains incomplete.** Historical sections below retain their original evidence; the latest retests in this section supersede their pending statuses only for the listed scenarios.
 
+## Final address-applicability correction — October 7, 23:02 onward
+
+Scope: the three reported failures (lost dialogue context, OCR mistaken for pronoun validation, and fitting a 0.4-second utterance). The configured translator remains OpenCode Muse; no local translation model or UI redesign was introduced.
+
+Root causes and corrections:
+
+1. Pacing previously received incomplete or progressively mutated dialogue. Translation, review and batch/sequential speech fitting now use chronological source rows, stable IDs/timestamps, an explicit target, and an immutable snapshot containing later reviewed source corrections. Source citations are versioned and obsolete address verdicts are invalidated.
+2. Source-text agreement and address interpretation were conflated. Review now reads Chinese context separately before the semantic passes. OCR can support source text, but it cannot establish who is speaking. Address-bearing output requires a grounded address verdict. Neutral interjections/numbers are explicitly not applicable; this must not be recorded as an approved relationship. Dropping essential meaning to avoid pronouns cannot pass the neutral check. Both the audit selector and acceptance gate now use the same address detection; newly introduced pronouns without a source reading remain unresolved.
+3. `atempo` output for the real 0.460-second “Hả?” exceeded a 0.400-second slot even at the 1.15× ceiling. A bounded Rubber Band attempt at the same ceiling fits the complete utterance. The code never trims the word or treats a missing filter/overlong waveform as success.
+
+Files in the final applicability correction: `core/translation_context.py`, `core/translation_review.py`, `core/streaming/session_store.py`, `tests/test_address_applicability.py`, `tests/test_translation_context.py`, `tests/test_natural_speech.py`, `tests/test_session_store.py`. Earlier context/timing corrections are recorded in commits `9b9e197`, `ef6fc54`, `15d7972`, `a2c75c6`, and `55e073b`. Session regressions preserve applicable, neutral and unresolved flags through two reopen cycles; code hashes prevent the previous review/visual/speech policy from reusing the old cache namespace.
+
+The production Studio process remains on the earlier code. Its stop/relaunch action was rejected by automatic approval review with `blocked by policy`; no alternative termination mechanism was used. A passing isolated provider or audio probe is **not** a production UI end-to-end pass. No new fully validated MP4 has been published for task `17736b77`.
+
+### Real Muse retest with the new applicability gate — October 7, 23:02–23:08
+
+The saved 14-segment source was reviewed again with the real configured OpenCode Muse client, fresh local OCR, and the two installed speech recognizers. The request completed with **14 checked, 10 verified, 4 unresolved**. Neutral rows (`啥`/“Hả?”, `十九`/“Mười chín tuổi.”, the narration row and other non-address lines) were recorded as `address_applicable=false`, `address_neutral_faithful=true`, `address_verified=false`; this is a faithful non-applicable result, not a relationship approval. `拜托姐` was verified as a direct “chị ơi” address. `跟我走` and the final `这话应该我来问吧` stayed unresolved because the available evidence did not prove the speaker/listener direction. The gate therefore did not turn matching OCR or a fluent “tôi” into proof of chị–em roles. No media was published by this audit-only run.
+
 ## Context, address review and short-speech retest — October 7, 22:29–22:32
 
 | Test and exact steps | Expected | Actual, cause and retest |
 | --- | --- | --- |
-| Real Muse address-context review on persisted `17736b77` source and 14 segments | Review reads the chronological Chinese source separately from OCR agreement; it must not mark pronouns correct solely because OCR matches | **PASS provider path:** OpenCode Muse `muse-spark-1.3-contributor-free` completed the address-context requests and independent semantic passes. `拜托姐` and the following `这话应该我来问吧` were both assigned the same speaker direction **em–chị**; the latter was corrected from the old neutral “tôi”. OCR evidence remained a source-text citation only. 1 verified / 1 corrected / 12 unresolved; unresolved rows remained explicitly flagged rather than falsely approved. |
+| Real Muse address-context review on persisted `17736b77` source and 14 segments | Review reads the chronological Chinese source separately from OCR agreement; it must not mark pronouns correct solely because OCR matches | **Requests completed; overall semantic result FAIL:** OpenCode Muse `muse-spark-1.3-contributor-free` completed the address-context requests and independent semantic passes. `拜托姐` and the following `这话应该我来问吧` were both assigned the same speaker direction **em–chị**; the latter was corrected from the old neutral “tôi”. OCR evidence remained a source-text citation only. 1 verified / 1 corrected / 12 unresolved; unresolved rows remained explicitly flagged rather than falsely approved. |
 | Sequential reviewed-context pacing regression | The first regenerated sentence sees later corrected source rows, while later UI rows remain unchanged until their own audio commits | **PASS focused:** immutable reviewed snapshot is passed by ID/time; 89 focused transcript/pipeline tests pass, including synthesis failure rollback. |
 | Exact 0.4-second speech slot with real Edge Hoài My | Preserve complete speech and fit the slot without exceeding 1.15× or rewriting verified text | **PASS real audio:** “Hả?” measured 0.460s; `atempo` alone produced 0.410208s, while FFmpeg Rubber Band at the same 1.15× ceiling produced 0.400000s and decoded successfully. No clipping, text rewrite, or fake success. |
 | Persistence of address evidence | Save/reopen keeps address verdict, source citations and stale-source invalidation | **PASS focused:** schema round-trip/security tests retain `address_context_sources`, `address_stale_source_ids`, and `address_verified` without credentials. |
@@ -15,6 +33,7 @@ Focused regression suite after these changes: **344 passed, 17 subtests**. Full 
 
 - **FAIL real pacing probe, 22:41–22:43:** the corrected final sentence measured 2.230s against its 1.580s slot (1.15× limit). A probe supplied the corrected sentence with the earlier persisted context, without the new address-review metadata. Three Muse proposals were rejected by semantic/uncertainty validation; no audio result or MP4 was published. This validates refusal of unsupported rewrites, not successful final synthesis.
 - **BLOCKED real source-reading → pacing retry, 22:44–22:45:** Muse timed out after 62.4s during the new source-only context request, before synthesis. The provider failure propagated explicitly. This chain has not passed, and the final production UI/media acceptance remains outstanding.
+- **FAIL real source-reading → pacing retry, 22:49–22:52:** using the production reviewer's 120s timeout, source reading returned an em–chị hypothesis but `uncertain=true`. Edge again measured 2.230s. Two proposed shortenings were rejected as uncertain; the third Muse request timed out after 61.2s under the configured pacing timeout. No user project, audio or MP4 was replaced. The earlier successful address-review response is therefore a bounded observation, not proof of reliable complete-chain success.
 
 ## Runtime follow-up — October 7, 18:07 onward
 
