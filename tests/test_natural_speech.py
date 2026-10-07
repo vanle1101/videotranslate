@@ -116,6 +116,53 @@ def test_short_speech_keeps_normal_speed_without_rewrite(tmp_path, aligner):
     assert_no_scratch(output)
 
 
+def test_exact_speed_ceiling_keeps_complete_interjection_without_rewrite(tmp_path, aligner, monkeypatch):
+    import subprocess
+    from core.engines.alignment import timing_aligner as timing
+    filters = subprocess.run(["ffmpeg", "-hide_banner", "-filters"], capture_output=True,
+                             text=True, check=True).stdout
+    if "rubberband" not in filters:
+        pytest.skip("Optional Rubber Band filter is unavailable")
+    commands = []
+    run = subprocess.run
+    def record(command, **kwargs):
+        commands.append(command)
+        return run(command, **kwargs)
+    monkeypatch.setattr(timing.subprocess, "run", record)
+    engine, translator = RecordedSynthesizer(.46), Mock()
+    output = tmp_path / "voice.wav"
+    result = synthesize_natural_speech(text="Hả?", source="啥", duration=1.99 - 1.59,
+        output_path=output, engine=engine, aligner=aligner, translator=translator)
+    assert result["text"] == "Hả?" and result["pacing_verification"] is None
+    assert result["speed_ratio"] == 1.15
+    assert engine.calls == ["Hả?"]
+    translator.rewrite_for_pacing.assert_not_called()
+    with wave.open(str(output), "rb") as wav:
+        assert wav.getnframes() == 9600 and wav.getframerate() == 24000
+        samples = array("h", wav.readframes(wav.getnframes()))
+    assert max(abs(value) for value in samples[-480:]) > 100
+    audio_filters = [cmd[cmd.index("-filter:a") + 1] for cmd in commands if "-filter:a" in cmd]
+    assert audio_filters == ["atempo=1.15000000", "rubberband=tempo=1.15000000:pitch=1"]
+    assert_no_scratch(output)
+
+
+def test_unavailable_exact_stretcher_never_publishes_overlong_audio(tmp_path, aligner):
+    aligner._rubberband_available = False
+    output = tmp_path / "voice.wav"
+    output.write_bytes(b"previous-complete-output")
+    with pytest.raises(SpeechBudgetError):
+        synthesize_natural_speech(text="Hả?", source="啥", duration=.4, output_path=output,
+            engine=RecordedSynthesizer(.46), aligner=aligner)
+    assert output.read_bytes() == b"previous-complete-output"
+    assert_no_scratch(output)
+
+
+def test_real_speed_excess_is_not_treated_as_floating_point_noise(tmp_path, aligner):
+    with pytest.raises(SpeechBudgetError):
+        aligner.apply_atempo(tmp_path / "unused.wav", tmp_path / "out.wav", 1.150001, fit_duration=.4)
+    assert not (tmp_path / "out.wav").exists()
+
+
 def test_internal_synthesis_pause_fits_before_rewrite_and_keeps_exact_words(tmp_path, aligner, caplog):
     original = "Tôi vẫn chưa làm việc đó."
     engine, translator = PausedSynthesizer(), Mock()

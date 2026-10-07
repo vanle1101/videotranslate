@@ -1,6 +1,7 @@
 import subprocess
 import time
 import math
+import logging
 from pathlib import Path
 from typing import List, Dict, Any, Tuple, Optional
 from config import settings
@@ -63,11 +64,12 @@ class TimingBudgetAligner(AlignmentEngine):
             raise ValueError("Thời lượng đoạn thoại không hợp lệ.")
         actual_speed = speed_factor if fit_duration is not None else max(self.min_speed, min(self.max_speed, speed_factor))
         for _ in range(4):
-            # ffprobe reports durations at sample precision; a value such as
-            # 1.1500000000000004 is still the configured 1.15x limit. Treat a
-            # sub-millisecond floating point excess as rounding, while keeping
-            # a real over-budget sentence on the normal rewrite/error path.
-            if fit_duration is not None and actual_speed > self.max_speed + 1e-3:
+            # Ignore floating-point arithmetic noise only. Clamp the actual
+            # render rate so cache validation and playback retain the same cap.
+            if actual_speed > self.max_speed and math.isclose(
+                    actual_speed, self.max_speed, rel_tol=0, abs_tol=1e-12):
+                actual_speed = self.max_speed
+            if fit_duration is not None and actual_speed > self.max_speed:
                 raise SpeechBudgetError(
                     f"Lời thoại quá dài để đọc tự nhiên (cần {actual_speed:.2f}x, "
                     f"giới hạn {self.max_speed:.2f}x). Hãy rút gọn lời Việt hoặc thử tạo giọng lại."
@@ -93,17 +95,55 @@ class TimingBudgetAligner(AlignmentEngine):
             rendered_duration = self.get_audio_duration(output_wav)
             if rendered_duration <= 0:
                 raise RuntimeError("Không đọc được âm thanh sau khi căn thời lượng.")
-            # atempo emits complete codec/sample blocks. Near the exact speed
-            # ceiling that can add less than a millisecond to the measured
-            # container duration; accepting this quantisation avoids asking
-            # for an imperceptibly faster (and disallowed) rate.
-            if rendered_duration <= fit_duration + 0.001:
+            if rendered_duration <= fit_duration + 0.0001:
                 return actual_speed
             # atempo works in blocks, so source_duration / speed is approximate.
             # Re-render the complete original at a slightly faster rate instead
             # of letting playback/export trim the final syllable at the slot end.
-            actual_speed *= rendered_duration / fit_duration * 1.01
+            next_speed = actual_speed * rendered_duration / fit_duration * 1.01
+            if next_speed > self.max_speed:
+                # Try the actual ceiling before declaring speech impossible.
+                # The previous proportional correction can overshoot it even
+                # when a render at the ceiling would fit.
+                if actual_speed < self.max_speed:
+                    actual_speed = self.max_speed
+                    continue
+                return self._fit_rubberband(input_wav, output_wav, fit_duration)
+            actual_speed = next_speed
         raise RuntimeError("Không thể căn đủ lời vào thời lượng đoạn thoại. Hãy rút gọn bản dịch.")
+
+    def _fit_rubberband(self, input_wav: Path, output_wav: Path, fit_duration: float):
+        """Retry complete speech at the same speed ceiling with an exact stretcher.
+
+        atempo's block overlap adds about 10 ms to a real 460 ms interjection,
+        even at exactly 1.15x. Rubber Band flushes the complete source to its
+        requested duration. No trim, pad, pitch change or text substitution is
+        used. Builds without the optional filter retain the normal fit failure.
+        """
+        if not hasattr(self, "_rubberband_available"):
+            probe = subprocess.run(["ffmpeg", "-hide_banner", "-filters"],
+                stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+                encoding="utf-8", errors="replace", check=True,
+                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+            self._rubberband_available = any(
+                len(parts := line.split()) > 2 and parts[1] == "rubberband"
+                for line in probe.stdout.splitlines())
+        if self._rubberband_available:
+            subprocess.run(["ffmpeg", "-v", "error", "-nostdin", "-y", "-i", str(input_wav),
+                "-filter:a", f"rubberband=tempo={self.max_speed:.8f}:pitch=1", "-vn", str(output_wav)],
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=True,
+                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+            rendered_duration = self.get_audio_duration(output_wav)
+            if not math.isfinite(rendered_duration) or rendered_duration <= 0:
+                raise RuntimeError("Không đọc được âm thanh sau khi căn thời lượng.")
+            if rendered_duration <= fit_duration + .0001:
+                logging.getLogger("pipeline").info(
+                    "PACING_FILTER_FIT filter=rubberband speed=%.8f rendered_seconds=%.6f slot_seconds=%.6f",
+                    self.max_speed, rendered_duration, fit_duration)
+                return self.max_speed
+        raise SpeechBudgetError(
+            "Lời thoại quá dài để đọc tự nhiên dù đã căn toàn bộ âm thanh ở tốc độ tối đa. "
+            "Hãy rút gọn lời Việt hoặc thử tạo giọng lại.")
 
     def align_and_budget(
         self,

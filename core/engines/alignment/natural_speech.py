@@ -78,12 +78,13 @@ def synthesize_natural_speech(*, text, source, duration, output_path, engine, al
                     on_stage("ALIGNING")
                 for fit_attempt in range(2):
                     try:
-                        # A measured ratio can exceed 1.15 by a few floating
-                        # point ulps when the source/slot durations are both
-                        # rounded to container samples. The aligner applies
-                        # the same 1 ms tolerance and still rejects a real
-                        # over-budget sentence.
-                        if ratio > aligner.max_speed + 1e-3:
+                        # Subtracting source timestamps can put an exact
+                        # ceiling ratio a few floating-point ulps over it.
+                        # Clamp only that arithmetic noise, never audible time.
+                        if ratio > aligner.max_speed and math.isclose(
+                                ratio, aligner.max_speed, rel_tol=0, abs_tol=1e-12):
+                            ratio = aligner.max_speed
+                        if ratio > aligner.max_speed:
                             raise SpeechBudgetError("Câu vượt nhịp đọc tự nhiên.")
                         ratio = aligner.apply_atempo(raw, fitted, ratio, fit_duration=duration)
                         break
