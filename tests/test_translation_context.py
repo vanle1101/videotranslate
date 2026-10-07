@@ -21,6 +21,22 @@ def source(index, text, vi="Lời nháp"):
             "needs_review": False, "review_reason": ""}
 
 
+def test_batch_summary_preserves_turn_boundaries_and_timestamps(monkeypatch):
+    translator = SemanticTranslator("opencode")
+    rows = [source(1, "这话应该我来问吧"), source(0, "拜托姐")]
+    summary = Mock(return_value={"theme": "Đối thoại", "pronouns": "em–chị", "terms": []})
+    execute = Mock(return_value={row["id"]: {"literal_vi": "Chị ơi.",
+        "natural_vi": "Chị ơi.", "final_vi": "Chị ơi."} for row in rows})
+    monkeypatch.setattr(translator, "_extract_context_and_glossary", summary)
+    monkeypatch.setattr(translator, "_execute_3tier_translation", execute)
+    translator.translate(rows)
+    context = json.loads(summary.call_args.args[0])
+    assert [row["id"] for row in context] == [0, 1]
+    assert context[0]["text_zh"] == "拜托姐"
+    assert context[1]["start"] == 3 and context[1]["end"] == 5
+    assert all("start" in row and "end" in row for row in execute.call_args.args[0])
+
+
 def test_context_retains_early_address_evidence_and_neighbors_beyond_ten_seconds():
     rows = [source(i, "这是普通的句子") for i in range(150)]
     rows[1] = source(1, "拜托姐", "Thôi mà chị.")
@@ -117,7 +133,7 @@ def test_reviewer_receives_early_source_context_in_both_passes(monkeypatch):
                 "evidence": [{"id": 0, "quote": "拜托姐"}]} for sid in ids]}
         batch = json.loads(prompt.split("Câu cần kiểm định: ", 1)[1].split("\nOCR mới tại máy", 1)[0])
         return {"segments": [{**row, "semantic_verified": True,
-                 "address_verified": True, "address_reason": "Đã kiểm tra chiều xưng hô theo nguồn.",
+                 "address_applicable": True, "address_verified": True, "address_reason": "Đã kiểm tra chiều xưng hô theo nguồn.",
                  "verification_reason": "Đã đối chiếu lời nguồn và quan hệ xưng hô.",
                  "source_evidence_ids": [f"review{row['id']}"]} for row in batch],
                 "screen_texts": [], "summary": ""}
@@ -177,7 +193,7 @@ def test_actual_reviewer_keeps_ocr_and_address_decisions_separate(monkeypatch, a
                 "uncertain": False, "reason": "Cùng mạch về nhà rồi nói đói với mẹ.",
                 "evidence": [{"id": 0, "quote": "妈妈我回来了"}, {"id": 1, "quote": "我饿了"}]} for row in rows]}
         return {"segments": [{**row, "semantic_verified": True, "verification_reason": "OCR xác nhận lời nguồn.",
-            "source_evidence_ids": [f"review{row['id']}"], "address_verified": address_verified,
+            "source_evidence_ids": [f"review{row['id']}"], "address_applicable": True, "address_verified": address_verified,
             "address_reason": "Lượt nói tiếp tục cùng người con."} for row in rows], "screen_texts": [], "summary": ""}
     client = Mock(has_credentials=True, model="offline-context-probe", translate=Mock(side_effect=respond))
     scanner = Mock(extract=Mock(return_value=[{"start": row["start"], "end": row["end"],

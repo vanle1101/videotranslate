@@ -232,8 +232,13 @@ class SemanticTranslator(TranslationEngine):
         if not segments:
             return []
 
-        # Join full transcript text for context analysis
-        full_text = " ".join([seg.get("text_zh", seg.get("text", "")) for seg in segments])
+        # A flattened transcript erases the evidence for continued speech and
+        # replies. Preserve every turn and its timing in the context pass.
+        full_text = json.dumps([
+            {**{key: seg[key] for key in ("id", "start", "end", "speaker_id", "addressee_id") if key in seg},
+             "text_zh": seg.get("text_zh", seg.get("text", ""))}
+            for seg in sorted(segments, key=lambda row: (row.get("start", 0), row["id"]))
+        ], ensure_ascii=False)
 
         # Step 1: Summary & Glossary
         if progress_callback:
@@ -248,6 +253,8 @@ class SemanticTranslator(TranslationEngine):
         payload = [
             {
                 "id": seg["id"],
+                "start": seg["start"],
+                "end": seg["end"],
                 "duration": seg.get("duration", round(seg["end"] - seg["start"], 2)),
                 "text_zh": seg.get("text_zh", seg.get("text", ""))
             }

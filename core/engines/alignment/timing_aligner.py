@@ -2,12 +2,14 @@ import subprocess
 import time
 import math
 import logging
+from copy import deepcopy
 from pathlib import Path
 from typing import List, Dict, Any, Tuple, Optional
 from config import settings
 from core.engines.alignment.base import AlignmentEngine
 from core.engines.tts.base import TTSEngine
 from core.engines.alignment.speech_timing import build_speech_timing, take_tts_word_boundaries, trim_tts_padding
+from core.translation_context import dialogue_context
 
 class SpeechBudgetError(RuntimeError):
     """Complete speech cannot fit without an unnatural speed change."""
@@ -156,6 +158,11 @@ class TimingBudgetAligner(AlignmentEngine):
     ) -> List[Dict[str, Any]]:
         self.min_speed, self.max_speed = speed_limits
         aligned_segments = []
+        # Keep one stable source/draft snapshot for the whole batch. Earlier
+        # pacing edits must not rewrite the evidence seen by later sentences.
+        source_dialogue = deepcopy(segments)
+        for row in source_dialogue:
+            row["final_vi"] = row.get("final_vi", row.get("vi_text", ""))
 
         print(f"[*] Executing Timing Alignment for {len(segments)} segments...")
 
@@ -171,9 +178,13 @@ class TimingBudgetAligner(AlignmentEngine):
             fitted_wav = self.temp_dir / f"seg_{seg_id}_fitted.wav"
 
             from core.engines.alignment.natural_speech import synthesize_natural_speech
+            context = dialogue_context(
+                [{**row, "is_focus": row.get("id") == seg_id} for row in deepcopy(source_dialogue)],
+                [seg],
+            )
             spoken = synthesize_natural_speech(text=text_vi, source=seg.get("text_zh", ""),
                 duration=slot_duration, output_path=fitted_wav, engine=tts_engine, aligner=self,
-                translator=translation_engine, voice=voice, ref_audio=ref_audio)
+                translator=translation_engine, voice=voice, ref_audio=ref_audio, context=context)
             text_vi = spoken["text"]
             tts_dur, speed_ratio, boundaries = spoken["tts_duration"], spoken["speed_ratio"], spoken["boundaries"]
 
