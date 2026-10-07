@@ -884,7 +884,11 @@ def test_automatic_review_fits_revised_source_and_publishes_only_verified_spoken
 
     args = session.translator.rewrite_for_pacing.call_args
     assert args.args[0] == row["text_zh"] and args.args[1] == long_text
-    assert args.args[3] == [{"zh": "前句", "vi": "Câu trước."}]
+    context = args.args[3]
+    assert [entry["id"] for entry in context] == [1, 0]
+    assert context[0]["zh"] == "前句" and context[0]["vi"] == "Câu trước."
+    assert context[1]["zh"] == row["text_zh"] and context[1]["vi"] == long_text
+    assert context[1]["start"] == segment.start and context[1]["end"] == segment.end
     assert args.kwargs["measured_duration"] == 4.2
     assert session.tts_engine.synthesize.call_count == 2
     assert segment.final_vi == shorter and segment.text_zh == row["text_zh"]

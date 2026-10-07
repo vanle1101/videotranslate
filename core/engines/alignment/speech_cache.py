@@ -65,6 +65,7 @@ def _code_revision():
     files = (Path(__file__), directory / "natural_speech.py",
              directory / "timing_aligner.py", directory / "speech_timing.py",
              directory.parent / "translation" / "semantic_translator.py",
+             directory.parent.parent / "translation_context.py",
              directory.parent / "translation" / "opencode_client.py",
              directory.parent / "translation" / "gemini_client.py",
              directory.parent / "translation" / "openrouter_client.py")

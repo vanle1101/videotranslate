@@ -58,7 +58,7 @@ def file_digest(path, check=lambda: None):
 
 def implementation_revision():
     root = Path(__file__).parent
-    paths = [root / name for name in ("review_checkpoint.py", "translation_review.py",
+    paths = [root / name for name in ("review_checkpoint.py", "translation_review.py", "translation_context.py",
              "video_intelligence.py", "screen_ocr.py", "media_process.py", "chinese_text.py",
              "engines/translation/opencode_client.py", "engines/asr/sensevoice_engine.py")]
     return {str(path.relative_to(root)): file_digest(path) for path in paths}

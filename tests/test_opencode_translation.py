@@ -31,13 +31,13 @@ class OpenCodeTranslationTests(unittest.TestCase):
         self.assertEqual(request.call_count, 2)
         self.assertIn("mình - bạn", request.call_args.args[0])
 
-    def test_single_keeps_only_recent_context_and_passes_budget(self):
+    def test_single_keeps_short_dialogue_context_and_passes_budget(self):
         context = [{"zh": f"previous-{i}", "vi": f"bản dịch {i}"} for i in range(7)]
         with patch.object(self.translator, "_opencode_request", return_value=json.dumps(self.translation)) as request:
             result = self.translator.translate_single_segment("你好", 2.0, context, "anh - em")
         self.assertEqual(result, self.translation)
         instruction = request.call_args.args[0]
-        self.assertNotIn("previous-1", instruction)
+        self.assertIn("previous-1", instruction)
         self.assertIn("previous-2", instruction)
         self.assertIn("previous-6", instruction)
         self.assertIn("anh - em", instruction)

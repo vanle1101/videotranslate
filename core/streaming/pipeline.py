@@ -247,6 +247,49 @@ class StreamingPipelineSession:
                 self.warnings.append(message)
             logging.getLogger("errors").error("[%s] PROJECT_SAVE_FAILED error_type=%s", self.task_id, type(exc).__name__)
 
+    def _dialogue_context_before(self, segment, *, focus_source=None, focus_vi=None):
+        """Return bounded source-first context for the whole known exchange.
+
+        A fixed preceding window can discard the only evidence that
+        distinguishes chị–em from tôi–mày. Keep every currently known source
+        turn (including the current and later turns) and let the shared
+        selector prioritize the focused turn plus address cues. ``focus_source``
+        is used while a review edit is still in memory so the provider never
+        receives the stale pre-review source for the focused segment.
+        """
+        from core.translation_context import dialogue_context
+        rows = []
+        for item in sorted(self.segments.values(), key=lambda value: (value.start, value.id)):
+            text_source = getattr(item, "text_zh", "")
+            source = str(text_source or getattr(item, "asr_text", "") or "").strip()
+            if item.id == segment.id and isinstance(focus_source, str) and focus_source.strip():
+                source = focus_source.strip()
+            if not source:
+                continue
+            row = {"id": item.id, "start": item.start, "end": item.end,
+                   "text_zh": source, "asr_text": getattr(item, "asr_text", "")}
+            draft = focus_vi if item.id == segment.id and isinstance(focus_vi, str) else getattr(item, "final_vi", "")
+            if isinstance(draft, str) and draft:
+                row["final_vi"] = draft
+            if getattr(item, "needs_review", False):
+                row["needs_review"] = True
+            if not text_source and getattr(item, "asr_text", ""):
+                row["source_needs_review"] = True
+            rows.append(row)
+        focus_rows = [{"id": segment.id, "start": segment.start, "end": segment.end,
+                       "text_zh": focus_source or getattr(segment, "text_zh", "") or getattr(segment, "asr_text", "") or ""}]
+        selected = dialogue_context(rows, focus_rows, max_rows=64)
+        # Keep the long-lived pipeline contract (`zh`/`vi`) alongside the
+        # stable IDs/timestamps now used by the selector. Draft translations
+        # remain explicitly labelled by dialogue_context for the provider.
+        result = []
+        for row in selected:
+            value = dict(row)
+            value["zh"] = value.get("text_zh", "")
+            value["vi"] = value.get("final_vi", "")
+            result.append(value)
+        return result
+
     def _ensure_tts_engine(self):
         if getattr(self, "tts_engine", None) is not None and not getattr(self, "_tts_init_failed", False):
             return
@@ -418,9 +461,11 @@ class StreamingPipelineSession:
                         engine=self.tts_engine, aligner=self.aligner, voice=self.voice, ref_audio=self.ref_audio,
                         translator=self.translator if review_result is not None else None,
                         on_stage=speech_stage,
-                        context=[{"zh": s.text_zh, "vi": s.final_vi} for s in
-                                 sorted(self.segments.values(), key=lambda s: (s.start, s.id))
-                                 if s.id != seg.id and s.end <= seg.start][-4:] if review_result is not None else None)
+                        context=(self._dialogue_context_before(
+                            seg,
+                            focus_source=review_result.get("text_zh", old_source),
+                            focus_vi=text,
+                        ) if review_result is not None else None))
                 spoken_text = spoken.get("text", text)
                 if spoken_text != text:
                     proof = spoken.get("pacing_verification")
@@ -1326,7 +1371,7 @@ class StreamingPipelineSession:
                 trans = await self._run_blocking(
                     self.translator.translate_single_segment,
                     text_zh=seg.text_zh, duration=seg.duration,
-                    rolling_context=self.rolling_context,
+                    rolling_context=self._dialogue_context_before(seg),
                 )
                 seg.literal_vi = trans.get("literal_vi", "")
                 seg.natural_vi = trans.get("natural_vi", "")
@@ -1340,7 +1385,7 @@ class StreamingPipelineSession:
                     raise RuntimeError("Dịch thuật trả về nội dung trống.")
                 if seg.final_vi.strip() and not seg.needs_review:
                     self.rolling_context.append({"zh": seg.text_zh, "vi": seg.final_vi})
-                    self.rolling_context = self.rolling_context[-10:]
+                    self.rolling_context = self.rolling_context[-64:]
             await self._synthesize_segment(seg)
         finally:
             slice_wav.unlink(missing_ok=True)
@@ -1382,8 +1427,7 @@ class StreamingPipelineSession:
                     text=seg.final_vi, source=seg.text_zh, duration=seg.duration, output_path=final_path,
                     engine=self.tts_engine, aligner=self.aligner, translator=self.translator,
                     voice=self.voice, ref_audio=self.ref_audio, on_stage=speech_stage,
-                    context=[{"zh": s.text_zh, "vi": s.final_vi} for s in self.segments.values()
-                             if s.end <= seg.start][-4:])
+                    context=self._dialogue_context_before(seg))
             seg.status = "ALIGNING"
             await self._segment_progress("align", f"Đang khớp thời lượng câu {seg.id + 1}")
             await self.emit("segment_update", seg.to_dict())

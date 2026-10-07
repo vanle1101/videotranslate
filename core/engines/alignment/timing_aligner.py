@@ -63,7 +63,11 @@ class TimingBudgetAligner(AlignmentEngine):
             raise ValueError("Thời lượng đoạn thoại không hợp lệ.")
         actual_speed = speed_factor if fit_duration is not None else max(self.min_speed, min(self.max_speed, speed_factor))
         for _ in range(4):
-            if fit_duration is not None and actual_speed > self.max_speed + 1e-6:
+            # ffprobe reports durations at sample precision; a value such as
+            # 1.1500000000000004 is still the configured 1.15x limit. Treat a
+            # sub-millisecond floating point excess as rounding, while keeping
+            # a real over-budget sentence on the normal rewrite/error path.
+            if fit_duration is not None and actual_speed > self.max_speed + 1e-3:
                 raise SpeechBudgetError(
                     f"Lời thoại quá dài để đọc tự nhiên (cần {actual_speed:.2f}x, "
                     f"giới hạn {self.max_speed:.2f}x). Hãy rút gọn lời Việt hoặc thử tạo giọng lại."
@@ -89,7 +93,11 @@ class TimingBudgetAligner(AlignmentEngine):
             rendered_duration = self.get_audio_duration(output_wav)
             if rendered_duration <= 0:
                 raise RuntimeError("Không đọc được âm thanh sau khi căn thời lượng.")
-            if rendered_duration <= fit_duration + 0.0001:
+            # atempo emits complete codec/sample blocks. Near the exact speed
+            # ceiling that can add less than a millisecond to the measured
+            # container duration; accepting this quantisation avoids asking
+            # for an imperceptibly faster (and disallowed) rate.
+            if rendered_duration <= fit_duration + 0.001:
                 return actual_speed
             # atempo works in blocks, so source_duration / speed is approximate.
             # Re-render the complete original at a slightly faster rate instead
