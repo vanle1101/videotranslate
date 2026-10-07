@@ -58,7 +58,7 @@ def test_source_correction_updates_private_context_without_mutating_input_rows()
                        {"id": 1, "start": 1.0, "end": 2.0, "asr_text": "拜托姐"}]
     original = json.loads(json.dumps(source_dialogue, ensure_ascii=False))
     corrections = {0: {"text_zh": "修正后的句子", "evidence_ids": ["ocr0"],
-                       "needs_review": False, "review_reason": ""}}
+                       "needs_review": False, "source_supported": True, "review_reason": ""}}
 
     VideoIntelligence._apply_source_corrections_to_context(source_dialogue, corrections)
 
