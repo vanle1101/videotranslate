@@ -102,6 +102,22 @@ html { scroll-padding-top: 106px; }
 .buffer-setting label { display: block; margin-bottom: 6px; color: #b7c8e4; font-size: 12px; }
 .buffer-setting select { width: 100%; padding: 8px 10px; border: 1px solid #354968; border-radius: 10px; background: #0a1120; color: #f6f7ff; font-size: 12px; color-scheme: dark; }
 .studio-preview { display: flex; flex-direction: column; gap: 12px; padding: 14px; }
+.caption-style-panel { flex-shrink: 0; border: 1px solid #2c3e5d; border-radius: 10px; background: #101a2c; padding: 9px 11px; font-size: 11px; color: #dce5f5; }
+.caption-style-panel summary { cursor: pointer; font-weight: 600; }
+.caption-style-panel summary span { margin-left: 7px; font-size: 10px; color: #aab8d2; font-weight: 400; }
+.caption-style-panel fieldset { min-width: 0; margin-top: 10px; }
+.caption-style-grid { display: grid; grid-template-columns: 1fr 1fr 1.5fr; gap: 10px; }
+.caption-style-grid label { display: flex; align-items: center; justify-content: space-between; gap: 5px; }
+.caption-style-grid input[type="color"] { width: 30px; height: 25px; border: 1px solid #50607b; border-radius: 4px; padding: 2px; background: #0a1120; cursor: pointer; }
+.caption-style-grid select { min-width: 0; max-width: 100%; border: 1px solid #354968; padding: 4px; border-radius: 5px; background: #0a1120; color: #eef3ff; }
+.caption-style-options { display: flex; align-items: center; flex-wrap: wrap; gap: 8px 12px; margin-top: 9px; }
+.caption-style-options label { display: flex; align-items: center; gap: 5px; }
+.caption-style-options input { accent-color: #e443a4; }
+.caption-style-options button { margin-left: auto; color: #f1acd4; padding: 3px 5px; }
+.caption-style-panel :disabled { opacity: .45; cursor: not-allowed; }
+#caption-style-status { margin-top: 7px; color: #aebdd5; font-size: 10px; line-height: 1.5; }
+#caption-style-status[data-error="true"] { color: #ffb5ca; }
+.source-subtitle-blur { position: absolute; backdrop-filter: blur(5px); -webkit-backdrop-filter: blur(5px); background: #80808008; }
 .studio-player-card { display: flex; flex-direction: column; min-height: 0; flex: 1; }
 .studio-player-heading { display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 12px; margin-bottom: 12px; }
 .studio-player-heading .studio-card-heading { font-size: 13px; }

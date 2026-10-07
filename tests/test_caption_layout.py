@@ -49,6 +49,10 @@ def test_explicit_empty_or_unavailable_cues_never_invent_timing(value):
     assert layout([speech(subtitle_cues=value)], [region()]) == []
 
 
+def test_malformed_segments_are_ignored_before_reflow():
+    assert layout([None, [], "invalid"], [region()]) == []
+
+
 @pytest.mark.parametrize("changes", [{"needs_review": True}, {"confirmed_silence": True}])
 def test_unreviewed_or_silent_segment_has_no_visible_caption(changes):
     assert layout([speech(**changes)], [region()]) == []
@@ -147,6 +151,43 @@ def test_source_region_at_edge_does_not_crash_after_caption_margin_clamping():
     assert cue["bbox"][0] >= .04
 
 
+def test_measured_sample_reflows_horizontally_without_changing_speech_timing(tmp_path):
+    segment = speech(start=2.44, end=4.5, speech_start=2.48, speech_end=4.35,
+        final_vi="Về nhất, phá kỷ lục của trường.", subtitle_timing_source="edge-word-boundary",
+        subtitle_cues=[{"start": 2.48, "end": 4.35, "text": "Về nhất, phá kỷ\nlục của trường."}])
+    source = region(start=2.4, end=4.5, bbox=[.3573, .8167, .2844, .0796])
+    cue = layout([segment], [source], (1920, 1080))[0]
+    assert cue["text"] == segment["final_vi"]
+    assert (cue["start"], cue["end"]) == (2.48, 4.35)
+    assert cue["placement"] == "below-source" and cue["background"] == "yellow"
+    assert cue["bbox"][2] > .30 and cue["bbox"][3] < .05
+    assert segment["subtitle_cues"][0]["text"].count("\n") == 1
+    ass = SubtitleGenerator().generate_ass([segment], tmp_path / "wide.ass",
+        screen_texts=[source], video_size=(1920, 1080)).read_text(encoding="utf-8")
+    text_row = next(line for line in ass.splitlines() if line.startswith("Dialogue: 1,"))
+    assert text_row.endswith(segment["final_vi"]) and r"\N" not in text_row
+
+
+def test_automatic_reflow_uses_portrait_width_and_preserves_all_words():
+    text = "Trải nghiệm 400 mét hội thao qua góc nhìn thứ nhất."
+    segment = speech(final_vi=text, subtitle_timing_source="audio-onset-estimate",
+                     subtitle_cues=[{"start": .4, "end": 2.8, "text": text}])
+    wide, portrait = (layout([segment], [], size)[0] for size in ((1920, 1080), (1080, 1920)))
+    assert wide["text"] == text
+    assert portrait["text"].count("\n") == 1
+    assert " ".join(portrait["text"].split()) == text
+    assert portrait["bbox"][0] >= .04 and sum(portrait["bbox"][::2]) <= .96
+    assert (wide["start"], wide["end"]) == (portrait["start"], portrait["end"])
+
+
+@pytest.mark.parametrize("timing_source", [None, "edge-word-boundary", "audio-pause-estimate"])
+def test_user_line_breaks_survive_wider_video(timing_source):
+    text = "Về nhất, phá kỷ\nlục của trường."
+    segment = speech(final_vi=text, subtitle_timing_source=timing_source,
+                     subtitle_cues=[{"start": .4, "end": 2.8, "text": text}])
+    assert layout([segment], [], (1920, 1080))[0]["text"] == text
+
+
 def test_placement_can_use_verified_source_region_without_approving_translation():
     uncertain = region(needs_review=True, source_region_verified=True, text_vi="Bản dịch chưa rõ")
     plan = layout([speech()], [uncertain], (1080, 1920))
@@ -211,3 +252,31 @@ def test_export_and_legacy_composer_never_invent_a_blur_strip(tmp_path, monkeypa
     args = run.call_args.args[0]
     filters = args[args.index("-filter_complex") + 1]
     assert "gblur" not in filters and "crop=" not in filters and "subtitles=" in filters
+
+
+@pytest.mark.parametrize("position", ["auto", "top", "middle", "bottom"])
+def test_bottom_preview_export_retains_source_blur_without_moving_captions(tmp_path, monkeypatch, position):
+    monkeypatch.setattr(settings, "TEMP_DIR", tmp_path)
+    monkeypatch.setattr(settings, "OUTPUT_DIR", tmp_path)
+    monkeypatch.setattr(settings, "SEPARATION_ENGINE", "none")
+    exporter = HQExporter()
+    observed = {}
+    def compose(**kwargs):
+        observed.update(kwargs)
+        kwargs["output_path"].write_bytes(b"fixture")
+    style = {"position": position, "blur_original": True}
+    size = (360, 640)
+    metadata = json.dumps({"format": {"duration": "3"}, "streams": [
+        {"codec_type": "video", "width": size[0], "height": size[1]}, {"codec_type": "audio"},
+    ]}).encode()
+    with patch("core.streaming.export.run_media", return_value=metadata), \
+            patch.object(exporter, "_assemble_voice_timeline"), patch.object(exporter.mixer, "mix"), \
+            patch.object(exporter.sub_gen, "generate_ass") as ass, \
+            patch.object(exporter.composer, "compose", side_effect=compose):
+        exporter.export("source-mask", tmp_path / "source.mp4", [speech()], 3,
+                        screen_texts=[], source_screen_texts=[region()], caption_style=style)
+    plan = ass.call_args.kwargs["caption_layout"]
+    assert plan["cues"] == build_caption_layout([speech()], [], size, style)["cues"]
+    assert plan["source_masks"] == build_caption_layout([speech()], [region()], size, style)["source_masks"]
+    assert observed["source_masks"] == plan["source_masks"]
+    assert observed["source_masks"]

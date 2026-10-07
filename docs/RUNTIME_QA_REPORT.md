@@ -2,6 +2,37 @@
 
 Date: 2026-10-07, Asia/Saigon. **Overall verdict: FAIL / broader audit remains incomplete.** Historical sections below retain their original evidence; the latest retests in this section supersede their pending statuses only for the listed scenarios.
 
+## Git publication checkpoint — October 7
+
+The user requested publication of the current work. This checkpoint is not production acceptance. The new post-result subtitle controls have not been loaded and verified in the normal Studio: Computer Use reported an Escape interruption at the attempted verification, and automation stopped.
+
+Changes included: horizontal caption reflow; measured speech pacing and verified speech reuse; post-result background/text colors, auto/top/middle/bottom placement and optional original-subtitle blur. Style-only changes reuse the translated text and existing narration, invalidate the previous result link, and require a new MP4 export. Blur uses trusted timed OCR rectangles rather than a blanket strip.
+
+Pre-push checks: **260 Python tests and 4 subtests passed; final JavaScript run: 185 passed.** The Python selection covers caption style/API/layout/cues, source blur, speech cache/pacing/timing and portable-pipeline integration. Included real FFmpeg rendering checks validate custom colors/placement and selective blur; mocked API/UI regression tests are not real production UI acceptance. Changed Python files parsed, Git whitespace checks passed, and no credential-pattern matches or large media files were found among the files selected for publication.
+
+Pre-push review also corrected two integration faults: export discarded blur evidence when automatic placement was disabled, and a reconnect snapshot could leave a newly exported result hidden after missing its completion event. Export now keeps source OCR evidence separate from placement, style changes remove stale completed export entries without deleting MP4s, and the UI accepts the current revision's explicit output-valid state. Follow-up caption API/layout/export regression suite: **89 passed**; the reconnect regression failed before its fix and passed afterward.
+
+Still unverified: native UI color/position/blur editing followed by a full production re-export and playback. Full editable-session persistence also remains unresolved. These limitations apply to this publication even though the targeted regression checks pass.
+
+## Latest acceptance update — October 7, 08:18 onward
+
+Scope: fix the reported speech-budget failure and narrow Vietnamese caption. Broader audit remains incomplete; no universal translation-quality claim.
+
+| Test / exact actions | Expected | Actual / cause / fix / retest |
+| --- | --- | --- |
+| Normal Studio reload, URL `7688978448627473651`, Start with OpenCode Muse + Hoài My, independent review enabled | Real speech and final playable MP4 | `90be55c1` completed 08:29. MP4 137,005,045 bytes, 73.7s, 1920×1080 H264/AAC; complete decode exit 0; native result preview visibly played. Language review found “Nhập vai” did not clearly preserve the first-person viewpoint: semantic quality FAIL despite valid media. |
+| Reproduce measured pacing | Preserve full meaning without rushed/cut speech | Original line measured 3.19s for a 2.44s slot. A later 2.84s proposal was only 34ms over the 1.15× limit. Added conservative internal-silence compaction before another rewrite, retaining every nonzero PCM sample and >=180ms pauses, with matching word timestamp remapping. Real original 3.19s sample had no eligible gaps and correctly still required rewriting; no live compaction success claimed. |
+| Independent shortened-text review | Check each source meaning against actual candidate words | Strengthened verifier to check manner/viewpoint/spatial/temporal relations rather than infer missing meaning from the previous draft. Real call `pacing-final-live` rejected a semantic mismatch, then verified “Trải nghiệm 400 mét hội thao qua mắt tôi.”; measured 2.5s, 1.0246×. Final-code call `pacing-final-code` verified “Trải nghiệm 400 mét hội thao qua góc nhìn thứ nhất.”, 2.73s, 1.1189×. |
+| Reuse finalized speech in a fresh caller | No repeated provider synthesis/rewrite for an exact validated hit | Real calls restored byte-identical WAV and verification while synthesis/provider requests were guarded against invocation. Production `9f453a05` logged `PACING_CACHE_HIT` for sentence 1 after a full app restart. Cache validates exact source/text/context/voice/model/runtime/code, complete WAV and hash; rewritten text must match independent proof; manual edits remain separate. Bounded at 64MB. PASS. |
+| Native Studio Start after final pacing reload | Same real URL produces reviewed video without the reported error | Port65023, `9f453a05` started09:54:23; reused validated source, ASR and all4OCRchunks. Both sentences verified, first cached speech reused, second real TTS1.99s/1.00×. MP4 published09:58:10,137,038,228bytes. User reported result available; screenshot exposed narrow caption layout. |
+| Caption screenshot “Về nhất, phá kỷ / lục của trường.” | One readable horizontal line when it fits | Root cause: speech cue hard-wrapped at26characters, then layout preserved the generated newline. Reflow now uses frame width at existing font, with bounded measure; preserves explicit manual breaks, cue times/pages/words and shared per-utterance geometry. Real source frame rendered with libass: one line below Chinese, bbox width0.3175 instead of0.1567, height0.0458 instead of0.0777. Focused95tests PASS. Full latest UI/MP4 acceptance pending below. |
+
+Restart history: an exact-id force-stop/relaunch request at~08:37 was rejected by automatic approval with “blocked by policy”; no alternate force stop used. Old app subsequently exited, normal launch09:53 loaded the pacing fixes. App exited gracefully10:05:31–10:05:34. A planned direct rerender could no longer read its session and did not modify the output. New normal Studio launched10:06:49 on55968; native UI Start10:08 created `dd4d3c8f` for final caption acceptance.
+
+Files: `core/engines/alignment/{natural_speech,speech_timing,speech_cache}.py`, `core/engines/translation/semantic_translator.py`, `core/subtitle_cues.py`, corresponding tests, plus test workspace isolation in `tests/test_portable_pipeline.py`.
+
+Validation so far: 1,166Python tests +125subtests passed before the final three cache identity regressions/five caption cases; final focused cache/pacing/portable suite151+4subtests and caption/timing suite95pass. JavaScript178pass (no JS changes since). Final integrated run pending. Full editable-session persistence remains FAIL; cache files and exported media survive but the in-memory transcript does not.
+
 ## Latest acceptance update — October 7, 01:11 onward
 
 **Production end-to-end retest: FAIL. Latest reload: BLOCKED.** The earlier valid MP4 is retained; it is not presented as proof that the final pacing/subtitle changes passed production acceptance.

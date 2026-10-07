@@ -149,6 +149,22 @@
           </div>
           <div class="audio-suppression"><i class="fa-solid fa-wave-square" aria-hidden="true"></i><span>Lọc thoại Trung:</span><strong id="player-suppression-badge" title="Mức giảm ước tính của bộ lọc">--</strong><span class="audio-divider">|</span><span class="audio-bgm-label"><i class="fa-solid fa-music" aria-hidden="true"></i> BGM:</span><span id="player-bgm-status">Chưa có</span></div>
         </section>
+        <details id="caption-style-panel" class="caption-style-panel hidden">
+          <summary>Chỉnh phụ đề <span>Màu sắc · vị trí · sub gốc</span></summary>
+          <fieldset id="caption-style-controls" disabled>
+            <div class="caption-style-grid">
+              <label>Màu chữ<input id="caption-text-color" type="color" value="#000000" aria-label="Màu chữ phụ đề"></label>
+              <label>Màu nền<input id="caption-background-color" type="color" value="#FFE500" aria-label="Màu nền phụ đề"></label>
+              <label>Vị trí<select id="caption-position"><option value="auto">Tự động</option><option value="top">Phía trên</option><option value="middle">Ở giữa</option><option value="bottom">Phía dưới</option></select></label>
+            </div>
+            <div class="caption-style-options">
+              <label><input id="caption-auto-background" type="checkbox" checked> Màu nền tự động</label>
+              <label title="Chỉ làm mờ vùng phụ đề gốc đã nhận diện"><input id="caption-blur-original" type="checkbox"> Làm mờ sub gốc</label>
+              <button id="caption-style-reset" type="button">Mặc định</button>
+            </div>
+          </fieldset>
+          <p id="caption-style-status" role="status" aria-live="polite">Xem trước thay đổi tại đây, rồi bấm Xuất video MP4 để lưu bản mới.</p>
+        </details>
       </section>
 
       <aside class="studio-sidebar" aria-label="Transcript và giọng lồng tiếng">

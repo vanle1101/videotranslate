@@ -13,6 +13,7 @@ from core.audio_ducking import PremiumAudioMixer
 from core.subtitle import SubtitleGenerator
 from core.video_composer import VideoComposer
 from core.media_process import run_media
+from core.subtitle_cues import build_caption_layout, normalize_caption_style
 
 class HQExporter:
     """
@@ -38,15 +39,18 @@ class HQExporter:
         cancel_check: Optional[Any] = None,
         screen_texts: Optional[List[Dict[str, Any]]] = None,
         publish_callback: Optional[Any] = None,
+        caption_style: Optional[Dict[str, Any]] = None,
+        source_screen_texts: Optional[List[Dict[str, Any]]] = None,
     ) -> Dict[str, Any]:
         with tempfile.TemporaryDirectory(prefix=f"hq_export_{task_id}_", dir=settings.TEMP_DIR) as temp_dir:
             return self._export(
                 task_id, Path(video_path), segments, total_duration, Path(temp_dir),
-                mask_chinese, progress_callback, cancel_check, screen_texts, publish_callback,
+                mask_chinese, progress_callback, cancel_check, screen_texts, publish_callback, caption_style, source_screen_texts,
             )
 
     def _export(self, task_id, video_path, segments, total_duration, task_dir,
-                mask_chinese, progress_callback, cancel_check, screen_texts=None, publish_callback=None):
+                mask_chinese, progress_callback, cancel_check, screen_texts=None, publish_callback=None, caption_style=None, source_screen_texts=None):
+        caption_style = normalize_caption_style(caption_style)
         if not math.isfinite(total_duration) or total_duration <= 0:
             raise ValueError("Thời lượng video phải lớn hơn 0.")
         t0 = time.time()
@@ -119,10 +123,18 @@ class HQExporter:
         subtitle_segments = [dict(s, vi_text=s.get("final_vi") or s.get("vi_text") or s.get("text_vi") or "") for s in segments]
         self.sub_gen.generate_srt(subtitle_segments, srt_path)
         video_size = self._video_size(video_path, cancel_check)
+        caption_plan = build_caption_layout(subtitle_segments, screen_texts, video_size, caption_style=caption_style)
+        if caption_style["blur_original"] and source_screen_texts is not None:
+            # Placement can be bottom-only while blur still uses observed source
+            # regions, matching the preview's caption_bottom_layout contract.
+            caption_plan["source_masks"] = build_caption_layout(
+                subtitle_segments, source_screen_texts, video_size,
+                caption_style=caption_style).get("source_masks", [])
         self.sub_gen.generate_ass(
             subtitle_segments, ass_path,
             screen_texts=screen_texts,
             video_size=video_size,
+            caption_layout=caption_plan,
         )
 
         # 6. Render final video at its original dimensions.
@@ -139,10 +151,11 @@ class HQExporter:
             audio_path=master_audio,
             subtitle_path=ass_path,
             output_path=rendered_video,
-            # OCR-aware exports mask their exact text regions in ASS. An empty
-            # detection list must not produce a blind strip across someone's body.
+            # Blur only approved OCR regions before drawing sharp Vietnamese
+            # captions. An empty detection list must not create a blanket strip.
             mask_chinese_sub=False,
             cancel_check=cancel_check,
+            source_masks=caption_plan.get("source_masks"),
         )
         _check_cancel()
         _report(None, "Đang kiểm tra hình ảnh, âm thanh và thời lượng video kết quả...")

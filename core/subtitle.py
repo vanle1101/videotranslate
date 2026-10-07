@@ -1,7 +1,7 @@
 from pathlib import Path
 from typing import List, Dict, Any
 from config import settings
-from core.subtitle_cues import build_subtitle_cues, fit_title_text, normalize_screen_texts, uncovered_intervals, build_caption_layout, speech_caption_cues
+from core.subtitle_cues import build_subtitle_cues, fit_title_text, normalize_screen_texts, uncovered_intervals, build_caption_layout, speech_caption_cues, normalize_caption_style
 
 
 def _ass_text(text: str) -> str:
@@ -13,6 +13,12 @@ def _ass_text(text: str) -> str:
     # backslashes keeps their visible glyph while preventing ASS escape parsing.
     return "\\N".join(line.replace("\\", "\\\u2060").replace("{", "\\{").replace("}", "\\}")
                        for line in lines)
+
+
+def _ass_color(color):
+    """Convert validated RGB web colors into ASS's BGR representation."""
+    normalized = normalize_caption_style({"text_color": color})["text_color"]
+    return normalized[5:7] + normalized[3:5] + normalized[1:3]
 
 
 class SubtitleGenerator:
@@ -51,11 +57,13 @@ class SubtitleGenerator:
         return output_path
 
     def generate_ass(self, segments: List[Dict[str, Any]], output_path: Path,
-                     screen_texts=None, video_size=None, mask_screen_text=False, caption_layout=None) -> Path:
-        """Render the same automatic caption plan as Studio, without source masks."""
+                     screen_texts=None, video_size=None, mask_screen_text=False, caption_layout=None,
+                     caption_style=None) -> Path:
+        """Render Studio's caption plan; the compositor applies source blur."""
         width, height = video_size or (1080, 1920)
         width, height = max(16, int(width)), max(16, int(height))
-        layout = build_caption_layout(segments, screen_texts, (width, height)) if caption_layout is None else caption_layout
+        style = normalize_caption_style(caption_style)
+        layout = build_caption_layout(segments, screen_texts, (width, height), style) if caption_layout is None else caption_layout
         header = f"""[Script Info]
 Title: Vietnamese Captions
 ScriptType: v4.00+
@@ -77,7 +85,8 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
             x, y, w, h = cue["bbox"]
             left, top, box_w, box_h = x * width, y * height, w * width, h * height
             radius = min(cue["border_radius"], box_h / 2, box_w / 2)
-            color = "00E5FF" if cue["background"] == "yellow" else "FFFFFF"
+            color = _ass_color(cue["background_color"]) if cue.get("background_color") else ("00E5FF" if cue["background"] == "yellow" else "FFFFFF")
+            text_color = _ass_color(cue["color"]) if cue.get("color", "black") != "black" else "000000"
             rect = (f"{{\\an7\\pos({left:.3f},{top:.3f})\\p1\\bord0\\shad0\\1c&H{color}&}}"
                     f"m {radius:.3f} 0 l {box_w-radius:.3f} 0 "
                     f"b {box_w:.3f} 0 {box_w:.3f} 0 {box_w:.3f} {radius:.3f} "
@@ -85,7 +94,7 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
                     f"l {radius:.3f} {box_h:.3f} b 0 {box_h:.3f} 0 {box_h:.3f} 0 {box_h-radius:.3f} "
                     f"l 0 {radius:.3f} b 0 0 0 0 {radius:.3f} 0{{\\p0}}")
             position = (f"{{\\an5\\q2\\pos({left+box_w/2:.3f},{top+box_h/2:.3f})"
-                        f"\\fs{cue['font_size']:.3f}\\bord0\\shad0\\1c&H000000&}}")
+                        f"\\fs{cue['font_size']:.3f}\\bord0\\shad0\\1c&H{text_color}&}}")
             for layer, text in ((0, rect), (1, position + _ass_text(cue["text"]))):
                 events.append(f"Dialogue: {layer},{self._format_time_ass(cue['start'])},{self._format_time_ass(cue['end'])},Caption,,0,0,0,,{text}")
         output_path.parent.mkdir(parents=True, exist_ok=True)

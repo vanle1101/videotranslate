@@ -67,6 +67,15 @@ document.addEventListener("DOMContentLoaded", () => {
   const toggleMaskChinese = document.getElementById("toggle-mask-chinese");
   const toggleSubtitles = document.getElementById("toggle-subtitles");
   const toggleScreenText = document.getElementById("toggle-screen-text");
+  const captionStylePanel = document.getElementById("caption-style-panel");
+  const captionStyleControls = document.getElementById("caption-style-controls");
+  const captionTextColor = document.getElementById("caption-text-color");
+  const captionBackgroundColor = document.getElementById("caption-background-color");
+  const captionAutoBackground = document.getElementById("caption-auto-background");
+  const captionPosition = document.getElementById("caption-position");
+  const captionBlurOriginal = document.getElementById("caption-blur-original");
+  const captionStyleReset = document.getElementById("caption-style-reset");
+  const captionStyleStatus = document.getElementById("caption-style-status");
   const volDubSlider = document.getElementById("vol-dub");
   const volDubVal = document.getElementById("vol-dub-val");
   const volBgmSlider = document.getElementById("vol-bgm");
@@ -161,6 +170,12 @@ document.addEventListener("DOMContentLoaded", () => {
   let screenTexts = [];
   let screenTextSignature = "";
   let visualSession = false;
+  const defaultCaptionStyle = {background_color: null, text_color: "#000000", position: "auto", blur_original: false};
+  let captionStyle = {...defaultCaptionStyle};
+  let captionStyleTaskId = null, captionStyleTimer = null, captionStyleRequest = null;
+  let captionStyleLastResponse = null;
+  let captionStyleRevision = 0, captionStyleEditVersion = 0;
+  let captionStyleDirty = false, captionOutputOutdated = false, hasSubtitleRegions = false;
   let containedVideoWidth = 0;
   let containedVideoHeight = 0;
   const transcriptRows = new Map();
@@ -521,8 +536,10 @@ document.addEventListener("DOMContentLoaded", () => {
   }
 
   function updateExportAvailability() {
+    syncCaptionStyleTask();
     const items = Object.values(segments);
     btnExportHQ.disabled = !currentTaskId || !items.length ||
+      captionStyleDirty || !!captionStyleRequest ||
       reviewInProgress() || pendingTaskAction?.kind === "review" || automaticExportActive ||
       ["failed", "incomplete"].includes(currentProgress?.review_summary?.status) || (currentProgress?.phase === "export" && ["RUNNING", "CANCELLING"].includes(currentProgress?.status)) ||
       transcriptDrafts.size > 0 || pendingTranscriptSaves > 0 ||
@@ -530,8 +547,144 @@ document.addEventListener("DOMContentLoaded", () => {
       (["FAILED", "STOPPED", "CANCELLED", "CANCELLING"].includes(currentProgress?.status)
         && currentProgress?.phase !== "export_error");
     if (btnReviewWorker) btnReviewWorker.disabled = !!pendingTaskAction || reviewInProgress() || automaticExportActive ||
-      !!exportingTaskId || transcriptDrafts.size > 0 || pendingTranscriptSaves > 0;
+      !!exportingTaskId || captionStyleDirty || !!captionStyleRequest || transcriptDrafts.size > 0 || pendingTranscriptSaves > 0;
+    updateCaptionStyleAvailability();
   }
+
+  function writeCaptionStyleControls(value) {
+    captionTextColor.value = value.text_color || "#000000";
+    captionAutoBackground.checked = value.background_color === null;
+    captionBackgroundColor.value = value.background_color || "#FFE500";
+    captionPosition.value = value.position || "auto";
+    captionBlurOriginal.checked = value.blur_original === true;
+  }
+
+  function syncCaptionStyleTask() {
+    if (captionStyleTaskId === currentTaskId) return;
+    clearTimeout(captionStyleTimer); captionStyleTimer = null;
+    captionStyleTaskId = currentTaskId;
+    captionStyle = {...defaultCaptionStyle};
+    captionStyleRevision = 0; captionStyleEditVersion++;
+    captionStyleDirty = captionOutputOutdated = hasSubtitleRegions = false;
+    // An older POST may finish on the server; its response cannot alter this task.
+    captionStyleRequest = null;
+    captionStyleLastResponse = null;
+    writeCaptionStyleControls(captionStyle);
+    captionStyleStatus.textContent = "Xem trước thay đổi tại đây, rồi bấm Xuất video MP4 để lưu bản mới.";
+    captionStyleStatus.dataset.error = "false";
+  }
+
+  function captionStyleLocked() {
+    return !currentTaskId || currentProgress?.status !== "COMPLETED" ||
+      reviewInProgress() || !!pendingTaskAction || automaticExportActive || !!exportingTaskId ||
+      transcriptDrafts.size > 0 || pendingTranscriptSaves > 0 ||
+      [...transcriptRows.values()].some(item => !item.editor.hidden);
+  }
+
+  function updateCaptionStyleAvailability() {
+    const complete = !!currentTaskId && (currentProgress?.status === "COMPLETED" || !!lastExportedFileUrl || captionOutputOutdated);
+    captionStylePanel?.classList.toggle("hidden", !complete);
+    const locked = captionStyleLocked();
+    captionStyleControls.disabled = locked;
+    captionBackgroundColor.disabled = locked || captionAutoBackground.checked;
+    captionBlurOriginal.disabled = locked || (!hasSubtitleRegions && !captionBlurOriginal.checked);
+    captionBlurOriginal.title = hasSubtitleRegions ? "Làm mờ đúng vùng sub gốc đã nhận diện" : "Video chưa có vùng phụ đề gốc đủ tin cậy để làm mờ";
+    if (toggleScreenText) toggleScreenText.disabled = captionStyleDirty || !!captionStyleRequest || !!exportingTaskId || automaticExportActive || captionStyle.position !== "auto";
+  }
+
+  function invalidateCaptionOutput() {
+    captionOutputOutdated = true;
+    resetTaskResult();
+    exportResultBox.classList.add("hidden");
+    taskResult.classList.remove("hidden");
+    taskResultStatus.textContent = "Phụ đề đã thay đổi. Bấm Xuất video MP4 để tạo bản mới.";
+    if (currentProgress) { currentProgress.output_video_url = ""; currentProgress.output_filename = ""; }
+  }
+
+  function applyCaptionStyleSnapshot(data, {force = false} = {}) {
+    syncCaptionStyleTask();
+    const revision = Number(data.caption_style_revision) || 0;
+    if (revision < captionStyleRevision || (!force && (captionStyleDirty || captionStyleRequest))) return;
+    if (data.caption_style) {
+      captionStyle = {...defaultCaptionStyle, ...data.caption_style};
+      captionStyleRevision = revision;
+      writeCaptionStyleControls(captionStyle);
+    }
+    if (typeof data.has_subtitle_regions === "boolean") hasSubtitleRegions = data.has_subtitle_regions;
+    if (data.output_outdated) invalidateCaptionOutput();
+    else if (data.output_outdated === false) captionOutputOutdated = false;
+    updateCaptionStyleAvailability();
+  }
+
+  function readCaptionStyleControls() {
+    return {text_color: captionTextColor.value,
+      background_color: captionAutoBackground.checked ? null : captionBackgroundColor.value,
+      position: captionPosition.value, blur_original: captionBlurOriginal.checked};
+  }
+
+  function scheduleCaptionStyle() {
+    if (captionStyleLocked()) return;
+    captionStyleEditVersion++; captionStyleDirty = true;
+    clearTimeout(captionStyleTimer);
+    captionStyleStatus.dataset.error = "false";
+    captionStyleStatus.textContent = "Đang cập nhật phụ đề…";
+    updateExportAvailability();
+    captionStyleTimer = setTimeout(saveCaptionStyle, 250);
+  }
+
+  async function saveCaptionStyle() {
+    captionStyleTimer = null;
+    if (!captionStyleDirty || captionStyleRequest || captionStyleLocked()) return;
+    const request = {taskId: currentTaskId, version: captionStyleEditVersion, style: readCaptionStyleControls()};
+    captionStyleRequest = request;
+    updateExportAvailability(); updateTranscriptReviewAvailability();
+    try {
+      const response = await fetch(`/api/streaming/${encodeURIComponent(request.taskId)}/caption-style`, {
+        method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify(request.style),
+      });
+      const data = await response.json();
+      if (request.taskId !== currentTaskId || captionStyleRequest !== request) return;
+      if (!response.ok) throw new Error(typeof data.detail === "string" ? data.detail : "Không cập nhật được phụ đề. Hãy thử lại.");
+      if (!data.caption_style || !Array.isArray(data.segments)) throw new Error("Máy chủ chưa xác nhận phụ đề mới. Hãy thử lại.");
+      captionStyleLastResponse = data;
+      if (data.output_outdated) invalidateCaptionOutput();
+      if (request.version !== captionStyleEditVersion) return;
+      captionStyleDirty = false;
+      applyCaptionStyleSnapshot(data, {force: true});
+      data.segments.forEach(applySegmentUpdate);
+      positionVideoOverlays();
+      captionStyleStatus.textContent = "Đã cập nhật xem trước. Bấm Xuất video MP4 để lưu bản mới.";
+      captionStyleStatus.dataset.error = "false";
+    } catch (error) {
+      if (request.taskId !== currentTaskId || captionStyleRequest !== request || request.version !== captionStyleEditVersion) return;
+      captionStyleDirty = false;
+      if (captionStyleLastResponse) {
+        applyCaptionStyleSnapshot(captionStyleLastResponse, {force: true});
+        captionStyleLastResponse.segments.forEach(applySegmentUpdate);
+        positionVideoOverlays();
+      }
+      writeCaptionStyleControls(captionStyle);
+      captionStyleStatus.textContent = error.message || "Không cập nhật được phụ đề. Hãy thử lại.";
+      captionStyleStatus.dataset.error = "true";
+    } finally {
+      if (captionStyleRequest === request) {
+        captionStyleRequest = null;
+        updateExportAvailability(); updateTranscriptReviewAvailability();
+        // Serialize writes: aborting fetch alone cannot cancel a server mutation.
+        if (captionStyleDirty && request.taskId === currentTaskId) saveCaptionStyle();
+      }
+    }
+  }
+
+  for (const control of [captionTextColor, captionBackgroundColor, captionAutoBackground, captionPosition, captionBlurOriginal]) {
+    control.addEventListener("input", scheduleCaptionStyle);
+    control.addEventListener("change", scheduleCaptionStyle);
+  }
+  captionStyleReset.addEventListener("click", () => {
+    if (captionStyleLocked()) return;
+    writeCaptionStyleControls(defaultCaptionStyle); scheduleCaptionStyle();
+  });
+  writeCaptionStyleControls(captionStyle);
 
   function reviewInProgress() {
     return (currentProgress?.review_summary?.status === "running" || (currentProgress?.phase === "review" && currentProgress?.status === "RUNNING")) &&
@@ -551,7 +704,7 @@ document.addEventListener("DOMContentLoaded", () => {
   }
 
   function updateTranscriptReviewAvailability() {
-    const busy = reviewInProgress() || pendingTaskAction?.kind === "review" || automaticExportActive || !!exportingTaskId;
+    const busy = reviewInProgress() || pendingTaskAction?.kind === "review" || automaticExportActive || !!exportingTaskId || captionStyleDirty || !!captionStyleRequest;
     for (const [id, item] of transcriptRows) {
       const segment = segments[id];
       item.translation.disabled = busy || !["READY", "PLAYED", "NEEDS_REVIEW"].includes(segment?.status);
@@ -733,6 +886,7 @@ document.addEventListener("DOMContentLoaded", () => {
   window.addEventListener("pagehide", () => closeResultPreview(false));
 
   function showTaskResult(data) {
+    if (captionStyleDirty || captionStyleRequest || captionOutputOutdated) return;
     if (["failed", "incomplete", "running"].includes((data.review_summary || currentProgress?.review_summary)?.status)) return;
     if (!data.output_video_url || !taskResult) return;
     const origin = `${window.location.protocol}//${window.location.host}`;
@@ -747,6 +901,7 @@ document.addEventListener("DOMContentLoaded", () => {
     btnSaveResult.classList.remove("hidden");
     btnSaveResult.disabled = false;
     btnSaveResult.title = "Lưu toàn bộ MP4 đã dịch, giữ nguyên chất lượng xuất";
+    updateCaptionStyleAvailability();
   }
 
   function resetWorkerBadges() {
@@ -1199,11 +1354,27 @@ document.addEventListener("DOMContentLoaded", () => {
   }
 
   function renderScreenTexts(time) {
-    // Source subtitles stay visible. Caption placement comes from the server's
-    // shared layout, never from an independent OCR translation or blur strip.
-    screenTextOverlay?.replaceChildren();
     chineseSubMask.style.display = "none";
-    return false;
+    if (!screenTextOverlay) return false;
+    const masks = !sourceAudition && captionStyle.blur_original ? Object.values(segments).flatMap(segment => {
+      const plan = toggleScreenText.checked ? segment.caption_layout : segment.caption_bottom_layout;
+      return (plan?.source_masks || []).filter(mask => time >= mask.start && time < mask.end &&
+        Array.isArray(mask.bbox) && mask.bbox.length === 4 && mask.bbox.every(Number.isFinite) &&
+        mask.bbox[0] >= 0 && mask.bbox[1] >= 0 && mask.bbox[2] > 0 && mask.bbox[3] > 0 &&
+        mask.bbox[0] + mask.bbox[2] <= 1.001 && mask.bbox[1] + mask.bbox[3] <= 1.001);
+    }) : [];
+    const unique = [...new Map(masks.map(mask => [JSON.stringify(mask.bbox), mask])).values()];
+    const signature = JSON.stringify(unique.map(mask => mask.bbox));
+    if (screenTextSignature !== signature) {
+      screenTextSignature = signature;
+      screenTextOverlay.replaceChildren(...unique.map(mask => {
+        const item = document.createElement("div"), [x,y,w,h] = mask.bbox;
+        item.className = "source-subtitle-blur";
+        Object.assign(item.style, {left: `${x*100}%`, top: `${y*100}%`, width: `${w*100}%`, height: `${h*100}%`});
+        return item;
+      }));
+    }
+    return unique.length > 0;
   }
 
   function renderSpeechCaption(segment, time) {
@@ -1226,13 +1397,14 @@ document.addEventListener("DOMContentLoaded", () => {
       Object.assign(subtitleText.style, { width: "100%", height: "100%", padding: "0",
         display: "flex", alignItems: "center", justifyContent: "center", boxSizing: "border-box",
         fontSize: `${cue.font_size * width / cue.video_size[0]}px`,
-        background: cue.background === "yellow" ? "#FFE500" : "#FFFFFF",
+        background: /^#[0-9a-f]{6}$/i.test(cue.background_color || "") ? cue.background_color : cue.background === "yellow" ? "#FFE500" : "#FFFFFF",
+        color: /^#[0-9a-f]{6}$/i.test(cue.color || "") ? cue.color : "#000000",
         borderRadius: `${cue.border_radius * width / cue.video_size[0]}px` });
     } else {
       Object.assign(subtitleOverlay.style, {left: `${side+width*.04}px`, right: `${side+width*.04}px`,
         top: "auto", bottom: `${top+height*.10}px`, width: "auto", height: "auto" });
       Object.assign(subtitleText.style, { width: "auto", height: "auto", padding: ".2em .55em",
-        display: "inline-block", background: "#FFFFFF", fontSize: `${subtitleFontSize(width,height)}px` });
+        display: "inline-block", background: "#FFFFFF", color: "#000000", fontSize: `${subtitleFontSize(width,height)}px` });
     }
   }
 
@@ -1832,6 +2004,7 @@ document.addEventListener("DOMContentLoaded", () => {
   // 6. STREAMING WEBSOCKET & DUBBING SYNC
   // =========================================================
   function applyStreamingSnapshot(msg) {
+    applyCaptionStyleSnapshot(msg);
     visualSession = msg.visual_translation === true || (msg.screen_texts || []).length > 0;
     totalVideoDuration = msg.duration;
     setScreenTexts(msg.screen_texts);
@@ -1918,6 +2091,8 @@ document.addEventListener("DOMContentLoaded", () => {
   }
 
   window.addEventListener("pagehide", () => {
+    clearTimeout(captionStyleTimer); captionStyleTimer = null;
+    captionStyleRequest = null; captionStyleDirty = false; captionStyleEditVersion++;
     clearTimeout(reconnectTimer);
     reconnectTimer = null;
     recoveryRequest?.abort();
@@ -1991,6 +2166,13 @@ document.addEventListener("DOMContentLoaded", () => {
           workerTtsBadge.className = "px-2 py-0.5 rounded bg-gray-800 text-gray-300";
         }
       }
+      else if (msg.type === "caption_style") {
+        if (!captionStyleDirty && !captionStyleRequest && (Number(msg.caption_style_revision) || 0) >= captionStyleRevision) {
+          applyCaptionStyleSnapshot(msg);
+          (msg.segments || []).forEach(applySegmentUpdate);
+          positionVideoOverlays();
+        }
+      }
       else if (msg.type === "telemetry") {
         if (msg.review_summary) showTaskProgress({review_summary: msg.review_summary});
         const warning = document.getElementById("pipeline-warning");
@@ -2045,6 +2227,7 @@ document.addEventListener("DOMContentLoaded", () => {
       }
       else if (msg.type === "result_ready") {
         automaticExportActive = false;
+        if (!captionStyleDirty && !captionStyleRequest) captionOutputOutdated = false;
         showTaskResult(msg);
         showTaskProgress({status: "COMPLETED", phase: "complete", stage: "Video kết quả đã sẵn sàng", progress_pct: 100,
           ...(msg.review_summary ? {review_summary: msg.review_summary} : {})});
@@ -2505,7 +2688,7 @@ document.addEventListener("DOMContentLoaded", () => {
 
   function startTranscriptEdit(id, event) {
     const segment = segments[id], item = transcriptRows.get(id);
-    if (reviewInProgress() || pendingTaskAction?.kind === "review" || automaticExportActive || exportingTaskId) return;
+    if (reviewInProgress() || pendingTaskAction?.kind === "review" || automaticExportActive || exportingTaskId || captionStyleDirty || captionStyleRequest) return;
     if (!item || !["READY", "PLAYED", "NEEDS_REVIEW"].includes(segment?.status)) return;
     let caretOffset = 0;
     // The text button has one text node: preserve the word the user clicked when opening its editor.
@@ -2521,6 +2704,7 @@ document.addEventListener("DOMContentLoaded", () => {
     item.editor.hidden = false;
     item.translation.hidden = true;
     item.row.dataset.editing = "true";
+    updateCaptionStyleAvailability();
     item.input.focus();
     item.input.setSelectionRange?.(caretOffset, caretOffset);
   }
@@ -2780,7 +2964,7 @@ document.addEventListener("DOMContentLoaded", () => {
   btnResumeWorker.addEventListener("click", window.studioResume);
   btnStopWorker.addEventListener("click", window.studioStop);
   window.studioAttachTask = async taskId => {
-    if (!/^[a-zA-Z0-9_-]{1,80}$/.test(taskId) || pendingStart || pendingTaskAction || exportingTaskId || transcriptDrafts.size || pendingTranscriptSaves) return false;
+    if (!/^[a-zA-Z0-9_-]{1,80}$/.test(taskId) || pendingStart || pendingTaskAction || exportingTaskId || captionStyleDirty || captionStyleRequest || transcriptDrafts.size || pendingTranscriptSaves) return false;
     pendingTaskAction = {kind: "attach"};
     stopVoicePreview();
     setWorkerSourceBusy(true);
@@ -2791,6 +2975,7 @@ document.addEventListener("DOMContentLoaded", () => {
       stopPreviewAudio();
       if (currentWs) currentWs.close();
       currentWs = null; currentTaskId = taskId; currentProgress = null;
+      syncCaptionStyleTask();
       resetTaskResult();
       segments = {}; resetScreenTexts(); renderSegmentsDrawer();
       translationReady = false; isBufferingUnderrun = false;
@@ -2806,6 +2991,7 @@ document.addEventListener("DOMContentLoaded", () => {
       showTaskProgress(data.progress || {});
       if (data.initialized && Array.isArray(data.segments)) applyStreamingSnapshot(data);
       translationReady = data.telemetry?.ready_to_play === true;
+      applyCaptionStyleSnapshot(data);
       showTaskResult(data);
       setupStreamingWebSocket(taskId);
       updateTasksTable();
@@ -2813,6 +2999,7 @@ document.addEventListener("DOMContentLoaded", () => {
     } finally {
       pendingTaskAction = null;
       setWorkerSourceBusy(!!currentTaskId && !["COMPLETED", "FAILED", "STOPPED", "CANCELLED"].includes(currentProgress?.status));
+      updateExportAvailability();
     }
   };
   window.openTaskInStudio = async taskId => {
@@ -3595,6 +3782,11 @@ document.addEventListener("DOMContentLoaded", () => {
   function updateExportScreenTextSummary() {
     const summary = document.getElementById("export-screen-text-summary");
     if (!summary) return;
+    if (captionStyle.position !== "auto" || captionStyle.background_color || captionStyle.text_color !== "#000000" || captionStyle.blur_original) {
+      const positions = {auto: "tự động", top: "phía trên", middle: "ở giữa", bottom: "phía dưới"};
+      summary.textContent = `Phụ đề ${positions[captionStyle.position] || "tự động"}, màu chữ ${captionStyle.text_color}, nền ${captionStyle.background_color || "tự động"}. ${captionStyle.blur_original ? "Làm mờ vùng sub gốc đã nhận diện." : "Giữ nguyên sub gốc."} Xuất đúng kiểu đang xem trước, giữ nguyên giọng đọc.`;
+      return;
+    }
     summary.textContent = toggleScreenText.checked
       ? "Tự đặt vị trí: giữ sub Trung, lời Việt nền vàng ở ngay dưới; không có sub gốc thì dùng ô trắng nhỏ phía dưới. Mỗi lượt thoại chỉ hiện khi bắt đầu đọc."
       : "Sub Việt nhỏ ở phía dưới. Giữ nguyên chữ và hình nguồn; mỗi lượt thoại hiện cùng giọng đọc.";
@@ -3697,6 +3889,7 @@ document.addEventListener("DOMContentLoaded", () => {
       exportStatusBox.classList.add("hidden");
       exportResultBox.classList.remove("hidden");
       lastExportedFileUrl = data.video_url;
+      captionOutputOutdated = false;
       showTaskResult({output_video_url: data.video_url, output_filename: data.output_filename});
       updateTasksTable();
 

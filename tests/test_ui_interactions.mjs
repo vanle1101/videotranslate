@@ -1799,6 +1799,178 @@ function captionFixture(ui, overrides = {}) {
   return segment;
 }
 
+function completedCaptionFixture(ui) {
+  const segment = captionFixture(ui);
+  const style = {background_color: null, text_color: '#000000', position: 'auto', blur_original: false};
+  ui.sockets.at(-1).receive({type: 'caption_style', caption_style: style,
+    caption_style_revision: 0, has_subtitle_regions: true, segments: [segment]});
+  ui.sockets.at(-1).receive({type: 'result_ready', output_video_url: '/api/outputs/before.mp4', output_filename: 'before.mp4'});
+  return {segment, style};
+}
+
+function styledCaptionReply(segment, style, revision = 1) {
+  const restyle = plan => ({...plan, source_masks: style.blur_original
+    ? [{start: .2, end: 1.8, bbox: [.2,.4,.6,.08]}] : [],
+    cues: plan.cues.map(cue => ({...cue, bbox: [.1,.1,.8,.08],
+      background_color: style.background_color || '#FFE500', color: style.text_color}))});
+  return {caption_style: style, caption_style_revision: revision, output_outdated: true,
+    has_subtitle_regions: true, segments: [{...segment, caption_layout: restyle(segment.caption_layout),
+      caption_bottom_layout: restyle(segment.caption_bottom_layout)}]};
+}
+
+test('completed caption controls update measured preview and invalidate old MP4 without changing speech', async () => {
+  const ui = studio(); await ui.start();
+  assert.equal(ui.el('caption-style-panel').classList.contains('hidden'), true);
+  const {segment} = completedCaptionFixture(ui);
+  assert.equal(ui.el('caption-style-panel').classList.contains('hidden'), false);
+  assert.equal(ui.el('caption-style-controls').disabled, false);
+  const video = ui.el('video-player'); video.videoWidth = 1080; video.videoHeight = 1920;
+  ui.el('player-container').getBoundingClientRect = () => ({width: 600, height: 640});
+  await video.emit('loadedmetadata');
+  const style = {background_color: '#123456', text_color: '#FEDCBA', position: 'top', blur_original: true};
+  ui.replies.set('/api/streaming/fixture/caption-style', styledCaptionReply(segment, style));
+  const requestsBefore = ui.requests.length;
+  ui.el('caption-auto-background').checked = false;
+  ui.el('caption-background-color').value = style.background_color;
+  ui.el('caption-text-color').value = style.text_color;
+  ui.el('caption-position').value = style.position;
+  ui.el('caption-blur-original').checked = true;
+  await ui.el('caption-blur-original').emit('change');
+  assert.equal(ui.el('btn-export-hq').disabled, true);
+  await ui.tickTimeouts(250);
+  const requests = ui.requests.slice(requestsBefore);
+  assert.equal(requests.length, 1);
+  assert.equal(requests[0].url, '/api/streaming/fixture/caption-style');
+  assert.deepEqual(JSON.parse(requests[0].options.body), style);
+  assert.equal(ui.el('btn-export-hq').disabled, false);
+  assert.equal(ui.el('btn-save-result').disabled, true);
+  assert.equal(ui.el('task-result-link').classList.contains('hidden'), true);
+  assert.match(ui.el('task-result-status').textContent, /Xuất video MP4/);
+  assert.equal(ui.el('subtitle-text').style.background, '#123456');
+  assert.equal(ui.el('subtitle-text').style.color, '#FEDCBA');
+  assert.equal(ui.el('subtitle-overlay').style.top, '64px');
+  video.currentTime = .5; await video.emit('timeupdate');
+  const mask = ui.el('screen-text-overlay').children[0];
+  assert.equal(mask.className, 'source-subtitle-blur');
+  assert.equal(mask.style.left, '20%');
+  assert.equal(mask.style.width, '60%');
+  video.currentTime = 1.9; await video.emit('timeupdate');
+  assert.equal(ui.el('screen-text-overlay').children.length, 0);
+  ui.sockets.at(-1).receive({type: 'progress', status: 'COMPLETED', output_video_url: '/api/outputs/before.mp4'});
+  assert.equal(ui.el('btn-save-result').disabled, true, 'old progress cannot restore stale output');
+  ui.replies.set('/api/streaming/export-hq', {video_url: '/api/outputs/after.mp4', output_filename: 'after.mp4'});
+  await ui.el('btn-export-hq').click(); await ui.el('btn-confirm-export').click();
+  assert.equal(ui.el('btn-save-result').disabled, false);
+  assert.match(ui.el('task-result-link').href, /after\.mp4$/);
+});
+
+test('reconnect restores the current exported caption revision after missing result_ready', async () => {
+  const ui = studio(); await ui.start();
+  const {segment, style} = completedCaptionFixture(ui);
+  const socket = ui.sockets.at(-1);
+  const updated = styledCaptionReply(segment, {...style, text_color: '#112233'}, 1);
+  socket.receive({type: 'caption_style', ...updated});
+  assert.equal(ui.el('btn-save-result').disabled, true);
+  ui.replies.set('/api/streaming/fixture', {...updated, initialized: true, duration: 4,
+    segments_count: 1, output_outdated: false, output_video_url: '/api/outputs/after.mp4',
+    output_filename: 'after.mp4', progress: {status: 'COMPLETED', phase: 'complete'}});
+  socket.close(); socket.onclose(); await ui.tickTimeouts(1500); await ui.flush();
+  assert.equal(ui.el('btn-save-result').disabled, false);
+  assert.match(ui.el('task-result-link').href, /after\.mp4$/);
+  assert.equal(ui.el('caption-text-color').value, '#112233');
+});
+
+test('caption edits serialize mutations and apply only the latest acknowledged revision', async () => {
+  const ui = studio(); await ui.start(); const {segment, style} = completedCaptionFixture(ui);
+  let finishFirst, finishSecond, count = 0;
+  ui.replies.set('/api/streaming/fixture/caption-style', () => new Promise(resolve => {
+    count++; if (count === 1) finishFirst = resolve; else finishSecond = resolve;
+  }));
+  ui.el('caption-text-color').value = '#112233'; await ui.el('caption-text-color').emit('input');
+  await ui.tickTimeouts(250); assert.equal(count, 1);
+  ui.el('caption-text-color').value = '#AABBCC'; await ui.el('caption-text-color').emit('input');
+  await ui.tickTimeouts(250); assert.equal(count, 1, 'second server mutation waits for first');
+  finishFirst({ok: true, json: async () => styledCaptionReply(segment, {...style, text_color: '#112233'}, 1)});
+  await ui.flush(); assert.equal(count, 2);
+  assert.equal(ui.el('caption-text-color').value, '#AABBCC');
+  assert.notEqual(ui.el('subtitle-text').style.color, '#112233');
+  finishSecond({ok: true, json: async () => styledCaptionReply(segment, {...style, text_color: '#AABBCC'}, 2)});
+  await ui.flush();
+  assert.equal(ui.el('subtitle-text').style.color, '#AABBCC');
+  assert.equal(ui.el('btn-export-hq').disabled, false);
+  ui.sockets.at(-1).receive({type: 'caption_style', ...styledCaptionReply(segment, style, 1)});
+  assert.equal(ui.el('caption-text-color').value, '#AABBCC', 'older broadcast cannot revert saved style');
+});
+
+test('caption style rejection restores saved controls and retains actionable failure without fake preview', async () => {
+  const ui = studio(); await ui.start(); completedCaptionFixture(ui);
+  ui.replies.set('/api/streaming/fixture/caption-style', {failure: true, detail: 'Chưa tìm thấy vùng sub gốc đủ tin cậy.'});
+  ui.el('caption-blur-original').checked = true; await ui.el('caption-blur-original').emit('change');
+  await ui.tickTimeouts(250);
+  assert.equal(ui.el('caption-blur-original').checked, false);
+  assert.match(ui.el('caption-style-status').textContent, /đủ tin cậy/);
+  assert.equal(ui.el('caption-style-status').dataset.error, 'true');
+  assert.equal(ui.el('screen-text-overlay').children.length, 0);
+  assert.equal(ui.el('btn-save-result').disabled, false);
+  assert.equal(ui.el('btn-export-hq').disabled, false);
+});
+
+test('failed newest caption edit falls back to the preceding acknowledged server style', async () => {
+  const ui = studio(); await ui.start(); const {segment, style} = completedCaptionFixture(ui);
+  let finishFirst, count = 0;
+  ui.replies.set('/api/streaming/fixture/caption-style', () => {
+    count++;
+    if (count === 1) return new Promise(resolve => { finishFirst = resolve; });
+    return {ok: false, json: async () => ({detail: 'Không thể áp dụng vị trí mới.'})};
+  });
+  ui.el('caption-text-color').value = '#112233'; await ui.el('caption-text-color').emit('input'); await ui.tickTimeouts(250);
+  ui.el('caption-position').value = 'top'; await ui.el('caption-position').emit('change'); await ui.tickTimeouts(250);
+  finishFirst({ok: true, json: async () => styledCaptionReply(segment, {...style, text_color: '#112233'}, 1)});
+  await ui.flush(); await ui.flush();
+  assert.equal(count, 2);
+  assert.equal(ui.el('caption-position').value, 'auto');
+  assert.equal(ui.el('caption-text-color').value, '#112233');
+  assert.equal(ui.el('subtitle-text').style.color, '#112233');
+  assert.equal(ui.el('caption-style-status').dataset.error, 'true');
+  assert.equal(ui.el('btn-save-result').disabled, true);
+});
+
+test('caption controls lock during transcript editing, review and export and reset without provider requests', async () => {
+  const ui = studio(); await ui.start(); const {segment, style} = completedCaptionFixture(ui);
+  const row = ui.el('segments-list').children[0];
+  await row.querySelector('.transcript-translation').click();
+  assert.equal(ui.el('caption-style-controls').disabled, true);
+  await row.querySelector('textarea').emit('keydown', {key: 'Escape'});
+  assert.equal(ui.el('caption-style-controls').disabled, false);
+  ui.sockets.at(-1).receive({type: 'progress', status: 'RUNNING', phase: 'review', review_summary: {status: 'running'}});
+  assert.equal(ui.el('caption-style-controls').disabled, true);
+  const before = ui.requests.length;
+  ui.el('caption-text-color').value = '#FFFFFF'; await ui.el('caption-text-color').emit('change');
+  await ui.tickTimeouts(250); assert.equal(ui.requests.length, before);
+  ui.sockets.at(-1).receive({type: 'progress', status: 'COMPLETED', phase: 'complete', review_summary: {status: 'completed'}});
+  ui.sockets.at(-1).receive({type: 'caption_style', ...styledCaptionReply(segment, {...style, position: 'bottom', text_color: '#FFFFFF'}, 1)});
+  ui.replies.set('/api/streaming/fixture/caption-style', styledCaptionReply(segment, style, 2));
+  await ui.el('caption-style-reset').click(); await ui.tickTimeouts(250);
+  assert.deepEqual(JSON.parse(ui.requests.at(-1).options.body), style);
+  ui.sockets.at(-1).receive({type: 'export_progress', progress: 12, stage: 'Đang xuất'});
+  assert.equal(ui.el('caption-style-controls').disabled, true);
+});
+
+test('leaving a task ignores an outstanding caption mutation and pagehide prevents queued writes', async () => {
+  const ui = studio(); await ui.start(); const {segment, style} = completedCaptionFixture(ui);
+  let finish;
+  ui.replies.set('/api/streaming/fixture/caption-style', () => new Promise(resolve => {finish = resolve;}));
+  ui.el('caption-position').value = 'top'; await ui.el('caption-position').emit('change'); await ui.tickTimeouts(250);
+  ui.window.loadDroppedLocalVideo('D:/next.mp4');
+  finish({ok: true, json: async () => styledCaptionReply(segment, {...style, position: 'top'})}); await ui.flush();
+  assert.equal(ui.el('caption-position').value, 'auto');
+  assert.equal(ui.el('caption-style-panel').classList.contains('hidden'), true);
+  const other = studio(); await other.start(); completedCaptionFixture(other);
+  other.el('caption-position').value = 'bottom'; await other.el('caption-position').emit('change');
+  const before = other.requests.length; await other.window.emit('pagehide'); await other.tickTimeouts(250);
+  assert.equal(other.requests.length, before);
+});
+
 test('caption layout shows only the current measured cue and never translates source pixels', async () => {
   const ui = studio(); await ui.start();
   const video = ui.el('video-player'); video.videoWidth = 1080; video.videoHeight = 1920;

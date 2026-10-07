@@ -3,6 +3,35 @@ import math
 import re
 
 
+def normalize_caption_style(style=None):
+    """Validate public caption options before they reach CSS or ASS filters.
+
+    A null background retains the automatic source-aware white/yellow palette.
+    The result is independent of the caller's dictionary and safe to persist.
+    """
+    defaults = {"background_color": None, "text_color": "#000000",
+                "position": "auto", "blur_original": False}
+    if style is None:
+        return defaults
+    if not isinstance(style, dict):
+        raise ValueError("Kiểu phụ đề phải là một đối tượng.")
+    if set(style) - set(defaults):
+        raise ValueError("Kiểu phụ đề chứa tùy chọn không được hỗ trợ.")
+    result = {**defaults, **style}
+    for key in ("background_color", "text_color"):
+        value = result[key]
+        if value is None and key == "background_color":
+            continue
+        if not isinstance(value, str) or not re.fullmatch(r"#[0-9a-fA-F]{6}", value):
+            raise ValueError("Màu phụ đề phải có dạng #RRGGBB.")
+        result[key] = value.upper()
+    if result["position"] not in ("auto", "top", "middle", "bottom"):
+        raise ValueError("Vị trí phụ đề không hợp lệ.")
+    if type(result["blur_original"]) is not bool:
+        raise ValueError("Tùy chọn làm mờ phụ đề gốc phải là true hoặc false.")
+    return result
+
+
 def _wrap_words(text, line_chars):
     words = text.split()
     if len(text) <= line_chars or len(words) < 2:
@@ -242,7 +271,7 @@ def _trusted_speech_regions(screen_texts):
     return regions
 
 
-def build_caption_layout(segments, screen_texts=None, video_size=None):
+def build_caption_layout(segments, screen_texts=None, video_size=None, caption_style=None):
     """One normalized caption plan for preview and ASS, preserving source text.
 
     A trusted Chinese speech region selects a compact yellow caption immediately
@@ -251,16 +280,32 @@ def build_caption_layout(segments, screen_texts=None, video_size=None):
     """
     width, height = video_size or (1080, 1920)
     width, height = max(16, int(width)), max(16, int(height))
+    style = normalize_caption_style(caption_style)
     regions = _trusted_speech_regions(screen_texts)
     base_font = max(8, round(min(width * .035, height * .028)))
     margin_x, gap = width * .04, max(2, height * .006)
-    output = []
+    # Measured speech cues may contain automatic narrow-screen line breaks.
+    # Reflow them for the actual frame, not a fixed 26-character column. Keep
+    # a bounded reading measure even on very wide video, and room for padding.
+    line_chars = max(1, min(72, math.floor(((width - 2 * margin_x) / base_font - 1.1) / .62)))
+    output, source_masks = [], []
     for index, segment in enumerate(segments or []):
+        if not isinstance(segment, dict):
+            continue
+        original_text = next((segment[key] for key in ("final_vi", "vi_text", "text_vi", "text")
+                              if isinstance(segment.get(key), str) and segment[key].strip()), None)
+        # Explicit user line breaks remain intentional. Legacy cue-only inputs
+        # lack the original text, so conservatively retain their supplied breaks.
+        automatic_lines = ("subtitle_cues" not in segment or segment.get("subtitle_timing_source") in
+                           ("edge-word-boundary", "audio-onset-estimate", "audio-pause-estimate"))
+        manual_lines = (not automatic_lines or original_text is None
+                        or "\n" in original_text or "\r" in original_text)
         pages = []
         for cue in speech_caption_cues(segment):
             source_lines = [" ".join(line.split()) for line in cue["text"].splitlines() if line.strip()]
             text = " ".join(source_lines)
-            wrapped = "\n".join(source_lines) if 1 < len(source_lines) <= 2 else _wrap_words(text, 32)
+            wrapped = ("\n".join(source_lines) if manual_lines and 1 < len(source_lines) <= 2
+                       else _wrap_words(text, line_chars))
             pages.append({**cue, "text": wrapped})
         if not pages:
             continue
@@ -282,6 +327,9 @@ def build_caption_layout(segments, screen_texts=None, video_size=None):
         placement, background, source_bbox = "bottom", "white", None
         x, y = (width - box_w) / 2, height * .90 - box_h
         if target:
+            source_bbox = target["bbox"]
+            background = "yellow"
+        if target and style["position"] == "auto":
             rx, ry, rw, rh = target["bbox"]
             source_bbox = target["bbox"]
             x = min(width - margin_x - box_w, max(margin_x, (rx + rw / 2) * width - box_w / 2))
@@ -309,11 +357,45 @@ def build_caption_layout(segments, screen_texts=None, video_size=None):
             if y < height * .02:
                 x, y = (width - box_w) / 2, height * .90 - box_h
                 placement, background, source_bbox = "bottom", "white", None
+        if style["position"] != "auto":
+            placement = style["position"]
+            # User placement is anchored to the frame and remains independent
+            # of OCR position or page length throughout the utterance.
+            if box_h > height * .92:
+                scale = height * .92 / box_h
+                font, box_w, box_h = font * scale, box_w * scale, box_h * scale
+            x = (width - box_w) / 2
+            y = {"top": height * .04, "middle": (height - box_h) / 2,
+                 "bottom": height * .96 - box_h}[placement]
+        if style["blur_original"] and not segment.get("needs_review") and not segment.get("preview_is_draft"):
+            for row in active:
+                for cue in pages:
+                    left, right = max(row["start"], cue["start"]), min(row["end"], cue["end"])
+                    if right > left:
+                        source_masks.append({"start": left, "end": right, "bbox": list(row["bbox"])})
         for cue in pages:
-            output.append({"segment_id": segment.get("id", index), "start": cue["start"], "end": cue["end"],
+            planned = {"segment_id": segment.get("id", index), "start": cue["start"], "end": cue["end"],
                            "text": cue["text"], "placement": placement,
                            "bbox": [x / width, y / height, box_w / width, box_h / height],
                            "source_bbox": source_bbox, "font_size": round(font, 3),
                            "video_size": [width, height],
-                           "background": background, "color": "black", "border_radius": round(font * .18, 3)})
-    return {"video_size": [width, height], "cues": output}
+                           "background": background, "color": "black", "border_radius": round(font * .18, 3)}
+            if style["background_color"] is not None:
+                planned.update(background="custom", background_color=style["background_color"])
+            if style["text_color"] != "#000000":
+                planned["color"] = style["text_color"]
+            output.append(planned)
+    result = {"video_size": [width, height], "cues": output}
+    if style != normalize_caption_style():
+        result["caption_style"] = style
+    if style["blur_original"]:
+        # Merge identical adjacent regions, preventing duplicated blur passes
+        # at pagination boundaries while retaining real temporal gaps.
+        merged = []
+        for mask in sorted(source_masks, key=lambda row: (tuple(row["bbox"]), row["start"], row["end"])):
+            if merged and mask["bbox"] == merged[-1]["bbox"] and mask["start"] <= merged[-1]["end"]:
+                merged[-1]["end"] = max(merged[-1]["end"], mask["end"])
+            else:
+                merged.append(mask)
+        result["source_masks"] = sorted(merged, key=lambda row: (row["start"], row["end"]))
+    return result

@@ -149,6 +149,9 @@ class StreamingPipelineSession:
         self.event_callback = event_callback
         self.visual_translation = bool(visual_translation)
         self.screen_texts: List[Dict[str, Any]] = []
+        self.caption_style: Dict[str, Any] = {}
+        self.caption_style_revision = 0
+        self.caption_output_outdated = False
         self.translation_sources: List[Dict[str, str]] = []
         self.review_summary: Dict[str, Any] = {}
         self.review_task: Optional[asyncio.Task] = None
@@ -514,9 +517,12 @@ class StreamingPipelineSession:
         """Preview and export consume the same measured caption layout."""
         from core.subtitle_cues import build_caption_layout
         size = getattr(self, "video_size", (1080, 1920))
-        return {**data,
-                "caption_layout": build_caption_layout([data], self.screen_texts, video_size=size),
-                "caption_bottom_layout": build_caption_layout([data], [], video_size=size)}
+        style = getattr(self, "caption_style", None)
+        layout = build_caption_layout([data], self.screen_texts, video_size=size, caption_style=style)
+        bottom = build_caption_layout([data], [], video_size=size, caption_style=style)
+        if layout.get("source_masks"):
+            bottom["source_masks"] = layout["source_masks"]
+        return {**data, "caption_layout": layout, "caption_bottom_layout": bottom}
 
     def segment_snapshot(self, segment):
         return self.caption_metadata(segment.to_dict())

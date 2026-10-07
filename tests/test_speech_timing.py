@@ -10,7 +10,9 @@ from unittest.mock import patch
 import numpy as np
 import pytest
 
-from core.engines.alignment.speech_timing import audio_activity_span, build_speech_timing
+from core.engines.alignment.speech_timing import (
+    audio_activity_span, build_speech_timing, compact_tts_pauses, retime_tts_word_boundaries,
+)
 from core.engines.tts.edge_fallback import EdgeTTSFallbackEngine
 from core.streaming.pipeline import SegmentItem, StreamingPipelineSession
 
@@ -356,3 +358,108 @@ def test_real_sample_comma_pause_does_not_blink_or_lose_boundary_word(tmp_path):
     cue = result["subtitle_cues"][0]
     assert cue["start"] < 2.91 < 3.19 < cue["end"]
     assert " ".join(word["text"] for word in cue["words"]) == text
+
+
+def read_pcm(path):
+    with wave.open(str(path), "rb") as wav:
+        return np.frombuffer(wav.readframes(wav.getnframes()), dtype="<i2").reshape(-1, wav.getnchannels()).copy(), wav.getframerate()
+
+
+def test_compaction_preserves_every_nonzero_sample_including_quiet_stereo_phonemes(tmp_path):
+    audio, rate = tmp_path / "pauses.wav", 24000
+    samples = np.zeros((round(1.75 * rate), 2), dtype="<i2")
+    samples[:round(.2 * rate), 0] = 6000
+    # A quiet breath in the other channel must not be discarded as silence.
+    samples[round(.85 * rate):round(.9 * rate), 1] = 1
+    samples[round(1.55 * rate):, 1] = -6000
+    with wave.open(str(audio), "wb") as wav:
+        wav.setparams((2, 2, rate, 0, "NONE", "not compressed"))
+        wav.writeframes(samples.tobytes())
+    cuts = compact_tts_pauses(audio, 1.0)
+    actual, actual_rate = read_pcm(audio)
+    assert actual_rate == rate and len(actual) / rate == pytest.approx(1.0, abs=1 / rate)
+    np.testing.assert_array_equal(actual[np.any(actual != 0, axis=1)], samples[np.any(samples != 0, axis=1)])
+    assert sum(right - left for left, right in cuts) == pytest.approx(.75)
+    for left, right in cuts:
+        assert np.all(samples[round(left * rate):round(right * rate)] == 0)
+    quiet = np.all(actual == 0, axis=1)
+    endpoints = np.flatnonzero(np.diff(np.r_[False, quiet, False])).reshape(-1, 2)
+    assert all((right - left) / rate >= .18 for left, right in endpoints)
+
+
+def test_compaction_keeps_natural_pause_floor_when_silence_cannot_cover_overrun(tmp_path):
+    audio = tmp_path / "short-pauses.wav"
+    paused_pcm(audio, [(0, .8), (1.038, 1.7)], duration=1.7)
+    before, rate = read_pcm(audio)
+    cuts = compact_tts_pauses(audio, 1.0)
+    after, _ = read_pcm(audio)
+    assert cuts and 0 < sum(right - left for left, right in cuts) <= .059
+    assert len(after) / rate > 1.64, "Insufficient silence must not remove speech or erase the pause"
+    np.testing.assert_array_equal(after[after != 0], before[before != 0])
+
+
+@pytest.mark.parametrize("target, intervals", [
+    (3, [(0, .8), (1.6, 2)]),  # Already fits.
+    (1, [(0, .8), (.95, 2)]),  # A short phoneme gap is not a punctuation pause.
+    (1, []),                  # Outer/silent audio is never an internal pause.
+])
+def test_compaction_leaves_fitting_or_ineligible_audio_byte_identical(tmp_path, target, intervals):
+    audio = tmp_path / "unchanged.wav"
+    paused_pcm(audio, intervals, duration=2)
+    before = audio.read_bytes()
+    assert compact_tts_pauses(audio, target) == []
+    assert audio.read_bytes() == before
+    assert sorted(path.name for path in tmp_path.iterdir()) == ["unchanged.wav"]
+
+
+def test_failed_compaction_replacement_preserves_original_pcm(tmp_path):
+    audio = tmp_path / "locked.wav"
+    paused_pcm(audio, [(0, .8), (1.6, 2)], duration=2)
+    before = audio.read_bytes()
+    with patch.object(Path, "replace", side_effect=PermissionError("locked")):
+        with pytest.raises(PermissionError, match="locked"):
+            compact_tts_pauses(audio, 1.5)
+    assert audio.read_bytes() == before
+    assert sorted(path.name for path in tmp_path.iterdir()) == ["locked.wav"]
+
+
+def test_boundary_remapping_tracks_trim_and_internal_pause_without_mutating_metadata():
+    boundaries = [{"text": "Ừ", "start": .4, "end": .8}, {"text": "Đi", "start": 1.8, "end": 2.2}]
+    mapped = retime_tts_word_boundaries(boundaries, trim_offset=.3, removed_intervals=[(1, 1.4)])
+    assert mapped[0]["start"] == pytest.approx(.1) and mapped[0]["end"] == pytest.approx(.5)
+    assert mapped[1]["start"] == pytest.approx(1.1) and mapped[1]["end"] == pytest.approx(1.5)
+    assert boundaries[1] == {"text": "Đi", "start": 1.8, "end": 2.2}
+
+
+def test_provider_origin_before_pcm_is_calibrated_before_pause_remapping():
+    boundaries = [{"text": "Ừ", "start": 0, "end": .4}, {"text": "Đi", "start": .8, "end": 1.2}]
+    mapped = retime_tts_word_boundaries(boundaries, trim_offset=.37, speech_onset=.04,
+                                       removed_intervals=[(.55, .7)])
+    assert mapped[0]["end"] - mapped[0]["start"] == pytest.approx(.4)
+    assert mapped[1]["start"] - mapped[0]["start"] == pytest.approx(.65)
+    assert mapped[0]["start"] == pytest.approx(.04)
+
+
+@pytest.mark.parametrize("boundaries", [[{}], [{"text": "Ừ", "start": float("nan"), "end": 1}],
+    [{"text": "Ừ", "start": .6, "end": .7}],
+    [{"text": "Ừ", "start": .8, "end": 1}, {"text": "Đi", "start": .2, "end": .4}]])
+def test_unusable_or_collapsed_metadata_falls_back_after_audio_cuts(boundaries):
+    assert retime_tts_word_boundaries(boundaries, removed_intervals=[(.5, .75)]) == []
+
+
+def test_compacted_sentence_captions_follow_real_audio_and_do_not_reveal_next_line_early(tmp_path):
+    from core.engines.alignment.speech_timing import trim_tts_padding
+    audio = tmp_path / "captions.wav"
+    paused_pcm(audio, [(.4, .9), (1.7, 2.7)], duration=3)
+    boundaries = [{"text": "Ừ", "start": .4, "end": .9}, {"text": "Đi", "start": 1.7, "end": 2.7}]
+    trim_offset = trim_tts_padding(audio)
+    boundaries = retime_tts_word_boundaries(boundaries, trim_offset=trim_offset)
+    cuts = compact_tts_pauses(audio, 1.95)
+    boundaries = retime_tts_word_boundaries(boundaries, removed_intervals=cuts)
+    result = build_speech_timing("Ừ. Đi.", 10, 13, audio, word_boundaries=boundaries)
+    first, second = result["subtitle_cues"]
+    expected_second = 10 + 1.7 - trim_offset - sum(right - left for left, right in cuts)
+    assert result["subtitle_timing_source"] == "edge-word-boundary"
+    assert second["start"] == pytest.approx(expected_second, abs=.011)
+    assert first["text"] == "Ừ." and second["text"] == "Đi."
+    assert second["words"][0]["start"] == second["start"]

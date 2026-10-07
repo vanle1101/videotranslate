@@ -85,6 +85,104 @@ def trim_tts_padding(path):
     return left / rate
 
 
+def compact_tts_pauses(path, target_duration):
+    """Shorten only long, digitally silent internal pauses when speech overruns.
+
+    Every nonzero PCM sample is retained, including quiet consonants and breaths.
+    Each shortened pause keeps at least 180 ms (156 ms at the maximum 1.15x
+    playback rate). Returned intervals use the input audio's time coordinates,
+    allowing provider timestamps to follow precisely the same cuts.
+    """
+    if not math.isfinite(target_duration) or target_duration <= 0:
+        return []
+    try:
+        with wave.open(str(path), "rb") as audio:
+            if audio.getsampwidth() != 2 or audio.getcomptype() != "NONE":
+                return []
+            params = audio.getparams()
+            rate, channels = audio.getframerate(), audio.getnchannels()
+            frames = np.frombuffer(audio.readframes(audio.getnframes()), dtype="<i2").reshape(-1, channels)
+        if rate <= 0 or not len(frames):
+            return []
+        needed = len(frames) - math.floor(target_duration * rate)
+        if needed <= 0:
+            return []
+        # An RMS threshold can erase low-volume phonemes. Require exact silence
+        # in every channel and leave equal guards on both sides of each cut.
+        silent = np.all(frames == 0, axis=1)
+        changes = np.flatnonzero(np.diff(np.r_[False, silent, False]))
+        keep = math.ceil(.18 * rate)
+        minimum = math.ceil(.20 * rate)
+        candidates = [(int(left), int(right)) for left, right in changes.reshape(-1, 2)
+                      if left > 0 and right < len(frames) and right - left >= minimum]
+    except (OSError, EOFError, wave.Error, ValueError, ZeroDivisionError):
+        return []
+    capacity = sum(right - left - keep for left, right in candidates)
+    remaining = min(needed, capacity)
+    if remaining <= 0:
+        return []
+    cuts = []
+    # Share the reduction across eligible pauses, so a single comma is not
+    # squeezed while other equally long pauses remain untouched.
+    for left, right in candidates:
+        available = right - left - keep
+        take = min(available, math.ceil(remaining * available / capacity))
+        capacity -= available
+        remaining -= take
+        if take:
+            cut_start = left + (right - left - take) // 2
+            cuts.append((cut_start, cut_start + take))
+        if not remaining:
+            break
+    pieces, cursor = [], 0
+    for left, right in cuts:
+        pieces.append(frames[cursor:left])
+        cursor = right
+    pieces.append(frames[cursor:])
+    compacted = np.concatenate(pieces).tobytes()
+    # As with outer trimming, never leave a partial WAV after an I/O failure.
+    with tempfile.TemporaryDirectory(prefix="tts-pauses-", dir=Path(path).parent) as directory:
+        temporary = Path(directory) / "speech.wav"
+        with wave.open(str(temporary), "wb") as audio:
+            audio.setparams(params)
+            audio.writeframes(compacted)
+        temporary.replace(path)
+    return [(left / rate, right / rate) for left, right in cuts]
+
+
+def retime_tts_word_boundaries(boundaries, *, trim_offset=0.0, removed_intervals=(), speech_onset=None):
+    """Copy valid provider boundaries onto the trimmed/compacted PCM timeline."""
+    origin = None
+
+    def mapped(position):
+        # Providers may timestamp their first word before the decoded PCM's
+        # onset. Calibrate that origin before applying cuts, as display timing
+        # already does; per-word clamping would shorten the first word and
+        # incorrectly pull later words forward.
+        position = max(0.0, position - origin + speech_onset) if speech_onset is not None else position - trim_offset
+        return position - sum(max(0.0, min(position, right) - left)
+                              for left, right in removed_intervals if position > left)
+
+    result, previous = [], -1.0
+    for item in boundaries:
+        try:
+            start, end = float(item["start"]), float(item["end"])
+            if (not isinstance(item["text"], str) or not item["text"].strip()
+                    or not all(math.isfinite(value) for value in (start, end))
+                    or start < 0 or end <= start or start < previous):
+                return []
+            previous = start
+            if origin is None:
+                origin = start
+            start, end = mapped(start), mapped(end)
+            if start < 0 or end <= start:
+                return []
+            result.append({**item, "start": start, "end": end})
+        except (KeyError, TypeError, ValueError):
+            return []
+    return result
+
+
 def _letters(text):
     return "".join(char for char in unicodedata.normalize("NFC", str(text)).casefold()
                    if char.isalnum())

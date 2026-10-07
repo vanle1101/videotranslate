@@ -47,6 +47,26 @@ class RecordedSynthesizer:
         return self.boundaries.pop(str(path))
 
 
+class PausedSynthesizer(RecordedSynthesizer):
+    def __init__(self, *, pause=(1, 1.7), duration=3.19):
+        super().__init__(duration)
+        self.pause = pause
+        self.original_pcm = None
+
+    def synthesize(self, *, text, output_path, **kwargs):
+        result = super().synthesize(text=text, output_path=output_path, **kwargs)
+        with wave.open(str(output_path), "rb") as wav:
+            params = wav.getparams()
+            samples = array("h", wav.readframes(wav.getnframes()))
+        left, right = (round(value * params.framerate) for value in self.pause)
+        samples[left:right] = array("h", [0]) * (right - left)
+        with wave.open(str(output_path), "wb") as wav:
+            wav.setparams(params)
+            wav.writeframes(samples.tobytes())
+        self.original_pcm = output_path.read_bytes()
+        return result
+
+
 @pytest.fixture(autouse=True)
 def reject_network(monkeypatch):
     # A missing stub must fail locally rather than consuming a provider request.
@@ -94,6 +114,69 @@ def test_short_speech_keeps_normal_speed_without_rewrite(tmp_path, aligner):
     assert 0 < aligner.get_audio_duration(output) < 1.0
     assert stages == ["TTS", "ALIGNING"]
     assert_no_scratch(output)
+
+
+def test_internal_synthesis_pause_fits_before_rewrite_and_keeps_exact_words(tmp_path, aligner, caplog):
+    original = "Tôi vẫn chưa làm việc đó."
+    engine, translator = PausedSynthesizer(), Mock()
+    output = tmp_path / "voice.wav"
+    with caplog.at_level(logging.INFO, logger="pipeline"), execution_context("pause-fit"):
+        result = synthesize_natural_speech(text=original, source="我还没做。", duration=2.44,
+            output_path=output, engine=engine, aligner=aligner, translator=translator)
+    assert engine.calls == [original]
+    translator.rewrite_for_pacing.assert_not_called()
+    assert result["text"] == original and result["pacing_verification"] is None
+    assert result["tts_duration"] <= 2.44 * 1.15
+    assert result["speed_ratio"] <= 1.15
+    assert 0 < aligner.get_audio_duration(output) <= 2.4401
+    assert any("PACING_COMPACTED run_id=pause-fit" in record.getMessage() for record in caplog.records)
+    assert_no_scratch(output)
+
+
+def test_internal_pause_compaction_also_preserves_manual_text(tmp_path, aligner):
+    text, output = "Giữ nguyên lời tôi đã sửa.", tmp_path / "voice.wav"
+    engine = PausedSynthesizer()
+    result = synthesize_natural_speech(text=text, source="", duration=2.44,
+        output_path=output, engine=engine, aligner=aligner)
+    assert result["text"] == text and engine.calls == [text]
+    assert result["pacing_verification"] is None and result["speed_ratio"] <= 1.15
+    assert aligner.get_audio_duration(output) <= 2.4401
+
+
+def test_near_fit_238ms_pause_preserves_natural_floor_with_real_atempo(tmp_path, aligner):
+    engine = PausedSynthesizer(pause=(1.7212, 1.9592), duration=2.84)
+    output = tmp_path / "voice.wav"
+    result = synthesize_natural_speech(text="Giữ nguyên câu này.", source="", duration=2.44,
+        output_path=output, engine=engine, aligner=aligner)
+    assert engine.calls == ["Giữ nguyên câu này."]
+    assert result["speed_ratio"] <= 1.15 and aligner.get_audio_duration(output) <= 2.4401
+    assert 2.78 <= result["tts_duration"] <= 2.79
+
+
+def test_inadequate_silence_never_relaxes_speed_or_replaces_previous_output(tmp_path, aligner):
+    output = tmp_path / "voice.wav"
+    output.write_bytes(b"previous complete output")
+    engine = PausedSynthesizer(pause=(1, 1.238))
+    with pytest.raises(SpeechBudgetError):
+        synthesize_natural_speech(text="Giữ đủ các từ này.", source="", duration=2.44,
+            output_path=output, engine=engine, aligner=aligner)
+    assert output.read_bytes() == b"previous complete output"
+    assert_no_scratch(output)
+
+
+def test_normal_fitting_speech_does_not_compact_punctuation_pauses(tmp_path, aligner, monkeypatch):
+    engine = PausedSynthesizer()
+    recorded = []
+    fit = aligner.apply_atempo
+
+    def capture(raw, *args, **kwargs):
+        recorded.append(raw.read_bytes())
+        return fit(raw, *args, **kwargs)
+
+    monkeypatch.setattr(aligner, "apply_atempo", capture)
+    result = synthesize_natural_speech(text="Giữ nhịp đọc này.", source="", duration=4,
+        output_path=tmp_path / "voice.wav", engine=engine, aligner=aligner)
+    assert result["speed_ratio"] == 1 and recorded == [engine.original_pcm]
 
 
 def test_verified_rewrite_is_resynthesized_and_matches_published_audio(tmp_path, aligner):

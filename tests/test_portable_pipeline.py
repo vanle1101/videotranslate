@@ -40,6 +40,7 @@ class PortablePipelineTests(unittest.TestCase):
         self.temp = tempfile.TemporaryDirectory(prefix="portable_pipeline_")
         self.root = Path(self.temp.name)
         self.patches = [patch.object(settings, "BASE_DIR", self.root),
+                        patch.object(settings, "WORKSPACE_DIR", self.root),
                         patch.object(settings, "TEMP_DIR", self.root),
                         patch.object(settings, "OUTPUT_DIR", self.root)]
         for item in self.patches:

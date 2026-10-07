@@ -14,7 +14,7 @@ from fastapi.responses import HTMLResponse, FileResponse, Response
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from fastapi.requests import Request
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, ConfigDict
 
 from config import settings
 from core.downloader import VideoDownloader
@@ -122,6 +122,13 @@ class ExportHQRequest(BaseModel):
 class SegmentEditRequest(BaseModel):
     final_vi: str = Field(max_length=2000, strict=True)
     confirm_silence: bool = Field(default=False, strict=True)
+
+class CaptionStyleRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    background_color: Optional[str] = Field(default=None, pattern=r"^#[0-9A-Fa-f]{6}$", strict=True)
+    text_color: str = Field(default="#000000", pattern=r"^#[0-9A-Fa-f]{6}$", strict=True)
+    position: Literal["auto", "top", "middle", "bottom"] = "auto"
+    blur_original: bool = Field(default=False, strict=True)
 
 class ConfigRequest(BaseModel):
     gemini_key: Optional[str] = None
@@ -428,6 +435,7 @@ def review_sidecar_payload(session):
             "translation_provider": getattr(segment, "translation_provider", None),
         })
     return {"task_id": session.task_id, "review_summary": dict(getattr(session, "review_summary", {}) or {}),
+            "caption_style": dict(getattr(session, "caption_style", {}) or {}),
             "segments": rows,
             **review_result_details(session)}
 
@@ -444,7 +452,8 @@ def export_revision_signature(session):
                              "start": s.start, "end": s.end, "final_vi": s.final_vi,
                              "verification": getattr(s, "verification", None)}
                             for s in session.segments.values()],
-               "screen_texts": getattr(session, "screen_texts", [])}
+               "screen_texts": getattr(session, "screen_texts", []),
+               "caption_style": getattr(session, "caption_style", {})}
     return hashlib.sha256(json.dumps(content, ensure_ascii=False, sort_keys=True).encode("utf-8")).hexdigest()
 
 
@@ -790,6 +799,7 @@ async def streaming_snapshot(task_id: str):
         "task_id": task_id, "initialized": session.initialized,
         "video_url": session.source_video_url,
         **session_output_details(session),
+        **caption_style_details(session),
         "progress": session.get_progress(), "telemetry": session.get_telemetry(),
         "duration": session.total_duration, "initial_buffer_seconds": session.initial_buffer_seconds,
         "segments": [session.segment_snapshot(segment) for segment in session.segments.values()],
@@ -801,6 +811,48 @@ async def streaming_snapshot(task_id: str):
         "suppression_level": f"{session.vocal_suppressor.suppression_level_db:.1f} dB",
         "suppression_rtf": session.suppression_stats.get("throughput_rtf", "0.0x"),
     }
+
+
+def caption_style_details(session):
+    from core.subtitle_cues import build_caption_layout, normalize_caption_style
+    style = normalize_caption_style(getattr(session, "caption_style", None))
+    plan = build_caption_layout([s.to_dict() for s in session.segments.values()],
+        getattr(session, "screen_texts", []), getattr(session, "video_size", (1080, 1920)),
+        caption_style={**style, "blur_original": True})
+    return {"caption_style": style,
+            "caption_style_revision": getattr(session, "caption_style_revision", 0),
+            "has_subtitle_regions": bool(plan.get("source_masks")),
+            "output_outdated": getattr(session, "caption_output_outdated", False)}
+
+
+@app.post("/api/streaming/{task_id}/caption-style")
+async def update_caption_style(task_id: str, req: CaptionStyleRequest):
+    session = get_streaming_session(task_id)
+    if session is None:
+        raise HTTPException(status_code=404, detail="Phiên dịch không còn tồn tại.")
+    if (session.is_running or getattr(session, "is_editing", False)
+            or active_export_tasks.get(f"export_{task_id}", {}).get("status") in {"RUNNING", "CANCELLING"}):
+        raise HTTPException(status_code=409, detail="Hãy chờ xử lý hoặc xuất video xong trước khi chỉnh phụ đề.")
+    if (session.error or not session.segments
+            or any(s.status not in ("READY", "PLAYED") for s in session.segments.values())):
+        raise HTTPException(status_code=409, detail="Hãy hoàn tất bản dịch trước khi chỉnh phụ đề.")
+    from core.subtitle_cues import normalize_caption_style
+    style = normalize_caption_style(req.model_dump())
+    previous = caption_style_details(session)
+    if style["blur_original"] and not previous["has_subtitle_regions"]:
+        raise HTTPException(status_code=422, detail="Chưa xác định được vùng phụ đề gốc đủ rõ để làm mờ.")
+    if style != previous["caption_style"]:
+        session.caption_style = style
+        session.caption_style_revision = previous["caption_style_revision"] + 1
+        session.caption_output_outdated = True
+        session._invalidate_output()
+        # A previous export is valid only for its old style. Drop its published
+        # task entry so task polling cannot present it as the new result.
+        active_export_tasks.pop(f"export_{task_id}", None)
+    payload = {**caption_style_details(session), **session_output_details(session),
+               "segments": [session.segment_snapshot(s) for s in session.segments.values()]}
+    await broadcast_session_event(task_id, "caption_style", payload)
+    return payload
 
 
 @app.post("/api/streaming/{task_id}/retry")
@@ -957,6 +1009,8 @@ async def export_hq(req: ExportHQRequest):
             progress_callback=_prog_cb,
             cancel_check=_cancel_chk,
             publish_callback=_publish_output,
+            caption_style=dict(getattr(session, "caption_style", {}) or {}),
+            source_screen_texts=getattr(session, "screen_texts", []),
         ))
         try:
             result = await asyncio.shield(render_worker)
@@ -990,6 +1044,7 @@ async def export_hq(req: ExportHQRequest):
         session.output_video_url = f"/api/outputs/{result['output_filename']}"
         session.output_filename = result["output_filename"]
         session.output_review_url = review_url
+        session.caption_output_outdated = False
         await broadcast_session_event(req.task_id, "result_ready", session_output_details(session))
 
         return {
@@ -1400,6 +1455,7 @@ async def websocket_stream(websocket: WebSocket, task_id: str):
             "segments_count": len(session.segments),
             "segments": [session.segment_snapshot(s) for s in session.segments.values()],
             "screen_texts": getattr(session, "screen_texts", []),
+            **caption_style_details(session),
             "visual_translation": getattr(session, "visual_translation", False),
             "translation_sources": getattr(session, "translation_sources", []),
             "asr_engine": session.source_processing_label() if hasattr(session, "source_processing_label") else "",
