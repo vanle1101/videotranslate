@@ -1,5 +1,6 @@
 """Reviewed sessions produce a final file without asking the user to audit Chinese."""
 import asyncio
+import errno
 import io
 import threading
 from pathlib import Path
@@ -16,6 +17,10 @@ from core.streaming.pipeline import SegmentItem
 
 @pytest.fixture
 def session(monkeypatch, tmp_path):
+    # /api/tasks merges durable history as well as the in-memory registry.
+    # Keep that real discovery path, but never scan the developer's projects.
+    monkeypatch.setattr(main.settings, "BASE_DIR", tmp_path)
+    monkeypatch.setattr(main.settings, "WORKSPACE_DIR", tmp_path / "workspace")
     segment = SegmentItem(0, 0, 2, 2)
     segment.status = "READY"
     segment.text_zh = "假的"
@@ -153,6 +158,112 @@ def test_automatic_export_error_is_safe_and_manual_retry_remains_available(sessi
     assert result["status"] == "ok"
 
 
+@pytest.mark.parametrize("failure,expected", [
+    (OSError(errno.ENOSPC, "secret-token-provider"), "Ổ đĩa không đủ chỗ trống"),
+    (RuntimeError("quá nhiều vùng secret-token-provider"), "Tắt làm mờ sub gốc"),
+])
+def test_automatic_export_preserves_one_classified_error_event(session, failure, expected):
+    item, exporter = session
+    socket = SimpleNamespace(send_json=AsyncMock())
+    main.stream_sockets[item.task_id] = [socket]
+    exporter.export.side_effect = failure
+
+    async def run():
+        main.schedule_reviewed_export(item.task_id)
+        await item.auto_export_task
+
+    asyncio.run(run())
+    errors = [call.args[0] for call in socket.send_json.call_args_list if call.args[0]["type"] == "result_error"]
+    assert len(errors) == 1
+    assert expected in errors[0]["message"]
+    assert errors[0]["message"] == main.active_export_tasks[f"export_{item.task_id}"]["stage"]
+    assert "secret-token-provider" not in str(errors)
+
+
+def test_automatic_export_preflight_error_keeps_original_actionable_detail(session, monkeypatch):
+    item, _ = session
+    socket = SimpleNamespace(send_json=AsyncMock())
+    main.stream_sockets[item.task_id] = [socket]
+    message = "AI kiểm tra lại chưa hoàn tất. Bấm AI kiểm tra lại để tiếp tục trước khi xuất."
+    monkeypatch.setattr(main, "export_hq", AsyncMock(side_effect=HTTPException(409, detail=message)))
+
+    async def run():
+        main.schedule_reviewed_export(item.task_id)
+        await item.auto_export_task
+
+    asyncio.run(run())
+    errors = [call.args[0] for call in socket.send_json.call_args_list if call.args[0]["type"] == "result_error"]
+    assert len(errors) == 1 and errors[0]["message"] == message
+
+
+def test_export_report_write_failure_preserves_published_mp4_and_warns(session, monkeypatch, tmp_path):
+    item, exporter = session
+    socket = SimpleNamespace(send_json=AsyncMock())
+    main.stream_sockets[item.task_id] = [socket]
+    rendered, final = tmp_path / "rendered.mp4", tmp_path / "reviewed.mp4"
+    sidecar = tmp_path / "reviewed.review.json"
+    sidecar.write_text('{"old_report": true}', encoding="utf-8")
+    item.output_review_url = "/api/outputs/reviewed.review.json"
+    item.persist = Mock()
+    log_warning = Mock()
+    monkeypatch.setattr(main.logging.getLogger("errors"), "warning", log_warning)
+    original_replace = Path.replace
+
+    def block_report_replace(path, target):
+        if path.name.startswith(".reviewed.review.json."):
+            raise PermissionError(errno.EACCES, "secret-token-must-not-be-shown")
+        return original_replace(path, target)
+
+    def render(**kwargs):
+        rendered.write_bytes(b"validated MP4 from exporter")
+        kwargs["publish_callback"](rendered, final)
+        return {"output_filename": final.name, "elapsed_seconds": 1}
+
+    exporter.export.side_effect = render
+    monkeypatch.setattr(Path, "replace", block_report_replace)
+    result = asyncio.run(main.export_hq(main.ExportHQRequest(task_id=item.task_id)))
+    assert result["status"] == "ok"
+    assert result["output_video_url"] == "/api/outputs/reviewed.mp4"
+    assert final.read_bytes() == b"validated MP4 from exporter"
+    assert result["review_url"] == item.output_review_url == ""
+    assert "chưa lưu được báo cáo kiểm tra" in result["metadata_warning"]
+    assert result["metadata_warning"] in result["warnings"] == item.warnings
+    assert sidecar.read_text(encoding="utf-8") == '{"old_report": true}'
+    assert not list(tmp_path.glob(".*.tmp"))
+    task = main.active_export_tasks[f"export_{item.task_id}"]
+    assert task["status"] == "COMPLETED" and task["published"] is True
+    assert task["review_url"] == "" and task["stage"] == result["metadata_warning"]
+    item.persist.assert_called_once()
+    events = [call.args[0] for call in socket.send_json.call_args_list]
+    assert not any(event["type"] == "result_error" for event in events)
+    ready = next(event for event in events if event["type"] == "result_ready")
+    assert ready["warnings"] == item.warnings and ready["metadata_warning"]
+    assert "EXPORT_REPORT_SAVE_FAILED" in str(log_warning.call_args_list)
+    assert "secret-token" not in str(log_warning.call_args_list)
+
+    monkeypatch.setattr(Path, "replace", original_replace)
+    retry = asyncio.run(main.export_hq(main.ExportHQRequest(task_id=item.task_id)))
+    assert retry["review_url"] == "/api/outputs/reviewed.review.json"
+    assert not retry["metadata_warning"] and not retry["warnings"]
+    assert not list(tmp_path.glob(".*.tmp"))
+
+
+def test_export_project_save_failure_keeps_download_and_warns(session):
+    item, _ = session
+    item.persist = Mock(side_effect=OSError(errno.ENOSPC, "secret-token-must-not-be-shown"))
+    socket = SimpleNamespace(send_json=AsyncMock())
+    main.stream_sockets[item.task_id] = [socket]
+
+    result = asyncio.run(main.export_hq(main.ExportHQRequest(task_id=item.task_id)))
+    assert result["status"] == "ok" and result["output_video_url"]
+    assert "Không lưu được phiên xuống ổ đĩa" in result["metadata_warning"]
+    assert "secret-token" not in str(result)
+    task = main.active_export_tasks[f"export_{item.task_id}"]
+    assert task["status"] == "COMPLETED" and task["stage"] == result["metadata_warning"]
+    ready = next(call.args[0] for call in socket.send_json.call_args_list if call.args[0]["type"] == "result_ready")
+    assert ready["warnings"] == item.warnings and ready["metadata_warning"]
+
+
 def test_automatic_export_is_tracked_cancellable_and_rejects_manual_duplicate(session):
     item, exporter = session
     release = threading.Event()
@@ -200,6 +311,7 @@ def test_final_output_and_audit_report_survive_snapshot_and_task_poll(session):
     assert snapshot["output_video_url"] == "/api/outputs/reviewed.mp4"
     assert snapshot["review_url"] == "/api/outputs/reviewed.review.json"
     assert snapshot["review_report"][0]["verification"]["status"] == "unresolved"
+    assert {task["task_id"] for task in tasks["tasks"]} == {item.task_id, f"export_{item.task_id}"}
     for task in tasks["tasks"]:
         assert task["video_url"] == task["output_video_url"] == "/api/outputs/reviewed.mp4"
         assert task["output_filename"] == "reviewed.mp4" and task["review_warning"]

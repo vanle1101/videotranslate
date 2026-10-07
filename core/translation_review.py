@@ -12,9 +12,7 @@ import json
 import math
 import logging
 from pathlib import Path
-import re
 import tempfile
-import unicodedata
 
 from config import settings
 from core.engines.translation.opencode_client import OpenCodeZenClient
@@ -22,6 +20,7 @@ from core.screen_ocr import ScreenOCR
 from core.media_process import run_media
 from core.video_intelligence import VideoIntelligence, VideoIntelligenceError
 from core.runtime_context import current_execution_context
+from core.chinese_text import comparable_chinese
 
 
 class _ReviewScreenOCR(ScreenOCR):
@@ -35,11 +34,13 @@ class _LocalAudioEvidence:
     """Two independent, already-installed recognizers, loaded sequentially."""
 
     def collect(self, video_path, rows, cancel_check=None, progress_callback=None):
+        self.last_error = None
         from core.engines.asr.sensevoice_engine import SenseVoiceEngine
         sensevoice = SenseVoiceEngine()
         whisper_path = settings.BASE_DIR / "workspace" / "models" / "faster-whisper-small"
         if not sensevoice.is_available or not all((whisper_path / name).is_file()
                 for name in ("config.json", "model.bin", "tokenizer.json")):
+            self.last_error = FileNotFoundError("Required local review recognizers are unavailable.")
             return {}
         check = lambda: VideoIntelligence._check_cancelled(cancel_check)
         result = {row["id"]: {} for row in rows}
@@ -98,12 +99,56 @@ class AutomaticTranslationReviewer:
     BATCH_SIZE = 12
 
     @staticmethod
+    def _diagnostic(error, stage, rows):
+        """Retain a useful category, never exception text/URLs/provider bodies."""
+        from core.engines.translation.opencode_client import (
+            OpenCodeConfigurationError, OpenCodeModelError)
+        if isinstance(error, VideoIntelligenceError):
+            code = "invalid_response"
+        elif isinstance(error, OpenCodeConfigurationError):
+            code = "provider_configuration"
+        elif isinstance(error, OpenCodeModelError):
+            code = "provider_model"
+        elif isinstance(error, (TimeoutError,)):
+            code = "provider_timeout" if stage != "audio_evidence" else "asr_timeout"
+        elif isinstance(error, (FileNotFoundError, ImportError)):
+            code = "asr_unavailable" if stage == "audio_evidence" else "runtime_unavailable"
+        else:
+            code = "asr_failed" if stage == "audio_evidence" else "provider_failed"
+        diagnostic = {"stage": stage, "code": code,
+            "run_id": current_execution_context().run_id,
+            "segment_ids": [row["id"] for row in rows if type(row.get("id")) is int]}
+        logging.getLogger("ai").warning(
+            "REVIEW_STAGE_FAILED run_id=%s segment_ids=%s stage=%s code=%s",
+            diagnostic["run_id"], diagnostic["segment_ids"], stage, code)
+        return diagnostic
+
+    @staticmethod
+    def _diagnostic_message(diagnostic):
+        return {
+            "asr_unavailable": "Thiếu model hoặc runtime nhận giọng để đối chiếu nguồn; kiểm tra mục Cài đặt.",
+            "asr_failed": "Bộ nhận giọng gặp lỗi khi đối chiếu nguồn; xem log tác vụ và thử kiểm tra lại.",
+            "asr_timeout": "Đối chiếu âm thanh quá thời gian; thử kiểm tra lại.",
+            "invalid_response": "AI trả dữ liệu kiểm định không hợp lệ; thử kiểm tra lại.",
+            "provider_configuration": "Kết nối OpenCode chưa hợp lệ; kiểm tra đăng nhập và cấu hình.",
+            "provider_model": "Model OpenCode chưa khả dụng; kiểm tra model đã chọn.",
+            "provider_timeout": "OpenCode quá thời gian phản hồi; thử kiểm tra lại.",
+            "runtime_unavailable": "Thiếu thành phần chạy kiểm định; kiểm tra cài đặt.",
+            "provider_failed": "Yêu cầu kiểm định OpenCode thất bại; xem log tác vụ và thử lại.",
+        }[diagnostic["code"]]
+
+    @staticmethod
     def _validated_review_request(client, prompt, batch, lo, hi, check):
         # Retry malformed structured replies without repeating the local OCR.
         # Authentication/transport errors propagate; invalid data never passes.
         for attempt in range(3):
             check()
-            raw = client.translate(prompt, max_tokens=10000)
+            try:
+                raw = client.translate(prompt, max_tokens=10000)
+            except Exception as error:
+                check()
+                AutomaticTranslationReviewer._diagnostic(error, "semantic_request", batch)
+                raise
             check()
             try:
                 data = VideoIntelligence._parse_json(raw)
@@ -115,21 +160,22 @@ class AutomaticTranslationReviewer:
                     current_execution_context().run_id, attempt + 1, len(raw) if isinstance(raw, str) else 0,
                     type(error).__name__)
                 if attempt == 2:
+                    AutomaticTranslationReviewer._diagnostic(error, "semantic_schema", batch)
                     raise
 
-    def __init__(self, client=None, screen_ocr=None, audio_evidence=None):
+    def __init__(self, client=None, screen_ocr=None, audio_evidence=None, *, checkpoint_dir=None):
+        # Injected test/plugin adapters cannot populate or consume production cache.
+        self._checkpoint_enabled = (client is None and screen_ocr is None and audio_evidence is None) or checkpoint_dir is not None
+        self._checkpoint_directory = checkpoint_dir
+        self._injected_adapters = client is not None or screen_ocr is not None or audio_evidence is not None
         self.client = client
         self.screen_ocr = screen_ocr if screen_ocr is not None else _ReviewScreenOCR()
         self.audio_evidence = audio_evidence if audio_evidence is not None else _LocalAudioEvidence()
 
     @staticmethod
     def _audio_text(value):
-        """Ignore sentence punctuation only; retain negation, numbers and units."""
-        if not isinstance(value, str):
-            return ""
-        value = unicodedata.normalize("NFKC", value)
-        value = re.sub(r"(?<!\d)\.|\.(?!\d)", "", value)
-        return re.sub(r'[\s，。！？；、…“”‘’「」『』（）(),!?;:"「」]+', "", value)
+        """Ignore orthographic variants, retaining negation, numbers and units."""
+        return comparable_chinese(value)
 
     @staticmethod
     def _summarize(result):
@@ -199,12 +245,17 @@ class AutomaticTranslationReviewer:
         client = self.client or OpenCodeZenClient(model=settings.OPENCODE_MODEL, timeout=120)
         if not client.has_credentials:
             raise VideoIntelligenceError("Chưa kết nối OpenCode để AI kiểm tra lại bản dịch.")
+        failure = None
         try:
             evidence = self.audio_evidence.collect(video_path, targets, cancel_check,
                 (lambda value: progress_callback(value * .6)) if progress_callback else None)
             check()
-        except Exception:
+            hidden_error = getattr(self.audio_evidence, "last_error", None)
+            if isinstance(hidden_error, BaseException):
+                failure = self._diagnostic(hidden_error, "audio_evidence", targets)
+        except Exception as error:
             check()
+            failure = self._diagnostic(error, "audio_evidence", targets)
             evidence = {}
         agreed = []
         for row in targets:
@@ -219,10 +270,12 @@ class AutomaticTranslationReviewer:
             if consensus:
                 agreed.append((row, a))
             else:
-                reason = ("Hai bộ nhận giọng độc lập chưa thống nhất lời nguồn; AI giữ bản nháp có căn cứ, không đoán phần thiếu."
+                reason = self._diagnostic_message(failure) if failure else ("Hai bộ nhận giọng độc lập chưa thống nhất lời nguồn; AI giữ bản nháp có căn cứ, không đoán phần thiếu."
                           if a and b else "Chưa thu được đủ hai kết quả nhận giọng tại máy để xác minh phần OCR thiếu.")
                 row.update(needs_review=True, review_reason=reason)
                 audit.update(status="unresolved", reason=reason)
+                if failure:
+                    audit["diagnostic"] = failure
         batches = math.ceil(len(agreed) / self.BATCH_SIZE)
         model = getattr(client, "model", settings.OPENCODE_MODEL)
         model = model if isinstance(model, str) else settings.OPENCODE_MODEL
@@ -281,13 +334,14 @@ class AutomaticTranslationReviewer:
                        for row in checked_audits.values()):
                     raise VideoIntelligenceError("Lượt kiểm định thứ hai thiếu kết luận ngữ nghĩa hợp lệ.")
                 data, validated, audits = checked, checked_validated, checked_audits
-            except Exception:
+            except Exception as error:
                 check()
+                diagnostic = self._diagnostic(error, "audio_semantic_review", sources)
                 for source in sources:
-                    reason = "Hai bộ nhận giọng đã thống nhất nguồn, nhưng AI chưa hoàn tất kiểm định nghĩa; giữ bản nháp đang có."
+                    reason = self._diagnostic_message(diagnostic)
                     source.update(needs_review=True, review_reason=reason)
                     source["verification"].update(status="incomplete", reason=reason,
-                                                  semantic_verified=False, audio_audit_status="failed")
+                                                  semantic_verified=False, audio_audit_status="failed", diagnostic=diagnostic)
                 continue
             completed_audits += 1
             for source, transcript in batch:
@@ -436,7 +490,44 @@ class AutomaticTranslationReviewer:
             f"Ngữ cảnh lân cận (không tạo thêm ID): {json.dumps(context, ensure_ascii=False)}"
         )
 
-    def review(self, video_path, segments, screen_texts, cancel_check=None, progress_callback=None):
+    @staticmethod
+    def _qualified_context(original, accepted):
+        audit = accepted.get("verification") or {}
+        if (not accepted.get("needs_review") and audit.get("status") in {"verified", "corrected"}
+                and audit.get("source_supported") is True and audit.get("semantic_verified") is True):
+            return accepted
+        return original
+
+    def _checkpoint(self, video_path, model, check, force_review):
+        if not self._checkpoint_enabled:
+            return None
+        from core.review_checkpoint import ReviewCheckpoint
+        try:
+            return ReviewCheckpoint(video_path, model, directory=self._checkpoint_directory,
+                check=check, force=force_review,
+                runtime_revision={"explicit_injected_adapters": True} if self._injected_adapters else None)
+        except (OSError, TypeError, ValueError):
+            # Caching is optional; inaccessible source/runtime must never skip review.
+            return None
+
+    @staticmethod
+    def _cached_pair(record, batch, lo, hi):
+        if not isinstance(record, dict) or set(record) != {"first", "second"}:
+            return None
+        try:
+            for raw in (record["first"], record["second"]):
+                parsed = VideoIntelligence._parse_json(raw)
+                validated = VideoIntelligence.validate_result(parsed, batch, lo, hi, [])
+                if any(not isinstance(row.get("semantic_verified"), bool)
+                       or not isinstance(row.get("verification_reason"), str)
+                       or not isinstance(row.get("source_evidence_ids"), list)
+                       for row in parsed["segments"]):
+                    return None
+            return parsed, validated
+        except (VideoIntelligenceError, KeyError, TypeError, ValueError):
+            return None
+
+    def review(self, video_path, segments, screen_texts, cancel_check=None, progress_callback=None, *, force_review=False):
         """Review existing speech once, returning copies and explicit audit status.
 
         Transport/schema errors propagate; callers retain the existing playable
@@ -471,13 +562,27 @@ class AutomaticTranslationReviewer:
             raise VideoIntelligenceError("Chưa kết nối OpenCode để AI kiểm tra lại bản dịch.")
         model = getattr(client, "model", settings.OPENCODE_MODEL)
         model = model if isinstance(model, str) else settings.OPENCODE_MODEL
+        checkpoint = self._checkpoint(video_path, model, check, force_review)
         provenance = {"provider": "opencode", "model": model[:200], "evidence_mode": "fresh-ocr-text-review"}
         evidence = []
         windows = self._windows(targets)
         try:
             for index, (start, end) in enumerate(windows):
                 check()
-                observed = self.screen_ocr.extract(Path(video_path), start, end, cancel_check)
+                stage = {"kind": "ocr", "start": start, "end": end,
+                         "fps": _ReviewScreenOCR.FPS, "max_dimension": _ReviewScreenOCR.MAX_DIMENSION}
+                observed = checkpoint.load(stage) if checkpoint else None
+                if not VideoIntelligence._valid_observed_screens(observed, start, end):
+                    try:
+                        observed = self.screen_ocr.extract(Path(video_path), start, end, cancel_check)
+                    except Exception as error:
+                        check()
+                        self._diagnostic(error, "ocr_evidence", [row for row in targets if row["start"] < end and row["end"] > start])
+                        raise
+                    if checkpoint:
+                        cache_rows = [{**item, "id": str(i)} for i, item in enumerate(observed)]
+                        if VideoIntelligence._valid_observed_screens(cache_rows, start, end):
+                            checkpoint.store(stage, cache_rows)
                 check()
                 for item in observed:
                     evidence.append({**item, "id": f"review{len(evidence)}", "origin": "fresh-local-ocr"})
@@ -497,31 +602,49 @@ class AutomaticTranslationReviewer:
             # Two adjacent turns on either side give context without resending
             # an entire long video for every batch.
             lo, hi = min(row["start"] for row in batch), max(row["end"] for row in batch)
-            context = [{key: row.get(key, "") for key in ("start", "end", "text_zh", "final_vi")}
-                       for row in rows if row["start"] < hi + 10 and row["end"] > lo - 10]
-            data, validated = self._validated_review_request(
-                client, self._prompt(prompt_rows, relevant, context), batch, lo, hi, check)
+            context = [{key: accepted.get(key, "") for key in ("start", "end", "text_zh", "final_vi")}
+                       for row in rows if row["start"] < hi + 10 and row["end"] > lo - 10
+                       for accepted in [self._qualified_context(row, output[row["id"]])]]
+            prompt = self._prompt(prompt_rows, relevant, context)
+            # Hash structured prompt inputs rather than rendered JSON. OCR key
+            # ordering may differ between fresh and cached extraction.
+            stage = {"kind": "review_batch", "rows": prompt_rows,
+                     "evidence": relevant, "context": context, "batch_size": self.BATCH_SIZE}
+            saved = checkpoint.load(stage) if checkpoint else None
+            cached_pair = self._cached_pair(saved, batch, lo, hi)
+            if cached_pair:
+                data, validated = cached_pair
+                first_data = saved["first"]
+                logging.getLogger("ai").info("REVIEW_CHECKPOINT_HIT run_id=%s segment_ids=%s",
+                    current_execution_context().run_id, [row["id"] for row in batch])
+            else:
+                data, validated = self._validated_review_request(client, prompt, batch, lo, hi, check)
+                first_data = deepcopy(data)
             audit_rows = {item["id"]: item for item in data["segments"]}
             # Run a separate semantic pass over the same measured evidence.
             # This catches fluent but over-broad translations (quantifiers,
             # handles and entities) without another OCR scan or audio request.
-            second_pass_complete = False
+            second_pass_complete = bool(cached_pair)
+            second_failure = None
             try:
-                recheck_prompt = (self._prompt(prompt_rows, relevant, context)
+                recheck_prompt = (prompt
                     + "\nĐÂY LÀ LƯỢT KIỂM TRA NGỮ NGHĨA THỨ HAI, ĐỘC LẬP. "
                     "Không mặc định bản nháp đúng. Rà từng mệnh đề, lượng từ, mức độ, @mention, số và chủ thể; "
                     "sửa nếu cần theo nguồn/OCR và giữ needs_review=true nếu còn nghi ngờ. Trả đúng schema, đủ ID.\n"
                     + json.dumps(data["segments"], ensure_ascii=False))
-                checked_data, checked_validated = self._validated_review_request(
-                    client, recheck_prompt, batch, lo, hi, check)
+                checked_data, checked_validated = (cached_pair if cached_pair else self._validated_review_request(
+                    client, recheck_prompt, batch, lo, hi, check))
                 checked_rows = {item["id"]: item for item in checked_data["segments"]}
                 if all(isinstance(row.get("semantic_verified"), bool)
                        and isinstance(row.get("verification_reason"), str)
                        for row in checked_rows.values()):
                     data, validated, audit_rows = checked_data, checked_validated, checked_rows
                     second_pass_complete = True
-            except Exception:
+                else:
+                    raise VideoIntelligenceError("Lượt kiểm định thứ hai thiếu kết luận ngữ nghĩa hợp lệ.")
+            except Exception as error:
                 check()
+                second_failure = self._diagnostic(error, "semantic_second_pass", batch)
             for source in batch:
                 sid = source["id"]
                 proposed, audit = validated["segments"][sid], audit_rows[sid]
@@ -541,7 +664,7 @@ class AutomaticTranslationReviewer:
                 verified = bool(second_pass_complete and supported and audit["semantic_verified"] and not proposed["needs_review"])
                 reason = audit["verification_reason"].strip()[:500]
                 if not second_pass_complete:
-                    reason = "Lượt kiểm tra ngữ nghĩa thứ hai chưa hoàn tất; giữ bản nháp và thử AI kiểm tra lại."
+                    reason = self._diagnostic_message(second_failure) if second_failure else "Lượt kiểm tra ngữ nghĩa thứ hai chưa hoàn tất; giữ bản nháp và thử AI kiểm tra lại."
                 elif invalid_refs:
                     reason = "AI dẫn chứng sai ID hoặc sai thời điểm; giữ bản nháp trước khi kiểm tra."
                 elif changed_source and not supported:
@@ -568,9 +691,14 @@ class AutomaticTranslationReviewer:
                     "reason": reason or "AI đã đối chiếu nghĩa và chữ OCR mới cùng thời điểm.",
                     "translation_changed": changed_translation,
                 }
+                if second_failure:
+                    target["verification"]["diagnostic"] = second_failure
                 output[sid] = target
                 summary["checked"] += 1
                 summary[status] = summary.get(status, 0) + 1
+            if checkpoint and not cached_pair and all(
+                    self._qualified_context({}, output[row["id"]]) for row in batch):
+                checkpoint.store(stage, {"first": first_data, "second": data})
             if progress_callback:
                 progress_callback(round(30 + 45 * (index + 1) / batches, 1))
         result["translation_sources"].append(provenance)

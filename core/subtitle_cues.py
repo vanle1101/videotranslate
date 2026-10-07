@@ -247,8 +247,41 @@ def speech_caption_cues(segment):
     return cues
 
 
-def _trusted_speech_regions(screen_texts):
+def _trusted_speech_regions(screen_texts, segments=None):
+    """Return source subtitle geometry that has independent local evidence.
+
+    OCR rows intentionally remain marked uncertain until the visual reviewer
+    can prove their wording.  A completed speech review is a separate source
+    of evidence, however: when it cites a local OCR box for the same spoken
+    sentence, that box is safe for *placement* (and optional masking) even if
+    the translated screen-text row itself is still unresolved.  We keep the
+    original row untouched and synthesize a layout-only region here so title
+    OCR and unrelated uncertain boxes remain ineligible.
+    """
     regions = []
+    from core.chinese_text import comparable_chinese
+
+    def same_subtitle_box(evidence, box):
+        text = comparable_chinese(evidence.get("text_zh"))
+        for source in screen_texts or []:
+            if (not isinstance(source, dict) or source.get("kind") != "subtitle"
+                    or source.get("source_method") != "local-ocr"
+                    or comparable_chinese(source.get("text_zh")) != text):
+                continue
+            try:
+                sx, sy, sw, sh = map(float, source["bbox"])
+                if float(source["start"]) >= evidence["end"] or float(source["end"]) <= evidence["start"]:
+                    continue
+            except (KeyError, TypeError, ValueError):
+                continue
+            if not all(math.isfinite(v) for v in (sx, sy, sw, sh)) or sw <= 0 or sh <= 0:
+                continue
+            x, y, w, h = box
+            overlap = max(0, min(x + w, sx + sw) - max(x, sx)) * max(0, min(y + h, sy + sh) - max(y, sy))
+            union = w * h + sw * sh - overlap
+            if union > 0 and overlap / union >= .5:
+                return True
+        return False
     for row in screen_texts or []:
         if (not isinstance(row, dict) or row.get("kind") != "subtitle"
                 or (row.get("needs_review") and row.get("source_region_verified") is not True)
@@ -268,6 +301,63 @@ def _trusted_speech_regions(screen_texts):
                 or w <= 0 or h <= 0 or h > .15 or w * h > .20 or x + w > 1 or y + h > 1):
             continue
         regions.append({**row, "start": max(0, start), "end": end, "bbox": [x, y, w, h]})
+
+    # Fresh local OCR cited by a completed semantic speech review carries the
+    # exact time/box measured from the source frames.  Do not trust a draft,
+    # text-only result, or a review that did not establish source support.
+    for segment in segments or []:
+        if not isinstance(segment, dict):
+            continue
+        verification = segment.get("verification")
+        if (not isinstance(verification, dict)
+                or verification.get("status") not in {"verified", "corrected"}
+                or verification.get("source_supported") is not True
+                or verification.get("semantic_verified") is not True
+                or verification.get("second_pass_status") != "completed"
+                or verification.get("evidence_mode") not in {"fresh-ocr-text-review", "dual-local-asr-text-review"}
+                or not isinstance(verification.get("evidence"), list)
+                or not isinstance(verification.get("evidence_ids"), list)):
+            continue
+        try:
+            segment_start, segment_end = float(segment["start"]), float(segment["end"])
+        except (KeyError, TypeError, ValueError):
+            continue
+        source_text = comparable_chinese(segment.get("text_zh"))
+        if not source_text or not all(math.isfinite(v) for v in (segment_start, segment_end)):
+            continue
+        for evidence in verification["evidence"]:
+            if not isinstance(evidence, dict) or evidence.get("id") not in verification["evidence_ids"]:
+                continue
+            evidence_text = comparable_chinese(evidence.get("text_zh"))
+            if not evidence_text or evidence_text not in source_text:
+                continue
+            try:
+                start, end = float(evidence["start"]), float(evidence["end"])
+                x, y, w, h = map(float, evidence["bbox"])
+                confidence = float(evidence.get("confidence", 0))
+            except (KeyError, TypeError, ValueError):
+                continue
+            if (not all(math.isfinite(v) for v in (start, end, x, y, w, h, confidence))
+                    or end <= max(0, start) or end <= segment_start or start >= segment_end
+                    or confidence < .90 or x < 0 or y < 0 or w <= 0 or h <= 0
+                    or h > .15 or w * h > .20 or x + w > 1 or y + h > 1):
+                continue
+            if not same_subtitle_box({**evidence, "start": start, "end": end}, [x, y, w, h]):
+                continue
+            region = {"id": f"review-source-{segment.get('id', '')}-{evidence.get('id', '')}",
+                      "start": max(0, start), "end": end,
+                      "bbox": [x, y, w, h], "confidence": confidence,
+                      "kind": "subtitle", "source_method": "local-ocr",
+                      "source_region_verified": True, "review_evidence": True,
+                      "needs_review": False, "mask_only": False}
+            # Avoid duplicate geometry when the serialized OCR row is already
+            # trusted. A reviewed box should not create competing anchors.
+            duplicate = any(existing["bbox"] == region["bbox"]
+                            and existing["start"] < region["end"]
+                            and existing["end"] > region["start"]
+                            for existing in regions)
+            if not duplicate:
+                regions.append(region)
     return regions
 
 
@@ -281,7 +371,7 @@ def build_caption_layout(segments, screen_texts=None, video_size=None, caption_s
     width, height = video_size or (1080, 1920)
     width, height = max(16, int(width)), max(16, int(height))
     style = normalize_caption_style(caption_style)
-    regions = _trusted_speech_regions(screen_texts)
+    regions = _trusted_speech_regions(screen_texts, segments)
     base_font = max(8, round(min(width * .035, height * .028)))
     margin_x, gap = width * .04, max(2, height * .006)
     # Measured speech cues may contain automatic narrow-screen line breaks.

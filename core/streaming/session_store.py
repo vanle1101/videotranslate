@@ -1,0 +1,526 @@
+"""Durable editable projects. Runtime tasks, engines and credentials never enter a manifest."""
+import json
+import math
+import numbers
+import os
+import re
+import tempfile
+import time
+import wave
+from pathlib import Path
+from urllib.parse import quote, urlsplit, urlunsplit, parse_qsl, urlencode
+
+from config import settings
+
+VERSION = 1
+MAX_BYTES = 16 * 1024 * 1024
+ID_PATTERN = re.compile(r"^[a-zA-Z0-9_-]{1,80}$")
+SEGMENT_FIELDS = frozenset((
+    "id start end duration status text_zh emotion literal_vi natural_vi final_vi tts_duration speed_ratio "
+    "audio_path failed_stage revision source_method translation_provider translation_model evidence_mode "
+    "needs_review review_reason asr_text verification confirmed_silence subtitle_cues subtitle_timing_source "
+    "speech_start speech_end asr_pretranscribed"
+).split())
+SESSION_FIELDS = frozenset((
+    "initial_buffer_seconds voice tts_engine_name asr_engine_name visual_translation total_duration video_size "
+    "screen_texts caption_style caption_style_revision caption_output_outdated translation_sources review_summary "
+    "suppression_stats current_playback_time warnings rolling_context initialized auto_export_result"
+).split())
+PATH_FIELDS = ("video_path", "ref_audio", "raw_audio_16k", "bgm_audio_path")
+META_FIELDS = frozenset((
+    "status reason provider model evidence_mode evidence_ids evidence id start end text_zh confidence bbox "
+    "source_supported semantic_verified second_pass_status translation_changed before_pacing pacing "
+    "source text verified meaning_preserved natural accepted candidate measured_seconds max_speed "
+    "kind text_vi mask_only needs_review review_reason source_method text word words "
+    "checked corrected unresolved manual incomplete version method speech_id duration ratio "
+    "background_color text_color position blur_original suppression_level_db throughput_rtf "
+    "zh vi source_evidence_ids speaker theme terms pronouns name src tgt note "
+    "tts_seconds slot_seconds fit_ratio semantic_status acoustic_status source_region_verified "
+    "reference_zh reference_vi equivalent different_source same_meaning text_preserved "
+    "mode input_duration output_duration sample_rate channels elapsed_seconds rtf "
+    "diagnostic audio_evidence audio_consensus audio_audit_status"
+).split())
+DIAGNOSTIC_STAGES = frozenset((
+    "semantic_request semantic_schema semantic_second_pass ocr_evidence audio_evidence audio_semantic_review"
+).split())
+DIAGNOSTIC_CODES = frozenset((
+    "invalid_response provider_configuration provider_model provider_timeout asr_timeout "
+    "asr_unavailable runtime_unavailable asr_failed provider_failed"
+).split())
+
+
+def _project_path(task_id):
+    if not isinstance(task_id, str) or not ID_PATTERN.fullmatch(task_id):
+        raise ValueError("Mã dự án không hợp lệ.")
+    root = settings.BASE_DIR / "workspace" / "projects"
+    if root.is_symlink():
+        raise ValueError("Thư mục dự án không được là liên kết.")
+    return root / f"{task_id}.json"
+
+
+def _secrets():
+    model_fields = getattr(type(settings), "model_fields", {})
+    return [value for key in model_fields
+            if any(word in key.upper() for word in ("API_KEY", "TOKEN", "PASSWORD"))
+            and isinstance(value := getattr(settings, key, None), str) and len(value) >= 4]
+
+
+def _clean_diagnostic(value, *, depth):
+    """Persist the reviewer's fixed diagnostic schema, never arbitrary errors."""
+    if not isinstance(value, dict):
+        return {}
+    result = {}
+    for key, allowed in (("stage", DIAGNOSTIC_STAGES), ("code", DIAGNOSTIC_CODES)):
+        if isinstance(value.get(key), str) and value[key] in allowed:
+            result[key] = value[key]
+    run_id = value.get("run_id")
+    if isinstance(run_id, str) and (run_id == "[redacted]" or re.fullmatch(r"[A-Za-z0-9_-]{1,64}", run_id)):
+        result["run_id"] = _clean(run_id, depth=depth + 1)
+    segment_ids = value.get("segment_ids")
+    if (isinstance(segment_ids, list) and len(segment_ids) <= 10000
+            and all(type(item) is int and item >= 0 for item in segment_ids)):
+        result["segment_ids"] = list(segment_ids)
+    return result
+
+
+def _clean_audio_evidence(value, *, depth):
+    if not isinstance(value, list) or len(value) > 10000:
+        raise ValueError("Dữ liệu đối chiếu âm thanh không hợp lệ.")
+    result = []
+    for item in value:
+        if (not isinstance(item, dict) or item.get("engine") not in ("sensevoice", "faster-whisper-small")
+                or not isinstance(item.get("text_zh"), str)
+                or not _finite(item.get("start")) or not _finite(item.get("end"))
+                or item["end"] <= item["start"]):
+            continue
+        result.append({"engine": item["engine"], "text_zh": _clean(item["text_zh"], depth=depth + 1),
+                       "start": item["start"], "end": item["end"]})
+    return result
+
+
+def _clean(value, *, depth=0):
+    if depth > 12:
+        raise ValueError("Dữ liệu dự án lồng quá sâu.")
+    if value is None or isinstance(value, bool):
+        return value
+    if isinstance(value, numbers.Real):
+        if not math.isfinite(value):
+            raise ValueError("Dự án chứa mốc số không hợp lệ.")
+        return int(value) if isinstance(value, numbers.Integral) else float(value)
+    if isinstance(value, str):
+        if len(value) > 100_000 or "\x00" in value:
+            raise ValueError("Nội dung dự án quá dài hoặc không hợp lệ.")
+        for secret in _secrets():
+            value = value.replace(secret, "[redacted]")
+        return value
+    if isinstance(value, (list, tuple)):
+        if len(value) > 10000:
+            raise ValueError("Dự án có quá nhiều phần tử.")
+        return [_clean(item, depth=depth + 1) for item in value]
+    if isinstance(value, dict):
+        result = {}
+        for key, item in value.items():
+            if key not in META_FIELDS:
+                continue
+            if key == "diagnostic":
+                result[key] = _clean_diagnostic(item, depth=depth + 1)
+            elif key == "audio_evidence":
+                result[key] = _clean_audio_evidence(item, depth=depth + 1)
+            elif key == "audio_consensus":
+                if type(item) is bool:
+                    result[key] = item
+            elif key == "audio_audit_status":
+                if item == "failed":
+                    result[key] = item
+            else:
+                result[key] = _clean(item, depth=depth + 1)
+        return result
+    raise ValueError("Dự án chứa dữ liệu không thể lưu.")
+
+
+def _local_path(value, *, generated=False):
+    if value is None:
+        return None
+    if not isinstance(value, str) or not value or "\x00" in value or value.startswith(("\\\\", "//")):
+        raise ValueError("Đường dẫn phương tiện không hợp lệ.")
+    path = Path(value)
+    if (not path.is_absolute() or ".." in path.parts or path.is_symlink()
+            or any(parent.is_symlink() for parent in path.parents)
+            or (os.name == "nt" and ":" in value[2:])):
+        raise ValueError("Đường dẫn phương tiện không an toàn.")
+    resolved = path.resolve()
+    if generated and not resolved.is_relative_to((settings.BASE_DIR / "workspace" / "cache").resolve()):
+        raise ValueError("Âm thanh của dự án phải nằm trong cache ứng dụng.")
+    return str(resolved)
+
+
+def _source_url(value):
+    if not isinstance(value, str) or not value:
+        return None
+    parsed = urlsplit(value)
+    if parsed.scheme not in ("http", "https") or not parsed.hostname or parsed.username or parsed.password:
+        return None
+    query = [(key, val) for key, val in parse_qsl(parsed.query)
+             if not any(word in key.lower() for word in ("token", "key", "password", "auth", "cookie"))]
+    return urlunsplit((parsed.scheme, parsed.netloc, parsed.path, urlencode(query), ""))
+
+
+def _filename(value):
+    if not value:
+        return ""
+    if not isinstance(value, str) or Path(value).name != value or "/" in value or "\\" in value or ":" in value:
+        raise ValueError("Tên video kết quả không hợp lệ.")
+    return value
+
+
+def save_session(session):
+    target = _project_path(session.task_id)
+    fields = {key: _clean(getattr(session, key)) for key in SESSION_FIELDS if hasattr(session, key)}
+    for key in PATH_FIELDS:
+        path = getattr(session, key, None)
+        fields[key] = _local_path(str(Path(path).resolve()), generated=key in ("raw_audio_16k", "bgm_audio_path")) if path else None
+    fields["source_url"] = _source_url(getattr(session, "source_url", None))
+    fields["output_filename"] = _filename(getattr(session, "output_filename", ""))
+    review_url = getattr(session, "output_review_url", "")
+    fields["review_filename"] = _filename(review_url.rsplit("/", 1)[-1]) if review_url else ""
+    rows = []
+    for segment in session.segments.values():
+        row = {key: _clean(getattr(segment, key)) for key in SEGMENT_FIELDS if hasattr(segment, key)}
+        row["audio_path"] = _local_path(row.get("audio_path"), generated=True)
+        rows.append(row)
+    inferred_duration = max((float(row.get("end", 0)) for row in rows), default=0.0)
+    if not fields.get("total_duration") and inferred_duration:
+        fields["total_duration"] = inferred_duration
+    payload = {"version": VERSION, "task_id": session.task_id, "updated_at": time.time(),
+               "state": "STOPPED" if session.is_stopped else "FAILED" if session.error else
+               "RUNNING" if session.is_running or session.is_editing else "READY",
+               "session": fields, "segments": rows}
+    _validate(payload, session.task_id)
+    encoded = json.dumps(payload, ensure_ascii=False, allow_nan=False, separators=(",", ":"))
+    if len(encoded.encode("utf-8")) > MAX_BYTES:
+        raise ValueError("Dự án vượt quá dung lượng lưu cho phép.")
+    target.parent.mkdir(parents=True, exist_ok=True)
+    if target.is_symlink():
+        raise ValueError("Tệp dự án không được là liên kết.")
+    temporary = None
+    try:
+        with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8", suffix=".tmp", dir=target.parent, delete=False) as handle:
+            temporary = Path(handle.name)
+            handle.write(encoded)
+            handle.flush()
+            os.fsync(handle.fileno())
+        temporary.replace(target)
+    finally:
+        if temporary:
+            temporary.unlink(missing_ok=True)
+    return target
+
+
+def _finite(value, minimum=0):
+    return type(value) in (int, float) and math.isfinite(value) and value >= minimum
+
+
+def _validate(data, task_id):
+    if (not isinstance(data, dict) or set(data) != {"version", "task_id", "updated_at", "state", "session", "segments"}
+            or data["version"] != VERSION or data["task_id"] != task_id or not _finite(data["updated_at"])
+            or data["state"] not in {"STOPPED", "FAILED", "RUNNING", "READY"}):
+        raise ValueError("Tệp dự án không đúng định dạng.")
+    fields, rows = data["session"], data["segments"]
+    if not isinstance(fields, dict) or set(fields) - (SESSION_FIELDS | set(PATH_FIELDS) | {"source_url", "output_filename", "review_filename"}):
+        raise ValueError("Cấu hình dự án không hợp lệ.")
+    for key in PATH_FIELDS:
+        fields[key] = _local_path(fields.get(key), generated=key in ("raw_audio_16k", "bgm_audio_path"))
+    for key in ("output_filename", "review_filename"):
+        fields[key] = _filename(fields.get(key))
+    fields["source_url"] = _source_url(fields.get("source_url"))
+    duration = fields.get("total_duration", 0)
+    if not _finite(duration) or duration > 86400:
+        raise ValueError("Thời lượng dự án không hợp lệ.")
+    for key in ("voice", "tts_engine_name", "asr_engine_name"):
+        if not isinstance(fields.get(key), str) or not fields[key] or len(fields[key]) > 200:
+            raise ValueError("Cấu hình giọng hoặc nhận diện không hợp lệ.")
+    for key in ("visual_translation", "initialized", "caption_output_outdated", "auto_export_result"):
+        if key in fields and type(fields[key]) is not bool:
+            raise ValueError("Trạng thái dự án không hợp lệ.")
+    for key in ("screen_texts", "translation_sources", "warnings", "rolling_context"):
+        if not isinstance(fields.get(key, []), list):
+            raise ValueError("Dữ liệu dự án không hợp lệ.")
+    for key in ("caption_style", "review_summary", "suppression_stats"):
+        if not isinstance(fields.get(key, {}), dict):
+            raise ValueError("Siêu dữ liệu dự án không hợp lệ.")
+    style = fields.get("caption_style", {})
+    if (set(style) - {"background_color", "text_color", "position", "blur_original"}
+            or style.get("position", "auto") not in {"auto", "top", "middle", "bottom"}
+            or type(style.get("blur_original", False)) is not bool
+            or any(not isinstance(style[key], str) or not re.fullmatch(r"#[0-9a-fA-F]{6}", style[key])
+                   for key in ("text_color", "background_color") if key in style and not (key == "background_color" and style[key] is None))):
+        raise ValueError("Kiểu phụ đề đã lưu không hợp lệ.")
+    revision = fields.get("caption_style_revision", 0)
+    if type(revision) is not int or revision < 0:
+        raise ValueError("Phiên bản phụ đề không hợp lệ.")
+    summary = fields.get("review_summary", {})
+    if summary.get("status") not in {None, "running", "completed", "failed", "incomplete"}:
+        raise ValueError("Trạng thái kiểm tra bản dịch không hợp lệ.")
+    for key in ("checked", "verified", "corrected", "unresolved", "manual", "incomplete"):
+        if key in summary and (type(summary[key]) is not int or summary[key] < 0):
+            raise ValueError("Số câu đã kiểm tra không hợp lệ.")
+    for screen in fields.get("screen_texts", []):
+        if (not isinstance(screen, dict) or not _finite(screen.get("start")) or not _finite(screen.get("end"))
+                or not screen["start"] < screen["end"] <= duration + .1):
+            raise ValueError("Vùng chữ trên hình không hợp lệ.")
+        box = screen.get("bbox")
+        if box is not None and (not isinstance(box, list) or len(box) != 4 or any(not _finite(v) for v in box)):
+            raise ValueError("Vị trí chữ trên hình không hợp lệ.")
+    for source in fields.get("translation_sources", []):
+        if not isinstance(source, dict) or not isinstance(source.get("provider"), str):
+            raise ValueError("Nguồn bản dịch đã lưu không hợp lệ.")
+    if not _finite(fields.get("current_playback_time", 0)) or not _finite(fields.get("initial_buffer_seconds", 0)):
+        raise ValueError("Mốc phát video không hợp lệ.")
+    size = fields.get("video_size", [1080, 1920])
+    if not isinstance(size, list) or len(size) != 2 or any(type(v) is not int or not 0 < v <= 16384 for v in size):
+        raise ValueError("Kích thước video không hợp lệ.")
+    if not isinstance(rows, list) or len(rows) > 10000:
+        raise ValueError("Danh sách câu thoại không hợp lệ.")
+    ids = set()
+    for row in rows:
+        if not isinstance(row, dict) or set(row) - SEGMENT_FIELDS or type(row.get("id")) is not int or row["id"] < 0 or row["id"] in ids:
+            raise ValueError("Mã câu thoại không hợp lệ.")
+        ids.add(row["id"])
+        if (not all(_finite(row.get(k)) for k in ("start", "end", "duration"))
+                or not row["start"] < row["end"] <= duration + .1
+                or abs(row["end"] - row["start"] - row["duration"]) > .02):
+            raise ValueError("Thời gian câu thoại không hợp lệ.")
+        if row.get("status") not in {"WAITING", "ASR", "TRANSLATING", "TTS", "ALIGNING", "READY", "PLAYED", "FAILED", "NEEDS_REVIEW"}:
+            raise ValueError("Trạng thái câu thoại không hợp lệ.")
+        for key in ("text_zh", "final_vi", "literal_vi", "natural_vi", "emotion", "asr_text", "subtitle_timing_source"):
+            if key in row and not isinstance(row[key], str):
+                raise ValueError("Nội dung câu thoại không hợp lệ.")
+        if not isinstance(row.get("subtitle_cues", []), list) or not isinstance(row.get("verification") or {}, dict):
+            raise ValueError("Mốc phụ đề không hợp lệ.")
+        if type(row.get("revision", 0)) is not int or row.get("revision", 0) < 0:
+            raise ValueError("Phiên bản câu thoại không hợp lệ.")
+        for key in ("needs_review", "confirmed_silence", "asr_pretranscribed"):
+            if key in row and type(row[key]) is not bool:
+                raise ValueError("Trạng thái câu thoại không hợp lệ.")
+        for key in ("tts_duration", "speed_ratio"):
+            if key in row and not _finite(row[key]):
+                raise ValueError("Thời lượng giọng đọc không hợp lệ.")
+        for cue in row.get("subtitle_cues", []):
+            if (not isinstance(cue, dict) or not isinstance(cue.get("text"), str)
+                    or not _finite(cue.get("start")) or not _finite(cue.get("end"))
+                    or not row["start"] - .05 <= cue["start"] < cue["end"] <= row["end"] + .05):
+                raise ValueError("Mốc phụ đề không khớp câu thoại.")
+            if not isinstance(cue.get("words", []), list):
+                raise ValueError("Mốc từ trong phụ đề không hợp lệ.")
+            for word in cue.get("words", []):
+                if (not isinstance(word, dict) or not isinstance(word.get("text"), str)
+                        or not _finite(word.get("start")) or not _finite(word.get("end"))
+                        or not cue["start"] - .05 <= word["start"] <= word["end"] <= cue["end"] + .05):
+                    raise ValueError("Mốc từ không khớp phụ đề.")
+        row["audio_path"] = _local_path(row.get("audio_path"), generated=True)
+        if row["audio_path"] and Path(row["audio_path"]) != (settings.BASE_DIR / "workspace" / "cache" / task_id / "segments" / f"seg_{row['id']}.wav").resolve():
+            raise ValueError("Âm thanh câu thoại không thuộc dự án này.")
+    # Bounded tree and finite numbers; do not permit manifest-injected credentials.
+    for key, value in fields.items():
+        fields[key] = _clean(value)
+    for row in rows:
+        for key, value in row.items():
+            row[key] = _clean(value)
+    return data
+
+
+def _read(task_id):
+    path = _project_path(task_id)
+    if not path.exists():
+        raise FileNotFoundError("Không tìm thấy dự án đã lưu.")
+    if path.is_symlink() or not path.is_file() or path.stat().st_size > MAX_BYTES:
+        raise ValueError("Không tìm thấy tệp dự án hợp lệ.")
+    return _validate(json.loads(path.read_text(encoding="utf-8")), task_id)
+
+
+def _exists(value):
+    try:
+        return bool(value and Path(value).is_file() and Path(value).stat().st_size > 0)
+    except OSError:
+        return False
+
+
+def _valid_audio(value):
+    if not _exists(value):
+        return False
+    try:
+        with wave.open(str(value), "rb") as audio:
+            frames, width, channels = audio.getnframes(), audio.getsampwidth(), audio.getnchannels()
+            if not frames or not 1 <= channels <= 2 or width not in (1, 2, 3, 4) or audio.getframerate() <= 0:
+                return False
+            # Check actual last frame too: a surviving header is not valid TTS.
+            audio.setpos(frames - 1)
+            return len(audio.readframes(1)) == width * channels
+    except (OSError, EOFError, ValueError, wave.Error):
+        return False
+
+
+def _availability(data):
+    fields, rows = data["session"], data["segments"]
+    missing = []
+    pending_download = not fields.get("video_path") and bool(fields.get("source_url"))
+    if not _exists(fields.get("video_path")) and not pending_download:
+        missing.append("Thiếu video gốc; hãy khôi phục tệp về vị trí đã lưu.")
+    if fields.get("bgm_audio_path") and not _exists(fields["bgm_audio_path"]):
+        missing.append("Thiếu âm thanh nền đã lưu; bản xem trước chưa phát đầy đủ.")
+    absent_audio = [row["id"] for row in rows if row.get("final_vi", "").strip()
+                    and row["status"] in {"READY", "PLAYED"} and not _valid_audio(row.get("audio_path"))]
+    if absent_audio:
+        missing.append(f"Thiếu âm thanh của {len(absent_audio)} câu; bấm Tiếp tục để tạo lại phần thiếu.")
+    ready = bool(fields.get("initialized") and all(row["status"] in {"READY", "PLAYED"} for row in rows)
+                 and not absent_audio and not missing)
+    if fields.get("review_summary", {}).get("status") in {"failed", "incomplete", "running"}:
+        ready = False
+    output = fields.get("output_filename", "")
+    valid_output = bool(output and not fields.get("caption_output_outdated") and _exists(settings.OUTPUT_DIR / output))
+    review_incomplete = fields.get("review_summary", {}).get("status") in {"failed", "incomplete", "running"}
+    status = "COMPLETED" if ready else "FAILED" if missing or data["state"] == "FAILED" or review_incomplete else "STOPPED"
+    message = " ".join(missing)
+    if pending_download:
+        message = "Tải video chưa xong; mở dự án và bấm Tiếp tục để khôi phục phần đã tải."
+    elif review_incomplete and not message:
+        message = "AI kiểm tra lại chưa hoàn tất; mở dự án và bấm AI kiểm tra lại để tiếp tục."
+    elif not ready and not message and fields.get("initialized") and rows and all(
+            row["status"] in {"READY", "PLAYED"} or row.get("final_vi", "").strip()
+            or row.get("confirmed_silence") or row.get("needs_review") for row in rows):
+        message = "Phần tạo giọng chưa xong; bấm Tiếp tục. Video và bản dịch đã kiểm tra được giữ nguyên."
+    if not ready and not message:
+        message = "Tác vụ trước đã gián đoạn; mở dự án để xem phần đã lưu và tiếp tục."
+    return {"status": status, "missing_media": message, "ready": ready, "source_exists": _exists(fields.get("video_path")),
+            "pending_download": pending_download,
+            "missing_audio_ids": absent_audio, "output_filename": output if valid_output and ready else ""}
+
+
+def list_saved_sessions():
+    root = _project_path("index").parent
+    result = []
+    if not root.exists():
+        return result
+    for path in root.glob("*.json"):
+        if not ID_PATTERN.fullmatch(path.stem):
+            continue
+        try:
+            data = _read(path.stem)
+            available = _availability(data)
+            fields = data["session"]
+            title = Path(fields["video_path"]).name if fields.get("video_path") else fields.get("source_url") or path.stem
+            result.append({"task_id": path.stem, "title": title, "updated_at": data["updated_at"],
+                "status": available["status"], "can_open": available["source_exists"] or available["pending_download"], "duration": fields.get("total_duration", 0),
+                "saved": True, "task_type": "Phiên đã lưu", "progress_pct": 100 if available["ready"] else None,
+                "missing_media": available["missing_media"], "stage": available["missing_media"] or "Dự án đã lưu",
+                "output_filename": available["output_filename"],
+                "output_video_url": f"/api/outputs/{available['output_filename']}" if available["output_filename"] else "",
+                "video_url": f"/api/outputs/{available['output_filename']}" if available["output_filename"] else "",
+                "review_url": f"/api/outputs/{fields['review_filename']}" if available["output_filename"] and fields.get("review_filename") and _exists(settings.OUTPUT_DIR / fields['review_filename']) else ""})
+        except (OSError, ValueError, TypeError, KeyError):
+            result.append({"task_id": path.stem, "title": path.stem, "updated_at": 0,
+                "status": "FAILED", "can_open": False, "output_filename": "", "output_video_url": "",
+                "missing_media": "Tệp dự án bị hỏng hoặc không hợp lệ; video đã xuất vẫn được giữ."})
+    return sorted(result, key=lambda row: row["updated_at"], reverse=True)
+
+
+def restore_saved_session(task_id, event_callback=None):
+    from core.streaming.pipeline import StreamingPipelineSession, SegmentItem, active_streaming_sessions
+    if task_id in active_streaming_sessions:
+        return active_streaming_sessions[task_id]
+    data = _read(task_id)
+    fields = data["session"]
+    available = _availability(data)
+    session = StreamingPipelineSession(task_id, Path(fields["video_path"]) if fields.get("video_path") else None,
+        voice=fields["voice"], tts_engine_name=fields["tts_engine_name"], asr_engine_name=fields["asr_engine_name"],
+        visual_translation=fields.get("visual_translation", False), event_callback=event_callback, _restoring=True)
+    for key in SESSION_FIELDS:
+        if key in fields:
+            setattr(session, key, fields[key])
+    for key in PATH_FIELDS:
+        setattr(session, key, Path(fields[key]) if fields.get(key) else None)
+    if "auto_export_result" not in fields:
+        # The first manifest version omitted this existing UI default. Recover
+        # it only for the same reviewed OpenCode visual workflow that enabled
+        # automatic export originally; never change an explicit false setting.
+        sources = fields.get("translation_sources", [])
+        session.auto_export_result = bool(session.visual_translation
+            and settings.LLM_PROVIDER == "opencode"
+            and fields.get("review_summary", {}).get("status") == "completed"
+            and sources and all(item.get("provider") == "opencode" for item in sources))
+    session.source_url = fields.get("source_url")
+    session.video_size = tuple(fields.get("video_size", [1080, 1920]))
+    session.source_video_url = f"/api/local-file?path={quote(session.video_path.as_posix(), safe='')}" if session.video_path else None
+    session.bgm_url = f"/api/streaming/bgm/{task_id}" if _exists(session.bgm_audio_path) else None
+    needs_preparation_resume = False
+    for row in data["segments"]:
+        segment = SegmentItem(row["id"], row["start"], row["end"], row["duration"])
+        for key, value in row.items():
+            setattr(segment, key, value)
+        if row["id"] in available["missing_audio_ids"] or row["status"] not in {"READY", "PLAYED", "NEEDS_REVIEW"}:
+            # A saved spoken line can resume directly at TTS. A row without a
+            # translation needs the normal preparation/translation path again.
+            if segment.final_vi or segment.confirmed_silence or (segment.source_method in {"text-ai", "video-ai"} and segment.needs_review):
+                segment.failed_stage = "TTS"
+            else:
+                segment.failed_stage = row.get("failed_stage") or row["status"]
+                needs_preparation_resume = True
+            segment.status = "FAILED"
+            segment.error = "Câu thoại bị gián đoạn hoặc thiếu tệp âm thanh; cần tiếp tục xử lý."
+        if _valid_audio(segment.audio_path):
+            segment.audio_url = f"/api/streaming/audio/{task_id}/{segment.id}?rev={segment.revision}"
+        else:
+            segment.audio_path = segment.audio_url = None
+        session.segments[segment.id] = segment
+    if session.review_summary.get("status") == "running":
+        session.review_summary["status"] = "incomplete"
+    reviewed_before_init = bool(not session.initialized and session.visual_translation and session.segments
+        and session.review_summary.get("status") == "completed"
+        and all(s.source_method in {"text-ai", "video-ai"} and s.translation_provider
+                and (s.final_vi.strip() or s.needs_review or s.confirmed_silence)
+                for s in session.segments.values()))
+    if reviewed_before_init:
+        # review_complete is durable before the later init event. A shutdown in
+        # that small interval must resume at TTS, not submit the draft/review again.
+        session.initialized = True
+    session.output_filename = available["output_filename"]
+    session.output_video_url = f"/api/outputs/{session.output_filename}" if session.output_filename else ""
+    review = fields.get("review_filename", "")
+    session.output_review_url = f"/api/outputs/{review}" if session.output_filename and _exists(settings.OUTPUT_DIR / review) else ""
+    session.total_processed_duration = sum(s.duration for s in session.segments.values() if s.status in {"READY", "PLAYED"})
+    session.current_playback_time = min(session.current_playback_time, session.total_duration)
+    session._recalculate_telemetry()
+    session.first_play_emitted = bool(session.initialized and _exists(session.video_path) and session.bgm_url)
+    session._prepared = _exists(session.raw_audio_16k) and _exists(session.bgm_audio_path)
+    incomplete = any(s.status == "FAILED" for s in session.segments.values())
+    source_missing = not _exists(session.video_path)
+    session._restored_source_missing = source_missing and not available["pending_download"]
+    if incomplete or source_missing:
+        session.error = available["missing_media"] or "Tác vụ trước bị gián đoạn; bấm Tiếp tục để xử lý phần còn lại."
+    elif available["missing_media"]:
+        session.warnings.append(available["missing_media"])
+    session.progress = {"phase": "complete" if available["ready"] else "restored",
+        "stage": available["missing_media"] or "Đã khôi phục bản dịch và giọng đọc đã lưu.",
+        "progress_pct": 100 if available["ready"] else None, "status": available["status"]}
+    # Fully prepared translations can retry TTS without ASR or a provider request.
+    # Earlier interrupted preparation is restarted explicitly using the same source/checkpoints.
+    session._restored_can_resume = bool(session.initialized and not source_missing
+        and (not needs_preparation_resume or _exists(session.raw_audio_16k)))
+    if not session.initialized and (not source_missing or available["pending_download"]):
+        session.initialized = False
+        session._startup_failed = True
+        session.error = "Chuẩn bị video bị gián đoạn; bấm Tiếp tục để khôi phục phần đã lưu."
+        if available["pending_download"]:
+            session._source_downloader = _SavedSourceDownloader()
+    session._persistence_enabled = True
+    session._restored_project = True
+    active_streaming_sessions[task_id] = session
+    return session
+
+
+class _SavedSourceDownloader:
+    def download(self, *args, **kwargs):
+        # Restoring history never contacts a network service. Resolve the normal
+        # downloader only after the user explicitly resumes a pending download.
+        from core.downloader import VideoDownloader
+        return VideoDownloader().download(*args, **kwargs)

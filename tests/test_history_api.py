@@ -1,0 +1,77 @@
+"""Opening saved projects does not start the translation workflow."""
+import asyncio
+import wave
+from pathlib import Path
+from unittest.mock import Mock
+
+import pytest
+
+import main
+from config import settings
+from core.streaming.pipeline import StreamingPipelineSession, SegmentItem, active_streaming_sessions
+
+
+@pytest.fixture
+def saved_project(tmp_path, monkeypatch):
+    for name in ("BASE_DIR", "WORKSPACE_DIR", "INPUT_DIR", "OUTPUT_DIR", "TEMP_DIR"):
+        path = tmp_path if name == "BASE_DIR" else tmp_path / "workspace" if name == "WORKSPACE_DIR" else tmp_path / name
+        path.mkdir(parents=True, exist_ok=True)
+        monkeypatch.setattr(settings, name, path)
+    session = StreamingPipelineSession("history-test", settings.INPUT_DIR / "source.mp4")
+    session.video_path.write_bytes(b"existing source")
+    session.initialized = True
+    session.total_duration = 2
+    session.video_size = (1920, 1080)
+    segment = SegmentItem(0, 0, 2, 2)
+    segment.final_vi = "Lời đã sửa."
+    segment.text_zh = "你好"
+    segment.status = "READY"
+    segment.revision = 3
+    segment.verification = {"status": "manual"}
+    segment.audio_path = str(session.segments_dir / "seg_0.wav")
+    with wave.open(segment.audio_path, "wb") as wav:
+        wav.setparams((1, 2, 24000, 0, "NONE", "not compressed"))
+        wav.writeframes(b"\x01\x00" * 48000)
+    session.segments[0] = segment
+    session.caption_style = {"background_color": "#123456", "text_color": "#FFFFFF", "position": "top", "blur_original": False}
+    session.caption_style_revision = 2
+    session.caption_output_outdated = True
+    session.persist()
+    monkeypatch.setattr(main, "active_export_tasks", {})
+    monkeypatch.setattr(main, "task_history", [])
+    old = dict(active_streaming_sessions)
+    active_streaming_sessions.clear()
+    yield session
+    active_streaming_sessions.clear()
+    active_streaming_sessions.update(old)
+
+
+def test_history_then_attach_restores_exact_edits_without_provider(saved_project, monkeypatch):
+    monkeypatch.setattr(StreamingPipelineSession, "start", Mock(side_effect=AssertionError("must not start")))
+    async def run():
+        history = (await main.list_tasks())["tasks"]
+        row = next(row for row in history if row["task_id"] == saved_project.task_id)
+        assert row["saved"] and row["can_open"] and row["title"] == "source.mp4"
+        assert not row["video_url"]
+        snapshot = await main.streaming_snapshot(saved_project.task_id)
+        assert snapshot["segments"][0]["final_vi"] == "Lời đã sửa."
+        assert snapshot["segments"][0]["revision"] == 3
+        assert snapshot["caption_style"] == saved_project.caption_style
+        assert snapshot["voice"] == saved_project.voice
+        assert snapshot["tts_engine"] == saved_project.tts_engine_name
+        assert snapshot["output_outdated"] is True
+        assert snapshot["progress"]["status"] == "COMPLETED"
+        restored = active_streaming_sessions[saved_project.task_id]
+        assert restored.worker_task is None and restored.start_task is None
+        assert Path(restored.segments[0].audio_path).read_bytes() == Path(saved_project.segments[0].audio_path).read_bytes()
+    asyncio.run(run())
+
+
+def test_removed_source_is_reported_in_history(saved_project):
+    saved_project.video_path.unlink()
+    rows = asyncio.run(main.list_tasks())["tasks"]
+    row = next(row for row in rows if row["task_id"] == saved_project.task_id)
+    assert row["status"] == "FAILED" and "Thiếu video" in row["stage"]
+    snapshot = asyncio.run(main.streaming_snapshot(saved_project.task_id))
+    assert snapshot["progress"]["status"] == "FAILED"
+    assert snapshot["output_video_url"] == ""

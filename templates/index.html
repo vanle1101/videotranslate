@@ -12,15 +12,15 @@
   
   <header class="app-header">
     <div class="app-brand">
-      <div class="app-logo" aria-hidden="true"><i class="fa-solid fa-bolt-lightning"></i></div>
+      <div class="app-logo" aria-hidden="true"><img src="/static/studio-mark.svg" alt=""></div>
       <div class="app-brand-copy">
         <h1>Douyin2TikTok AI Studio</h1>
-        <p>{{ settings.ASR_ENGINE }} {{ settings.WHISPER_MODEL_SIZE }} · {{ settings.DEVICE | upper }} · {{ settings.TTS_ENGINE }}</p>
+        <p>Dịch video · Lồng tiếng · Biên tập phụ đề</p>
       </div>
     </div>
     <nav class="app-navigation" aria-label="Điều hướng ứng dụng">
-      <button id="tab-studio" class="nav-btn text-white bg-pink-600/80"><i class="fa-solid fa-play" aria-hidden="true"></i> Studio</button>
-      <button id="tab-tasks" class="nav-btn text-gray-400"><i class="fa-solid fa-list-check" aria-hidden="true"></i> Tác vụ</button>
+      <button id="tab-studio" class="nav-btn text-white bg-pink-600/80"><i class="fa-solid fa-house" aria-hidden="true"></i> Studio</button>
+      <button id="tab-tasks" class="nav-btn text-gray-400"><i class="fa-solid fa-list-check" aria-hidden="true"></i> Tác vụ &amp; Lịch sử</button>
       <button id="tab-models" class="nav-btn text-gray-400"><i class="fa-solid fa-layer-group" aria-hidden="true"></i> Models</button>
       <button id="tab-diagnostics" class="nav-btn text-gray-400"><i class="fa-solid fa-wave-square" aria-hidden="true"></i> Diagnostics</button>
       <button id="tab-settings" class="nav-btn text-gray-400"><i class="fa-solid fa-gear" aria-hidden="true"></i> Cài đặt</button>
@@ -32,7 +32,7 @@
     <section class="telemetry-ribbon" aria-label="Trạng thái phát và xử lý">
       <div class="telemetry-metrics">
         <div class="telemetry-item"><i class="fa-solid fa-circle" aria-hidden="true"></i><span>Đang phát:</span><strong id="tel-playing">00:00</strong></div>
-        <div class="telemetry-item"><i class="fa-solid fa-shield-heart" aria-hidden="true"></i><span>Playable:</span><strong id="tel-playable">00:00</strong></div>
+        <div class="telemetry-item"><i class="fa-solid fa-play" aria-hidden="true"></i><span>Đã sẵn sàng:</span><strong id="tel-playable">00:00</strong></div>
         <div class="telemetry-item"><i class="fa-solid fa-database" aria-hidden="true"></i><span>Buffer:</span><strong id="tel-buffer">+0.0s</strong></div>
         <div class="telemetry-item"><i class="fa-solid fa-stopwatch" aria-hidden="true"></i><span>TTFP:</span><strong id="tel-ttfp">--</strong></div>
         <div class="telemetry-item"><i class="fa-solid fa-gauge-high" aria-hidden="true"></i><span>RTF:</span><strong id="tel-rtf">0.0x</strong></div>
@@ -44,7 +44,8 @@
     <main class="studio-workspace">
       <aside class="studio-controls" aria-label="Nguồn video và cấu hình">
         <section class="studio-source-card studio-card" aria-labelledby="source-heading">
-          <h2 id="source-heading" class="studio-card-heading"><i class="fa-solid fa-link" aria-hidden="true"></i>1. VIDEO NGUỒN (DOUYIN / URL / FILE)</h2>
+          <h2 id="source-heading" class="studio-card-heading"><span class="step-number" aria-hidden="true">1</span>Video nguồn <small>(Douyin / URL / File)</small></h2>
+          <p class="panel-description">Dán nội dung chia sẻ hoặc tải video từ máy.</p>
           <div class="source-tabs" role="group" aria-label="Kiểu nguồn video">
             <button id="source-tab-url" type="button" class="source-tab is-active" aria-pressed="true"><i class="fa-solid fa-link" aria-hidden="true"></i> URL</button>
             <button id="source-tab-file" type="button" class="source-tab" aria-pressed="false"><i class="fa-regular fa-file-video" aria-hidden="true"></i> Tải file</button>
@@ -66,12 +67,13 @@
           <div id="drop-zone" role="button" tabindex="0" aria-label="Chọn video từ máy" class="source-drop-zone">
             <input type="file" id="video-file" accept="video/*" class="hidden">
             <i class="fa-solid fa-cloud-arrow-up" aria-hidden="true"></i>
-            <p id="file-name-display">Chọn video từ máy</p>
-            <span>Hỗ trợ: MP4, MOV, WebM, MKV (kéo thả trực tiếp từ Explorer)</span>
+            <p id="file-name-display">Kéo &amp; thả video vào đây</p>
+            <span>Hoặc bấm để chọn file từ máy tính<br>MP4, MOV, WebM, MKV</span>
           </div>
         </section>
         <section class="studio-action-card studio-card" aria-labelledby="action-heading">
-          <h2 id="action-heading" class="studio-card-heading"><i class="fa-solid fa-sliders" aria-hidden="true"></i>2. DỊCH VÀ LỒNG TIẾNG</h2>
+          <h2 id="action-heading" class="studio-card-heading"><i class="fa-solid fa-microphone-lines" aria-hidden="true"></i>2. Dịch và lồng tiếng</h2>
+          <p class="panel-description">Đối chiếu nguồn, dịch và căn nhịp lời đọc.</p>
           <label class="visual-translation-option" title="Đối chiếu lời nói với chữ trên video, rồi tự rà và sửa bản dịch trước khi tạo giọng."><input id="visual-translation" type="checkbox" aria-describedby="visual-translation-help" {% if settings.LLM_PROVIDER in ('gemini', 'openrouter-free', 'opencode') %}checked{% endif %}><span>AI kiểm tra bản dịch</span></label>
           <span id="visual-translation-help" class="sr-only">Đối chiếu lời nói với chữ trên video, rồi tự rà và sửa bản dịch trước khi tạo giọng.</span>
           <div id="task-progress" class="hidden task-progress" aria-label="Tiến độ xử lý video">
@@ -89,7 +91,7 @@
             <button id="btn-stop-worker" class="hidden"><i class="fa-solid fa-stop" aria-hidden="true"></i> Dừng hẳn</button>
           </div>
           <button id="btn-export-hq" disabled title="Hoàn tất các câu dịch trước khi xuất video" class="studio-export-button"><i class="fa-solid fa-arrow-up-from-bracket" aria-hidden="true"></i>Xuất video MP4</button>
-          <button id="btn-save-result" class="studio-export-button" disabled title="Có thể lưu sau khi xuất xong toàn bộ video">Tải video đầy đủ đã dịch</button>
+          <button id="btn-save-result" class="studio-export-button" disabled title="Có thể lưu sau khi xuất xong toàn bộ video"><i class="fa-solid fa-download" aria-hidden="true"></i>Tải video đầy đủ đã dịch</button>
           <div id="task-result" class="hidden" role="status">
             <p id="task-result-status" class="task-progress-detail"></p>
             <a id="task-result-link" class="studio-export-button hidden">Xem trước kết quả</a>
@@ -98,10 +100,10 @@
         </section>
       </aside>
 
-      <section class="studio-preview studio-card" aria-label="Video và điều chỉnh âm thanh">
-        <div class="studio-player-card">
+      <section class="studio-preview" aria-label="Video và điều chỉnh âm thanh">
+        <div class="studio-player-card studio-card">
           <div class="studio-player-heading">
-            <h2 class="studio-card-heading"><i class="fa-solid fa-video" aria-hidden="true"></i>XEM TRƯỚC VIDEO</h2>
+            <h2 class="studio-card-heading"><i class="fa-solid fa-video" aria-hidden="true"></i>Xem trước video</h2>
             <div class="player-options">
               <label title="Hiện phụ đề lời thoại tiếng Việt ở dưới video."><input type="checkbox" id="toggle-subtitles" checked> Hiện Sub Việt</label>
               <label title="Giữ sub Trung và đặt lời Việt ngay bên dưới. Nếu không thấy sub gốc, đặt lời Việt nhỏ ở đáy hình."><input type="checkbox" id="toggle-screen-text" checked aria-label="Tự đặt lời Việt dưới phụ đề Trung"> Tự đặt vị trí sub</label>
@@ -123,7 +125,7 @@
                     <div id="player-progress-track" class="player-progress-track" role="progressbar" aria-label="Tiến độ tải video" aria-valuemin="0" aria-valuemax="100"><div id="player-progress-bar" class="player-progress-bar"></div></div>
                   </div>
                 </div>
-                <div id="player-placeholder" class="player-placeholder"><i class="fa-solid fa-film" aria-hidden="true"></i><p>Chưa có video được nạp</p><span>Dán link Douyin hoặc kéo thả video để bắt đầu.</span></div>
+                <div id="player-placeholder" class="player-placeholder"><img class="empty-video-art" src="/static/studio-empty.svg" alt=""><p>Chưa có video được nạp</p><span>Dán link Douyin/TikTok hoặc tải video từ máy tính để bắt đầu dịch và lồng tiếng.</span><div class="preview-features" aria-hidden="true"><span><i class="fa-solid fa-film"></i>Nhiều định dạng</span><span><i class="fa-regular fa-circle-play"></i>Xem trước trực tiếp</span><span><i class="fa-solid fa-font"></i>Chỉnh phụ đề</span><span><i class="fa-solid fa-volume-high"></i>Giọng lồng tiếng</span></div></div>
               </div>
             </div>
             <p id="player-task-status" class="player-task-status hidden" role="status"></p>
@@ -142,7 +144,7 @@
           </div>
         </div>
         <section class="studio-audio-panel" aria-labelledby="audio-heading">
-          <h3 id="audio-heading"><i class="fa-solid fa-headphones" aria-hidden="true"></i>ĐIỀU CHỈNH ÂM THANH</h3>
+          <h3 id="audio-heading"><i class="fa-solid fa-headphones" aria-hidden="true"></i>Điều chỉnh âm thanh</h3>
           <div class="audio-mixers">
             <div class="audio-mixer"><i class="fa-solid fa-microphone-lines" aria-hidden="true"></i><label for="vol-dub">Giọng Việt</label><input type="range" id="vol-dub" min="0" max="1" step="0.05" value="1.0"><span id="vol-dub-val">100%</span></div>
             <div class="audio-mixer audio-mixer-bgm"><i class="fa-solid fa-music" aria-hidden="true"></i><label for="vol-bgm">BGM & SFX</label><input type="range" id="vol-bgm" min="0" max="1" step="0.05" value="0.30"><span id="vol-bgm-val">30%</span></div>
@@ -170,7 +172,7 @@
       <aside class="studio-sidebar" aria-label="Transcript và giọng lồng tiếng">
         <section class="transcript-panel studio-card" aria-labelledby="transcript-heading">
           <div class="transcript-heading"><h2 id="transcript-heading"><i class="fa-regular fa-file-lines" aria-hidden="true"></i>Transcript</h2><span id="segments-count-badge" class="transcript-count">0 câu</span><p>Bấm vào câu để tua video. Bấm bản dịch để sửa từng chữ.</p></div>
-          <div class="transcript-toolbar"><label class="transcript-follow"><input id="transcript-follow" type="checkbox" checked> Theo vị trí phát</label><span class="transcript-time-note">Mốc thời gian theo câu</span></div>
+          <div class="transcript-toolbar"><label class="transcript-follow"><input id="transcript-follow" type="checkbox" checked> Theo vị trí phát</label><label class="transcript-option"><input id="transcript-show-time" type="checkbox" checked> Hiện thời gian</label><span class="transcript-time-note">Theo câu</span></div>
           <div id="segments-list" class="transcript-list" aria-label="Câu thoại gốc và bản dịch" tabindex="0"><div class="transcript-empty"><i class="fa-regular fa-file-lines" aria-hidden="true"></i><p>Chưa có nội dung transcript</p><span>Nạp video và bắt đầu dịch để xem, sửa và nghe lại cạnh khung hình.</span></div></div>
           <p id="transcript-status" class="transcript-status" role="status" aria-live="polite">Bản sửa sẽ cập nhật phụ đề và tạo lại giọng đọc, giữ nguyên mốc thời gian.</p>
         </section>
@@ -196,9 +198,9 @@
     <div class="flex items-center justify-between pb-3 border-b border-gray-800">
       <div>
         <h2 class="text-base font-bold text-white flex items-center gap-2">
-          <i class="fa-solid fa-list-check text-teal-400"></i> Quản Lý Tác Vụ (Task Manager)
+          <i class="fa-solid fa-list-check text-teal-400"></i> Tác vụ &amp; Lịch sử
         </h2>
-        <p class="text-xs text-gray-400">Theo dõi tiến trình dịch realtime, xuất video HQ và tải checkpoint AI.</p>
+        <p class="text-xs text-gray-400">Phiên đã lưu vẫn còn khi thoát ứng dụng. Chọn Mở lại để chỉnh lời, màu phụ đề và xuất tiếp.</p>
       </div>
       <button id="btn-refresh-tasks" class="px-3 py-1.5 rounded-lg border border-gray-700 bg-gray-800 hover:bg-gray-700 text-xs text-gray-200 flex items-center gap-1.5">
         <i class="fa-solid fa-rotate-right"></i> Làm mới

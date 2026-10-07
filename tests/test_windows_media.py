@@ -134,9 +134,11 @@ def test_edge_converts_service_mp3_to_real_pcm_without_console_windows(media):
     output = folder / "giọng Edge.wav"
     with patch("core.engines.tts.edge_fallback.edge_tts.Communicate",
                return_value=SimpleNamespace(save=save_response)), \
-            background_launches("core.engines.tts.edge_fallback.subprocess.run") as launch:
+            patch("core.media_process.subprocess.Popen", wraps=subprocess.Popen) as launch:
         result = EdgeTTSFallbackEngine().synthesize("Xin chào", output)
     assert [call.args[0][0] for call in launch.call_args_list] == ["ffmpeg"]
+    assert all(call.kwargs.get("creationflags") == getattr(subprocess, "CREATE_NO_WINDOW", 0)
+               for call in launch.call_args_list)
     assert result == output
     metadata = probe(output)
     audio = metadata["streams"][0]

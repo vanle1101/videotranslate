@@ -2,6 +2,7 @@
 import asyncio
 import threading
 import wave
+from copy import deepcopy
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import Mock
@@ -853,6 +854,185 @@ def test_automatic_review_only_regenerates_changed_audio_and_preserves_uncertain
     assert session.tts_engine.synthesize.call_count == int(changed)
     assert segment.revision == int(changed)
     assert not session.is_running and not session.is_editing
+
+
+@pytest.mark.parametrize("unresolved", [False, True])
+def test_automatic_review_fits_revised_source_and_publishes_only_verified_spoken_text(session, monkeypatch, unresolved):
+    from core.translation_review import AutomaticTranslationReviewer
+    monkeypatch.setattr(settings, "LLM_PROVIDER", "opencode")
+    segment = session.segments[0]
+    long_text, shorter = "Lời thuyết minh rất dài cần rút gọn nhưng giữ nghĩa.", "Lời đọc gọn đủ nghĩa."
+    row = dict(segment.to_dict(), text_zh="已经校正的原文", final_vi=long_text,
+        needs_review=unresolved, review_reason="Nguồn chưa chắc" if unresolved else None,
+        verification={"status": "unresolved" if unresolved else "verified", "semantic_verified": True})
+    untouched_row = deepcopy(row)
+    proof = {"status": "verified", "text": shorter, "provider": "opencode", "reason": "Giữ đủ ý nguồn."}
+    session.translator = Mock()
+    session.translator.rewrite_for_pacing.return_value = {"final_vi": shorter, "pacing_verification": proof}
+    session.aligner.get_audio_duration.side_effect = lambda path: 4.2 if Path(path).read_text() == long_text else 2.7
+    previous = SegmentItem(1, 0, 1.5, 1.5)
+    previous.status, previous.text_zh, previous.final_vi = "READY", "前句", "Câu trước."
+    session.segments[1] = previous
+    monkeypatch.setattr(AutomaticTranslationReviewer, "review", lambda *args, **kwargs: {
+        "segments": {0: row}, "summary": {"checked": 1, "verified": int(not unresolved),
+                                             "corrected": 0, "unresolved": int(unresolved)}})
+
+    async def run():
+        await session.start_automatic_review()
+        await session.review_task
+    asyncio.run(run())
+
+    args = session.translator.rewrite_for_pacing.call_args
+    assert args.args[0] == row["text_zh"] and args.args[1] == long_text
+    assert args.args[3] == [{"zh": "前句", "vi": "Câu trước."}]
+    assert args.kwargs["measured_duration"] == 4.2
+    assert session.tts_engine.synthesize.call_count == 2
+    assert segment.final_vi == shorter and segment.text_zh == row["text_zh"]
+    assert Path(segment.audio_path).read_bytes() == (shorter + " aligned").encode()
+    assert " ".join(cue["text"] for cue in segment.subtitle_cues) == shorter
+    assert segment.verification["pacing"] == proof
+    assert segment.verification["before_pacing"] == long_text
+    assert segment.verification["translation_changed"] is True
+    assert segment.needs_review is unresolved
+    assert segment.verification["status"] == ("unresolved" if unresolved else "corrected")
+    assert segment.revision == 1 and segment.audio_url.endswith("?rev=1")
+    assert session.rolling_context == [{"zh": row["text_zh"], "vi": shorter}]
+    assert session.review_summary["verified"] == 0
+    assert session.review_summary["corrected"] == int(not unresolved)
+    assert session.review_summary["unresolved"] == int(unresolved)
+    completed = next(data for kind, data in session.events if kind == "review_complete")
+    assert completed["review_summary"] == session.review_summary
+    assert row == untouched_row, "Do not mutate the reviewer's draft/proof before audio is committed"
+    assert not list(session.segments_dir.glob("edit_*"))
+
+
+@pytest.mark.parametrize("failure", ["pacing", "timing", "publication"])
+def test_review_pacing_failure_rolls_back_text_source_audio_proof_context_and_output(session, monkeypatch, failure):
+    long_text, shorter = "Bản kiểm tra quá dài để đọc tự nhiên.", "Bản ngắn đủ nghĩa."
+    row = dict(session.segments[0].to_dict(), text_zh="修正来源", final_vi=long_text,
+               verification={"status": "verified"}, needs_review=False)
+    before_row = deepcopy(row)
+    session.review_summary = {"status": "completed", "checked": 1, "verified": 1}
+    before_summary = dict(session.review_summary)
+    before_segment = deepcopy(session.segments[0].to_dict())
+    before_context = deepcopy(session.rolling_context)
+    audio_path = Path(session.segments[0].audio_path)
+    before_audio = audio_path.read_bytes()
+    session.output_video_url, session.output_filename = "/api/outputs/saved.mp4", "saved.mp4"
+    session.translator = Mock()
+    session.translator.rewrite_for_pacing.return_value = {"final_vi": shorter,
+        "pacing_verification": {"status": "verified", "text": shorter}}
+    session.aligner.get_audio_duration.side_effect = lambda path: 4.2 if Path(path).read_text() == long_text else 2.7
+    if failure == "pacing":
+        session.translator.rewrite_for_pacing.side_effect = RuntimeError("pacing service unavailable")
+    elif failure == "timing":
+        monkeypatch.setattr("core.streaming.pipeline.build_speech_timing", Mock(side_effect=RuntimeError("timing failed")))
+    else:
+        replace = Path.replace
+        def fail_publish(path, target):
+            if Path(target) == audio_path:
+                raise RuntimeError("publication failed")
+            return replace(path, target)
+        monkeypatch.setattr(Path, "replace", fail_publish)
+    with pytest.raises(RuntimeError):
+        asyncio.run(session.edit_segment(0, long_text, _review_result=row))
+    assert session.segments[0].to_dict() == before_segment
+    assert audio_path.read_bytes() == before_audio
+    assert session.rolling_context == before_context
+    assert session.review_summary == before_summary
+    assert session.output_video_url == "/api/outputs/saved.mp4"
+    assert session.output_filename == "saved.mp4"
+    assert row == before_row and not session.edit_tasks
+    assert not list(session.segments_dir.glob("edit_*"))
+    assert not any(kind in ("segment_update", "result_invalidated") for kind, _ in session.events)
+
+
+def test_manual_edit_never_rewrites_user_words_to_satisfy_timing(session):
+    from core.engines.alignment.timing_aligner import SpeechBudgetError
+    session.translator = Mock()
+    session.aligner.get_audio_duration.return_value = 4.2
+    original = deepcopy(session.segments[0].to_dict())
+    with pytest.raises(SpeechBudgetError):
+        asyncio.run(session.edit_segment(0, "Giữ nguyên chính xác lời tôi nhập."))
+    session.translator.rewrite_for_pacing.assert_not_called()
+    assert session.tts_engine.synthesize.call_args.kwargs["text"] == "Giữ nguyên chính xác lời tôi nhập."
+    assert session.segments[0].to_dict() == original
+    assert Path(session.segments[0].audio_path).read_bytes() == b"old audio"
+
+
+def test_review_progress_tracks_speech_stages_until_timing_commits_and_clears_only_resolved_warning(session, monkeypatch):
+    from core.translation_review import AutomaticTranslationReviewer
+    from core.streaming.pipeline import REVIEW_FAILURE_WARNINGS, build_speech_timing
+    monkeypatch.setattr(settings, "LLM_PROVIDER", "opencode")
+    old_warnings = list(REVIEW_FAILURE_WARNINGS)
+    unrelated = "Không lưu được tiến độ nhận diện xuống đĩa; giữ trong phiên hiện tại."
+    session.warnings = [*old_warnings, unrelated]
+    long_text, shorter = "Lời dài cần viết gọn để giọng đọc giữ nhịp tự nhiên.", "Lời gọn đủ nghĩa."
+    callback = {}
+    def review(*args, progress_callback, **kwargs):
+        callback["semantic"] = progress_callback
+        progress_callback(100)
+        return {"segments": {0: dict(session.segments[0].to_dict(), final_vi=long_text,
+                                     verification={"status": "verified"})},
+                "summary": {"checked": 1, "verified": 1}}
+    monkeypatch.setattr(AutomaticTranslationReviewer, "review", review)
+    session.aligner.get_audio_duration.side_effect = lambda path: 4.2 if Path(path).read_text() == long_text else 2.7
+    def rewrite(*args, **kwargs):
+        # A delayed callback from the finished semantic stage must not replace
+        # the live TTS/pacing stage or reintroduce 100%.
+        callback["semantic"](100)
+        return {"final_vi": shorter, "pacing_verification": {"status": "verified", "text": shorter}}
+    session.translator = SimpleNamespace(rewrite_for_pacing=rewrite)
+    entered, release = threading.Event(), threading.Event()
+    def measured_timing(*args, **kwargs):
+        entered.set()
+        assert release.wait(3)
+        return build_speech_timing(*args, **kwargs)
+    monkeypatch.setattr("core.streaming.pipeline.build_speech_timing", measured_timing)
+
+    async def run():
+        await session.start_automatic_review()
+        task = session.review_task
+        await wait_until(entered.is_set)
+        try:
+            await asyncio.sleep(.02)
+            state = session.get_progress()
+            assert state["status"] == "RUNNING" and state["phase"] == "review"
+            assert state["review_stage"] == "aligning" and state["progress_pct"] is None
+            assert session.segments[0].final_vi == "Lời thoại cũ"
+            assert Path(session.segments[0].audio_path).read_bytes() == b"old audio"
+            states = [data for kind, data in session.events if kind == "progress"]
+            assert {"tts", "rewriting", "aligning"}.issubset({state.get("review_stage") for state in states})
+            assert not any(state.get("progress_pct") == 100 for state in states)
+            assert all(warning in session.warnings for warning in old_warnings)
+        finally:
+            release.set()
+            await task
+    asyncio.run(run())
+    assert session.get_progress()["status"] == "COMPLETED"
+    assert session.get_progress()["progress_pct"] == 100
+    assert session.segments[0].final_vi == shorter
+    assert session.warnings == [unrelated]
+    assert session.get_telemetry()["warnings"] == [unrelated]
+    review_complete = next(data for kind, data in session.events if kind == "review_complete")
+    assert review_complete["warnings"] == [unrelated]
+
+
+def test_failed_review_retry_keeps_warning_without_duplicates_and_never_reports_100_percent(session, monkeypatch):
+    from core.translation_review import AutomaticTranslationReviewer
+    monkeypatch.setattr(settings, "LLM_PROVIDER", "opencode")
+    warning = "AI kiểm tra lại chưa hoàn tất. Các câu đã lưu và âm thanh sẵn có được giữ; có thể thử lại."
+    session.warnings = [warning, "Giữ cảnh báo khác."]
+    monkeypatch.setattr(AutomaticTranslationReviewer, "review", Mock(side_effect=RuntimeError("offline failure")))
+    async def run():
+        for _ in range(2):
+            await session.start_automatic_review()
+            await session.review_task
+            assert session.get_progress()["status"] == "FAILED"
+            assert session.get_progress()["progress_pct"] is None
+    asyncio.run(run())
+    assert session.warnings == [warning, "Giữ cảnh báo khác."]
+    assert not any(data.get("progress_pct") == 100 for kind, data in session.events if kind == "progress")
 
 
 def test_review_removes_old_placeholder_audio_without_claiming_source_silence(session, monkeypatch):

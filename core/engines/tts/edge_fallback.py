@@ -1,13 +1,71 @@
 import asyncio
 import json
-import subprocess
+import logging
+import time
+import uuid
+import wave
 import tempfile
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Dict, Any, Optional
 import edge_tts
+import aiohttp
 from config import settings
 from core.engines.tts.base import TTSEngine
+from core.media_process import run_media
+from core.runtime_context import current_execution_context
+
+
+EDGE_REQUEST_TIMEOUT = 45.0
+
+
+def _retryable(error):
+    if isinstance(error, (aiohttp.ClientConnectorCertificateError, aiohttp.ClientConnectorSSLError)):
+        return False
+    if isinstance(error, aiohttp.ClientResponseError):
+        return error.status in {408, 429} or 500 <= error.status < 600
+    return isinstance(error, (edge_tts.exceptions.NoAudioReceived,
+                              aiohttp.ClientConnectionError, asyncio.TimeoutError))
+
+
+def _provider_error(error):
+    """Keep URLs, headers and SDK response bodies out of the user-facing task."""
+    if isinstance(error, aiohttp.ClientResponseError):
+        status = error.status
+        if status in {401, 403}:
+            return RuntimeError("Edge-TTS từ chối yêu cầu. Kiểm tra mạng hoặc thử lại sau.")
+        if status == 429:
+            return RuntimeError("Edge-TTS đang giới hạn lượt yêu cầu. Hãy thử lại sau.")
+        return RuntimeError("Edge-TTS tạm thời không phản hồi đúng. Hãy thử lại sau.")
+    if isinstance(error, aiohttp.ClientError):
+        return RuntimeError("Không kết nối được tới Edge-TTS. Kiểm tra mạng rồi thử lại.")
+    if isinstance(error, asyncio.TimeoutError):
+        return RuntimeError("Edge-TTS hết thời gian chờ. Hãy thử lại câu này.")
+    if isinstance(error, (TypeError, ValueError)):
+        return ValueError("Cấu hình giọng Edge-TTS không hợp lệ; kiểm tra giọng và tốc độ đọc.")
+    if isinstance(error, OSError):
+        return RuntimeError("Không ghi được âm thanh Edge-TTS. Kiểm tra dung lượng và quyền ghi thư mục làm việc.")
+    return RuntimeError("Edge-TTS gặp lỗi khi tạo giọng. Bản dịch được giữ; hãy thử lại câu này.")
+
+
+async def _await_cancellable(awaitable, cancel_check, timeout):
+    """Bound service work and Stop latency, draining the request before return."""
+    worker = asyncio.ensure_future(awaitable)
+    started = time.monotonic()
+    try:
+        while not worker.done():
+            if cancel_check and cancel_check():
+                raise asyncio.CancelledError
+            if time.monotonic() - started >= timeout:
+                raise asyncio.TimeoutError
+            await asyncio.wait({worker}, timeout=.2)
+        if cancel_check and cancel_check():
+            raise asyncio.CancelledError
+        return worker.result()
+    finally:
+        if not worker.done():
+            worker.cancel()
+        await asyncio.gather(worker, return_exceptions=True)
 
 class EdgeTTSFallbackEngine(TTSEngine):
     """
@@ -54,6 +112,13 @@ class EdgeTTSFallbackEngine(TTSEngine):
         # VieNeu preset names are not valid Microsoft voice IDs.
         chosen_voice = voice if voice and voice.startswith("vi-VN-") else self.voice
         rate_str = f"+{int((speed - 1.0) * 100)}%" if speed >= 1.0 else f"{int((speed - 1.0) * 100)}%"
+        execution = current_execution_context()
+        logger = logging.getLogger("pipeline")
+        request_id = uuid.uuid4().hex[:12]
+        def check_cancel():
+            if execution.cancel_check and execution.cancel_check():
+                raise asyncio.CancelledError
+        check_cancel()
         # Edge returns MP3 bytes. Convert to real PCM when a WAV is requested.
         with tempfile.TemporaryDirectory(prefix="edge_tts_", dir=output_path.parent) as temp_dir:
             mp3_path = Path(temp_dir) / "speech.mp3"
@@ -65,11 +130,18 @@ class EdgeTTSFallbackEngine(TTSEngine):
                 # Communicate stream is single-use, so retry with a new instance
                 # and discard any partial file before requesting the same voice.
                 for attempt in range(3):
+                    check_cancel()
+                    started = time.monotonic()
                     try:
                         boundaries.clear()
+                        logger.info("TTS_REQUEST run_id=%s request_id=%s provider=edge-tts voice=%s attempt=%d text_chars=%d",
+                                    execution.run_id, request_id, chosen_voice, attempt + 1, len(text))
                         com = edge_tts.Communicate(text, chosen_voice, rate=rate_str,
-                                                   boundary="WordBoundary")
-                        await com.save(str(mp3_path), str(metadata_path))
+                                                   boundary="WordBoundary", connect_timeout=10, receive_timeout=30)
+                        await _await_cancellable(com.save(str(mp3_path), str(metadata_path)),
+                                                 execution.cancel_check, EDGE_REQUEST_TIMEOUT)
+                        if not mp3_path.is_file() or not mp3_path.stat().st_size:
+                            raise edge_tts.exceptions.NoAudioReceived("Empty audio file")
                         if metadata_path.is_file():
                             try:
                                 for line in metadata_path.read_text(encoding="utf-8").splitlines():
@@ -84,16 +156,29 @@ class EdgeTTSFallbackEngine(TTSEngine):
                                 # Valid speech remains usable if metadata is
                                 # malformed; downstream exposes its fallback.
                                 boundaries.clear()
+                        logger.info("TTS_RESPONSE run_id=%s request_id=%s provider=edge-tts attempt=%d audio_bytes=%d word_boundaries=%d elapsed_ms=%d",
+                                    execution.run_id, request_id, attempt + 1, mp3_path.stat().st_size,
+                                    len(boundaries), int((time.monotonic() - started) * 1000))
                         return
-                    except edge_tts.exceptions.NoAudioReceived:
+                    except Exception as error:
+                        logger.warning("TTS_REQUEST_FAILED run_id=%s request_id=%s provider=edge-tts voice=%s attempt=%d error_type=%s status=%s elapsed_ms=%d",
+                                       execution.run_id, request_id, chosen_voice, attempt + 1, type(error).__name__,
+                                       error.status if isinstance(error, aiohttp.ClientResponseError) else "none",
+                                       int((time.monotonic() - started) * 1000))
+                        if not _retryable(error):
+                            raise _provider_error(error) from None
                         mp3_path.unlink(missing_ok=True)
                         metadata_path.unlink(missing_ok=True)
                         if attempt == 2:
+                            if not isinstance(error, edge_tts.exceptions.NoAudioReceived):
+                                raise RuntimeError("Không kết nối ổn định tới Edge-TTS sau 3 lần thử. "
+                                                   "Bản dịch được giữ; bấm Tiếp tục để tạo lại giọng.") from None
                             raise RuntimeError(
                                 "Edge-TTS chưa trả về âm thanh sau 3 lần thử. "
                                 "Hãy thử lại hoặc chọn giọng đọc khác."
                             ) from None
-                        await asyncio.sleep((3.0, 8.0)[attempt])
+                        await _await_cancellable(asyncio.sleep((3.0, 8.0)[attempt]),
+                                                 execution.cancel_check, 10.0)
 
             try:
                 asyncio.get_running_loop()
@@ -104,15 +189,25 @@ class EdgeTTSFallbackEngine(TTSEngine):
                     executor.submit(lambda: asyncio.run(_run())).result()
 
             if output_path.suffix.lower() == ".mp3":
+                check_cancel()
                 mp3_path.replace(output_path)
             else:
-                result = subprocess.run(
-                    ["ffmpeg", "-y", "-i", str(mp3_path), "-vn", "-ac", "1", "-ar", "24000", str(output_path)],
-                    capture_output=True,
-                    creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
-                )
-                if result.returncode:
-                    raise RuntimeError(result.stderr.decode("utf-8", errors="replace")[-1500:])
+                converted = Path(temp_dir) / "converted.wav"
+                try:
+                    run_media(["ffmpeg", "-v", "error", "-nostdin", "-y", "-i", str(mp3_path),
+                               "-vn", "-ac", "1", "-ar", "24000", str(converted)], execution.cancel_check)
+                except RuntimeError:
+                    check_cancel()
+                    raise
+                with wave.open(str(converted), "rb") as audio:
+                    frames = audio.getnframes()
+                    if audio.getnchannels() != 1 or audio.getframerate() != 24000 or audio.getsampwidth() != 2 or frames <= 0:
+                        raise RuntimeError("Edge-TTS trả về âm thanh không hợp lệ.")
+                    audio.setpos(frames - 1)
+                    if len(audio.readframes(1)) != 2:
+                        raise RuntimeError("Edge-TTS trả về âm thanh chưa đầy đủ.")
+                check_cancel()
+                converted.replace(output_path)
         self._word_boundaries[str(output_path.resolve())] = boundaries
         while len(self._word_boundaries) > 64:
             self._word_boundaries.pop(next(iter(self._word_boundaries)))

@@ -47,6 +47,9 @@ def configure_windows_identity():
 
 def create_app_icon() -> QIcon:
     """Generates a high-resolution dark studio icon for window and system tray."""
+    brand_icon = QIcon(str(APP_ROOT / "static" / "studio-mark.svg"))
+    if not brand_icon.isNull():
+        return brand_icon
     size = 128
     pix = QPixmap(size, size)
     pix.fill(Qt.GlobalColor.transparent)

@@ -196,6 +196,83 @@ def test_placement_can_use_verified_source_region_without_approving_translation(
     assert plan[0]["text"] == "Anh đã đến rồi."
 
 
+def test_completed_speech_review_can_anchor_its_local_ocr_box_without_trusting_titles():
+    reviewed = speech(text_zh="你来了", verification={
+        "status": "corrected", "source_supported": True,
+        "semantic_verified": True, "second_pass_status": "completed",
+        "evidence_mode": "fresh-ocr-text-review", "evidence_ids": ["review0"],
+        "evidence": [{"id": "review0", "start": 0, "end": 2.6,
+                       "text_zh": "你来了", "confidence": .97,
+                       "bbox": [.3, .70, .4, .04]}],
+    })
+    uncertain_subtitle = region(needs_review=True, source_region_verified=False)
+    uncertain_title = region(id="title", kind="title", start=0, end=3,
+                             needs_review=True, source_region_verified=False,
+                             bbox=[.1, .1, .8, .08])
+    plan = layout([reviewed], [uncertain_subtitle, uncertain_title], (1080, 1920))
+    assert plan[0]["placement"] == "below-source"
+    assert plan[0]["background"] == "yellow"
+    assert plan[0]["source_bbox"] == [.3, .70, .4, .04]
+    assert uncertain_subtitle["needs_review"] is True
+    assert uncertain_subtitle["source_region_verified"] is False
+    assert uncertain_title["needs_review"] is True
+
+    # Provenance/citation, source content, time and measured geometry must all
+    # agree; source-support flags alone cannot promote an arbitrary title.
+    for screens in ([], [uncertain_title], [region(needs_review=True, bbox=[.1, .1, .2, .04])],
+                    [region(needs_review=True, text_zh="你没来")], [region(needs_review=True, start=4, end=5)]):
+        rejected = layout([reviewed], screens, (1080, 1920))[0]
+        assert rejected["source_bbox"] is None and rejected["background"] == "white"
+    for changed in ({"evidence_mode": "text-only"}, {"evidence_ids": []}, {"evidence": None},
+                    {"status": "unresolved"}, {"second_pass_status": "failed"}):
+        candidate = {**reviewed, "verification": {**reviewed["verification"], **changed}}
+        rejected = layout([candidate], [uncertain_subtitle], (1080, 1920))[0]
+        assert rejected["source_bbox"] is None
+
+
+def test_unverified_or_text_only_review_never_anchors_a_source_box():
+    for verification in ({
+        "status": "verified", "source_supported": False,
+        "semantic_verified": True, "second_pass_status": "completed",
+        "evidence": [{"id": "review0", "start": 0, "end": 2.6,
+                       "text_zh": "你来了", "confidence": .99,
+                       "bbox": [.3, .70, .4, .04]}],
+    }, {
+        "status": "verified", "source_supported": True,
+        "semantic_verified": True, "second_pass_status": "completed",
+        "evidence": [{"id": "review0", "start": 0, "end": 2.6,
+                       "text_zh": "你来了", "confidence": .80,
+                       "bbox": [.3, .70, .4, .04]}],
+    }):
+        cue = layout([speech(verification=verification)], [], (1080, 1920))[0]
+        assert cue["placement"] == "bottom" and cue["background"] == "white"
+
+
+def test_live_review_geometry_places_caption_below_source_without_changing_uncertainty():
+    # Geometry/timing from the reproduced 755a2fe4 overlap. The original OCR
+    # classification stayed uncertain; fresh reviewed OCR confirmed the line.
+    source = region(start=0, end=2.666667, text_zh="第一人称视角体验运动会400m",
+                    bbox=[.2604166667, .8185185185, .4791666667, .0740740741],
+                    needs_review=True, source_region_verified=False)
+    evidence_box = [.2611111111, .8185185185, .4784722222, .0765432099]
+    segment = speech(start=0, end=2.44, speech_start=.05, speech_end=2.25,
+        text_zh="第一人称视角体验运动会400m",
+        verification={"status": "corrected", "source_supported": True,
+            "semantic_verified": True, "second_pass_status": "completed",
+            "evidence_mode": "fresh-ocr-text-review", "evidence_ids": ["review0"],
+            "evidence": [{"id": "review0", "start": 0, "end": 2.6,
+                          "text_zh": "第一人称视角体验运动会400m", "confidence": .975,
+                          "bbox": evidence_box}]})
+    plan = build_caption_layout([segment], [source], (1920, 1080), {"blur_original": True})
+    cue = plan["cues"][0]
+    assert cue["placement"] == "below-source" and cue["background"] == "yellow"
+    assert cue["bbox"][1] > evidence_box[1] + evidence_box[3]
+    assert plan["source_masks"] == [{"start": cue["start"], "end": cue["end"], "bbox": evidence_box}]
+    assert source["needs_review"] is True and source["source_region_verified"] is False
+    no_masks = build_caption_layout([segment], [source], (1920, 1080), {"blur_original": False})
+    assert "source_masks" not in no_masks
+
+
 def test_ass_and_srt_use_explicit_cues_without_word_reveal_or_stale_ocr(tmp_path):
     segments = [speech()]
     plan = layout(segments, [region()], (1080, 1920))

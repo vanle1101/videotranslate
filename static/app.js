@@ -228,6 +228,7 @@ document.addEventListener("DOMContentLoaded", () => {
   let voicePreviewBusy = false;
   let previewedVoiceId = null;
   let voiceCatalogLoaded = false;
+  let savedSessionVoice = null;
   const voiceRows = new Map();
   const voiceGroups = [];
   const voicePreferenceKey = "studio.voice-id";
@@ -269,8 +270,29 @@ document.addEventListener("DOMContentLoaded", () => {
     const voice = selectedCatalogVoice();
     return voice && voiceCatalogLoaded ? { voice_id: voice.id } : {
       voice: voiceSelect.value || "vi-VN-HoaiMyNeural",
-      tts_engine: document.body.dataset.ttsEngine
+      tts_engine: voice?.engine || document.body.dataset.ttsEngine
     };
+  }
+
+  function applySavedSessionVoice() {
+    if (!savedSessionVoice || savedSessionVoice.taskId !== currentTaskId) return false;
+    const { voice, engine, id } = savedSessionVoice;
+    const match = voiceCatalog.find(item => item.engine === engine && (item.id === id || item.id === voice));
+    voiceSelect.value = match?.id || id;
+    describeSelectedVoice();
+    return true;
+  }
+
+  function restoreSessionVoice(snapshot, taskId) {
+    savedSessionVoice = null;
+    const voice = typeof snapshot.voice === "string" ? snapshot.voice.trim() : "";
+    const engine = typeof snapshot.tts_engine === "string" ? snapshot.tts_engine.trim() : "";
+    const prefix = { "edge-tts": "edge", "vieneu-tts": "vieneu", "piper-tts": "piper" }[engine];
+    if (!voice || !prefix) return;
+    // Restoring history must neither change the user's default nor let a late
+    // catalog response replace the voice that generated this project's audio.
+    savedSessionVoice = { taskId, voice, engine, id: `${prefix}:${voice}` };
+    applySavedSessionVoice();
   }
 
   function updateVoiceControls() {
@@ -287,6 +309,8 @@ document.addEventListener("DOMContentLoaded", () => {
       preview.disabled = sessionBusy || voicePreviewBusy || !voice.available || !voiceCatalogLoaded;
       preview.setAttribute("aria-busy", String(previewing && voicePreviewBusy));
       const playing = previewing && !voicePreviewAudio.paused && !voicePreviewAudio.ended;
+      const wave = row.querySelector?.('.voice-wave');
+      if (wave) wave.dataset.playing = String(playing);
       preview.innerHTML = `<i aria-hidden="true" class="fa-solid ${previewing && voicePreviewBusy ? "fa-spinner fa-spin" : playing ? "fa-stop" : "fa-play"}"></i>`;
       preview.title = previewing && voicePreviewBusy ? "Đang tạo mẫu giọng…" : playing ? "Dừng mẫu" : "Nghe thử";
       preview.setAttribute("aria-label", `${playing ? "Dừng mẫu" : "Nghe thử"} giọng ${voice.name}`);
@@ -314,9 +338,11 @@ document.addEventListener("DOMContentLoaded", () => {
   }
 
   function describeSelectedVoice() {
-    const voice = selectedCatalogVoice();
+    const voice = voiceCatalog.find(item => item.id === voiceSelect.value);
     if (voice) {
-      voiceSource.textContent = `Đang chọn: ${voice.name} · ${voice.source} · ${voice.offline ? "Chạy trên máy" : "Cần Internet"}`;
+      voiceSource.textContent = `Đang chọn: ${voice.name} · ${voice.source} · ${voice.offline ? "Chạy trên máy" : "Cần Internet"}${voice.available ? "" : " · Chưa sẵn sàng"}`;
+    } else if (savedSessionVoice?.taskId === currentTaskId && savedSessionVoice?.id === voiceSelect.value) {
+      voiceSource.textContent = `Giọng dự án: ${savedSessionVoice.voice} · ${savedSessionVoice.engine}${voiceCatalogLoaded ? " · Chưa có trong danh sách giọng hiện tại" : ""}`;
     }
     updateVoiceControls();
   }
@@ -367,7 +393,12 @@ document.addEventListener("DOMContentLoaded", () => {
       name.textContent = voice.name;
       const description = document.createElement("p");
       description.className = "voice-description";
-      description.textContent = `${voice.description || "Tiếng Việt"} · ${voice.offline ? "Chạy trên máy" : "Cần Internet"}${voice.available ? "" : " · Chưa sẵn sàng"}`;
+      for (const text of [...(voice.description || "Tiếng Việt").split(" · "), voice.offline ? "Chạy trên máy" : "Cần Internet", ...(!voice.available ? ["Chưa sẵn sàng"] : [])]) {
+        const tag = document.createElement("span");
+        tag.className = "voice-tag";
+        tag.textContent = text;
+        description.appendChild(tag);
+      }
       details.appendChild(name);
       details.appendChild(description);
       const preview = document.createElement("button");
@@ -383,7 +414,16 @@ document.addEventListener("DOMContentLoaded", () => {
         voiceSelect.value = voice.id;
         selectVoice();
       });
-      row.append(preview, details, choose);
+      const wave = document.createElement("span");
+      wave.className = "voice-wave";
+      wave.setAttribute("aria-hidden", "true");
+      for (const [i, height] of [5, 9, 14, 20, 27, 18, 12, 22, 29, 20, 14, 9, 5].entries()) {
+        const bar = document.createElement("i");
+        bar.style.setProperty("--bar", `${height}px`);
+        bar.style.setProperty("--delay", `${i * -0.08}s`);
+        wave.appendChild(bar);
+      }
+      row.append(preview, details, wave, choose);
       const group = groups.get(voice.source);
       group.ids.push(voice.id);
       group.element.appendChild(row);
@@ -411,7 +451,7 @@ document.addEventListener("DOMContentLoaded", () => {
         voice.engine === document.body.dataset.ttsEngine);
       const selectedId = available(savedId) ? savedId : available(data.default_voice_id)
         ? data.default_voice_id : legacy?.id || voices.find(voice => voice.available).id;
-      voiceSelect.value = selectedId;
+      if (!applySavedSessionVoice()) voiceSelect.value = selectedId;
       renderVoiceList();
     } catch (_) {
       voiceCatalogLoaded = false;
@@ -419,15 +459,19 @@ document.addEventListener("DOMContentLoaded", () => {
       voiceCatalog = (edge ? [
         ["vi-VN-HoaiMyNeural", "Hoài My", "Nữ"], ["vi-VN-NamMinhNeural", "Nam Minh", "Nam"]
       ] : [["Trúc Ly", "Trúc Ly", "Nữ"], ["Thiện Minh", "Thiện Minh", "Nam"]]).map(([id, name, description]) => ({
-        id, name, description, source: edge ? "Microsoft Edge" : "VieNeu", available: true, offline: !edge
+        id, name, description, engine: edge ? "edge-tts" : "vieneu-tts",
+        source: edge ? "Microsoft Edge" : "VieNeu", available: true, offline: !edge
       }));
-      voiceSelect.value = voiceCatalog.some(voice => voice.id === initialVoice) ? initialVoice : voiceCatalog[0].id;
+      if (!applySavedSessionVoice()) {
+        voiceSelect.value = voiceCatalog.some(voice => voice.id === initialVoice) ? initialVoice : voiceCatalog[0].id;
+      }
       voiceCatalogStatus.textContent = "Chưa tải được danh sách mở rộng. Vẫn dùng được các giọng hiện tại; mở lại Studio để nghe thử.";
       renderVoiceList();
     }
   }
 
   function selectVoice() {
+    savedSessionVoice = null;
     stopVoicePreview();
     describeSelectedVoice();
     const voice = selectedCatalogVoice();
@@ -556,6 +600,7 @@ document.addEventListener("DOMContentLoaded", () => {
     captionAutoBackground.checked = value.background_color === null;
     captionBackgroundColor.value = value.background_color || "#FFE500";
     captionPosition.value = value.position || "auto";
+    if (toggleScreenText) toggleScreenText.checked = captionPosition.value === "auto";
     captionBlurOriginal.checked = value.blur_original === true;
   }
 
@@ -574,22 +619,29 @@ document.addEventListener("DOMContentLoaded", () => {
     captionStyleStatus.dataset.error = "false";
   }
 
+  function captionSourceReady() {
+    const items = Object.values(segments);
+    return !!currentTaskId && (currentProgress?.status === "COMPLETED" ||
+      (currentProgress?.phase === "export_error" && items.length > 0 &&
+        items.every(segment => ["READY", "PLAYED"].includes(segment.status))));
+  }
+
   function captionStyleLocked() {
-    return !currentTaskId || currentProgress?.status !== "COMPLETED" ||
+    return !captionSourceReady() ||
       reviewInProgress() || !!pendingTaskAction || automaticExportActive || !!exportingTaskId ||
       transcriptDrafts.size > 0 || pendingTranscriptSaves > 0 ||
       [...transcriptRows.values()].some(item => !item.editor.hidden);
   }
 
   function updateCaptionStyleAvailability() {
-    const complete = !!currentTaskId && (currentProgress?.status === "COMPLETED" || !!lastExportedFileUrl || captionOutputOutdated);
+    const complete = !!currentTaskId && (captionSourceReady() || !!lastExportedFileUrl || captionOutputOutdated);
     captionStylePanel?.classList.toggle("hidden", !complete);
     const locked = captionStyleLocked();
     captionStyleControls.disabled = locked;
     captionBackgroundColor.disabled = locked || captionAutoBackground.checked;
     captionBlurOriginal.disabled = locked || (!hasSubtitleRegions && !captionBlurOriginal.checked);
     captionBlurOriginal.title = hasSubtitleRegions ? "Làm mờ đúng vùng sub gốc đã nhận diện" : "Video chưa có vùng phụ đề gốc đủ tin cậy để làm mờ";
-    if (toggleScreenText) toggleScreenText.disabled = captionStyleDirty || !!captionStyleRequest || !!exportingTaskId || automaticExportActive || captionStyle.position !== "auto";
+    if (toggleScreenText) toggleScreenText.disabled = captionStyleDirty || !!captionStyleRequest || !!exportingTaskId || automaticExportActive;
   }
 
   function invalidateCaptionOutput() {
@@ -710,6 +762,9 @@ document.addEventListener("DOMContentLoaded", () => {
       item.translation.disabled = busy || !["READY", "PLAYED", "NEEDS_REVIEW"].includes(segment?.status);
       item.silence.disabled = busy || item.saving;
       item.save.disabled = item.input.disabled = busy || item.saving;
+      // A lifecycle event can finish review without another segment event.
+      // Refresh its hint too so an idle/failed task never claims AI is working.
+      if (segment) updateSegmentDrawerItem(segment);
     }
   }
 
@@ -885,7 +940,24 @@ document.addEventListener("DOMContentLoaded", () => {
   });
   window.addEventListener("pagehide", () => closeResultPreview(false));
 
+  function showPipelineWarnings(data) {
+    if (!Array.isArray(data.warnings) && !data.metadata_warning) return;
+    const warning = document.getElementById("pipeline-warning");
+    if (!warning) return;
+    const reviewCompleted = (data.review_summary || data.progress?.review_summary || currentProgress?.review_summary)?.status === "completed";
+    const resolvedReviewWarnings = new Set([
+      "AI kiểm tra lại chưa hoàn tất. Các câu đã lưu và âm thanh sẵn có được giữ; có thể thử lại.",
+      "AI kiểm tra lại chưa hoàn tất; giữ bản nháp và cho phép thử lại.",
+      "AI kiểm tra lại chưa hoàn tất; mở dự án và bấm AI kiểm tra lại để tiếp tục.",
+    ]);
+    const messages = (Array.isArray(data.warnings) ? data.warnings : []).filter(item => typeof item === "string" && item && !(reviewCompleted && resolvedReviewWarnings.has(item)));
+    if (typeof data.metadata_warning === "string" && data.metadata_warning && !messages.includes(data.metadata_warning)) messages.push(data.metadata_warning);
+    warning.textContent = messages.join(" · ");
+    warning.classList.toggle("hidden", !warning.textContent);
+  }
+
   function showTaskResult(data) {
+    showPipelineWarnings(data);
     if (captionStyleDirty || captionStyleRequest || captionOutputOutdated) return;
     if (["failed", "incomplete", "running"].includes((data.review_summary || currentProgress?.review_summary)?.status)) return;
     if (!data.output_video_url || !taskResult) return;
@@ -1775,6 +1847,12 @@ document.addEventListener("DOMContentLoaded", () => {
     syncPlayback();
   });
   toggleScreenText.addEventListener("change", () => {
+    if (toggleScreenText.disabled) return;
+    if (currentTaskId && currentProgress?.status === "COMPLETED") {
+      captionPosition.value = toggleScreenText.checked ? "auto" : "bottom";
+      scheduleCaptionStyle();
+      return;
+    }
     screenTextSignature = "";
     chineseSubMask.style.display = "none";
     syncPlayback();
@@ -2175,11 +2253,7 @@ document.addEventListener("DOMContentLoaded", () => {
       }
       else if (msg.type === "telemetry") {
         if (msg.review_summary) showTaskProgress({review_summary: msg.review_summary});
-        const warning = document.getElementById("pipeline-warning");
-        if (warning) {
-          warning.textContent = (msg.warnings || []).join(" · ");
-          warning.classList.toggle("hidden", !warning.textContent);
-        }
+        showPipelineWarnings(msg);
         telPlayable.textContent = formatTime(msg.playable_until);
         const buf = msg.buffer_ahead || 0;
         telBuffer.textContent = `+${buf.toFixed(1)}s`;
@@ -2214,6 +2288,7 @@ document.addEventListener("DOMContentLoaded", () => {
         }
       }
       else if (msg.type === "review_complete") {
+        showPipelineWarnings(msg);
         if (pendingTaskAction?.kind === "review") pendingTaskAction.progressSeen = true;
         const summary = msg.review_summary || msg.summary;
         if (summary) showTaskProgress({...msg.progress, review_summary: summary});
@@ -2890,6 +2965,9 @@ document.addEventListener("DOMContentLoaded", () => {
   }
 
   transcriptFollow?.addEventListener("change", () => highlightTranscript(activeTranscriptId, true));
+  document.getElementById("transcript-show-time")?.addEventListener("change", event => {
+    segmentsList.dataset.hideTime = String(!event.target.checked);
+  });
 
   // Seeking on timeline
   timelineTrack.addEventListener("click", async (e) => {
@@ -2970,11 +3048,12 @@ document.addEventListener("DOMContentLoaded", () => {
     setWorkerSourceBusy(true);
     try {
       const response = await fetch(`/api/streaming/${encodeURIComponent(taskId)}`);
-      if (!response.ok) throw new Error("Phiên dịch không còn tồn tại.");
       const data = await response.json();
+      if (!response.ok) throw new Error(data.detail || "Phiên dịch không còn tồn tại.");
       stopPreviewAudio();
       if (currentWs) currentWs.close();
       currentWs = null; currentTaskId = taskId; currentProgress = null;
+      restoreSessionVoice(data, taskId);
       syncCaptionStyleTask();
       resetTaskResult();
       segments = {}; resetScreenTexts(); renderSegmentsDrawer();
@@ -3160,7 +3239,8 @@ document.addEventListener("DOMContentLoaded", () => {
         } else if (t.status === "PAUSED" || t.status === "CANCELLING") {
           statusBadge = `<span class="px-2 py-0.5 rounded bg-amber-950 text-amber-400 border border-amber-800 text-[10px]">${t.status === "CANCELLING" ? "ĐANG DỪNG" : "TẠM DỪNG"}</span>`;
         } else if (t.status === "COMPLETED") {
-          statusBadge = `<span class="px-2 py-0.5 rounded bg-blue-950 text-blue-400 border border-blue-800 text-[10px]">HOÀN THÀNH</span>`;
+          const resultAvailable = !!(t.output_video_url || t.video_url);
+          statusBadge = `<span class="px-2 py-0.5 rounded bg-blue-950 text-blue-400 border border-blue-800 text-[10px]">${resultAvailable ? "ĐÃ XUẤT VIDEO" : "ĐÃ DỊCH · CHƯA XUẤT"}</span>`;
         } else if (t.status === "CANCELLED" || t.status === "STOPPED") {
           statusBadge = `<span class="px-2 py-0.5 rounded bg-gray-800 text-gray-400 border border-gray-700 text-[10px]">ĐÃ DỪNG</span>`;
         } else {
@@ -3168,8 +3248,8 @@ document.addEventListener("DOMContentLoaded", () => {
         }
 
         let actionButtons = "";
-        if (/^[a-zA-Z0-9_-]{1,80}$/.test(t.task_id) && !t.task_id.startsWith("export_") && !["STOPPED", "CANCELLED"].includes(t.status)) {
-          actionButtons += `<button onclick="window.openTaskInStudio('${t.task_id}')" class="px-2 py-1 bg-pink-600/80 hover:bg-pink-600 text-white rounded text-[10px]">Mở trong Studio</button> `;
+        if (/^[a-zA-Z0-9_-]{1,80}$/.test(t.task_id) && !t.task_id.startsWith("export_") && t.can_open !== false && (t.saved || !["STOPPED", "CANCELLED"].includes(t.status))) {
+          actionButtons += `<button onclick="window.openTaskInStudio('${t.task_id}')" class="px-2 py-1 bg-pink-600/80 hover:bg-pink-600 text-white rounded text-[10px]">${t.saved ? 'Mở lại để chỉnh' : 'Mở trong Studio'}</button> `;
         }
         if (t.can_pause) {
           actionButtons += `<button onclick="window.pauseTask('${t.task_id}')" class="px-2 py-1 bg-amber-600/80 hover:bg-amber-600 text-white rounded text-[10px]"><i class="fa-solid fa-pause mr-1"></i>Tạm dừng</button> `;
@@ -3185,8 +3265,8 @@ document.addEventListener("DOMContentLoaded", () => {
         }
 
         tr.innerHTML = `
-          <td class="p-3.5 font-bold text-white">${t.task_id}</td>
-          <td class="p-3.5 text-pink-400 font-semibold">${t.task_type}</td>
+          <td class="p-3.5 font-bold text-white">${escapeHtml(t.title || t.task_id)}${t.title ? `<div class="text-[10px] text-gray-400 font-normal">${escapeHtml(t.task_id)}</div>` : ''}${t.updated_at ? `<div class="text-[10px] text-gray-400 font-normal">${escapeHtml(new Date(t.updated_at * 1000).toLocaleString('vi-VN'))}</div>` : ''}</td>
+          <td class="p-3.5 text-pink-400 font-semibold">${escapeHtml(t.saved ? 'Phiên đã lưu' : t.task_type)}</td>
           <td class="p-3.5">
             <div class="flex items-center gap-2">
               ${terminalWithoutProgress ? "" : `<div class="w-24 bg-gray-800 h-2 rounded-full overflow-hidden">

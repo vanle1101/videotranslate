@@ -14,6 +14,8 @@ from core.subtitle import SubtitleGenerator
 from core.video_composer import VideoComposer
 from core.media_process import run_media
 from core.subtitle_cues import build_caption_layout, normalize_caption_style
+from core.streaming.audio_cache import (build_audio_cache_identity, load_audio_cache,
+                                       prepare_audio_cache, commit_audio_cache)
 
 class HQExporter:
     """
@@ -66,54 +68,19 @@ class HQExporter:
             if cancel_check and cancel_check():
                 raise RuntimeError("Tác vụ xuất video HQ đã bị hủy bởi người dùng.")
 
-        # 1. Extract Master Audio
-        _report(None, "1/6 Trích xuất âm thanh gốc...")
-        _check_cancel()
-        raw_audio = task_dir / "raw_audio.wav"
-        cmd = ["ffmpeg", "-v", "error", "-nostdin", "-y", "-i", str(video_path), "-vn", "-acodec", "pcm_s16le", "-ar", "44100", "-ac", "2", str(raw_audio)]
-        run_media(cmd, cancel_check)
-
-        # 2. Use the configured separator; the CPU profile needs no large AI model.
-        _report(None, "2/6 Xử lý giọng gốc và âm thanh nền...")
-        _check_cancel()
-        sep_dir = task_dir / "separated"
-        separation_engine = settings.SEPARATION_ENGINE
-        warnings = []
-        if separation_engine == "roformer":
-            self.separator = self.separator or BSRoFormerSeparator(settings.ROFORMER_MODEL)
-            if self.separator.is_available:
-                _, instrumental_path = self.separator.separate(raw_audio, sep_dir)
-            else:
-                warnings.append("RoFormer chưa được cài; đã dùng bộ giảm giọng DSP.")
-                separation_engine = "dsp"
-        if separation_engine == "none":
-            instrumental_path = raw_audio
-        elif separation_engine != "roformer":
-            if separation_engine not in ("dsp", "realtime"):
-                warnings.append(f"Export dùng DSP thay cho {separation_engine}.")
-            instrumental_path = task_dir / "background.wav"
-            self.suppressor.process_file(raw_audio, instrumental_path,
-                                         forced_mode=None if settings.SUPPRESSION_MODE == "AUTO" else settings.SUPPRESSION_MODE,
-                                         cancel_check=cancel_check)
-            separation_engine = "dsp"
-
-        # 3. Assemble Voice Timeline
-        _report(None, "3/6 Ráp timeline giọng đọc tiếng Việt...")
-        _check_cancel()
-        voice_wav = task_dir / "voice_timeline.wav"
-        self._assemble_voice_timeline(segments, total_duration, voice_wav, cancel_check)
-
-        # 4. Sidechain Audio Ducking
-        _report(None, "4/6 Trộn giọng đọc và âm thanh nền...")
-        _check_cancel()
-        master_audio = task_dir / "master_audio_ducked.wav"
-        self.mixer.mix(
-            instrumental_path=instrumental_path,
-            voice_path=voice_wav,
-            output_path=master_audio,
-            total_duration=total_duration,
-            cancel_check=cancel_check,
-        )
+        _report(None, "Đang kiểm tra âm thanh đã xử lý để dùng lại...")
+        audio_identity = build_audio_cache_identity(video_path, segments, total_duration,
+                                                    self.mixer, self.suppressor, cancel_check)
+        reused = load_audio_cache(audio_identity, task_dir, cancel_check)
+        pending_audio = None
+        if reused is not None:
+            master_audio, audio_metadata = reused
+            _report(None, "Đã dùng lại bản âm thanh đã kiểm tra; chỉ xuất lại hình và phụ đề...")
+        else:
+            master_audio, audio_metadata = self._mix_audio(
+                video_path, segments, total_duration, task_dir, _report, _check_cancel, cancel_check)
+            pending_audio = prepare_audio_cache(audio_identity, master_audio, audio_metadata, task_dir, cancel_check)
+        separation_engine, warnings = audio_metadata["separation_engine"], audio_metadata["warnings"]
 
         # 5. Subtitles
         _report(None, "5/6 Tạo phụ đề tiếng Việt...")
@@ -166,6 +133,10 @@ class HQExporter:
         else:
             rendered_video.replace(final_video_path)
 
+        # Cancelled or invalid video exports never publish a reusable mix. Once
+        # the MP4 commit succeeded, cache I/O cannot change its success state.
+        commit_audio_cache(audio_identity, pending_audio)
+
         elapsed = round(time.time() - t0, 1)
         _report(100, "Xuất video hoàn tất thành công!")
         return {
@@ -176,6 +147,46 @@ class HQExporter:
             "separation_engine": separation_engine,
             "warnings": warnings
         }
+
+    def _mix_audio(self, video_path, segments, total_duration, task_dir, report, check_cancel, cancel_check):
+        report(None, "1/6 Trích xuất âm thanh gốc...")
+        check_cancel()
+        raw_audio = task_dir / "raw_audio.wav"
+        run_media(["ffmpeg", "-v", "error", "-nostdin", "-y", "-i", str(video_path), "-vn",
+                   "-acodec", "pcm_s16le", "-ar", "44100", "-ac", "2", str(raw_audio)], cancel_check)
+
+        report(None, "2/6 Xử lý giọng gốc và âm thanh nền...")
+        check_cancel()
+        separation_engine, warnings = settings.SEPARATION_ENGINE, []
+        if separation_engine == "roformer":
+            self.separator = self.separator or BSRoFormerSeparator(settings.ROFORMER_MODEL)
+            if self.separator.is_available:
+                _, instrumental_path = self.separator.separate(raw_audio, task_dir / "separated")
+            else:
+                warnings.append("RoFormer chưa được cài; đã dùng bộ giảm giọng DSP.")
+                separation_engine = "dsp"
+        if separation_engine == "none":
+            instrumental_path = raw_audio
+        elif separation_engine != "roformer":
+            if separation_engine not in ("dsp", "realtime"):
+                warnings.append(f"Export dùng DSP thay cho {separation_engine}.")
+            instrumental_path = task_dir / "background.wav"
+            self.suppressor.process_file(raw_audio, instrumental_path,
+                forced_mode=None if settings.SUPPRESSION_MODE == "AUTO" else settings.SUPPRESSION_MODE,
+                cancel_check=cancel_check)
+            separation_engine = "dsp"
+
+        report(None, "3/6 Ráp timeline giọng đọc tiếng Việt...")
+        check_cancel()
+        voice_wav = task_dir / "voice_timeline.wav"
+        self._assemble_voice_timeline(segments, total_duration, voice_wav, cancel_check)
+
+        report(None, "4/6 Trộn giọng đọc và âm thanh nền...")
+        check_cancel()
+        master_audio = task_dir / "master_audio_ducked.wav"
+        self.mixer.mix(instrumental_path=instrumental_path, voice_path=voice_wav,
+                       output_path=master_audio, total_duration=total_duration, cancel_check=cancel_check)
+        return master_audio, {"separation_engine": separation_engine, "warnings": warnings}
 
     @staticmethod
     def validate_output(path, expected_duration, cancel_check=None):

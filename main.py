@@ -6,6 +6,7 @@ import shutil
 import stat
 import uuid
 import time
+import logging
 from pathlib import Path
 from urllib.parse import quote
 from typing import Dict, Any, Optional, List, Literal
@@ -35,6 +36,8 @@ from core.streaming.pipeline import (
     SegmentEditConflict,
 )
 from core.streaming.export import HQExporter
+from core.streaming.session_store import list_saved_sessions, restore_saved_session
+from core.runtime_errors import export_failure
 from core.media_preview import preview_manager
 from core.voice_catalog import list_voices, resolve_voice
 from core.voice_preview import select_voice, voice_preview_manager, VoicePreviewBusy
@@ -444,7 +447,33 @@ def session_output_details(session):
     return {"output_video_url": getattr(session, "output_video_url", ""),
             "output_filename": getattr(session, "output_filename", ""),
             "review_url": getattr(session, "output_review_url", ""),
+            "output_outdated": getattr(session, "caption_output_outdated", False),
             **review_result_details(session)}
+
+
+def editable_session(task_id):
+    session = get_streaming_session(task_id)
+    if session is None:
+        try:
+            session = restore_saved_session(task_id, event_callback=lambda event, data:
+                broadcast_session_event(task_id, event, data))
+        except FileNotFoundError:
+            return None
+        except (ValueError, OSError, TypeError, KeyError):
+            raise HTTPException(status_code=409, detail="Không mở được phiên đã lưu. Kiểm tra video nguồn và dữ liệu trong Lịch sử.") from None
+    return session
+
+
+def persist_session(session):
+    save = getattr(session, "persist", None)
+    if callable(save):
+        try:
+            save()
+        except (OSError, ValueError, TypeError) as error:
+            logging.getLogger("errors").error("PROJECT_SAVE_FAILED run_id=%s error_type=%s", session.task_id, type(error).__name__)
+            warning = "Không lưu được phiên xuống ổ đĩa; giữ ứng dụng mở và kiểm tra dung lượng/quyền ghi."
+            if warning not in getattr(session, "warnings", []):
+                session.warnings.append(warning)
 
 
 def export_revision_signature(session):
@@ -484,9 +513,15 @@ def schedule_reviewed_export(task_id):
             if task and task.get("status") in {"RUNNING", "CANCELLING"}:
                 task.update(cancelled=True, status="CANCELLING", stage="Đang dừng xuất video...")
             raise
-        except Exception:
+        except Exception as error:
+            # export_hq already emitted its classified error. A second generic
+            # event would replace the useful cause in the user's status panel.
+            if getattr(error, "result_error_reported", False):
+                return
+            message = (error.detail if isinstance(error, HTTPException) and isinstance(error.detail, str)
+                       else export_failure(error, f"export_{task_id}", "automatic_export"))
             await broadcast_session_event(task_id, "result_error", {
-                "message": "Chưa tạo được video kết quả. Bản dịch và giọng đọc đã được giữ; bấm Xuất video để thử lại.",
+                "message": message,
                 **review_result_details(session),
             })
 
@@ -549,6 +584,13 @@ async def list_tasks():
         if not any(t["task_id"] == hist["task_id"] for t in tasks):
             tasks.append(hist)
 
+    existing = {task["task_id"] for task in tasks}
+    for saved in list_saved_sessions():
+        if saved["task_id"] not in existing:
+            tasks.append({**saved, "saved": True, "task_type": "Phiên đã lưu",
+                          "video_url": saved.get("output_video_url", ""),
+                          "stage": saved.get("stage") or saved.get("missing_media", ""),
+                          "can_pause": False, "can_resume": False, "can_stop": False})
     return {"tasks": tasks}
 
 @app.post("/api/tasks/{task_id}/pause")
@@ -792,12 +834,14 @@ async def get_segment_audio(task_id: str, seg_id: int):
 
 @app.get("/api/streaming/{task_id}")
 async def streaming_snapshot(task_id: str):
-    session = get_streaming_session(task_id)
+    session = editable_session(task_id)
     if not session:
         raise HTTPException(status_code=404, detail="Phiên dịch không còn tồn tại.")
     return {
         "task_id": task_id, "initialized": session.initialized,
         "video_url": session.source_video_url,
+        "voice": getattr(session, "voice", ""),
+        "tts_engine": getattr(session, "tts_engine_name", ""),
         **session_output_details(session),
         **caption_style_details(session),
         "progress": session.get_progress(), "telemetry": session.get_telemetry(),
@@ -849,6 +893,7 @@ async def update_caption_style(task_id: str, req: CaptionStyleRequest):
         # A previous export is valid only for its old style. Drop its published
         # task entry so task polling cannot present it as the new result.
         active_export_tasks.pop(f"export_{task_id}", None)
+        persist_session(session)
     payload = {**caption_style_details(session), **session_output_details(session),
                "segments": [session.segment_snapshot(s) for s in session.segments.values()]}
     await broadcast_session_event(task_id, "caption_style", payload)
@@ -1029,23 +1074,53 @@ async def export_hq(req: ExportHQRequest):
         if not active_export_tasks[export_id].get("published") and (_cancel_chk() or getattr(session, "is_stopped", False)):
             raise RuntimeError("Export cancelled before publishing")
 
-        active_export_tasks[export_id]["status"] = "COMPLETED"
-        active_export_tasks[export_id]["progress"] = 100
-        active_export_tasks[export_id]["stage"] = "Xuất video hoàn tất thành công!"
-        active_export_tasks[export_id]["video_url"] = f"/api/outputs/{result['output_filename']}"
-        active_export_tasks[export_id]["output_filename"] = result["output_filename"]
         review_url = ""
+        metadata_warning = ""
+        sidecar_warning = ("Video MP4 đã xuất và có thể tải, nhưng chưa lưu được báo cáo kiểm tra. "
+                           "Kiểm tra dung lượng/quyền ghi thư mục kết quả rồi xuất lại để lưu báo cáo.")
         if review_status == "completed":
             sidecar_name = f"{Path(result['output_filename']).stem}.review.json"
             sidecar_path = settings.OUTPUT_DIR / sidecar_name
-            sidecar_path.write_text(json.dumps(review_sidecar_payload(session), ensure_ascii=False, indent=2), encoding="utf-8")
-            review_url = f"/api/outputs/{sidecar_name}"
-        active_export_tasks[export_id]["review_url"] = review_url
+            sidecar_temp = sidecar_path.with_name(f".{sidecar_name}.{uuid.uuid4().hex}.tmp")
+            try:
+                sidecar_temp.write_text(json.dumps(review_sidecar_payload(session), ensure_ascii=False, indent=2), encoding="utf-8")
+                sidecar_temp.replace(sidecar_path)
+                review_url = f"/api/outputs/{sidecar_name}"
+                if sidecar_warning in session.warnings:
+                    session.warnings.remove(sidecar_warning)
+            except (OSError, ValueError, TypeError) as error:
+                # The validated MP4 has already been published. Report this
+                # separate metadata failure without discarding a usable video
+                # or linking a stale report from an earlier export.
+                metadata_warning = sidecar_warning
+                if sidecar_warning not in session.warnings:
+                    session.warnings.append(sidecar_warning)
+                logging.getLogger("errors").warning(
+                    "EXPORT_REPORT_SAVE_FAILED run_id=%s error_type=%s errno=%s",
+                    export_id, type(error).__name__, getattr(error, "errno", None))
+            finally:
+                try:
+                    sidecar_temp.unlink(missing_ok=True)
+                except OSError as error:
+                    logging.getLogger("errors").warning(
+                        "EXPORT_REPORT_TEMP_CLEANUP_FAILED run_id=%s error_type=%s",
+                        export_id, type(error).__name__)
         session.output_video_url = f"/api/outputs/{result['output_filename']}"
         session.output_filename = result["output_filename"]
         session.output_review_url = review_url
         session.caption_output_outdated = False
-        await broadcast_session_event(req.task_id, "result_ready", session_output_details(session))
+        warnings_before_save = list(session.warnings)
+        persist_session(session)
+        save_warnings = [warning for warning in session.warnings if warning not in warnings_before_save]
+        metadata_warning = " ".join(filter(None, [metadata_warning, *save_warnings]))
+        active_export_tasks[export_id].update(
+            status="COMPLETED", progress=100,
+            stage=metadata_warning or "Xuất video hoàn tất thành công!",
+            video_url=session.output_video_url, output_filename=session.output_filename,
+            review_url=review_url, warnings=list(session.warnings), metadata_warning=metadata_warning)
+        output_details = {**session_output_details(session), "warnings": list(session.warnings),
+                          "metadata_warning": metadata_warning}
+        await broadcast_session_event(req.task_id, "result_ready", output_details)
 
         return {
             "status": "ok",
@@ -1053,7 +1128,7 @@ async def export_hq(req: ExportHQRequest):
             "output_filename": result["output_filename"],
             "video_url": f"/api/outputs/{result['output_filename']}",
             "elapsed_seconds": result["elapsed_seconds"],
-            **session_output_details(session),
+            **output_details,
             "review_url": review_url,
         }
     except asyncio.CancelledError:
@@ -1070,14 +1145,18 @@ async def export_hq(req: ExportHQRequest):
                 break
         active_export_tasks[export_id].update(status="CANCELLED", stage="Đã hủy xuất video")
         raise
-    except Exception:
+    except Exception as error:
         status_name = "CANCELLED" if active_export_tasks.get(export_id, {}).get("cancelled") else "FAILED"
-        message = ("Đã hủy xuất video" if status_name == "CANCELLED" else
-                   "Chưa xuất được video. Bản dịch và giọng đọc vẫn được giữ; hãy thử xuất lại.")
+        stage = active_export_tasks.get(export_id, {}).get("stage", "export")
+        message = "Đã hủy xuất video" if status_name == "CANCELLED" else export_failure(error, export_id, stage)
         if export_id in active_export_tasks:
             active_export_tasks[export_id]["status"] = status_name
             active_export_tasks[export_id]["stage"] = message
-        raise HTTPException(status_code=409 if status_name == "CANCELLED" else 500, detail=message) from None
+        await broadcast_session_event(req.task_id, "result_error", {"message": message, **session_output_details(session)})
+        persist_session(session)
+        failure = HTTPException(status_code=409 if status_name == "CANCELLED" else 500, detail=message)
+        failure.result_error_reported = True
+        raise failure from None
     finally:
         session.export_task = None
 

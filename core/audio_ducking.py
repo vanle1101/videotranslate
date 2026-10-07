@@ -53,7 +53,11 @@ class PremiumAudioMixer:
         # the sidechain detector and for the audible voiceover in the final mix.
         # Padding both inputs also prevents a short voice track cutting BGM off.
         ratio = 1.0 if self.duck_amount_db == 0 else max(1.0, min(20.0, abs(self.duck_amount_db) / 2.5))
-        padding = f",apad=whole_dur={total_duration}" if total_duration else ""
+        # A finite EOF on one side of the sidechain/asplit graph can end amix
+        # before its queued tail is drained. Keep both inputs live until the
+        # final atrim reaches the requested duration; don't pad only to that
+        # duration upstream. Legacy callers without a duration still end at BGM.
+        padding = ",apad" if total_duration else ""
         voice_padding = padding if total_duration else ",apad"
         trim = f",atrim=duration={total_duration}" if total_duration else ""
 

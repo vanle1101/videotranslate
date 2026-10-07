@@ -46,7 +46,7 @@ class LocalAPITests(unittest.TestCase):
         attrs = dict(
             task_id="local-test", video_path=self.video, total_duration=1.0,
             initial_buffer_seconds=10.0, segments={0: segment},
-            screen_texts=[], video_size=(1080, 1920),
+            screen_texts=[], video_size=(1080, 1920), warnings=[],
             is_running=False, is_paused=False, error=None,
             start_wall_time=0, first_play_emitted=True, bgm_url=None,
             vocal_suppressor=SimpleNamespace(name="DSP"), suppression_stats={},

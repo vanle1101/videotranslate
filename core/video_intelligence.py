@@ -22,6 +22,7 @@ from config import settings
 from core.engines.translation.gemini_client import GeminiClient, GeminiError, GeminiIncompleteError
 from core.engines.translation.openrouter_client import OpenRouterFreeClient, OpenRouterClientError
 from core.engines.translation.opencode_client import OpenCodeZenClient, OpenCodeClientError
+from core.chinese_text import comparable_chinese
 from core.media_process import run_media
 from core.screen_ocr import ScreenOCR
 
@@ -189,7 +190,8 @@ class VideoIntelligence:
                         "chunking": [self.MAX_CHUNK_SECONDS, self.TARGET_CHUNK_SECONDS, self.MAX_WIDTH],
                         "ocr": [ScreenOCR.FPS, ScreenOCR.MAX_DIMENSION, ScreenOCR.MIN_CONFIDENCE],
                         "code": [hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),
-                                 hashlib.sha256(Path(__file__).with_name("screen_ocr.py").read_bytes()).hexdigest()]}
+                                  hashlib.sha256(Path(__file__).with_name("screen_ocr.py").read_bytes()).hexdigest(),
+                                  hashlib.sha256(Path(__file__).with_name("chinese_text.py").read_bytes()).hexdigest()]}
             key = self._checkpoint_digest(identity)
             return {"key": key, "source": source,
                     "directory": Path(settings.WORKSPACE_DIR) / "cache" / "visual_checkpoints" / key}
@@ -546,9 +548,8 @@ class VideoIntelligence:
                 # Retain the measured ASR as an explicitly unapproved draft.
                 text, refs = source.get("asr_text", ""), []
                 reason = "AI dẫn chứng chữ ở sai thời điểm; giữ bản nhận giọng để nghe lại."
-            compact = lambda value: re.sub(r"[\s\W_]+", "", value, flags=re.UNICODE)
             original = source.get("asr_text", "")
-            changed = compact(text) != compact(original)
+            changed = self._compact_text(text) != self._compact_text(original)
             review = invalid_evidence or row["needs_review"] or (changed and not refs) or (bool(original.strip()) and not text.strip())
             if review and not reason.strip():
                 reason = "Chưa đủ bằng chứng OCR để xác minh câu nhận dạng."
@@ -574,7 +575,7 @@ class VideoIntelligence:
 
     @staticmethod
     def _compact_text(value):
-        return re.sub(r"[\s\W_]+", "", value or "", flags=re.UNICODE)
+        return comparable_chinese(value)
 
     @classmethod
     def _ocr_supports_text(cls, text, evidence):
@@ -714,6 +715,53 @@ class VideoIntelligence:
                 screens[sid].update(needs_review=True, review_reason=reason)
             return raw, result
 
+    @staticmethod
+    def _group_repeated_screens(observed, payload):
+        """Share exact repeated non-speech text at the same measured location.
+
+        A sentence overlapping ASR stays independent: one character's subtitle
+        must never authorize another turn or alter evidence citations. Distinct
+        spellings, confidence classes and review flags also stay independent.
+        """
+        representatives, occurrences = [], {}
+        for row in observed:
+            overlaps_speech = any(row["start"] < speech["end"] and row["end"] > speech["start"] for speech in payload)
+            match = None
+            if not overlaps_speech:
+                for candidate in representatives:
+                    if (candidate.get("text_zh") != row.get("text_zh")
+                            or bool(candidate.get("needs_review")) != bool(row.get("needs_review"))
+                            or candidate.get("review_reason", "") != row.get("review_reason", "")
+                            or (float(candidate.get("confidence", 0)) >= .9) != (float(row.get("confidence", 0)) >= .9)
+                            or any(candidate["start"] < speech["end"] and candidate["end"] > speech["start"] for speech in payload)):
+                        continue
+                    if ScreenOCR._overlap(candidate["bbox"], row["bbox"]) >= .8:
+                        match = candidate
+                        break
+            if match is None:
+                match = dict(row)
+                representatives.append(match)
+                occurrences[match["id"]] = []
+            occurrences[match["id"]].append(row)
+            # Never increase certainty by retaining only the clearest sighting.
+            match["confidence"] = min(float(match.get("confidence", 0)), float(row.get("confidence", 0)))
+        return representatives, occurrences
+
+    @staticmethod
+    def _expand_repeated_screens(result, occurrences):
+        expanded = []
+        for translated in result["screen_texts"]:
+            for original in occurrences.get(translated["id"], [translated]):
+                # Only the translation/classification is shared. Every source
+                # ID, OCR spelling, box, confidence and interval stays measured.
+                expanded.append({**translated, **original,
+                    "text_vi": translated["text_vi"], "kind": translated["kind"],
+                    "needs_review": bool(translated["needs_review"] or original.get("needs_review")),
+                    "review_reason": translated.get("review_reason", ""),
+                    "source_region_verified": (translated.get("source_region_verified", False)
+                                                if len(occurrences.get(translated["id"], [])) == 1 else False)})
+        return {**result, "screen_texts": sorted(expanded, key=lambda row: row["start"])}
+
     def _translate_text(self, payload, observed, previous_summary, start, end, cancel_check=None, *, quota_fallback=False):
         """Primary free translation and explicit quota fallback share text checks."""
         self._check_cancelled(cancel_check)
@@ -727,17 +775,24 @@ class VideoIntelligence:
                 raise VideoIntelligenceError(f"Chưa có thông tin đăng nhập {label}.")
             combined = {"segments": {}, "screen_texts": [], "summary": previous_summary}
             all_corrections = {}
+            representatives, occurrences = (self._group_repeated_screens(observed, payload)
+                if provider == "opencode" else (observed, {row["id"]: [row] for row in observed}))
+            if len(representatives) < len(observed):
+                from core.runtime_context import current_execution_context
+                logging.getLogger("ai").info(
+                    "OCR_TRANSLATION_GROUPED run_id=%s measured_regions=%s unique_regions=%s",
+                    current_execution_context().run_id, len(observed), len(representatives))
             # Bound response size even when rapid subtitle changes produce many
             # local OCR IDs. Every requested ID belongs to exactly one batch.
-            batches = max(1, math.ceil(len(payload) / 12), math.ceil(len(observed) / 24))
+            batches = max(1, math.ceil(len(payload) / 12), math.ceil(len(representatives) / 24))
             context = json.dumps({"speech": [{"start": row["start"], "end": row["end"],
                                              "asr_text": row.get("asr_text", "")} for row in payload],
                                   "ocr": [{"start": row["start"], "end": row["end"],
-                                           "text_zh": row["text_zh"]} for row in observed]}, ensure_ascii=False)
+                                            "text_zh": row["text_zh"]} for row in representatives]}, ensure_ascii=False)
             for index in range(batches):
                 self._check_cancelled(cancel_check)
                 batch_payload = payload[index * 12:(index + 1) * 12]
-                batch_screens = observed[index * 24:(index + 1) * 24]
+                batch_screens = representatives[index * 24:(index + 1) * 24]
                 batch_stage = {"kind": "text_batch", "start": start, "end": end, "index": index,
                                "provider": provider, "model": model_setting, "quota_fallback": quota_fallback,
                                "context": self._checkpoint_digest([payload, observed, combined["summary"]])}
@@ -785,6 +840,8 @@ class VideoIntelligence:
                           "KHÔNG tự hoàn thiện câu, KHÔNG xóa cờ chưa chắc chắn để làm bản dịch trơn tru. "
                           "Các trường tiếng Việt không chứa chữ Hán; nếu không dịch chắc thì đánh dấu cần kiểm tra. "
                           "Chỉ xuất các ID được yêu cầu trong batch; phần ngữ cảnh không được tạo thêm ID.\n"
+                          "Vùng chữ lặp chính xác ở cùng vị trí ngoài lời thoại có thể dùng một ID đại diện. "
+                          "Chỉ dịch chữ thực có; không hoàn thiện chữ băng rôn bị cắt, không biến tiêu đề thành lời nói.\n"
                           "Đã có bước đối chiếu nguồn riêng: dịch corrected_text_zh và trả text_zh đúng nguyên câu đó. "
                           "Không diễn giải lại chữ ASR gốc khi đã có câu sửa được OCR chứng minh. "
                           "source_needs_review=true luôn phải giữ needs_review=true.\n"
@@ -830,7 +887,7 @@ class VideoIntelligence:
                     if not quota_fallback and classification_changed:
                         row["needs_review"] = True
                         row["review_reason"] = row.get("review_reason") or "Hai lượt đối chiếu chưa thống nhất loại chữ trên hình."
-                result = verified
+                result = self._expand_repeated_screens(verified, occurrences)
                 self._write_checkpoint(batch_stage, {"result": result,
                     "corrections": {str(key): value for key, value in corrections.items()}}, cancel_check)
                 combined["segments"].update(result["segments"])

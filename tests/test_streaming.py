@@ -7,15 +7,13 @@ sys.stdout.reconfigure(encoding='utf-8')
 sys.path.insert(0, str(Path(__file__).parent.parent))
 from core.streaming.pipeline import create_streaming_session
 
-async def test_streaming():
+async def run_streaming():
     print("=" * 70)
     print("⚡ TESTING REAL-TIME STREAMING SEGMENT PIPELINE")
     print("=" * 70)
 
     input_video = Path("workspace/inputs/e2e_input.mp4")
-    if not input_video.exists():
-        print("[!] Input video not found!")
-        return
+    assert input_video.exists(), f"Standalone streaming diagnostic source is missing: {input_video}"
 
     events_received = []
 
@@ -52,6 +50,10 @@ async def test_streaming():
     while session.is_running:
         await asyncio.sleep(0.5)
 
+    assert not session.is_running, "Streaming diagnostic did not reach a terminal state"
+    assert not session.error, f"Streaming diagnostic failed: {session.error}"
+    assert session.segments, "Streaming diagnostic completed without any segments"
+
     elapsed = round(time.time() - t0, 2)
     print("\n" + "=" * 70)
     print(f"✅ STREAMING SESSION COMPLETED IN {elapsed}s")
@@ -72,4 +74,4 @@ async def test_streaming():
         print(f"  Audio File: {seg.audio_path}")
 
 if __name__ == "__main__":
-    asyncio.run(test_streaming())
+    asyncio.run(run_streaming())

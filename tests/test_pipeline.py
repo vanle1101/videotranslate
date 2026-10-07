@@ -2,10 +2,11 @@ import asyncio
 from pathlib import Path
 from core.subtitle import SubtitleGenerator
 from core.tts import VietnameseTTS
-from core.audio_ducking import AudioDucker
+from core.audio_ducking import PremiumAudioMixer
 from config import settings
 
-async def test_modules():
+async def run_modules():
+    settings.TEMP_DIR.mkdir(parents=True, exist_ok=True)
     print("=== TEST 1: Subtitle Generator ===")
     sub_gen = SubtitleGenerator()
     dummy_segments = [
@@ -27,13 +28,13 @@ async def test_modules():
     print(f"[OK] Audio generated: {test_audio.name}, duration: {dur:.2f}s")
 
     print("\n=== TEST 3: Audio Ducking ===")
-    ducker = AudioDucker()
+    mixer = PremiumAudioMixer()
     out_mixed = settings.TEMP_DIR / "test_mixed.wav"
-    # Mix test_audio with itself as mock bgm
-    ducker.mix_and_duck(test_audio, test_audio, out_mixed)
+    # Mix test_audio with itself as a small, real media smoke check.
+    mixer.mix(test_audio, test_audio, out_mixed, total_duration=dur or None)
     print(f"[OK] Audio Ducking mixed: {out_mixed.name} ({out_mixed.stat().st_size} bytes)")
 
     print("\n=== ALL TESTS PASSED! ===")
 
 if __name__ == "__main__":
-    asyncio.run(test_modules())
+    asyncio.run(run_modules())

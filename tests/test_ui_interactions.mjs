@@ -230,7 +230,7 @@ test('voice catalog renders a list with source groups, restores selection and of
   assert.equal(ui.row('vieneu:Unavailable').querySelector('.voice-choose-button').disabled, true);
   assert.equal(ui.row('vieneu:Unavailable').querySelector('.voice-preview-button').disabled, true);
   assert.match(ui.el('voice-source').textContent, /Trúc Ly · VieNeu · Hugging Face · Chạy trên máy/);
-  assert.match(ui.row('vieneu:Trúc Ly').querySelector('.voice-description').textContent, /Nữ miền Bắc/);
+  assert.match(ui.row('vieneu:Trúc Ly').querySelectorAll('.voice-tag').map(tag => tag.textContent).join(' · '), /Nữ miền Bắc/);
   assert.equal(ui.row('vieneu:Trúc Ly').querySelector('.voice-choose-button').getAttribute('aria-pressed'), 'true');
   assert.equal(ui.row('vieneu:Trúc Ly').querySelector('.voice-preview-button').disabled, false);
   assert.equal(ui.el('voice-preview-audio').playCount, 0);
@@ -1403,6 +1403,17 @@ test('terminal Tasks with no measured progress show their stage without a progre
   }
 });
 
+test('history distinguishes a translated project from a published video', async () => {
+  const ui=studio(); await ui.flush();
+  ui.replies.set('/api/tasks',{tasks:[
+    {task_id:'draft',status:'COMPLETED',saved:true,output_video_url:''},
+    {task_id:'published',status:'COMPLETED',saved:true,output_video_url:'/api/outputs/final.mp4'},
+  ]});
+  await ui.el('btn-refresh-tasks').click();
+  assert.match(ui.el('tasks-table-body').children[0].innerHTML,/ĐÃ DỊCH · CHƯA XUẤT/);
+  assert.match(ui.el('tasks-table-body').children[1].innerHTML,/ĐÃ XUẤT VIDEO/);
+});
+
 test('Diagnostics preserves log lines, safely highlights levels and copies exact raw text', async () => {
   const ui = studio(); await ui.flush();
   const raw = '2026-10-05 INFO first line\n2026-10-05 ERROR <script>unsafe</script>\n    traceback detail\n';
@@ -1878,6 +1889,38 @@ test('reconnect restores the current exported caption revision after missing res
   assert.equal(ui.el('btn-save-result').disabled, false);
   assert.match(ui.el('task-result-link').href, /after\.mp4$/);
   assert.equal(ui.el('caption-text-color').value, '#112233');
+});
+
+test('automatic caption placement persists through the style API and invalidates the old result', async () => {
+  const ui = studio(); await ui.start();
+  const {segment, style} = completedCaptionFixture(ui);
+  ui.replies.set('/api/streaming/fixture/caption-style', styledCaptionReply(segment, {...style, position: 'bottom'}, 1));
+  ui.el('toggle-screen-text').checked = false;
+  await ui.el('toggle-screen-text').emit('change'); await ui.tickTimeouts(250);
+  assert.equal(JSON.parse(ui.requests.at(-1).options.body).position, 'bottom');
+  assert.equal(ui.el('caption-position').value, 'bottom');
+  assert.equal(ui.el('btn-save-result').disabled, true);
+  assert.equal(ui.el('task-result-link').classList.contains('hidden'), true);
+  assert.equal(ui.el('toggle-screen-text').disabled, false);
+  ui.replies.set('/api/streaming/fixture/caption-style', styledCaptionReply(segment, style, 2));
+  ui.el('toggle-screen-text').checked = true;
+  await ui.el('toggle-screen-text').emit('change'); await ui.tickTimeouts(250);
+  assert.equal(JSON.parse(ui.requests.at(-1).options.body).position, 'auto');
+  assert.equal(ui.el('caption-position').value, 'auto');
+});
+
+test('saved history exposes edit action and preserves missing-source messages safely', async () => {
+  const ui = studio(); await ui.flush();
+  ui.replies.set('/api/tasks', {tasks: [{task_id: 'saved_fixture', title: '<b>Saved clip</b>',
+    saved: true, can_open: true, status: 'COMPLETED', duration: 4, updated_at: 1700000000},
+    {task_id: 'missing_fixture', saved: true, can_open: false, status: 'FAILED', stage: 'Video nguồn đã bị di chuyển', duration: 4}]});
+  await ui.el('tab-tasks').click(); await ui.flush();
+  const rows = ui.el('tasks-table-body').children;
+  assert.match(rows[0].innerHTML, /Mở lại để chỉnh/);
+  assert.match(rows[0].innerHTML, /&lt;b&gt;Saved clip&lt;\/b&gt;/);
+  assert.doesNotMatch(rows[1].innerHTML, /openTaskInStudio/);
+  ui.replies.set('/api/streaming/saved_fixture', {failure: true, detail: 'Video nguồn đã bị di chuyển.'});
+  await assert.rejects(ui.window.studioAttachTask('saved_fixture'), /Video nguồn đã bị di chuyển/);
 });
 
 test('caption edits serialize mutations and apply only the latest acknowledged revision', async () => {
@@ -2485,6 +2528,74 @@ test('attach restores an existing task without source download or model requests
   assertWorkerSourceBusy(ui,false);
 });
 
+test('history restores the project voice without overwriting the default for new projects', async () => {
+  const ui = studio(undefined, {catalog:voiceCatalog, saved:{'studio.voice-id':'vieneu:Trúc Ly'}});
+  await ui.flush();
+  assert.equal(ui.el('voice-select').value,'vieneu:Trúc Ly');
+  ui.replies.set('/api/streaming/recovered', {voice:'vi-VN-HoaiMyNeural',tts_engine:'edge-tts',progress:{status:'COMPLETED'}});
+  assert.equal(await ui.window.studioAttachTask('recovered'),true);
+  assert.equal(ui.el('voice-select').value,'edge:vi-VN-HoaiMyNeural');
+  assert.equal(ui.row('edge:vi-VN-HoaiMyNeural').dataset.selected,'true');
+  assert.match(ui.el('voice-source').textContent,/Hoài My.*Microsoft Edge/);
+  assert.equal(ui.saved.get('studio.voice-id'),'vieneu:Trúc Ly');
+  assert.equal(ui.requests.filter(r=>r.url.includes('/start-') || r.url==='/api/voices/preview').length,0);
+});
+
+test('a late voice catalog cannot replace the voice of an attached project', async () => {
+  let finish;
+  const ui = studio(undefined, {catalog:()=>new Promise(resolve=>{finish=resolve;}),saved:{'studio.voice-id':'vieneu:Trúc Ly'}});
+  ui.replies.set('/api/streaming/recovered', {voice:'vi-VN-HoaiMyNeural',tts_engine:'edge-tts',progress:{status:'COMPLETED'}});
+  await ui.window.studioAttachTask('recovered');
+  assert.equal(ui.el('voice-select').value,'edge:vi-VN-HoaiMyNeural');
+  finish({ok:true,json:async()=>voiceCatalog}); await ui.flush();
+  assert.equal(ui.el('voice-select').value,'edge:vi-VN-HoaiMyNeural');
+  assert.equal(ui.row('edge:vi-VN-HoaiMyNeural').dataset.selected,'true');
+  assert.equal(ui.saved.get('studio.voice-id'),'vieneu:Trúc Ly');
+});
+
+test('late catalog recovery follows the latest attached project and supports legacy fallback', async () => {
+  for (const catalogFailure of [false,true]) {
+    let finish;
+    const ui = studio(undefined, {catalog:()=>new Promise(resolve=>{finish=resolve;}),saved:{'studio.voice-id':'vieneu:Trúc Ly'}});
+    ui.replies.set('/api/streaming/first', {voice:'Trúc Ly',tts_engine:'vieneu-tts',progress:{status:'COMPLETED'}});
+    ui.replies.set('/api/streaming/second', {voice:'vi-VN-HoaiMyNeural',tts_engine:'edge-tts',progress:{status:'COMPLETED'}});
+    await ui.window.studioAttachTask('first');
+    await ui.window.studioAttachTask('second');
+    finish({ok:!catalogFailure,json:async()=>catalogFailure ? {} : voiceCatalog}); await ui.flush();
+    const expectedId = catalogFailure ? 'vi-VN-HoaiMyNeural' : 'edge:vi-VN-HoaiMyNeural';
+    assert.equal(ui.el('voice-select').value,expectedId);
+    assert.equal(ui.row(expectedId).dataset.selected,'true');
+    assert.match(ui.el('voice-source').textContent,/Hoài My/);
+    assert.equal(ui.saved.get('studio.voice-id'),'vieneu:Trúc Ly');
+  }
+});
+
+test('history preserves unavailable or removed voices instead of claiming a different voice was used', async () => {
+  for (const nativeVoice of ['Unavailable','Removed voice']) {
+    const ui = studio(undefined, {catalog:voiceCatalog,saved:{'studio.voice-id':voiceCatalog.default_voice_id}});
+    await ui.flush();
+    ui.replies.set('/api/streaming/recovered', {voice:nativeVoice,tts_engine:'vieneu-tts',progress:{status:'COMPLETED'}});
+    await ui.window.studioAttachTask('recovered');
+    assert.equal(ui.el('voice-select').value,`vieneu:${nativeVoice}`);
+    assert.equal(ui.row(voiceCatalog.default_voice_id).dataset.selected,'false');
+    assert.match(ui.el('voice-source').textContent,/Chưa sẵn sàng|Chưa có trong danh sách/);
+    assert.equal(ui.saved.get('studio.voice-id'),voiceCatalog.default_voice_id);
+    if (nativeVoice==='Unavailable') assert.equal(ui.row('vieneu:Unavailable').dataset.selected,'true');
+    await ui.choose(voiceCatalog.default_voice_id);
+    assert.equal(ui.el('voice-select').value,voiceCatalog.default_voice_id);
+    assert.doesNotMatch(ui.el('voice-source').textContent,/Chưa sẵn sàng|Chưa có trong danh sách/);
+  }
+});
+
+test('legacy history snapshots without voice fields keep the current selection', async () => {
+  const ui = studio(undefined,{catalog:voiceCatalog,saved:{'studio.voice-id':'vieneu:Trúc Ly'}});
+  await ui.flush();
+  ui.replies.set('/api/streaming/legacy',{progress:{status:'COMPLETED'}});
+  await ui.window.studioAttachTask('legacy');
+  assert.equal(ui.el('voice-select').value,'vieneu:Trúc Ly');
+  assert.equal(ui.saved.get('studio.voice-id'),'vieneu:Trúc Ly');
+});
+
 test('attach locks controls while loading and keeps active sessions locked', async () => {
   const ui = studio(undefined,{catalog:voiceCatalog}); await ui.flush();
   let finish;
@@ -2580,6 +2691,22 @@ test('AI review receives corrected audio revision at the current playhead and re
   assert.equal(ui.el('btn-export-hq').disabled,true, 'An unaudited uncertain row remains blocked');
 });
 
+test('review completion replaces stale failure warnings but retains current source warnings', async () => {
+  const ui=studio(); await ui.start();
+  const socket=ui.sockets.at(-1);
+  socket.receive({type:'telemetry',warnings:['AI kiểm tra lại chưa hoàn tất.']});
+  assert.match(ui.el('pipeline-warning').textContent,/chưa hoàn tất/);
+  socket.receive({type:'review_complete',warnings:['Chữ gốc chưa rõ.'],review_summary:{status:'completed',checked:1}});
+  assert.equal(ui.el('pipeline-warning').textContent,'Chữ gốc chưa rõ.');
+  socket.receive({type:'telemetry',warnings:['AI kiểm tra lại chưa hoàn tất; mở dự án và bấm AI kiểm tra lại để tiếp tục.','Chữ gốc chưa rõ.'],review_summary:{status:'completed'}});
+  assert.equal(ui.el('pipeline-warning').textContent,'Chữ gốc chưa rõ.','Old persisted review warning must not contradict completed review');
+  socket.receive({type:'review_complete',review_summary:{status:'completed',checked:1}});
+  assert.equal(ui.el('pipeline-warning').textContent,'Chữ gốc chưa rõ.');
+  socket.receive({type:'review_complete',warnings:[],review_summary:{status:'completed',checked:1}});
+  assert.equal(ui.el('pipeline-warning').textContent,'');
+  assert.equal(ui.el('pipeline-warning').classList.contains('hidden'),true);
+});
+
 test('rejected AI review restores completed controls without discarding its draft or audio', async () => {
   const ui=studio(); await ui.start();
   ui.sockets.at(-1).receive({type:'progress',status:'COMPLETED',can_review:true});
@@ -2651,6 +2778,19 @@ test('AI review reconnect retains preview and existing audio and reports failed 
   assert.equal(ui.el('btn-export-hq').disabled,true);
   assert.equal(ui.el('btn-review-worker').disabled,false);
   assertWorkerSourceBusy(ui,false);
+});
+
+test('published video stays downloadable while metadata save warnings remain visible', async () => {
+  const ui=studio(); await ui.start();
+  const socket=ui.sockets.at(-1);
+  const message='Video đã xuất; chưa lưu được báo cáo kiểm tra.';
+  socket.receive({type:'result_ready',output_video_url:'/api/outputs/final.mp4',output_filename:'final.mp4',
+    warnings:[message],metadata_warning:message,review_summary:{status:'completed'}});
+  assert.equal(ui.el('btn-save-result').disabled,false);
+  assert.equal(ui.el('pipeline-warning').textContent,message);
+  assert.equal(ui.el('pipeline-warning').classList.contains('hidden'),false);
+  socket.receive({type:'telemetry',playable_until:10});
+  assert.equal(ui.el('pipeline-warning').textContent,message);
 });
 
 test('backend automatic export locks edits and displays a final result without autoplay or posting a second export', async () => {
@@ -2901,6 +3041,8 @@ test('task polling exposes missed export failure and cancellation while allowing
     assert.equal(ui.el('task-result-link').classList.contains('hidden'), true);
     assert.equal(ui.el('btn-export-hq').disabled, false);
     assert.equal(ui.el('task-progress-value').textContent, '');
+    assert.equal(ui.el('caption-style-panel').classList.contains('hidden'), false);
+    assert.equal(ui.el('caption-style-controls').disabled, false, 'Cancelling export preserves caption editing');
   }
 });
 
