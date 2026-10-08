@@ -2,7 +2,7 @@
 
 > **Bản cấu hình Windows / RAM 16 GB:** xem [hướng dẫn cài đặt và vận hành](docs/windows-guide.md). Chạy `setup.bat` cho máy mới, `start.bat` để mở. Cấu hình mặc định hiện tại: Whisper Small CPU int8, Edge-TTS và DSP; các engine cao cấp trong phần giới thiệu bên dưới là tùy chọn cần cài riêng.
 
-> **Dùng key có sẵn trong OpenCode:** mặc định **OpenRouter Free**, tự đọc key local, không cần tải LLM dịch. OpenCode Zen CLI vẫn có thể chọn nhưng hiện gặp lỗi 403 từ dịch vụ. Kiểm tra kết nối ở Cài đặt; key không gửi ra giao diện hay đẩy GitHub. Gemini, DeepSeek và Google/MyMemory vẫn có thể chọn riêng.
+> **Dịch bằng OpenCode Muse:** mặc định **OpenCode Zen · Muse Spark Free** (`muse-spark-1.3-contributor-free`), dùng phiên OpenCode đã kết nối trên máy. OpenRouter Free, Gemini, DeepSeek và Google/MyMemory là các lựa chọn thay thế; ứng dụng không tự đổi sang model trả phí khi provider lỗi. Kiểm tra kết nối ở Cài đặt; key không gửi ra giao diện hay đẩy GitHub.
 
 > **Gemini và Muse:** Gemini đứng đầu Cài đặt, có kiểm tra model đã lưu và xử lý lỗi API rõ ràng. Muse dùng được phiên đăng nhập Chrome đang mở sau khi bạn cho phép Chrome kết nối, hoặc dùng hồ sơ Chrome riêng. Chạy `setup_muse.bat` một lần rồi kết nối trong Cài đặt. Tích hợp không tự cấp token; xem [hướng dẫn Muse](docs/windows-guide.md#muse-qua-tài-khoản-của-bạn-thử-nghiệm).
 

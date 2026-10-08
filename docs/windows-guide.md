@@ -1,6 +1,6 @@
 # Cài đặt và vận hành trên Windows
 
-Máy đã kiểm tra ngày 05/10/2026: Intel i5-13420H (8 nhân / 12 luồng), RAM 16 GB, NVIDIA RTX 2050 4 GB, Windows 11, Python 3.12.10 và FFmpeg 9.0.1.
+Cấu hình ghi nhận ngày 05/10/2026: Intel i5-13420H (8 nhân / 12 luồng), RAM 16 GB, NVIDIA RTX 2050 4 GB, Windows 11, Python 3.12.10 và FFmpeg 9.0.1. Đây là cấu hình của lượt kiểm tra đó, không phải kết quả đo lại phần cứng mỗi lần mở ứng dụng.
 
 ## Mở ứng dụng
 
@@ -9,6 +9,8 @@ Nhấp đúp **Douyin2TikTok AI Studio.lnk** (logo Studio) hoặc **start.bat**,
 Bấm **X** chỉ ẩn cửa sổ xuống khay hệ thống; tác vụ tải, dịch, kiểm tra và xuất video tiếp tục chạy. Bấm biểu tượng Studio ở khay (có thể nằm trong nút **^**) hoặc mở lại shortcut để hiện cửa sổ. Chuột phải biểu tượng, chọn **Thoát hoàn toàn** để tắt; nếu còn tác vụ, Studio hỏi trước khi dừng. Khi máy không có khay hệ thống khả dụng, X sẽ đóng ứng dụng như bình thường.
 
 Môi trường `venv`, cấu hình `.env` và model Whisper Small đã được cài ở máy này. Sau khi khởi động lại Windows không cần cài lại. Nếu chuyển sang máy khác hoặc bị thiếu thư viện, chạy **setup.bat**. Script dùng Python 3.12, tái sử dụng package hệ thống phù hợp, chỉ bổ sung package thiếu vào venv và không sửa Python toàn cục. FFmpeg và FFprobe phải có trong PATH. Dung lượng cài mới khoảng 1–2 GB.
+
+Launcher chạy `scripts/check_runtime.py` trước khi mở Studio. Kiểm tra này bao gồm thư viện OCR/OpenCV và các giới hạn phiên bản NumPy, SciPy, PyAV mà adapter hiện hỗ trợ; có thư viện import được chưa đủ để coi là tương thích. Nếu kiểm tra báo lỗi, xem đúng package và phiên bản ghi trong thông báo. Không cần cài lại toàn bộ môi trường chỉ vì một dependency lỗi. Kiểm tra này chạy offline, không gọi Muse và không xác nhận chất lượng dịch.
 
 ## Thư mục làm việc
 
@@ -166,12 +168,14 @@ venv\Scripts\python.exe -B -m pytest -p no:cacheprovider tests/test_local_runtim
 
 Hai script kiểm tra riêng: `tests/smoke_desktop.py` kiểm tra phát hình/âm thanh thật trong QtWebEngine, pause/seek/resume, năm tab ở 1024×640 và transcript cạnh video ở 1920×1080/1024×640. Kiểm tra transcript dùng phản hồi máy chủ giả lập để xác nhận vị trí con trỏ khi bấm chữ, lưu bản sửa và đồng bộ phụ đề trong DOM thật; không xác nhận chất lượng dịch hoặc tổng hợp giọng của dịch vụ. `tests/smoke_local_video.py` tạo câu nói tiếng Trung tổng hợp, nhận giọng thật, dịch, đọc tiếng Việt và xuất video. Script video cần Internet và model đã tải, tự dọn media thử; dùng `--keep-output` nếu muốn giữ MP4 cuối.
 
-Lượt chỉnh giao diện theo mẫu ngày 05/10/2026 đạt **82 bài Node**; nhóm kiểm thử Python tập trung đạt **245 bài**, bỏ qua một bài tạo symlink thật do quyền Windows. Qt smoke đạt ở các chiều rộng 1920, 1672, 1366, 1280 và 1024 px, gồm dán link, 42,4% tiến độ, sửa transcript, nghe mẫu, nghe tiếng gốc, phát/tua/tạm dừng, và vị trí lớp che trên vùng ảnh thực. Tiến độ dùng dữ liệu giả lập có kiểm soát, không tải lại video lớn. Fullscreen đã kiểm tra handler Qt và luồng JavaScript; chưa xác nhận thao tác vào fullscreen bằng chuột thật trong phiên người dùng.
+Kết quả kiểm thử hiện tại, task ID, output thực tế, số bài hồi quy và giới hạn chưa kiểm chứng được ghi trong [Runtime QA report](RUNTIME_QA_REPORT.md). Đọc mục có thời gian gần nhất: một kết quả PASS của phiên bản cũ hoặc một bộ test dùng mock không xác nhận toàn bộ luồng sản xuất của phiên bản đang chạy.
 
-Sau khi bổ sung transcript, `node --test tests/test_ui_interactions.mjs` đạt **50 bài**, gồm giữ bản nháp, xử lý lỗi lưu, chống lưu lặp, đổi audio revision, khóa xuất khi chưa lưu và dọn trạng thái tải khi dừng. Desktop smoke cũng đạt kiểm tra transcript/giọng mẫu/phát video nêu trên. Bộ Python liên quan đến resolver, worker tải, sửa transcript, tiến độ và cookie đạt **187 bài**. Các kết quả kiểm thử pipeline dịch thực tế trong đoạn tiếp theo là từ những lượt trước, không phải xác nhận toàn bộ video Douyin của lượt tải mới.
+Các lượt Qt smoke ngày 05/10/2026 đã kiểm tra bố cục ở 1920, 1672, 1366, 1280 và 1024 px, sửa transcript, nghe mẫu/tiếng gốc và phát/tua/tạm dừng. Tiến độ trong smoke dùng dữ liệu giả lập; các lần chạy thật với provider và kiểm tra MP4 được ghi riêng trong báo cáo QA. Fullscreen đã kiểm tra handler Qt và JavaScript; kết quả đó không chứng minh thao tác bằng chuột thật trong phiên người dùng.
 
 Kết nối Chrome đang dùng có bộ kiểm thử `node --test tests/test_chrome_connection.mjs tests/test_muse_chat_adapter.mjs`: kiểm tra giữ nguyên các tab khác, ngắt kết nối đúng lúc, xử lý đóng tool trong khi đang kết nối, mở đoạn chat phụ trên giao diện tiếng Việt và đợi nội dung trả lời xuất hiện. Cần người dùng bật quyền Chrome để kiểm tra Muse thật; các kiểm thử giả lập không xác nhận quyền tài khoản.
 
-Lượt hồi quy mới trên máy này đạt 214 bài Python và 51 bài Node cho kết nối Chrome, Muse và UI. Các sửa tiếp theo về playlist, điều khiển, log và model cũng qua bộ kiểm tra tập trung 50 bài. Desktop smoke kiểm tra 42% tải, bước chưa có %, tác vụ tải xuất hiện sớm và log nhiều dòng/sao chép đều đạt. Desktop phát được video qua bản xem trước WebM, pause/seek/resume và phát BGM Ogg thành công. Video tổng hợp 6,864 giây qua 3 đoạn thoại đã chạy thật với OpenRouter Free ở lần trước và Gemini 2.5 Flash ở lần này, đọc tiếng Việt và xuất MP4 thành công. Lượt kiểm tra lại sau sửa tải/progress và cài model cũng đạt với 3 câu, MP4 169.874 byte; đã tự dọn file mẫu. Gemini 2.5 Flash đã kiểm tra dịch một đoạn và theo lô bằng API thật, giữ nguyên ID/thời gian/metadata; dịch vụ có lúc trả 503, lần thử lại đã thành công. Edge-TTS thử lại tối đa 3 lần nếu dịch vụ kết thúc mà không trả âm thanh. Bản dịch AI vẫn cần xem lại trước khi xuất bản. Chưa kiểm chứng trên video dài hoặc tài khoản tải video riêng của người dùng. `pip check` còn báo xung đột của các công cụ toàn cục có sẵn (aider-chat, patchright, selenium); các package toàn cục đó không được chỉnh sửa bởi lần cài này.
+Các mẫu tổng hợp ngắn dùng OpenRouter/Gemini trong lượt kiểm tra cũ đã xuất MP4; đó không phải chứng nhận kết quả Muse hoặc video dài hiện tại. Edge-TTS có retry khi dịch vụ kết thúc mà không trả âm thanh. Bản dịch chưa đủ bằng chứng vẫn được ghi rõ trong transcript và báo cáo đi kèm; kiểm thử thực thi thành công không biến nội dung chưa chắc thành đã xác minh.
+
+Môi trường dùng package hệ thống có thể phát sinh xung đột theo thời gian. Dùng `venv\Scripts\python.exe -X utf8 -m pip check` để xem dependency hiện có và `venv\Scripts\python.exe -B scripts/check_runtime.py` để kiểm tra các yêu cầu thực tế của Studio. Không xem xung đột riêng của aider-chat/selenium là lỗi Studio, nhưng lỗi của package Studio dùng như NumPy/SciPy cần được xử lý trước khi chạy. Không tự sửa hoặc gỡ công cụ toàn cục.
 
 `.env`, video, model và venv không được đẩy lên GitHub. Các bài audit cũ của dự án có yêu cầu model/mẫu video riêng và không thuộc bộ kiểm thử hồi quy trên.

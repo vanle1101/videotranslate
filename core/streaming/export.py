@@ -210,8 +210,13 @@ class HQExporter:
         if not valid:
             raise ValueError("Video kết quả thiếu hình, âm thanh hoặc thời lượng không khớp nguồn.")
         # Confirm that both media streams can actually be decoded before publishing.
+        # A one-second probe is insufficient for long exports: a truncated or
+        # corrupt tail can still pass while the user receives an unplayable
+        # result.  Decode the complete output and discard the frames.  FFmpeg
+        # remains cancellable through run_media, so Stop still interrupts this
+        # validation instead of publishing a partial file.
         run_media(["ffmpeg", "-v", "error", "-xerror", "-nostdin", "-i", str(path),
-                   "-t", "1", "-map", "0:v:0", "-map", "0:a:0", "-f", "null", "-"], cancel_check)
+                   "-map", "0:v:0", "-map", "0:a:0", "-f", "null", "-"], cancel_check)
 
     @staticmethod
     def _video_size(video_path, cancel_check=None):

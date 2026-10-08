@@ -205,6 +205,107 @@ test('failed or stopped preview never retains a stale full-promotion button', as
   }
 });
 
+async function compatibleLongStudio() {
+  const ui = studio(); await ui.start();
+  const video = ui.el('video-player'), socket = ui.sockets.at(-1);
+  socket.receive({type:'init', duration:1300, segments_count:2, bgm_url:'/bgm.m4a', segments:[
+    {id:0,start:0,end:10,status:'READY',audio_url:'/first.wav',final_vi:'Câu đầu'},
+    {id:1,start:900,end:910,status:'READY',audio_url:'/later.wav',final_vi:'Câu ở phút thứ mười lăm'}]});
+  socket.receive({type:'progress',status:'COMPLETED',phase:'complete',translation_mode:'full',
+    source_prepared_seconds:1300,processed_seconds:1300,total_seconds:1300});
+  ui.replies.set('/api/preview',{preview_id:'prefix',status:'READY',video_url:'/api/preview/prefix/media',
+    start_seconds:0,end_seconds:120,coverage_seconds:120,source_duration:1300});
+  video.error={code:4}; await video.emit('error'); await ui.flush();
+  video.error=null; video.currentSrc=video.src; video.duration=120;
+  await video.emit('loadedmetadata'); await video.emit('canplay');
+  return ui;
+}
+
+test('transcript seek beyond ten minutes swaps a bounded window and retains global captions and BGM time', async () => {
+  const ui = await compatibleLongStudio(), video=ui.el('video-player');
+  ui.replies.set('/api/preview',{preview_id:'later',status:'READY',video_url:'/api/preview/later/media',
+    start_seconds:888,end_seconds:1008,coverage_seconds:120,source_duration:1300});
+  await ui.el('seg-row-1').querySelector('.transcript-time').click(); await ui.flush();
+  const body=JSON.parse(ui.requests.filter(item=>item.url==='/api/preview').at(-1).options.body);
+  assert.equal(body.start_seconds,888); assert.equal(body.end_seconds,1008);
+  assert.equal(body.coverage_seconds,120);
+  video.currentSrc=video.src; video.duration=120;
+  await video.emit('loadedmetadata'); await video.emit('canplay'); await video.emit('seeking'); await video.emit('timeupdate');
+  assert.equal(video.currentTime,12);
+  assert.equal(ui.el('bar-current-time').textContent,'15:00');
+  assert.equal(ui.el('subtitle-text').textContent,'Câu ở phút thứ mười lăm');
+  assert.equal(ui.audio.find(item=>item.src==='/bgm.m4a').currentTime,900);
+  assert.equal(video.paused,true);
+});
+
+test('a later seek supersedes a pending window and a late old response cannot rewind playback', async () => {
+  const ui=await compatibleLongStudio(), video=ui.el('video-player');
+  let release;
+  ui.replies.set('/api/preview',()=>new Promise(resolve=>{release=resolve;}));
+  await ui.el('seg-row-1').querySelector('.transcript-time').click(); await ui.flush();
+  const pending=ui.requests.filter(item=>item.url==='/api/preview').at(-1);
+  ui.replies.set('/api/preview',{preview_id:'newer',status:'READY',video_url:'/api/preview/newer/media',
+    start_seconds:1200,end_seconds:1300,coverage_seconds:100,source_duration:1300});
+  await ui.el('segments-timeline-track').emit('keydown',{key:'End'}); await ui.flush();
+  assert.equal(pending.options.signal.aborted,true);
+  release({ok:true,json:async()=>({preview_id:'old',status:'READY',video_url:'/api/preview/old/media',
+    start_seconds:888,end_seconds:1008,coverage_seconds:120})}); await ui.flush();
+  assert.equal(video.src,'/api/preview/newer/media');
+});
+
+test('stop pagehide and changing source abort a pending compatibility window without late source replacement', async () => {
+  for(const action of ['stop','pagehide','source']) {
+    const ui=await compatibleLongStudio(), video=ui.el('video-player');
+    let release;
+    ui.replies.set('/api/preview',()=>new Promise(resolve=>{release=resolve;}));
+    await ui.el('seg-row-1').querySelector('.transcript-time').click(); await ui.flush();
+    const pending=ui.requests.filter(item=>item.url==='/api/preview').at(-1);
+    if(action==='stop') await ui.window.studioStop();
+    else if(action==='pagehide') await ui.window.emit('pagehide');
+    else ui.window.loadDroppedLocalVideo('D:/next.mp4');
+    const retained=video.src;
+    release({ok:true,json:async()=>({preview_id:'late-window',status:'READY',video_url:'/api/preview/late-window/media',
+      start_seconds:888,end_seconds:1008,coverage_seconds:120})}); await ui.flush();
+    assert.equal(pending.options.signal.aborted,true,action);
+    assert.equal(video.src,retained,action);
+  }
+});
+
+test('window conversion preserves explicit playback intent and a user pause cancels the deferred resume', async () => {
+  for(const pauseWhileWaiting of [false,true]) {
+    const ui=await compatibleLongStudio(), video=ui.el('video-player');
+    await video.play();
+    let release;
+    ui.replies.set('/api/preview',()=>new Promise(resolve=>{release=resolve;}));
+    await ui.el('seg-row-1').querySelector('.transcript-time').click(); await ui.flush();
+    assert.equal(video.paused,true);
+    if(pauseWhileWaiting) await ui.el('player-play-toggle').click();
+    release({ok:true,json:async()=>({preview_id:'moving',status:'READY',video_url:'/api/preview/moving/media',
+      start_seconds:888,end_seconds:1008,coverage_seconds:120})}); await ui.flush();
+    video.currentSrc=video.src; video.duration=120;
+    ui.audio.filter(item=>item.src==='/later.wav').forEach(item=>{item.duration=5;});
+    await video.emit('loadedmetadata'); await video.emit('canplay'); await ui.flush();
+    assert.equal(video.paused,pauseWhileWaiting, JSON.stringify({pauseWhileWaiting,plays:video.playCount,
+      audios:ui.audio.map(a=>({src:a.src,paused:a.paused,time:a.currentTime})),status:ui.el('buffering-text').textContent}));
+    assert.equal(video.currentTime,12);
+  }
+});
+
+test('the end of a compatibility window advances at the exact global boundary instead of ending the source video', async () => {
+  const ui=await compatibleLongStudio(), video=ui.el('video-player');
+  ui.replies.set('/api/preview',{preview_id:'next-window',status:'READY',video_url:'/api/preview/next-window/media',
+    start_seconds:108,end_seconds:228,coverage_seconds:120});
+  video.currentTime=120; video.ended=true;
+  await video.emit('ended'); await ui.flush();
+  const body=JSON.parse(ui.requests.filter(item=>item.url==='/api/preview').at(-1).options.body);
+  assert.equal(body.start_seconds,108); assert.equal(body.end_seconds,228);
+  video.currentSrc=video.src; video.duration=120; video.ended=false;
+  await video.emit('loadedmetadata'); await video.emit('canplay'); await video.emit('timeupdate');
+  assert.equal(video.currentTime,12);
+  assert.equal(ui.el('bar-current-time').textContent,'02:00');
+  assert.equal(video.paused,false);
+});
+
 function studio(cookieReply = { configured: false, count: 0, message: '' }, voiceConfig = {}) {
   const elements = new Map(), audio = [], sockets = [], requests = [], alerts = [], copied = [];
   const intervals = new Map();

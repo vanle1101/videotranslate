@@ -7,6 +7,7 @@ import stat
 import uuid
 import time
 import logging
+import traceback
 import re
 from pathlib import Path
 from urllib.parse import quote
@@ -1024,8 +1025,20 @@ async def edit_streaming_segment(task_id: str, segment_id: int, req: SegmentEdit
         raise HTTPException(status_code=409, detail=str(error)) from None
     except ValueError:
         raise HTTPException(status_code=422, detail="Nội dung hoặc thời lượng câu thoại không hợp lệ. Nhập từ 1 đến 2.000 ký tự.") from None
-    except Exception:
-        raise HTTPException(status_code=503, detail="Chưa tạo lại được giọng đọc. Nội dung và âm thanh cũ vẫn được giữ; hãy thử lại.") from None
+    except Exception as error:
+        attempt_id = uuid.uuid4().hex[:12]
+        # Log frame locations rather than exception text/locals: provider
+        # errors can echo transcript content or credentials. The attempt ID
+        # links this user-visible failure to its actual runtime path.
+        frames = traceback.extract_tb(error.__traceback__)
+        trace = " > ".join(f"{Path(frame.filename).name}:{frame.lineno}:{frame.name}"
+                           for frame in frames[-12:])
+        logging.getLogger("errors").error(
+            "TRANSCRIPT_EDIT_FAILED run_id=%s segment_id=%s attempt_id=%s provider=%s error_type=%s trace=%s",
+            task_id, segment_id, attempt_id, getattr(session, "tts_engine_name", "unknown"),
+            type(error).__name__, trace)
+        raise HTTPException(status_code=503, detail="Chưa tạo lại được giọng đọc. Nội dung và âm thanh cũ vẫn được giữ; hãy thử lại. "
+                            f"Mã lỗi: {attempt_id}.") from None
     return {"segment": session.caption_metadata(segment), "screen_texts": getattr(session, "screen_texts", [])}
 
 @app.get("/api/streaming/bgm/{task_id}")
@@ -1344,6 +1357,8 @@ class PreviewRequest(BaseModel):
     # only the prepared prefix.  Leaving it unset preserves the full-result
     # preview contract used by exported MP4 files.
     coverage_seconds: Optional[float] = Field(default=None, gt=0, le=86400)
+    start_seconds: float = Field(default=0, ge=0, le=86400)
+    end_seconds: Optional[float] = Field(default=None, gt=0, le=86400)
 
 
 @app.post("/api/preview")
@@ -1351,7 +1366,8 @@ async def create_media_preview(req: PreviewRequest):
     session = None
     if req.output_filename is not None:
         name = req.output_filename
-        if (req.file_path is not None or req.task_id is not None or not name
+        if (req.file_path is not None or req.task_id is not None or req.coverage_seconds is not None
+                or req.start_seconds != 0 or req.end_seconds is not None or not name
                 or name != name.strip() or Path(name).suffix.lower() != ".mp4"
                 or any(ord(char) < 32 or char in '<>:"/\\|?*' for char in name)):
             raise HTTPException(status_code=400, detail="Tên video kết quả không hợp lệ")
@@ -1372,7 +1388,11 @@ async def create_media_preview(req: PreviewRequest):
     if not source:
         raise HTTPException(status_code=404, detail="Không tìm thấy video cần xem trước")
     reject_private_media_path(source)
+    if req.end_seconds is not None and req.end_seconds <= req.start_seconds:
+        raise HTTPException(status_code=422, detail="Khoảng xem trước phải kết thúc sau vị trí bắt đầu")
     coverage_seconds = req.coverage_seconds
+    start_seconds = req.start_seconds
+    end_seconds = req.end_seconds
     # A compatibility fallback must never launch a full multi-hour transcode.
     # For a chunked task keep the request inside the globally measured source
     # cursor; when no task exists use one short prefix until the user starts it.
@@ -1383,15 +1403,27 @@ async def create_media_preview(req: PreviewRequest):
         except (TypeError, ValueError):
             prepared = 0
         if prepared > 0:
-            coverage_seconds = min(coverage_seconds or prepared, prepared)
-        elif coverage_seconds is None:
+            if start_seconds >= prepared:
+                raise HTTPException(status_code=409, detail="Đoạn xem trước chưa được chuẩn bị")
+            requested_end = end_seconds
+            if requested_end is None:
+                requested_end = start_seconds + (coverage_seconds or DEFAULT_COMPATIBILITY_SECONDS)
+            end_seconds = min(requested_end, prepared)
+            if end_seconds <= start_seconds:
+                raise HTTPException(status_code=409, detail="Đoạn xem trước chưa được chuẩn bị")
+            coverage_seconds = end_seconds - start_seconds
+        elif coverage_seconds is None and end_seconds is None:
             coverage_seconds = DEFAULT_COMPATIBILITY_SECONDS
+            end_seconds = start_seconds + coverage_seconds
+        elif coverage_seconds is None:
+            coverage_seconds = end_seconds - start_seconds
     try:
-        if coverage_seconds is None:
+        if coverage_seconds is None and start_seconds == 0 and end_seconds is None:
             # Preserve the original full-result call shape for integrations
             # that provide a minimal PreviewManager implementation.
             return preview_manager.start(source)
-        return preview_manager.start(source, coverage_seconds=coverage_seconds)
+        return preview_manager.start(source, coverage_seconds=coverage_seconds,
+                                     start_seconds=start_seconds, end_seconds=end_seconds)
     except (FileNotFoundError, ValueError):
         raise HTTPException(status_code=404, detail="Video nguồn không tồn tại") from None
     except RuntimeError as error:
@@ -1400,20 +1432,35 @@ async def create_media_preview(req: PreviewRequest):
 
 @app.post("/api/preview/upload")
 async def create_uploaded_preview(file: UploadFile = File(...),
-                                  coverage_seconds: Optional[float] = Form(default=None, gt=0, le=86400)):
+                                  coverage_seconds: Optional[float] = Form(default=None, gt=0, le=86400),
+                                  start_seconds: float = Form(default=0, ge=0, le=86400),
+                                  end_seconds: Optional[float] = Form(default=None, gt=0, le=86400)):
+    if end_seconds is not None and end_seconds <= start_seconds:
+        raise HTTPException(status_code=422, detail="Khoảng xem trước phải kết thúc sau vị trí bắt đầu")
     try:
         if coverage_seconds is None:
             coverage_seconds = DEFAULT_COMPATIBILITY_SECONDS
         return await asyncio.to_thread(preview_manager.start_upload, file.file,
-                                       Path(file.filename or "video").suffix, coverage_seconds)
+                                       Path(file.filename or "video").suffix, coverage_seconds,
+                                       start_seconds, end_seconds)
     except RuntimeError as error:
         raise HTTPException(status_code=409, detail=str(error)) from None
+    except ValueError as error:
+        raise HTTPException(status_code=422, detail=str(error)) from None
 
 
 @app.get("/api/preview/{preview_id}")
 async def get_media_preview_status(preview_id: str):
     try:
         return preview_manager.status(preview_id)
+    except KeyError:
+        raise HTTPException(status_code=404, detail="Bản xem trước không tồn tại") from None
+
+
+@app.delete("/api/preview/{preview_id}")
+async def cancel_media_preview(preview_id: str):
+    try:
+        return preview_manager.cancel(preview_id)
     except KeyError:
         raise HTTPException(status_code=404, detail="Bản xem trước không tồn tại") from None
 

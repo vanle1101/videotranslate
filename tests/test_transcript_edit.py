@@ -68,6 +68,34 @@ def client():
     return httpx.AsyncClient(transport=httpx.ASGITransport(app=main.app), base_url="http://test")
 
 
+def test_unknown_source_rows_never_advertise_one_hundred_percent(session):
+    session.segments.clear()
+    asyncio.run(session._segment_progress("asr", "Đang nhận diện lời nói"))
+    progress = session.get_progress()
+    assert progress["completed_segments"] == progress["total_segments"] == 0
+    assert progress["progress_pct"] is None and progress["status"] == "RUNNING"
+
+
+def test_manual_speech_failure_is_traceable_without_logging_secret_or_losing_old_audio(session, caplog):
+    original = session.segments[0].to_dict()
+    old_audio = Path(session.segments[0].audio_path)
+    session.tts_engine.synthesize.side_effect = RuntimeError('Authorization: Bearer private-test-key')
+    async def run():
+        async with client() as api:
+            response = await api.patch(route(session), json={'final_vi': 'Lời thoại mới'})
+            assert response.status_code == 503
+            detail = response.json()['detail']
+            assert 'Mã lỗi:' in detail
+            attempt_id = detail.split('Mã lỗi: ')[1].rstrip('.')
+            assert 'attempt_id=' + attempt_id in caplog.text
+    asyncio.run(run())
+    assert 'TRANSCRIPT_EDIT_FAILED run_id=transcript-test segment_id=0' in caplog.text
+    assert 'error_type=RuntimeError' in caplog.text and 'trace=' in caplog.text
+    assert 'private-test-key' not in caplog.text
+    assert session.segments[0].to_dict() == original
+    assert old_audio.read_bytes() == b'old audio'
+
+
 def route(session, segment_id=0):
     return f"/api/streaming/{session.task_id}/segments/{segment_id}"
 
@@ -733,7 +761,8 @@ def test_export_uses_revised_text_and_audio_and_blocks_edits_until_done(session,
 
     async def run():
         async with client() as api:
-            assert (await api.patch(route(session), json={"final_vi": "Bản xuất"})).status_code == 200
+            edited = await api.patch(route(session), json={"final_vi": "Bản xuất"})
+            assert edited.status_code == 200, edited.text
             exporting = asyncio.create_task(api.post("/api/streaming/export-hq", json={"task_id": session.task_id}))
             try:
                 await wait_until(entered.is_set)
@@ -1240,3 +1269,29 @@ def test_rechecking_invalidates_previous_result_even_when_service_fails(session,
     assert session.output_video_url == ""
     assert session.events[0][0] == "result_invalidated"
     assert session.events[0][1]["reason"] == "review_started"
+
+
+def test_chunked_automatic_review_speech_failure_keeps_proof_but_never_completed(session, monkeypatch):
+    from core.translation_review import AutomaticTranslationReviewer
+    monkeypatch.setattr(settings, "LLM_PROVIDER", "opencode")
+    session._chunked_source_started = True
+    session._source_prepared_seconds = session._visual_completed_seconds = session.total_duration
+    session._visual_prepass_complete = True
+    row = {**session.segments[0].to_dict(), "final_vi": "Lời đã kiểm tra.", "needs_review": False,
+           "verification": {"status": "corrected", "semantic_verified": True}}
+    monkeypatch.setattr(AutomaticTranslationReviewer, "review", lambda *args, **kwargs: {
+        "segments": {0: row}, "summary": {"checked": 1, "corrected": 1}})
+    session.tts_engine.synthesize.side_effect = RuntimeError("Offline speech failure after accepted review")
+
+    async def run():
+        await session.start_automatic_review()
+        await session.review_task
+    asyncio.run(run())
+
+    assert session.segments[0].status == "FAILED"
+    assert session.segments[0].verification["semantic_verified"] is True
+    assert session.segments[0].audio_path is None
+    assert session.get_progress()["status"] == "FAILED"
+    assert session.get_progress()["progress_pct"] is None
+    assert session.can_retry
+    assert not any(data.get("status") == "COMPLETED" for kind, data in session.events if kind == "progress")

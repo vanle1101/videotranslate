@@ -69,7 +69,7 @@ document.addEventListener("DOMContentLoaded", () => {
   // user action.  Keep the value in one place so URL, upload and local-file
   // starts use the same contract.
   const PREVIEW_SECONDS = 24;
-  const COMPATIBILITY_MAX_SECONDS = 600;
+  const COMPATIBILITY_MAX_SECONDS = 120;
   const PREVIEW_READY_STATUS = "PREVIEW_READY";
   const isPreviewReady = status => String(status || "").toUpperCase() === PREVIEW_READY_STATUS;
 
@@ -219,11 +219,49 @@ document.addEventListener("DOMContentLoaded", () => {
   // measured coverage so a later source-prepared checkpoint can replace the
   // prefix without claiming that it is the complete video.
   let previewCompatibilityCoverage = null;
+  // Qt compatibility media may represent a sliding source window.  The
+  // player time is local to that WebM; all transcript, audio and seek logic
+  // remains on the source's global timeline through these helpers.
+  let previewCompatibilityStart = 0;
+  let previewCompatibilityEnd = null;
+  let previewCompatibilitySourceDuration = null;
   let previewCompatibilityRefresh = null;
+  let previewCompatibilityRequest = null;
+  let previewCompatibilityRevision = 0;
+  let previewCompatibilityJob = null;
+  let previewCompatibilityTarget = null;
   let previewResumeTime = null;
   let playWhenPreviewReady = false;
   let autoPlayTaskId = null;
   let internalPreviewPauseEvents = 0;
+
+  function cancelCompatibilityRequest() {
+    previewCompatibilityRevision++;
+    previewCompatibilityRequest?.abort?.();
+    previewCompatibilityRequest = null;
+    cancelCompatibilityJob();
+    previewCompatibilityTarget = null;
+    previewCompatibilityRefresh = null;
+    if (previewPending) {
+      previewPending = false;
+      if (previewCompatibilityCoverage === null) previewFallbackTried = false;
+    }
+  }
+
+  function resetCompatibilityPreviewState() {
+    cancelCompatibilityRequest();
+    previewCompatibilityCoverage = null;
+    previewCompatibilityStart = 0;
+    previewCompatibilityEnd = null;
+    previewCompatibilitySourceDuration = null;
+  }
+
+  function cancelCompatibilityJob() {
+    const id = previewCompatibilityJob;
+    previewCompatibilityJob = null;
+    if (/^[a-zA-Z0-9_-]{1,80}$/.test(id || ""))
+      void fetch(`/api/preview/${id}`, {method: "DELETE", keepalive: true}).catch(() => {});
+  }
   let translationReady = false;
   let audioPermissionNeeded = false;
   let pendingStart = null;
@@ -1071,6 +1109,7 @@ document.addEventListener("DOMContentLoaded", () => {
   }
 
   function pauseStoppedSession(progress = currentProgress, pausePlayback = true) {
+    cancelCompatibilityRequest();
     // Stopping execution must not detach the saved project: Retry needs its ID
     // and users still need the transcript and already generated audio. In
     // particular, history restore receives STOPPED again over the live socket.
@@ -1291,6 +1330,40 @@ document.addEventListener("DOMContentLoaded", () => {
     videoPlayer.volume = playbackVolume();
   }
 
+  function previewGlobalTime() {
+    const local = Number(videoPlayer.currentTime);
+    return (Number.isFinite(local) ? local : 0) + (Number(previewCompatibilityStart) || 0);
+  }
+
+  function setPreviewGlobalTime(time) {
+    const target = Number(time);
+    if (!Number.isFinite(target)) return;
+    const start = Number(previewCompatibilityStart) || 0;
+    const duration = Number(videoPlayer.duration);
+    const local = target - start;
+    videoPlayer.currentTime = Number.isFinite(duration) && duration >= 0
+      ? Math.max(0, Math.min(local, duration)) : Math.max(0, local);
+  }
+
+  function compatibilityWindowContains(time, margin = 0) {
+    const target = Number(time);
+    const start = Number(previewCompatibilityStart) || 0;
+    const end = previewCompatibilityEnd === null ? NaN : Number(previewCompatibilityEnd);
+    return Number.isFinite(target) && Number.isFinite(end) && target >= start - margin && target <= end + margin;
+  }
+
+  function setPreviewCompatibilityWindow(data) {
+    const start = Number(data?.start_seconds);
+    const coverage = Number(data?.coverage_seconds);
+    const end = data?.end_seconds == null ? NaN : Number(data.end_seconds);
+    const duration = Number(data?.source_duration);
+    previewCompatibilityStart = Number.isFinite(start) && start >= 0 ? start : 0;
+    previewCompatibilityCoverage = Number.isFinite(coverage) ? coverage : null;
+    previewCompatibilityEnd = Number.isFinite(end) ? end :
+      (previewCompatibilityCoverage === null ? null : previewCompatibilityStart + previewCompatibilityCoverage);
+    if (Number.isFinite(duration) && duration > 0) previewCompatibilitySourceDuration = duration;
+  }
+
   function setPreviewSource(source, descriptor = null) {
     // A reconnect sends the source again. Keep the current playhead and any
     // compatible preview already prepared for this exact task and source.
@@ -1307,8 +1380,7 @@ document.addEventListener("DOMContentLoaded", () => {
     previewSource = source;
     previewFallbackTried = !!canReuse;
     previewPending = false;
-    previewCompatibilityCoverage = canReuse ? previewCompatibilityCoverage : null;
-    previewCompatibilityRefresh = null;
+    if (!canReuse) resetCompatibilityPreviewState();
     audioPermissionNeeded = false;
     mediaPlayButton.classList.add("hidden");
     previewResumeTime = null;
@@ -1345,51 +1417,139 @@ document.addEventListener("DOMContentLoaded", () => {
     return Math.min(COMPATIBILITY_MAX_SECONDS, bounded);
   }
 
-  async function requestCompatiblePreview(body, generation) {
-    let response = await fetch("/api/preview", {
-      method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body),
-    });
+  function compatibilityPreparedSeconds() {
+    return previewDescriptor?.task_id ? Number(currentProgress?.source_prepared_seconds)
+      : Number(previewCompatibilitySourceDuration || totalVideoDuration);
+  }
+
+  async function requestCompatiblePreview(body, generation, revision, signal) {
+    const deadline = Date.now() + 180000;
+    let requestBody = body, requestOptions = {method: "POST", signal};
+    let endpoint = "/api/preview";
+    if (body?.file) {
+      endpoint = "/api/preview/upload";
+      const form = new FormData();
+      form.append("file", body.file);
+      if (body.coverage_seconds) form.append("coverage_seconds", String(body.coverage_seconds));
+      if (body.start_seconds) form.append("start_seconds", String(body.start_seconds));
+      if (body.end_seconds) form.append("end_seconds", String(body.end_seconds));
+      requestBody = form;
+    } else {
+      requestOptions.headers = {"Content-Type": "application/json"};
+      requestBody = JSON.stringify(body);
+    }
+    requestOptions.body = requestBody;
+    let response = await fetch(endpoint, requestOptions);
     let data = await response.json();
     if (!response.ok) throw new Error(data.detail || "Không thể chuẩn bị bản xem trước");
-    while (generation === previewGeneration && data.status === "PROCESSING") {
+    if (generation !== previewGeneration || revision !== previewCompatibilityRevision) {
+      if (/^[a-zA-Z0-9_-]{1,80}$/.test(data.preview_id || ""))
+        void fetch(`/api/preview/${data.preview_id}`, {method: "DELETE"}).catch(() => {});
+      return null;
+    }
+    previewCompatibilityJob = data.status === "PROCESSING" ? data.preview_id : null;
+    while (generation === previewGeneration && revision === previewCompatibilityRevision && data.status === "PROCESSING") {
+      if (Date.now() >= deadline) throw new Error("Tạo bản xem trước quá thời gian chờ; bấm mốc câu để thử lại.");
       await new Promise(resolve => setTimeout(resolve, 400));
-      if (generation !== previewGeneration) return null;
-      response = await fetch(`/api/preview/${data.preview_id}`);
+      if (generation !== previewGeneration || revision !== previewCompatibilityRevision) return null;
+      response = await fetch(`/api/preview/${data.preview_id}`, {signal});
       data = await response.json();
       if (!response.ok) throw new Error(data.detail || "Không đọc được trạng thái bản xem trước");
     }
-    if (generation !== previewGeneration) return null;
+    if (generation !== previewGeneration || revision !== previewCompatibilityRevision) return null;
     if (data.status !== "READY") throw new Error(data.error || "Không thể tạo bản xem trước");
+    previewCompatibilityJob = null;
     return data;
   }
 
-  async function refreshCompatiblePreview() {
-    if (previewCompatibilityRefresh || previewPending || previewDescriptor?.file ||
-        !previewDescriptor?.task_id || !videoPlayer.currentSrc?.includes("/api/preview/")) return;
-    const target = compatibilityCoverageTarget();
-    if (!target || (previewCompatibilityCoverage !== null && target <= previewCompatibilityCoverage + .5)) return;
+  function compatibilityWindowBody(targetTime, preparedSeconds, initial = false) {
+    const prepared = Number(preparedSeconds);
+    if (!Number.isFinite(prepared) || prepared <= 0) return null;
+    const target = Math.max(0, Math.min(Number(targetTime) || 0, prepared));
+    const currentEnd = Number(previewCompatibilityEnd);
+    if (!initial && compatibilityWindowContains(target) && target < currentEnd - 1.5) return null;
+    const windowSize = initial ? Math.min(COMPATIBILITY_MAX_SECONDS, prepared) : COMPATIBILITY_MAX_SECONDS;
+    const lead = initial ? 0 : Math.min(12, windowSize * .2);
+    let start = initial ? 0 : Math.max(0, target - lead);
+    if (prepared - start < 4 && start > 0) start = Math.max(0, prepared - windowSize);
+    const end = Math.min(prepared, start + windowSize);
+    if (end <= start + .1) return null;
+    return {...previewDescriptor, start_seconds: Number(start.toFixed(3)),
+      end_seconds: Number(end.toFixed(3)), coverage_seconds: Number((end - start).toFixed(3))};
+  }
+
+  async function requestCompatibilityWindow(targetTime, {initial = false, force = false, resume = null} = {}) {
+    if ((previewPending && !previewCompatibilityRefresh) || !previewDescriptor ||
+        !videoPlayer.currentSrc?.includes("/api/preview/")) return;
+    const prepared = compatibilityPreparedSeconds();
+    if (!Number.isFinite(prepared) || prepared <= 0) return;
+    const rawTarget = Math.max(0, Number(targetTime) || 0);
+    if (rawTarget > prepared + .05) {
+      cancelCompatibilityRequest();
+      bufferingText.textContent = "Đoạn này chưa được chuẩn bị. Chờ xử lý tiếp hoặc bấm Dịch toàn bộ.";
+      bufferingAlert.classList.remove("hidden");
+      return false;
+    }
+    const target = Math.min(rawTarget, Math.max(0, prepared - .01));
+    const body = compatibilityWindowBody(target, prepared, initial);
+    if (!body) return;
+    if (previewCompatibilityRefresh && previewCompatibilityTarget !== null &&
+        Math.abs(previewCompatibilityTarget - target) < 1.5) return previewCompatibilityRefresh;
+    previewCompatibilityRevision++;
+    const revision = previewCompatibilityRevision;
+    previewCompatibilityRequest?.abort?.();
+    cancelCompatibilityJob();
+    const controller = typeof AbortController !== "undefined" ? new AbortController() : null;
+    previewCompatibilityRequest = controller;
+    previewCompatibilityTarget = target;
     const generation = previewGeneration;
-    const body = {...previewDescriptor, coverage_seconds: target};
-    previewCompatibilityRefresh = (async () => {
-      const data = await requestCompatiblePreview(body, generation);
-      if (!data || generation !== previewGeneration) return;
-      const coverage = Number(data.coverage_seconds);
-      if (!Number.isFinite(coverage) || (previewCompatibilityCoverage !== null && coverage <= previewCompatibilityCoverage + .1)) return;
-      // The user may keep playing or seek while FFmpeg prepares the larger
-      // prefix.  Read both values immediately before swapping sources so the
-      // replacement does not rewind to the position from request start.
-      const resumeTime = videoPlayer.currentTime || 0;
-      const wasPlaying = !videoPlayer.paused;
-      previewCompatibilityCoverage = coverage;
-      previewResumeTime = resumeTime;
-      playWhenPreviewReady = wasPlaying;
-      videoPlayer.src = data.video_url;
-      videoPlayer.load();
-    })().catch(() => {
-      // Keep the already playable prefix if the larger prefix cannot be
-      // prepared; the next measured source checkpoint can retry it.
-    }).finally(() => { previewCompatibilityRefresh = null; });
-    await previewCompatibilityRefresh;
+    const wasPlaying = resume === null
+      ? (!videoPlayer.paused || !!dubPlaybackWait || (previewPending && playWhenPreviewReady)) : Boolean(resume);
+    cancelDubPlaybackWait();
+    previewPending = true;
+    playWhenPreviewReady = wasPlaying;
+    if (wasPlaying) { internalPreviewPauseEvents++; videoPlayer.pause(); }
+    activeAudio?.pause();
+    bgmAudio?.pause();
+    bufferingText.textContent = "Đang chuẩn bị đoạn xem trước tại vị trí đã chọn…";
+    bufferingAlert.dataset.state = "loading";
+    bufferingAlert.classList.remove("hidden");
+    const request = (async () => {
+      try {
+        const data = await requestCompatiblePreview(body, generation, revision, controller?.signal);
+        if (!data || generation !== previewGeneration || revision !== previewCompatibilityRevision) return;
+        setPreviewCompatibilityWindow(data);
+        previewResumeTime = target;
+        videoPlayer.src = data.video_url;
+        videoPlayer.load();
+        return true;
+      } catch (error) {
+        if (error?.name === "AbortError" || generation !== previewGeneration || revision !== previewCompatibilityRevision) return;
+        // Keep the current window playable. A later checkpoint/seek retries.
+        console.warn("Compatible preview window failed", error);
+        previewPending = false;
+        bufferingText.textContent = `Chưa mở được đoạn xem trước: ${error.message}. Bấm mốc câu để thử lại.`;
+        bufferingAlert.dataset.state = "error";
+        return false;
+      } finally {
+        if (previewCompatibilityRequest === controller) {
+          previewCompatibilityRequest = null;
+          previewCompatibilityTarget = null;
+        }
+      }
+    })();
+    previewCompatibilityRefresh = request;
+    try { return await request; } finally {
+      if (previewCompatibilityRefresh === request) previewCompatibilityRefresh = null;
+    }
+  }
+
+  async function refreshCompatiblePreview() {
+    const target = previewGlobalTime();
+    const prepared = compatibilityPreparedSeconds();
+    if (!Number.isFinite(prepared) || target >= prepared - .25) return;
+    if (compatibilityWindowContains(target, 1.5) && target < Number(previewCompatibilityEnd) - 2) return;
+    await requestCompatibilityWindow(target);
   }
 
   async function loadCompatiblePreview() {
@@ -1401,7 +1561,11 @@ document.addEventListener("DOMContentLoaded", () => {
     previewPending = true;
     bufferingAlert.dataset.state = "loading";
     const generation = previewGeneration;
-    const resumeTime = videoPlayer.currentTime || 0;
+    const revision = ++previewCompatibilityRevision;
+    const controller = new AbortController();
+    previewCompatibilityRequest?.abort?.();
+    previewCompatibilityRequest = controller;
+    const resumeTime = previewGlobalTime();
     // Readiness means media exists; only explicit Start/Play or interrupted
     // playback grants permission to resume after codec conversion.
     playWhenPreviewReady = !videoPlayer.paused || playWhenPreviewReady;
@@ -1412,36 +1576,20 @@ document.addEventListener("DOMContentLoaded", () => {
     bufferingText.textContent = "Đang chuẩn bị bản xem trước tương thích… Video gốc vẫn được giữ nguyên.";
     bufferingAlert.classList.remove("hidden");
     try {
-      let response;
-      if (previewDescriptor?.file) {
-        const body = new FormData();
-        body.append("file", previewDescriptor.file);
-        const coverage = compatibilityCoverageTarget();
-        if (coverage) body.append("coverage_seconds", String(coverage));
-        response = await fetch("/api/preview/upload", { method: "POST", body });
-      } else {
-        const body = {...(previewDescriptor || {})};
-        const coverage = compatibilityCoverageTarget();
-        if (coverage) body.coverage_seconds = coverage;
-        response = await fetch("/api/preview", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
-      }
-      let data = await response.json();
-      if (!response.ok) throw new Error(data.detail || "Không thể chuẩn bị bản xem trước");
-      while (generation === previewGeneration && data.status === "PROCESSING") {
-        await new Promise(resolve => setTimeout(resolve, 400));
-        if (generation !== previewGeneration) return;
-        response = await fetch(`/api/preview/${data.preview_id}`);
-        data = await response.json();
-        if (!response.ok) throw new Error(data.detail || "Không đọc được trạng thái bản xem trước");
-      }
-      if (generation !== previewGeneration) return;
-      if (data.status !== "READY") throw new Error(data.error || "Không thể tạo bản xem trước");
-      previewCompatibilityCoverage = Number.isFinite(Number(data.coverage_seconds)) ? Number(data.coverage_seconds) : null;
+      const body = {...(previewDescriptor || {})};
+      const coverage = compatibilityCoverageTarget();
+      if (coverage) body.coverage_seconds = coverage;
+      const data = await requestCompatiblePreview(body, generation, revision, controller.signal);
+      if (!data || generation !== previewGeneration || revision !== previewCompatibilityRevision) return;
+      setPreviewCompatibilityWindow(data);
       previewResumeTime = resumeTime;
       videoPlayer.src = data.video_url;
       videoPlayer.load();
     } catch (error) {
-      if (generation === previewGeneration) showMediaError(`Lỗi xem trước: ${error.message}`);
+      if (error?.name !== "AbortError" && generation === previewGeneration && revision === previewCompatibilityRevision)
+        showMediaError(`Lỗi xem trước: ${error.message}`);
+    } finally {
+      if (previewCompatibilityRequest === controller) previewCompatibilityRequest = null;
     }
   }
 
@@ -1692,11 +1840,11 @@ document.addEventListener("DOMContentLoaded", () => {
       screenTextOverlay.style.width = `${width}px`;
       screenTextOverlay.style.height = `${height}px`;
       screenTextSignature = "";
-      renderScreenTexts(videoPlayer.currentTime);
+      renderScreenTexts(previewGlobalTime());
     }
     chineseSubMask.style.display = "none";
-    const current = Object.values(segments).find(s => dubContainsTime(s, videoPlayer.currentTime));
-    renderSpeechCaption(current, videoPlayer.currentTime);
+    const current = Object.values(segments).find(s => dubContainsTime(s, previewGlobalTime()));
+    renderSpeechCaption(current, previewGlobalTime());
   }
   if (typeof ResizeObserver !== "undefined") new ResizeObserver(positionVideoOverlays).observe(playerContainer);
   videoPlayer.addEventListener("loadedmetadata", () => {
@@ -1705,7 +1853,7 @@ document.addEventListener("DOMContentLoaded", () => {
       playerContainer.style.setProperty("--source-ratio", String(videoPlayer.videoWidth / videoPlayer.videoHeight));
     }
     positionVideoOverlays();
-    if (previewResumeTime !== null) videoPlayer.currentTime = Math.min(previewResumeTime, videoPlayer.duration || 0);
+    if (previewResumeTime !== null) setPreviewGlobalTime(previewResumeTime);
   });
   videoPlayer.addEventListener("emptied", () => {
     cancelDubPlaybackWait();
@@ -1920,8 +2068,7 @@ document.addEventListener("DOMContentLoaded", () => {
       previewGeneration++;
       previewPending = false;
       previewDescriptor = null;
-      previewCompatibilityCoverage = null;
-      previewCompatibilityRefresh = null;
+      resetCompatibilityPreviewState();
       videoPlayer.removeAttribute("src");
       videoPlayer.load();
       playerPlaceholder.classList.remove("hidden");
@@ -2031,7 +2178,7 @@ document.addEventListener("DOMContentLoaded", () => {
   for (const event of ["play", "pause", "ended", "emptied"]) videoPlayer.addEventListener(event, updatePlayerControls);
   videoPlayer.addEventListener("loadedmetadata", () => {
     if (!currentTaskId && Number.isFinite(videoPlayer.duration)) {
-      totalVideoDuration = videoPlayer.duration;
+      totalVideoDuration = previewCompatibilitySourceDuration || videoPlayer.duration;
       barTotalTime.textContent = formatTime(totalVideoDuration);
       renderTimelineSlices();
     }
@@ -2039,7 +2186,7 @@ document.addEventListener("DOMContentLoaded", () => {
   toggleMaskChinese.addEventListener("change", () => {
     chineseSubMask.style.display = "none";
     screenTextSignature = "";
-    renderScreenTexts(videoPlayer.currentTime);
+    renderScreenTexts(previewGlobalTime());
   });
   toggleSubtitles.addEventListener("change", () => {
     subtitleOverlay.style.display = toggleSubtitles.checked ? "block" : "none";
@@ -2072,7 +2219,7 @@ document.addEventListener("DOMContentLoaded", () => {
   videoPlayer.addEventListener("play", () => {
     if (resultPreviewActive) { videoPlayer.pause(); return; }
     if (!sourceAudition && bgmAudio) {
-      bgmAudio.currentTime = videoPlayer.currentTime;
+      bgmAudio.currentTime = previewGlobalTime();
       bgmAudio.play().catch(reportPlayFailure);
     }
     syncPlayback();
@@ -2094,6 +2241,16 @@ document.addEventListener("DOMContentLoaded", () => {
     if (videoPlayer.paused) stopSourceAudition();
   });
   videoPlayer.addEventListener("ended", () => {
+    const prepared = compatibilityPreparedSeconds();
+    const globalEnd = previewGlobalTime();
+    if (previewDescriptor && previewCompatibilityEnd !== null &&
+        Number.isFinite(prepared) && globalEnd < prepared - .25) {
+      // The compatibility WebM ended at the current window boundary. Move
+      // the player to the next source window and preserve the user's intent
+      // to keep watching instead of treating this as the end of the video.
+      void requestCompatibilityWindow(globalEnd, {force: true, resume: true});
+      return;
+    }
     cancelDubPlaybackWait();
     stopPlaybackFrames();
     stopSourceAudition();
@@ -2108,17 +2265,17 @@ document.addEventListener("DOMContentLoaded", () => {
   videoPlayer.addEventListener("seeking", () => {
     cancelDubPlaybackWait();
     if (sourceAudition) {
-      if (videoPlayer.currentTime < sourceAudition.start || videoPlayer.currentTime >= sourceAudition.end) stopSourceAudition();
+      if (previewGlobalTime() < sourceAudition.start || previewGlobalTime() >= sourceAudition.end) stopSourceAudition();
       else return;
     }
-    if (bgmAudio) bgmAudio.currentTime = videoPlayer.currentTime;
+    if (bgmAudio) bgmAudio.currentTime = previewGlobalTime();
     if (activeAudio) {
       activeAudio.pause();
       activeAudio = null;
       activePlayingSegId = null;
     }
     if (currentWs?.readyState === WebSocket.OPEN) {
-      currentWs.send(JSON.stringify({ type: "seek", time: videoPlayer.currentTime }));
+      currentWs.send(JSON.stringify({ type: "seek", time: previewGlobalTime() }));
     }
   });
   videoPlayer.addEventListener("seeked", syncPlayback);
@@ -2171,8 +2328,7 @@ document.addEventListener("DOMContentLoaded", () => {
     translationReady = false;
     previewGeneration++;
     previewPending = false;
-    previewCompatibilityCoverage = null;
-    previewCompatibilityRefresh = null;
+    resetCompatibilityPreviewState();
     previewResumeTime = null;
     resetTaskResult();
     btnStart.classList.add("hidden");
@@ -2272,8 +2428,7 @@ document.addEventListener("DOMContentLoaded", () => {
       else {
         previewGeneration++;
         previewDescriptor = { task_id: currentTaskId };
-        previewCompatibilityCoverage = null;
-        previewCompatibilityRefresh = null;
+        resetCompatibilityPreviewState();
         videoPlayer.removeAttribute("src");
         videoPlayer.load();
       }
@@ -2377,7 +2532,7 @@ document.addEventListener("DOMContentLoaded", () => {
 
   function replaceBgmSource(url) {
     if (!url || (bgmAudio && url === bgmUrl)) return;
-    const previousTime = videoPlayer.currentTime || 0;
+    const previousTime = previewGlobalTime();
     const wasPlaying = !!bgmAudio && !bgmAudio.paused;
     const previousAudio = bgmAudio;
     if (previousAudio) {
@@ -2436,6 +2591,7 @@ document.addEventListener("DOMContentLoaded", () => {
   }
 
   window.addEventListener("pagehide", () => {
+    cancelCompatibilityRequest();
     clearTimeout(captionStyleTimer); captionStyleTimer = null;
     captionStyleRequest = null; captionStyleDirty = false; captionStyleEditVersion++;
     clearTimeout(reconnectTimer);
@@ -2495,7 +2651,7 @@ document.addEventListener("DOMContentLoaded", () => {
       else if (msg.type === "segment_update") {
         applySegmentUpdate(msg);
         if (isBufferingUnderrun && ["READY", "PLAYED"].includes(msg.status) &&
-            dubContainsTime(msg, videoPlayer.currentTime)) {
+            dubContainsTime(msg, previewGlobalTime())) {
           isBufferingUnderrun = false;
           bufferingAlert.classList.add("hidden");
           videoPlayer.play().catch(reportPlayFailure);
@@ -2525,7 +2681,7 @@ document.addEventListener("DOMContentLoaded", () => {
           visualSession = true;
           setScreenTexts(msg.screen_texts);
           (msg.segments || []).forEach(applySegmentUpdate);
-          renderScreenTexts(videoPlayer.currentTime || 0);
+          renderScreenTexts(previewGlobalTime());
           positionVideoOverlays();
         }
         if (msg.processed_seconds != null && msg.total_seconds != null) {
@@ -2664,7 +2820,7 @@ document.addEventListener("DOMContentLoaded", () => {
       activePlayingSegId === wait.segmentId && activeAudio === wait.audio &&
       segments[wait.segmentId]?.audio_url === wait.url &&
       sameDubTiming(segments[wait.segmentId], wait.bounds) &&
-      Math.abs(videoPlayer.currentTime - wait.time) < 0.05;
+      Math.abs(previewGlobalTime() - wait.time) < 0.05;
   }
 
   function failDubPlayback(wait, error = null) {
@@ -2721,7 +2877,7 @@ document.addEventListener("DOMContentLoaded", () => {
     if (dubPlaybackWait && !currentDubWait(dubPlaybackWait)) cancelDubPlaybackWait();
     if (!dubPlaybackWait) {
       const wait = {taskId: currentTaskId, segmentId: segment.id, url: segment.audio_url,
-        bounds: resolveDubTiming(segment), audio, time: videoPlayer.currentTime, starting: false};
+        bounds: resolveDubTiming(segment), audio, time: previewGlobalTime(), starting: false};
       dubPlaybackWait = wait;
       wait.timer = setTimeout(() => failDubPlayback(wait), 15000);
       // Pause the master clock before asking the browser to decode/play audio.
@@ -2814,7 +2970,12 @@ document.addEventListener("DOMContentLoaded", () => {
   // timeupdate may arrive only four times a second. Preload the next utterance
   // and synchronize on animation frames so short lines retain their opening.
   function syncPlayback() {
-    const curTime = videoPlayer.currentTime;
+    const curTime = previewGlobalTime();
+    if (!videoPlayer.paused && !previewCompatibilityRefresh && previewCompatibilityEnd !== null &&
+        curTime >= Number(previewCompatibilityEnd) - 1 &&
+        compatibilityPreparedSeconds() > Number(previewCompatibilityEnd) + .5) {
+      void requestCompatibilityWindow(curTime);
+    }
     if (dubPlaybackWait) {
       if (currentDubWait(dubPlaybackWait)) { resumeDubPlayback(dubPlaybackWait); return; }
       cancelDubPlaybackWait();
@@ -2848,7 +3009,7 @@ document.addEventListener("DOMContentLoaded", () => {
       // its measured boundary instead of silently playing untranslated time
       // or showing an endless loading spinner after the preview finishes.
       videoPlayer.pause();
-      videoPlayer.currentTime = previewEnd;
+      setPreviewGlobalTime(previewEnd);
       isBufferingUnderrun = false;
       bufferingAlert.classList.add("hidden");
       playerTaskStatus.textContent = "Đã hết đoạn xem trước. Bấm Dịch toàn bộ để xử lý các đoạn tiếp theo.";
@@ -2999,8 +3160,14 @@ document.addEventListener("DOMContentLoaded", () => {
     const bounds = resolveDubTiming(segment);
     if (!bounds) { showMediaError("Mốc thời gian lồng tiếng không hợp lệ. Hãy xử lý lại câu này."); return; }
     stopSourceAudition();
-    videoPlayer.currentTime = Math.max(0, Math.min(totalVideoDuration || bounds.end, bounds.start));
-    if (bgmAudio) bgmAudio.currentTime = videoPlayer.currentTime;
+    const target = Math.max(0, Math.min(totalVideoDuration || bounds.end, bounds.start));
+    if (videoPlayer.currentSrc?.includes("/api/preview/") && !compatibilityWindowContains(target)) {
+      void requestCompatibilityWindow(target, {force: true});
+      return;
+    }
+    if (previewCompatibilityRefresh) cancelCompatibilityRequest();
+    setPreviewGlobalTime(target);
+    if (bgmAudio) bgmAudio.currentTime = previewGlobalTime();
     syncPlayback();
   }
 
@@ -3010,14 +3177,14 @@ document.addEventListener("DOMContentLoaded", () => {
     sourceAudition = null;
     clearInterval(audition.timer);
     videoPlayer.pause();
-    if (atEnd) videoPlayer.currentTime = audition.end;
+    if (atEnd) setPreviewGlobalTime(audition.end);
     videoPlayer.muted = audition.muted;
     videoPlayer.volume = playbackVolume();
     chineseSubMask.style.display = "none";
     screenTextSignature = "";
-    renderScreenTexts(videoPlayer.currentTime);
-    const currentSegment = Object.values(segments).find(segment => dubContainsTime(segment, videoPlayer.currentTime));
-    renderSpeechCaption(currentSegment, videoPlayer.currentTime);
+    renderScreenTexts(previewGlobalTime());
+    const currentSegment = Object.values(segments).find(segment => dubContainsTime(segment, previewGlobalTime()));
+    renderSpeechCaption(currentSegment, previewGlobalTime());
     const button = transcriptRows.get(audition.id)?.listen;
     if (button) {
       button.textContent = "Nghe gốc";
@@ -3036,9 +3203,25 @@ document.addEventListener("DOMContentLoaded", () => {
     activeAudio?.pause();
     bgmAudio?.pause();
     isBufferingUnderrun = false;
+    const generation = previewGeneration;
+    if (videoPlayer.currentSrc?.includes("/api/preview/") && !compatibilityWindowContains(segment.start)) {
+      const loaded = await requestCompatibilityWindow(segment.start, {force: true, resume: false});
+      if (!loaded || generation !== previewGeneration) return;
+      // Wait for the replacement's metadata before auditioning source audio.
+      // Assigning sourceAudition before load() would let the native emptied
+      // event cancel it and play a different source interval.
+      const ready = await new Promise(resolve => {
+        let timer;
+        const finish = value => { clearTimeout(timer); videoPlayer.removeEventListener?.("canplay", onReady); resolve(value); };
+        const onReady = () => finish(true);
+        videoPlayer.addEventListener("canplay", onReady, {once: true});
+        timer = setTimeout(() => finish(false), 30000);
+      });
+      if (!ready || generation !== previewGeneration) return;
+    }
     const audition = { id, start: Math.max(0, segment.start), end: segment.end, muted: videoPlayer.muted };
     sourceAudition = audition;
-    videoPlayer.currentTime = audition.start;
+    setPreviewGlobalTime(audition.start);
     videoPlayer.muted = false;
     // An explicit audition temporarily enables sound without changing master mute.
     videoPlayer.volume = masterVolume || 1;
@@ -3049,7 +3232,7 @@ document.addEventListener("DOMContentLoaded", () => {
       button.setAttribute("aria-pressed", "true");
     }
     audition.timer = setInterval(() => {
-      if (sourceAudition === audition && videoPlayer.currentTime >= audition.end) stopSourceAudition(true);
+      if (sourceAudition === audition && previewGlobalTime() >= audition.end) stopSourceAudition(true);
     }, 50);
     try {
       await videoPlayer.play();
@@ -3311,15 +3494,26 @@ document.addEventListener("DOMContentLoaded", () => {
     const pct = Math.max(0, Math.min(1, clickX / rect.width));
     const targetTime = pct * totalVideoDuration;
 
-    videoPlayer.currentTime = targetTime;
+    if (videoPlayer.currentSrc?.includes("/api/preview/") && !compatibilityWindowContains(targetTime)) {
+      void requestCompatibilityWindow(targetTime, {force: true});
+      return;
+    }
+    if (previewCompatibilityRefresh) cancelCompatibilityRequest();
+    setPreviewGlobalTime(targetTime);
     if (bgmAudio) bgmAudio.currentTime = targetTime;
 
   });
   timelineTrack.addEventListener("keydown", event => {
     if (!["ArrowLeft", "ArrowRight", "Home", "End"].includes(event.key) || !totalVideoDuration) return;
     event.preventDefault();
-    const target = event.key === "Home" ? 0 : event.key === "End" ? totalVideoDuration : videoPlayer.currentTime + (event.key === "ArrowLeft" ? -5 : 5);
-    videoPlayer.currentTime = Math.min(totalVideoDuration, Math.max(0, target));
+    const target = event.key === "Home" ? 0 : event.key === "End" ? totalVideoDuration : previewGlobalTime() + (event.key === "ArrowLeft" ? -5 : 5);
+    const boundedTarget = Math.min(totalVideoDuration, Math.max(0, target));
+    if (videoPlayer.currentSrc?.includes("/api/preview/") && !compatibilityWindowContains(boundedTarget)) {
+      void requestCompatibilityWindow(boundedTarget, {force: true});
+      return;
+    }
+    if (previewCompatibilityRefresh) cancelCompatibilityRequest();
+    setPreviewGlobalTime(boundedTarget);
   });
 
   // Worker controls
@@ -3400,8 +3594,7 @@ document.addEventListener("DOMContentLoaded", () => {
       else {
         previewGeneration++;
         previewDescriptor = {task_id: taskId};
-        previewCompatibilityCoverage = null;
-        previewCompatibilityRefresh = null;
+        resetCompatibilityPreviewState();
         previewPending = false;
         previewResumeTime = null;
         videoPlayer.removeAttribute("src");

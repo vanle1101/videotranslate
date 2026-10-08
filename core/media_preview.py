@@ -10,6 +10,7 @@ import math
 import shutil
 import tempfile
 import threading
+import time
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
@@ -29,7 +30,8 @@ MAX_PREVIEW_BYTES = 90 * 1024 * 1024
 # never starts a whole-source transcode or an unbounded sequence of growing
 # conversions.  The exported MP4 path does not pass coverage_seconds and is
 # therefore unaffected.
-MAX_COMPATIBILITY_SECONDS = 10 * 60
+MAX_COMPATIBILITY_SECONDS = 120
+MAX_RETAINED_JOBS = 8
 DEFAULT_COMPATIBILITY_SECONDS = 24.0
 
 
@@ -44,6 +46,18 @@ def _normalise_coverage(value):
         raise ValueError("Khoảng xem trước không hợp lệ")
     # Keeping the cache key stable avoids one conversion per progress event.
     return min(round(value, 3), MAX_COMPATIBILITY_SECONDS)
+
+
+def _normalise_start(value):
+    if value is None:
+        return 0.0
+    try:
+        value = float(value)
+    except (TypeError, ValueError):
+        raise ValueError("Vị trí bắt đầu xem trước không hợp lệ") from None
+    if not math.isfinite(value) or value < 0:
+        raise ValueError("Vị trí bắt đầu xem trước không hợp lệ")
+    return round(value, 3)
 
 
 class PreviewManager:
@@ -62,27 +76,79 @@ class PreviewManager:
             self._executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="MediaPreview")
         return self._root
 
-    def start(self, source, coverage_seconds=None):
+    def _drop_job_locked(self, key, job):
+        if job.get("status") == "PROCESSING":
+            return False
+        try:
+            job.get("output", Path()).unlink(missing_ok=True)
+        except OSError:
+            logger.warning("Could not remove stale preview output %s", job.get("output"))
+        uploaded = job.get("uploaded_source")
+        if uploaded:
+            try:
+                Path(uploaded).unlink(missing_ok=True)
+            except OSError:
+                logger.warning("Could not remove temporary preview source %s", uploaded)
+        self._jobs.pop(key, None)
+        return True
+
+    def _evict_jobs_locked(self):
+        if len(self._jobs) <= MAX_RETAINED_JOBS:
+            return
+        terminal = sorted(
+            ((key, job) for key, job in self._jobs.items()
+             if job.get("status") in {"READY", "FAILED", "CANCELLED"}),
+            key=lambda item: (item[1].get("last_access", 0), item[1].get("finished_at") or 0),
+        )
+        for key, job in terminal:
+            if len(self._jobs) <= MAX_RETAINED_JOBS:
+                break
+            self._drop_job_locked(key, job)
+
+    def start(self, source, coverage_seconds=None, start_seconds=0, end_seconds=None):
         source = Path(source).resolve(strict=True)
         if not source.is_file():
             raise ValueError("Không tìm thấy video để tạo bản xem trước")
         coverage_seconds = _normalise_coverage(coverage_seconds)
+        start_seconds = _normalise_start(start_seconds)
+        if end_seconds is not None:
+            try:
+                end_seconds = float(end_seconds)
+            except (TypeError, ValueError):
+                raise ValueError("Vị trí kết thúc xem trước không hợp lệ") from None
+            if not math.isfinite(end_seconds) or end_seconds <= start_seconds:
+                raise ValueError("Vị trí kết thúc xem trước không hợp lệ")
+            end_seconds = round(end_seconds, 3)
+            if end_seconds - start_seconds > MAX_COMPATIBILITY_SECONDS:
+                end_seconds = round(start_seconds + MAX_COMPATIBILITY_SECONDS, 3)
+        elif coverage_seconds is not None:
+            end_seconds = round(start_seconds + coverage_seconds, 3)
+        elif start_seconds > 0:
+            end_seconds = round(start_seconds + MAX_COMPATIBILITY_SECONDS, 3)
         stat = source.stat()
-        coverage_key = "full" if coverage_seconds is None else f"prefix:{coverage_seconds:.3f}"
-        key = hashlib.sha256(f"{source}|{stat.st_size}|{stat.st_mtime_ns}|{coverage_key}".encode()).hexdigest()[:24]
+        window_key = "full" if end_seconds is None else f"window:{start_seconds:.3f}-{end_seconds:.3f}"
+        identity = f"{source}|{stat.st_size}|{stat.st_mtime_ns}|{getattr(stat, 'st_ctime_ns', 0)}|{getattr(stat, 'st_ino', 0)}|{window_key}"
+        key = hashlib.sha256(identity.encode()).hexdigest()[:24]
         with self._lock:
             if self._closed:
                 raise RuntimeError("Ứng dụng đang đóng")
             if key in self._jobs:
-                return self.status(key)
+                existing = self._jobs[key]
+                if existing["status"] in {"FAILED", "CANCELLED"}:
+                    self._drop_job_locked(key, existing)
+                else:
+                    return self.status(key)
             root = self._directory()
             job = {"status": "PROCESSING", "cancel": threading.Event(), "output": root / f"{key}.webm",
-                   "coverage_seconds": coverage_seconds, "source_duration": None, "partial": False}
+                   "coverage_seconds": coverage_seconds, "source_duration": None, "partial": False,
+                   "start_seconds": start_seconds, "end_seconds": end_seconds,
+                   "created_at": time.monotonic(), "finished_at": None, "last_access": time.monotonic()}
             self._jobs[key] = job
             job["future"] = self._executor.submit(self._convert, source, job)
+            self._evict_jobs_locked()
             return self.status(key)
 
-    def start_upload(self, stream, suffix, coverage_seconds=None):
+    def start_upload(self, stream, suffix, coverage_seconds=None, start_seconds=0, end_seconds=None):
         with self._lock:
             if self._closed:
                 raise RuntimeError("Ứng dụng đang đóng")
@@ -94,8 +160,15 @@ class PreviewManager:
                 # still writing into it. Copy in fixed-size chunks, never RAM.
                 with temporary:
                     shutil.copyfileobj(stream, temporary, length=1024 * 1024)
-                result = self.start(temporary.name, coverage_seconds=coverage_seconds)
-                self._jobs[result["preview_id"]]["uploaded_source"] = Path(temporary.name)
+                result = self.start(temporary.name, coverage_seconds=coverage_seconds,
+                                    start_seconds=start_seconds, end_seconds=end_seconds)
+                uploaded = Path(temporary.name)
+                self._jobs[result["preview_id"]]["uploaded_source"] = uploaded
+                # A tiny upload may finish before the worker gets a chance to
+                # observe uploaded_source in its finally block.  Clean it
+                # immediately if the job is already terminal.
+                if self._jobs[result["preview_id"]]["status"] != "PROCESSING":
+                    uploaded.unlink(missing_ok=True)
                 return result
             except Exception:
                 Path(temporary.name).unlink(missing_ok=True)
@@ -110,13 +183,20 @@ class PreviewManager:
             duration = float(probe.get("format", {}).get("duration", 0))
             if duration <= 0:
                 raise RuntimeError("Không đọc được thời lượng video")
-            requested = job.get("coverage_seconds")
-            effective_duration = min(duration, requested) if requested is not None else duration
-            if effective_duration <= 0:
+            requested_start = float(job.get("start_seconds") or 0)
+            requested_end = job.get("end_seconds")
+            if requested_start >= duration:
+                raise RuntimeError("Vị trí xem trước vượt quá thời lượng video")
+            effective_start = min(duration, requested_start)
+            effective_end = min(duration, float(requested_end)) if requested_end is not None else duration
+            if effective_end <= effective_start:
                 raise RuntimeError("Không đọc được khoảng xem trước")
-            partial = effective_duration < duration - .05
+            effective_duration = effective_end - effective_start
+            partial = effective_start > .05 or effective_end < duration - .05
             with self._lock:
                 job["source_duration"] = round(duration, 3)
+                job["start_seconds"] = round(effective_start, 3)
+                job["end_seconds"] = round(effective_end, 3)
                 job["coverage_seconds"] = round(effective_duration, 3)
                 job["partial"] = partial
             # Keep the compatibility file below 90 MiB.  For a bounded prefix
@@ -126,6 +206,7 @@ class PreviewManager:
                 raise RuntimeError("Video quá dài để tạo bản xem trước dưới 90 MB. Hãy chia thành các video ngắn hơn.")
             command = [
                 "ffmpeg", "-hide_banner", "-loglevel", "error", "-nostdin", "-y", "-threads", "2",
+                *(["-ss", f"{effective_start:.3f}"] if effective_start > .001 else []),
                 "-i", str(source), "-map", "0:v:0", "-map", "0:a:0?",
                 "-vf", "scale=w='min(640,iw)':h='min(640,ih)':force_original_aspect_ratio=decrease:force_divisible_by=2,fps=24",
                 "-c:v", "libvpx", "-deadline", "realtime", "-cpu-used", "8", "-threads", "2",
@@ -144,13 +225,19 @@ class PreviewManager:
             if output.stat().st_size >= MAX_PREVIEW_BYTES:
                 raise RuntimeError("Bản xem trước vượt giới hạn dung lượng 90 MB. Hãy chia video ngắn hơn.")
             with self._lock:
+                if job["cancel"].is_set():
+                    raise RuntimeError("Đã dừng tạo bản xem trước")
                 job["status"] = "READY"
+                job["finished_at"] = time.monotonic()
+                self._evict_jobs_locked()
         except Exception as error:
             output.unlink(missing_ok=True)
             logger.warning("Compatible video preview failed: %s", error)
             with self._lock:
                 job["status"] = "CANCELLED" if job["cancel"].is_set() else "FAILED"
                 job["error"] = "Đã dừng tạo bản xem trước" if job["cancel"].is_set() else str(error)
+                job["finished_at"] = time.monotonic()
+                self._evict_jobs_locked()
         finally:
             with self._lock:
                 uploaded = job.get("uploaded_source")
@@ -162,19 +249,34 @@ class PreviewManager:
             job = self._jobs.get(key)
             if job is None:
                 raise KeyError(key)
+            job["last_access"] = time.monotonic()
             return {"preview_id": key, "status": job["status"],
                     "video_url": f"/api/preview/{key}/media" if job["status"] == "READY" else None,
                     "error": job.get("error"),
                     "source_duration": job.get("source_duration"),
                     "coverage_seconds": job.get("coverage_seconds"),
+                    "start_seconds": job.get("start_seconds", 0),
+                    "end_seconds": job.get("end_seconds"),
                     "partial": bool(job.get("partial", False))}
 
     def media(self, key):
         with self._lock:
             job = self._jobs.get(key)
-            if not job or job["status"] != "READY":
+            if (not job or job["status"] != "READY" or
+                    not job.get("output", Path()).is_file() or
+                    job["output"].stat().st_size <= 0):
                 raise KeyError(key)
+            job["last_access"] = time.monotonic()
             return job["output"]
+
+    def cancel(self, key):
+        with self._lock:
+            job = self._jobs.get(key)
+            if job is None:
+                raise KeyError(key)
+            if job["status"] == "PROCESSING":
+                job["cancel"].set()
+            return self.status(key)
 
     def shutdown(self):
         with self._lock:

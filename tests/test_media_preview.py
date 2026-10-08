@@ -1,5 +1,6 @@
 """Offline preview API/cache regressions; no configuration writes or AI calls."""
 import json
+import os
 import subprocess
 import time
 import threading
@@ -84,6 +85,85 @@ def test_chunked_preview_uses_a_bounded_prefix_and_exposes_coverage(preview):
     assert later['preview_id'] != ready['preview_id']
 
 
+def test_source_replacement_with_preserved_size_and_mtime_does_not_reuse_old_preview(preview):
+    client, _, source = preview
+    ready = wait_ready(client, client.post('/api/preview', json={'file_path': str(source)}).json())
+    before = source.stat()
+    # An atomic replacement has a new file identity while preserving the
+    # fields used by the old cache key.  Both assets are owned test files.
+    replacement_source = source.with_name('replacement.mp4')
+    replacement_source.write_bytes(source.read_bytes())
+    os.replace(replacement_source, source)
+    os.utime(source, ns=(before.st_atime_ns, before.st_mtime_ns))
+    replacement = client.post('/api/preview', json={'file_path': str(source)}).json()
+    assert replacement['preview_id'] != ready['preview_id']
+
+
+def test_preview_failure_can_be_retried_instead_of_staying_cached_forever(preview):
+    _, manager, source = preview
+    original = source.read_bytes()
+    invalid = source.parent / 'retry.mp4'
+    invalid.write_bytes(b'not a video')
+    first = manager.start(invalid, coverage_seconds=.2)
+    deadline = time.monotonic() + 5
+    while manager.status(first['preview_id'])['status'] == 'PROCESSING' and time.monotonic() < deadline:
+        time.sleep(.02)
+    assert manager.status(first['preview_id'])['status'] == 'FAILED'
+    # Same invalid file still needs a fresh attempt rather than reusing a
+    # terminal failure.  It can be corrected independently afterward.
+    second = manager.start(invalid, coverage_seconds=.2)
+    assert second['preview_id'] == first['preview_id']
+    assert second['status'] == 'PROCESSING'
+    invalid.write_bytes(original)
+
+
+def test_later_source_window_has_global_offsets_and_separate_cache_entry(preview):
+    client, manager, source = preview
+    first = wait_ready(client, client.post('/api/preview', json={
+        'file_path': str(source), 'start_seconds': 0, 'end_seconds': .2,
+    }).json())
+    later = wait_ready(client, client.post('/api/preview', json={
+        'file_path': str(source), 'start_seconds': .2, 'end_seconds': .4,
+    }).json())
+    assert later['preview_id'] != first['preview_id']
+    assert later['partial'] is True
+    assert later['start_seconds'] == pytest.approx(.2, abs=.01)
+    assert later['end_seconds'] == pytest.approx(.4, abs=.05)
+    probe = subprocess.run([
+        'ffprobe', '-v', 'error', '-show_entries', 'format=duration',
+        '-of', 'default=noprint_wrappers=1:nokey=1', str(manager.media(later['preview_id'])),
+    ], capture_output=True, check=True, timeout=10)
+    assert float(probe.stdout) <= .3
+
+
+def test_preview_cancel_stops_conversion_and_deletes_media_on_eviction(preview):
+    _, manager, source = preview
+    original_limit = __import__('core.media_preview', fromlist=['MAX_RETAINED_JOBS']).MAX_RETAINED_JOBS
+    with patch('core.media_preview.MAX_RETAINED_JOBS', 1):
+        first = manager.start(source, coverage_seconds=.2)
+        assert manager.cancel(first['preview_id'])['status'] == 'PROCESSING'
+        deadline = time.monotonic() + 5
+        while manager.status(first['preview_id'])['status'] == 'PROCESSING' and time.monotonic() < deadline:
+            time.sleep(.02)
+        assert manager.status(first['preview_id'])['status'] in {'CANCELLED', 'FAILED'}
+        second = manager.start(source, coverage_seconds=.3)
+        deadline = time.monotonic() + 5
+        while manager.status(second['preview_id'])['status'] == 'PROCESSING' and time.monotonic() < deadline:
+            time.sleep(.02)
+        assert manager.status(second['preview_id'])['status'] == 'READY'
+    assert original_limit == 8
+
+
+def test_preview_api_rejects_reversed_window_before_start(preview):
+    client, _, source = preview
+    with patch.object(main.preview_manager, 'start') as start:
+        response = client.post('/api/preview', json={
+            'file_path': str(source), 'start_seconds': 1, 'end_seconds': .5,
+        })
+    assert response.status_code == 422
+    start.assert_not_called()
+
+
 def test_session_source_covers_downloaded_url_and_uploaded_video(preview):
     client, manager, source = preview
     with patch.object(main, 'get_streaming_session', return_value=SimpleNamespace(video_path=source)):
@@ -110,7 +190,8 @@ def test_initial_source_preview_requests_a_short_compatibility_prefix(preview):
     with patch.object(main.preview_manager, 'start', return_value=expected) as start:
         response = client.post('/api/preview', json={'file_path': str(source)})
     assert response.status_code == 200
-    start.assert_called_once_with(str(source), coverage_seconds=24.0)
+    start.assert_called_once_with(str(source), coverage_seconds=24.0,
+                                  start_seconds=0, end_seconds=24.0)
 
 
 def test_chunked_preview_never_requests_beyond_prepared_cursor(preview):
@@ -124,7 +205,8 @@ def test_chunked_preview_never_requests_beyond_prepared_cursor(preview):
             'task_id': 'chunked-task', 'coverage_seconds': 3,
         })
     assert response.status_code == 200
-    start.assert_called_once_with(source, coverage_seconds=0.2)
+    start.assert_called_once_with(source, coverage_seconds=0.2,
+                                  start_seconds=0, end_seconds=0.2)
 
 
 def test_exported_result_preview_uses_existing_output_and_preserves_final_mp4(preview):
@@ -252,3 +334,41 @@ def test_shutdown_cancels_active_conversion_and_removes_owned_directory(preview)
         manager.shutdown()
     assert not root.exists()
     assert source.exists()
+
+
+def test_stop_at_conversion_return_cannot_publish_ready_media(preview):
+    _, manager, source = preview
+    def media(command, cancel_check, **kwargs):
+        if command[0] == 'ffprobe':
+            return json.dumps({'format': {'duration': '0.5'}}).encode()
+        Path(command[-1]).write_bytes(b'nonempty conversion output')
+        # Model the narrow race after the subprocess's own cancellation check
+        # but before the preview manager commits READY.
+        cancel_check.__self__.set()
+        return b''
+    with patch('core.media_preview.run_media', media):
+        job = manager.start(source, coverage_seconds=.2)
+        manager._jobs[job['preview_id']]['future'].result(timeout=3)
+    status = manager.status(job['preview_id'])
+    assert status['status'] == 'CANCELLED' and status['video_url'] is None
+    with pytest.raises(KeyError):
+        manager.media(job['preview_id'])
+
+
+def test_queued_conversions_enforce_retention_after_they_finish(preview):
+    _, manager, source = preview
+    release = threading.Event()
+    def media(command, cancel_check, **kwargs):
+        if command[0] == 'ffprobe':
+            assert release.wait(3)
+            return json.dumps({'format': {'duration': '0.5'}}).encode()
+        Path(command[-1]).write_bytes(b'owned temporary output')
+        return b''
+    with patch('core.media_preview.run_media', media), patch('core.media_preview.MAX_RETAINED_JOBS', 2):
+        submitted = [manager.start(source, coverage_seconds=seconds) for seconds in (.2, .3, .4)]
+        futures = [manager._jobs[job['preview_id']]['future'] for job in submitted]
+        assert len(manager._jobs) == 3  # All queued/inflight jobs retain ownership.
+        release.set()
+        for future in futures:
+            future.result(timeout=3)
+        assert len(manager._jobs) == len(list(manager._root.glob('*.webm'))) == 2

@@ -1,9 +1,31 @@
 """Qt test ownership: destroy native widgets on the GUI thread, before workers."""
 import gc
+import logging
 import os
 import threading
 
 import pytest
+
+
+_TEST_LOG_HANDLERS = []
+
+
+def pytest_sessionstart(session):
+    # Install before collection imports ServiceManager. Offline provider/error
+    # fixtures must never pollute the user's live Diagnostics files. Records
+    # still propagate to pytest/caplog; real acceptance scripts run separately.
+    for name in ("app", "ai", "pipeline", "errors"):
+        logger = logging.getLogger(name)
+        handler = logging.NullHandler()
+        logger.addHandler(handler)
+        _TEST_LOG_HANDLERS.append((logger, handler))
+
+
+def pytest_sessionfinish(session, exitstatus):
+    for logger, handler in _TEST_LOG_HANDLERS:
+        logger.removeHandler(handler)
+        handler.close()
+    _TEST_LOG_HANDLERS.clear()
 
 
 @pytest.fixture(scope="session")
