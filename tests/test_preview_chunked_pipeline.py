@@ -675,3 +675,77 @@ def test_published_summary_reaches_the_next_bounded_prepass_as_untrusted_context
         await session.worker_task
     asyncio.run(run())
     assert seen[0] == "" and all(value == "Tóm tắt nháp đoạn trước." for value in seen[1:])
+
+
+def saved_full_queue(session):
+    session.translation_mode = "full"
+    session.initialized = True
+    session._chunked_source_started = session._visual_prepass_complete = True
+    session._visual_completed_seconds = session.total_duration = 16
+    session.error = "Earlier speech request failed"
+    session.segments = {}
+    for sid, status in enumerate(("READY", "FAILED", "WAITING", "WAITING")):
+        row = SegmentItem(sid, sid * 4, sid * 4 + 2, 2)
+        row.final_vi, row.status = f"Lời {sid}.", status
+        row._retry_synthesis = True
+        if status == "FAILED":
+            row.failed_stage = "TTS"
+        session.segments[sid] = row
+
+
+def test_saved_full_retry_continues_later_rows_after_real_queue_failure(preview, monkeypatch):
+    session, *_, events = preview
+    saved_full_queue(session)
+    original = session._synthesize_segment
+    statuses = []
+    async def synthesize(row):
+        statuses.append((row.id, session.get_progress()["status"]))
+        if row.id == 1:
+            row.status = "TTS"
+            raise RuntimeError("Empty speech provider response")
+        await original(row)
+    monkeypatch.setattr(session, "_synthesize_segment", synthesize)
+    async def run():
+        await session.retry_failed_synthesis()
+        await session.worker_task
+    asyncio.run(run())
+    assert statuses == [(1, "RUNNING"), (2, "RUNNING"), (3, "RUNNING")]
+    assert [row.status for row in session.segments.values()] == ["READY", "FAILED", "READY", "READY"]
+    assert session.queue.empty() and session.can_retry
+    assert session.get_progress()["status"] == "FAILED"
+    assert not any(event == "progress" and payload["status"] == "COMPLETED" for event, payload in events)
+
+
+def test_saved_retry_capacity_failure_cannot_start_speech_worker(preview, monkeypatch):
+    from core.streaming.session_store import ProjectCapacityError
+    session, *_ = preview
+    saved_full_queue(session)
+    workers = []
+    async def review():
+        session._persistence_capacity_failed = True
+        raise ProjectCapacityError("Dự án đạt giới hạn dữ liệu lưu.")
+    async def worker():
+        workers.append(True)
+    monkeypatch.setattr(session, "_resume_pending_chunk_reviews", review)
+    monkeypatch.setattr(session, "_worker_loop", worker)
+    async def run():
+        await session.retry_failed_synthesis()
+        await session.worker_task
+    asyncio.run(run())
+    assert not workers and not session.is_running and not session.can_retry
+    assert session.get_progress()["status"] == "FAILED"
+    assert "giới hạn" in session.error
+
+
+def test_queue_capacity_failure_cannot_become_completed(preview, monkeypatch):
+    from core.streaming.session_store import ProjectCapacityError
+    session, *_ = preview
+    saved_full_queue(session)
+    session.error, session.is_running = None, True
+    async def update():
+        session._persistence_capacity_failed = True
+        raise ProjectCapacityError("Dự án đạt giới hạn dữ liệu lưu.")
+    monkeypatch.setattr(session, "_update_ready", update)
+    asyncio.run(session._worker_loop())
+    assert not session.is_running and session.get_progress()["status"] == "FAILED"
+    assert "giới hạn" in session.error

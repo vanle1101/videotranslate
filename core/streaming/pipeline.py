@@ -459,7 +459,15 @@ class StreamingPipelineSession:
                 self.is_running = False
                 self._release_runtime()
                 raise
-            except Exception:
+            except Exception as exc:
+                if getattr(self, "_persistence_capacity_failed", False):
+                    self.error = str(exc)
+                    self.is_running = False
+                    self._release_runtime()
+                    await self.emit("progress", self.get_progress())
+                    await self.emit("error", {"message": self.error})
+                    await self.emit("finished", self.get_telemetry())
+                    return
                 logging.getLogger("errors").warning("[%s] Không gửi được trạng thái thử lại tạo giọng", self.task_id)
             await self._worker_loop()
 
@@ -2234,7 +2242,9 @@ class StreamingPipelineSession:
                         else:
                             await self._process_segment(seg)
                 except Exception as exc:
-                    self.error = str(exc)
+                    if getattr(self, "_persistence_capacity_failed", False):
+                        raise
+                    message = str(exc)
                     # SDK exception strings can contain prompts or credentials.
                     # Keep a useful task/stage/type diagnostic without raw text.
                     logging.getLogger("errors").error(
@@ -2244,8 +2254,16 @@ class StreamingPipelineSession:
                     if seg:
                         seg.failed_stage = seg.status
                         seg.status = "FAILED"
-                        seg.error = self.error
+                        seg.error = message
                         await self.emit("segment_update", seg.to_dict())
+                    if self._chunked_source_started:
+                        # Recovery uses this queue too. A failed earlier row
+                        # must not strand healthy later rows on a saved run.
+                        warning = f"Câu {seg_id + 1} chưa tạo được giọng; giữ phần đã xong và tiếp tục các câu sau."
+                        if warning not in self.warnings:
+                            self.warnings.append(warning)
+                        continue
+                    self.error = message
                     await self.emit("error", {"message": self.error, "segment_id": seg_id})
                     break
                 finally:
@@ -2253,6 +2271,11 @@ class StreamingPipelineSession:
         except asyncio.CancelledError:
             self.is_stopped = True
             raise
+        except Exception as exc:
+            self.error = str(exc)
+            logging.getLogger("errors").error(
+                "[%s] QUEUE_WORKER_FAILED error_type=%s", self.task_id, type(exc).__name__)
+            await self.emit("error", {"message": self.error})
         finally:
             self.is_running = False
             self._release_runtime()
