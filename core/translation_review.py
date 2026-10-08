@@ -156,7 +156,13 @@ class AutomaticTranslationReviewer:
         for attempt in range(3):
             check()
             try:
-                raw = client.translate(prompt, max_tokens=10000)
+                retry_prompt = prompt
+                if attempt:
+                    retry_prompt += ("\nPhản hồi trước không đúng JSON/ID/mốc đã yêu cầu. Chỉ trả segments cho đúng "
+                        "các hàng sau, mỗi ID đúng một lần; các ID trong ngữ cảnh chỉ để đọc, không được xuất: "
+                        + json.dumps([{key: row[key] for key in ("id", "start", "end")} for row in batch])
+                        + ". Không thêm lời giải thích ngoài JSON.")
+                raw = client.translate(retry_prompt, max_tokens=10000)
             except Exception as error:
                 check()
                 AutomaticTranslationReviewer._diagnostic(error, "semantic_request", batch)
@@ -168,9 +174,9 @@ class AutomaticTranslationReviewer:
                 return data, validated
             except VideoIntelligenceError as error:
                 logging.getLogger("ai").warning(
-                    "REVIEW_RESPONSE_INVALID run_id=%s attempt=%s response_chars=%s error_type=%s",
+                    "REVIEW_RESPONSE_INVALID run_id=%s attempt=%s response_chars=%s error_type=%s requested_ids=%s",
                     current_execution_context().run_id, attempt + 1, len(raw) if isinstance(raw, str) else 0,
-                    type(error).__name__)
+                    type(error).__name__, [row["id"] for row in batch])
                 if attempt == 2:
                     AutomaticTranslationReviewer._diagnostic(error, "semantic_schema", batch)
                     raise
@@ -457,12 +463,14 @@ class AutomaticTranslationReviewer:
                 "\"verification_reason\":\"đối chiếu nghĩa cụ thể\"}],\"screen_texts\":[],\"summary\":\"\"}. "
                 "Giữ đúng ID và thời gian; trả đủ mọi câu.\n" + json.dumps(payload, ensure_ascii=False)
                 + "\nNgữ cảnh thoại nguồn, không tạo thêm ID; bản Việt kèm theo có thể sai:\n"
-                + json.dumps(context, ensure_ascii=False) + address_review_instruction(address_reading))
+                + json.dumps(context, ensure_ascii=False) + address_review_instruction(address_reading)
+                + "\nPHẠM VI KẾT QUẢ: Chỉ xuất các ID và mốc sau, mỗi hàng đúng một lần: "
+                + json.dumps([{key: row[key] for key in ("id", "start", "end")} for row in sources])
+                + ". Không xuất lại các hàng ngữ cảnh.")
             check()
             try:
-                data = VideoIntelligence._parse_json(client.translate(prompt, max_tokens=10000))
-                check()
-                validated = VideoIntelligence.validate_result(data, sources, observed_screens=[])
+                data, validated = self._validated_review_request(client, prompt, sources,
+                    min(row["start"] for row in sources), max(row["end"] for row in sources), check)
                 audits = {row["id"]: row for row in data["segments"]}
                 if any(not isinstance(row.get("semantic_verified"), bool)
                        or not isinstance(row.get("verification_reason"), str) for row in audits.values()):
@@ -476,9 +484,8 @@ class AutomaticTranslationReviewer:
                     "Đổi chiều đại từ theo đúng người đáp; không tự thêm tao/mày vì lời gấp. Nếu bản đầu sai, sửa theo nguồn; "
                     "nếu chưa đủ chắc, giữ needs_review=true. Trả đúng cùng JSON schema và ID.\n"
                     + json.dumps(data["segments"], ensure_ascii=False))
-                checked = VideoIntelligence._parse_json(client.translate(recheck, max_tokens=10000))
-                check()
-                checked_validated = VideoIntelligence.validate_result(checked, sources, observed_screens=[])
+                checked, checked_validated = self._validated_review_request(client, recheck, sources,
+                    min(row["start"] for row in sources), max(row["end"] for row in sources), check)
                 checked_audits = {row["id"]: row for row in checked["segments"]}
                 if any(not isinstance(row.get("semantic_verified"), bool)
                        or not isinstance(row.get("verification_reason"), str)

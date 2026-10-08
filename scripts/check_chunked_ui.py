@@ -131,6 +131,8 @@ def main():
                 record["edited"] = {"id": edited["id"], "revision": edited["revision"], "text": edited["final_vi"]}
                 record["edited_hashes"] = hashes(task_id, [edited])
                 RECORD.write_text(json.dumps(record), encoding="utf-8")
+                partial_playback(page, backend(base, f"/api/streaming/{task_id}"))
+                assert click(page, "player-play-toggle")
             else:
                 assert snapshot["progress"]["can_retry"]
                 assert click(page, "btn-retry-worker")

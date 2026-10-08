@@ -96,3 +96,29 @@ def test_audio_failure_retains_safe_diagnostic_and_segment_ids(caplog):
     assert diagnostic["segment_ids"] == [0]
     assert "REVIEW_STAGE_FAILED" in caplog.text
     assert "secret-token-do-not-log" not in caplog.text + json.dumps(result)
+
+
+def test_audio_schema_failure_retries_only_requested_id_without_repeating_asr():
+    client = Mock(has_credentials=True, model="offline-schema-probe")
+    audio = Mock()
+    row = {**source(6), "needs_review": True, "verification": {"source_supported": False}}
+    audio.collect.return_value = {6: {"sensevoice": "你好", "faster-whisper-small": "你好"}}
+    corrected = {**source(6), "literal_vi": "Xin chào", "natural_vi": "Xin chào", "final_vi": "Xin chào",
+        "semantic_verified": True, "verification_reason": "Giữ đúng lời chào nguồn."}
+    bad_context_row = {**corrected, "id": 99}
+    client.translate.side_effect = [
+        {"segments": [corrected, bad_context_row], "screen_texts": [], "summary": ""},
+        {"segments": [corrected], "screen_texts": [], "summary": ""},
+        {"segments": [corrected], "screen_texts": [], "summary": ""},
+    ]
+    reviewer = AutomaticTranslationReviewer(client, Mock(), audio)
+    reviewer._address_reading = Mock(return_value={})
+    result = reviewer.resolve_audio_uncertainty("unused", {"segments": {6: row}, "screen_texts": [],
+        "translation_sources": []}, context_segments=[source(99)])
+    assert client.translate.call_count == 3
+    audio.collect.assert_called_once()
+    retry = client.translate.call_args_list[1].args[0]
+    assert '"id": 6, "start": 6.0, "end": 7.0' in retry
+    assert "các ID trong ngữ cảnh chỉ để đọc" in retry
+    assert set(result["segments"]) == {6}
+    assert result["segments"][6]["verification"]["semantic_verified"] is True
