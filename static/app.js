@@ -69,6 +69,7 @@ document.addEventListener("DOMContentLoaded", () => {
   // user action.  Keep the value in one place so URL, upload and local-file
   // starts use the same contract.
   const PREVIEW_SECONDS = 24;
+  const COMPATIBILITY_MAX_SECONDS = 600;
   const PREVIEW_READY_STATUS = "PREVIEW_READY";
   const isPreviewReady = status => String(status || "").toUpperCase() === PREVIEW_READY_STATUS;
 
@@ -214,6 +215,11 @@ document.addEventListener("DOMContentLoaded", () => {
   let previewSource = null;
   let previewFallbackTried = false;
   let previewPending = false;
+  // Compatibility previews for chunked tasks are bounded prefixes.  Keep the
+  // measured coverage so a later source-prepared checkpoint can replace the
+  // prefix without claiming that it is the complete video.
+  let previewCompatibilityCoverage = null;
+  let previewCompatibilityRefresh = null;
   let previewResumeTime = null;
   let playWhenPreviewReady = false;
   let autoPlayTaskId = null;
@@ -1143,8 +1149,18 @@ document.addEventListener("DOMContentLoaded", () => {
   function showTaskProgress(progress) {
     progressRevision++;
     taskPollWarning = false;
+    const previousPreparedSeconds = Number(currentProgress?.source_prepared_seconds);
     const previousStatus = currentProgress?.status;
     currentProgress = { ...currentProgress, ...progress };
+    const preparedSeconds = Number(currentProgress?.source_prepared_seconds);
+    if (Number.isFinite(preparedSeconds) &&
+        (!Number.isFinite(previousPreparedSeconds) || preparedSeconds > previousPreparedSeconds + .5)) {
+      // The native Qt player may already be using a compatibility prefix.  A
+      // later source checkpoint can safely replace it with a longer prefix;
+      // refreshCompatiblePreview keeps the current playhead and ignores a
+      // failed extension so the already playable prefix remains available.
+      void refreshCompatiblePreview();
+    }
     const incompleteReview = ["failed", "incomplete"].includes(currentProgress.review_summary?.status);
     if (incompleteReview && (currentProgress.status === "COMPLETED" || (currentProgress.status === "FAILED" && currentProgress.phase === "review"))) {
       currentProgress = {...currentProgress, status: "FAILED", phase: "review",
@@ -1291,6 +1307,8 @@ document.addEventListener("DOMContentLoaded", () => {
     previewSource = source;
     previewFallbackTried = !!canReuse;
     previewPending = false;
+    previewCompatibilityCoverage = canReuse ? previewCompatibilityCoverage : null;
+    previewCompatibilityRefresh = null;
     audioPermissionNeeded = false;
     mediaPlayButton.classList.add("hidden");
     previewResumeTime = null;
@@ -1318,6 +1336,62 @@ document.addEventListener("DOMContentLoaded", () => {
     bufferingAlert.classList.remove("hidden");
   }
 
+  function compatibilityCoverageTarget() {
+    if (!previewDescriptor?.task_id || previewDescriptor?.file) return null;
+    const prepared = Number(currentProgress?.source_prepared_seconds);
+    if (!Number.isFinite(prepared) || prepared <= 0) return null;
+    const total = Number(currentProgress?.total_seconds || totalVideoDuration);
+    const bounded = Number.isFinite(total) && total > 0 ? Math.min(prepared, total) : prepared;
+    return Math.min(COMPATIBILITY_MAX_SECONDS, bounded);
+  }
+
+  async function requestCompatiblePreview(body, generation) {
+    let response = await fetch("/api/preview", {
+      method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body),
+    });
+    let data = await response.json();
+    if (!response.ok) throw new Error(data.detail || "Không thể chuẩn bị bản xem trước");
+    while (generation === previewGeneration && data.status === "PROCESSING") {
+      await new Promise(resolve => setTimeout(resolve, 400));
+      if (generation !== previewGeneration) return null;
+      response = await fetch(`/api/preview/${data.preview_id}`);
+      data = await response.json();
+      if (!response.ok) throw new Error(data.detail || "Không đọc được trạng thái bản xem trước");
+    }
+    if (generation !== previewGeneration) return null;
+    if (data.status !== "READY") throw new Error(data.error || "Không thể tạo bản xem trước");
+    return data;
+  }
+
+  async function refreshCompatiblePreview() {
+    if (previewCompatibilityRefresh || previewPending || previewDescriptor?.file ||
+        !previewDescriptor?.task_id || !videoPlayer.currentSrc?.includes("/api/preview/")) return;
+    const target = compatibilityCoverageTarget();
+    if (!target || (previewCompatibilityCoverage !== null && target <= previewCompatibilityCoverage + .5)) return;
+    const generation = previewGeneration;
+    const body = {...previewDescriptor, coverage_seconds: target};
+    previewCompatibilityRefresh = (async () => {
+      const data = await requestCompatiblePreview(body, generation);
+      if (!data || generation !== previewGeneration) return;
+      const coverage = Number(data.coverage_seconds);
+      if (!Number.isFinite(coverage) || (previewCompatibilityCoverage !== null && coverage <= previewCompatibilityCoverage + .1)) return;
+      // The user may keep playing or seek while FFmpeg prepares the larger
+      // prefix.  Read both values immediately before swapping sources so the
+      // replacement does not rewind to the position from request start.
+      const resumeTime = videoPlayer.currentTime || 0;
+      const wasPlaying = !videoPlayer.paused;
+      previewCompatibilityCoverage = coverage;
+      previewResumeTime = resumeTime;
+      playWhenPreviewReady = wasPlaying;
+      videoPlayer.src = data.video_url;
+      videoPlayer.load();
+    })().catch(() => {
+      // Keep the already playable prefix if the larger prefix cannot be
+      // prepared; the next measured source checkpoint can retry it.
+    }).finally(() => { previewCompatibilityRefresh = null; });
+    await previewCompatibilityRefresh;
+  }
+
   async function loadCompatiblePreview() {
     if (previewFallbackTried) {
       showMediaError("Không thể phát bản xem trước. Hãy kiểm tra FFmpeg trong Diagnostics rồi chọn lại video.");
@@ -1342,9 +1416,14 @@ document.addEventListener("DOMContentLoaded", () => {
       if (previewDescriptor?.file) {
         const body = new FormData();
         body.append("file", previewDescriptor.file);
+        const coverage = compatibilityCoverageTarget();
+        if (coverage) body.append("coverage_seconds", String(coverage));
         response = await fetch("/api/preview/upload", { method: "POST", body });
       } else {
-        response = await fetch("/api/preview", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(previewDescriptor || {}) });
+        const body = {...(previewDescriptor || {})};
+        const coverage = compatibilityCoverageTarget();
+        if (coverage) body.coverage_seconds = coverage;
+        response = await fetch("/api/preview", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
       }
       let data = await response.json();
       if (!response.ok) throw new Error(data.detail || "Không thể chuẩn bị bản xem trước");
@@ -1357,6 +1436,7 @@ document.addEventListener("DOMContentLoaded", () => {
       }
       if (generation !== previewGeneration) return;
       if (data.status !== "READY") throw new Error(data.error || "Không thể tạo bản xem trước");
+      previewCompatibilityCoverage = Number.isFinite(Number(data.coverage_seconds)) ? Number(data.coverage_seconds) : null;
       previewResumeTime = resumeTime;
       videoPlayer.src = data.video_url;
       videoPlayer.load();
@@ -1443,11 +1523,13 @@ document.addEventListener("DOMContentLoaded", () => {
   function resolveDubTiming(segment) {
     if (!segment) return null;
     const valid = value => typeof value === "number" && Number.isFinite(value) && value >= 0;
-    const { start, end, dub_start: dubStart, dub_end: dubEnd } = segment;
+    const { start, end, dub_start: dubStart, dub_end: dubEnd, dub_tail_limit: tailLimit } = segment;
     if (!valid(start) || !valid(end) || end <= start) return null;
     if (dubStart == null && dubEnd == null) return { start, end };
+    if (tailLimit != null && (!valid(tailLimit) || tailLimit < end - 1e-9 || tailLimit > end + 1 + 1e-9)) return null;
+    const endLimit = tailLimit == null ? end + .35 : Math.max(end + .35, tailLimit);
     if (!valid(dubStart) || !valid(dubEnd) || dubEnd <= dubStart ||
-        Math.abs(dubStart - start) > .35 + 1e-9 || Math.abs(dubEnd - end) > .35 + 1e-9) return null;
+        Math.abs(dubStart - start) > .35 + 1e-9 || dubEnd < end - .35 - 1e-9 || dubEnd > endLimit + 1e-9) return null;
     return { start: dubStart, end: dubEnd };
   }
 
@@ -1838,6 +1920,8 @@ document.addEventListener("DOMContentLoaded", () => {
       previewGeneration++;
       previewPending = false;
       previewDescriptor = null;
+      previewCompatibilityCoverage = null;
+      previewCompatibilityRefresh = null;
       videoPlayer.removeAttribute("src");
       videoPlayer.load();
       playerPlaceholder.classList.remove("hidden");
@@ -2087,6 +2171,8 @@ document.addEventListener("DOMContentLoaded", () => {
     translationReady = false;
     previewGeneration++;
     previewPending = false;
+    previewCompatibilityCoverage = null;
+    previewCompatibilityRefresh = null;
     previewResumeTime = null;
     resetTaskResult();
     btnStart.classList.add("hidden");
@@ -2186,6 +2272,8 @@ document.addEventListener("DOMContentLoaded", () => {
       else {
         previewGeneration++;
         previewDescriptor = { task_id: currentTaskId };
+        previewCompatibilityCoverage = null;
+        previewCompatibilityRefresh = null;
         videoPlayer.removeAttribute("src");
         videoPlayer.load();
       }
@@ -3312,6 +3400,8 @@ document.addEventListener("DOMContentLoaded", () => {
       else {
         previewGeneration++;
         previewDescriptor = {task_id: taskId};
+        previewCompatibilityCoverage = null;
+        previewCompatibilityRefresh = null;
         previewPending = false;
         previewResumeTime = null;
         videoPlayer.removeAttribute("src");

@@ -142,7 +142,7 @@ Nếu đường tải công khai không lấy được video, Studio tự thử 
 
 Lượt kiểm tra ngày 05/10/2026 dùng đúng link `_lAiSDH0bK8`: đã lấy mẫu **15 giây, 1080p, khoảng 28,5 MB** từ nguồn chất lượng gốc, giữ nguyên luồng hình/tiếng bằng remux. Chưa tải toàn bộ tệp nguồn khoảng **19,94 GB**. Sau một lượt Gemini trả 503, lần thử lại hoàn tất nhận diện, dịch và đọc cả 2 câu. Sửa một câu qua API đã tạo âm thanh mới, tăng revision và giữ nguyên mốc đầu/cuối; xuất MP4 H264/AAC **1920×1080, 15,017 giây, khoảng 11,3 MB** thành công. Bản tải nguồn giữ nguyên chất lượng; bản xuất lồng tiếng phải render lại để ghép âm thanh và phụ đề. Kết quả này chỉ xác nhận đoạn mẫu, chưa kiểm chứng xử lý toàn bộ video dài.
 
-Giới hạn hiện tại: Qt trên máy này cần bản xem trước WebM để phát H264/AAC. Bản xem trước có trần 90 MB nên video gần 3 giờ này chưa phát trọn vẹn trong Studio; tải nguồn thành công không đồng nghĩa preview video dài đã được hỗ trợ. Khi tắt đọc hình ảnh, phụ đề dùng vị trí đáy hình và giữ nguyên chữ nguồn. Video không có luồng âm thanh chưa được chế độ này hỗ trợ.
+Giới hạn hiện tại: Qt trên máy này cần bản xem trước WebM để phát H264/AAC. Studio tạo bản xem trước theo phần đã chuẩn bị (mặc định 24 giây, tối đa 10 phút và tối đa 90 MB), nên video gần 3 giờ chưa phát trọn vẹn trong Studio; tải nguồn thành công không đồng nghĩa preview toàn bộ video dài đã được hỗ trợ. MP4 xuất vẫn dùng toàn bộ nguồn. Khi tắt đọc hình ảnh, phụ đề dùng vị trí đáy hình và giữ nguyên chữ nguồn. Video không có luồng âm thanh chưa được chế độ này hỗ trợ.
 
 ### Cookie Douyin khi cần đăng nhập
 

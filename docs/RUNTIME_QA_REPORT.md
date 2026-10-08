@@ -1,5 +1,17 @@
 # Runtime QA report
 
+## Latest chunked-runtime retest — October 8, 23:02–23:28
+
+The previous real run reproduced a failure after the first 34 of 35 speech rows: row 26 (`36.67–37.57s`) produced a measured 1.64s WAV, while the old timing guard allowed only the 0.35s endpoint tolerance. The provider response and semantic review were valid; the failure was the local speech-window planner, not Muse or the network. The failed row was retained and the other 34 rows were not regenerated.
+
+Fixes now provide a bounded, persisted tail ceiling only when the following source interval has already been prepared. The ceiling is capped at one second after the source row and the next source/dub start, is checked again on retry/reload/export, and cannot compound or cross a later cue. Natural speech receives that measured capacity without exceeding the 1.15× speed limit. Existing full-source sessions keep the original ±350ms contract. Compatibility video previews now request only the prepared prefix (maximum ten minutes); the full exported MP4 path remains unchanged.
+
+**Real production UI retest — PASS:** task `db1fd7bb`, 48s fixture, OpenCode Muse and Edge-TTS. Retry resumed the saved task with 34 READY rows, synthesized the missing row, reached 35/35 READY, and exported `workspace/outputs/douyin_translated_db1fd7bb_hq.mp4`. The file is 9,273,609 bytes, H.264/AAC, 960×540, 48.000s; complete FFmpeg decode passed. Result playback through the production Qt UI reached decoded playback at 0.42s. A second UI inspection after reload reached the extended row at 37.96s; the real audio element was ready, playing, error-free, and the subtitle remained `Bố còn khóc cả buổi chiều.` until the measured dub end 38.4487s. Source timing was not mutated.
+
+The run still reports 10 source-evidence rows as `unresolved`; they remain visibly flagged for review. This is an execution/media PASS, not a claim that every semantic translation was independently verified. The application does not silently convert those flags into “verified”.
+
+Focused timing, persistence, preview and pipeline regressions: **185 passed**. Transcript transaction regressions: **83 passed**. Browser/UI interaction suite: **218 passed**. The final Python suite is **1813 passed, 1 skipped, 2 warnings** in 152.71s. The two warnings are upstream WebSocket deprecations from the desktop lifecycle test. A first full run exposed six Windows text-fixture failures because tests read UTF-8 temporary text with the system code page; those fixtures now specify UTF-8 and the final suite passes.
+
 ## Preview-first bounded processing — October 8, evening
 
 User flow implemented: Start requests `translation_mode=preview`, prepares only a bounded source/audio/ASR interval (24 seconds plus measured lookahead), publishes independent groups of four speech rows, and waits for the explicit **Dịch toàn bộ** action. Promotion retains the task ID, source, checkpoints, committed edits and WAVs. Further intervals publish progressively. Preview is not full completion and cannot export a full MP4. A failed speech row remains FAILED while healthy following rows continue; full export rejects gaps. Early READY rows remain editable during later chunk review. Source offsets and IDs stay global across preparation windows. Saved preview and partial states reopen without automatically contacting Muse.

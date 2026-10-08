@@ -65,9 +65,39 @@ def edit_through_ui(page, base, task_id, row):
     return edited
 
 
+def inspect_extended_tail(page, snapshot):
+    """Seek with the production transcript control, then observe real media."""
+    tail = next(row for row in snapshot["segments"] if row.get("dub_tail_limit") is not None
+                and row["dub_end"] > row["end"] + .35)
+    until(page, "document.getElementById('video-player').readyState>=2", timeout=90)
+    assert evaluate(page, "(() => {const b=document.querySelector(" +
+                    json.dumps(f"#seg-row-{tail['id']} .transcript-time") +
+                    ");if(!b)return false;b.click();return true;})()")
+    if evaluate(page, "document.getElementById('video-player').paused"):
+        assert click(page, "player-play-toggle")
+    time_point = tail["end"] + .36
+    expression = """(() => {const v=document.getElementById('video-player');
+        const a=window.__qaAudio.find(a=>a.currentSrc.includes('/audio/""" + snapshot["task_id"] + "/" + str(tail["id"]) + """'));
+        return {time:v.currentTime,paused:v.paused,text:document.getElementById('subtitle-text').textContent,
+            audio:a?{time:a.currentTime,paused:a.paused,ready:a.readyState,error:a.error?.message||null}:null};})()"""
+    deadline = time.monotonic() + 20
+    while time.monotonic() < deadline:
+        state = evaluate(page, expression)
+        if state["time"] >= time_point:
+            break
+        wait(30)
+    assert time_point <= state["time"] < tail["dub_end"], state
+    assert not state["paused"] and state["audio"] and not state["audio"]["paused"], state
+    assert state["audio"]["ready"] >= 2 and state["audio"]["error"] is None, state
+    assert state["text"].strip() and state["text"].strip() in tail["final_vi"], state
+    event("EXTENDED_TAIL_UI_PASS", {"id": tail["id"], "source_end": tail["end"],
+          "dub_end": tail["dub_end"], "state": state})
+    assert click(page, "player-play-toggle")
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("mode", choices=["preview", "full", "resume", "resume-stop", "inspect"])
+    parser.add_argument("mode", choices=["preview", "full", "resume", "resume-stop", "inspect", "inspect-tail"])
     args = parser.parse_args()
     assert SOURCE.is_file() and SOURCE.stat().st_size < 100_000_000
     assert settings.LLM_PROVIDER == "opencode"
@@ -110,8 +140,10 @@ def main():
             snapshot = backend(base, f"/api/streaming/{task_id}")
             retained = hashes(task_id, snapshot["segments"])
             assert all(retained.get(sid) == digest for sid, digest in record.get("edited_hashes", {}).items())
-            if args.mode == "inspect":
+            if args.mode in {"inspect", "inspect-tail"}:
                 assert snapshot["progress"]["status"] == "COMPLETED" and snapshot["output_filename"]
+                if args.mode == "inspect-tail":
+                    inspect_extended_tail(page, snapshot)
                 check_playback(page)
                 event("FINAL_REOPEN_PASS", {"task_id": task_id, "output": snapshot["output_filename"]})
                 return

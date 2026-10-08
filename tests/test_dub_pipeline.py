@@ -236,3 +236,189 @@ def test_fitted_audio_uses_export_sample_tolerance_not_four_sample_slack(session
     slot_frames = round(bounds["dub_end"] * 44100) - round(bounds["dub_start"] * 44100)
     with wave.open(str(pending), "rb") as audio:
         assert audio.getnframes() <= slot_frames + 1
+
+
+def prepare_tail_session(session):
+    """Actual failed row 26 and saved neighbouring measured WAV lengths."""
+    session.total_duration = 48.
+    session._chunked_source_started = True
+    session._source_prepared_seconds = 48.
+    specs = [
+        (23, 33.45, 34.25, 33.23654166666667, 34.025083333333335, .7885416666666667),
+        (24, 34.25, 35.73, 34.025083333333335, 35.728, 1.7029166666666666),
+        (25, 35.73, 36.67, 35.728, 37.02, 1.292),
+        (26, 36.67, 37.57, 37.02, 37.92, .4),
+        (27, 38.63, 39.53, None, None, .8947916666666667),
+    ]
+    rows = {}
+    for identity, start, end, dub_start, dub_end, audio_duration in specs:
+        row = SegmentItem(identity, start, end, end - start)
+        row.status = "READY"
+        row.text_zh = "你还哭了一下午" if identity == 26 else "来源"
+        row.final_vi = "Cũ." if identity == 26 else f"Câu {identity}."
+        row.dub_start, row.dub_end = dub_start, dub_end
+        row.audio_path = str(session.segments_dir / f"seg_{identity}.wav")
+        row.audio_url = f"/api/streaming/audio/{session.task_id}/{identity}?rev=0"
+        write_pcm(row.audio_path, audio_duration)
+        rows[identity] = row
+    session.segments = rows
+    return rows[26]
+
+
+def synthesize_tail_fixture(*, text, output_path, **kwargs):
+    """Complete already-fitted synthetic narration, not a live provider result."""
+    measured = 1.67 / 1.15
+    write_pcm(output_path, measured)
+    return {"text": text, "tts_duration": 1.67, "speed_ratio": 1.15,
+            "boundaries": [], "pacing_verification": None}
+
+
+def test_tail_fit_passes_only_proven_capacity_and_does_not_publish_before_return(session, monkeypatch):
+    focus = prepare_tail_session(session)
+    before = snapshot(session)
+    calls = []
+
+    def synthesis(**kwargs):
+        calls.append(kwargs)
+        return synthesize_tail_fixture(**kwargs)
+
+    monkeypatch.setattr(pipeline, "synthesize_natural_speech", synthesis)
+    pending = session.segments_dir / "tail-fit.wav"
+    spoken, timing, plan = asyncio.run(session._fit_dub(
+        focus, text="Bố còn khóc cả buổi chiều.", source=focus.text_zh, output_path=pending))
+    assert calls[0]["duration"] == pytest.approx(.9)
+    assert calls[0]["max_duration"] == pytest.approx(1.6750833333333333, abs=.0001)
+    assert calls[0]["max_duration_limit"] == calls[0]["max_duration"]
+    assert calls[0]["allow_bidirectional_reflow"] is True
+    assert plan[26]["dub_tail_limit"] == pytest.approx(38.57)
+    assert plan[26]["dub_start"] == pytest.approx(37.02)
+    assert plan[26]["dub_end"] < session.segments[27].start
+    assert spoken["text"] == "Bố còn khóc cả buổi chiều."
+    assert timing["speech_start"] >= plan[26]["dub_start"]
+    assert timing["speech_end"] <= plan[26]["dub_end"]
+    assert snapshot(session) == before
+
+
+def test_tail_synthesis_and_save_reopen_preserve_ceiling_audio_and_source(session, monkeypatch):
+    focus = prepare_tail_session(session)
+    focus.final_vi = "Bố còn khóc cả buổi chiều."
+    before = snapshot(session)
+    monkeypatch.setattr(pipeline, "synthesize_natural_speech", synthesize_tail_fixture)
+    asyncio.run(session._synthesize_segment(focus))
+    assert focus.status == "READY"
+    assert focus.dub_tail_limit == pytest.approx(38.57)
+    assert focus.dub_start == pytest.approx(37.02)
+    assert 38.45 < focus.dub_end < min(38.57, session.segments[27].start)
+    assert focus.final_vi == "Bố còn khóc cả buổi chiều."
+    assert focus.speed_ratio == 1.15
+    assert focus.subtitle_cues
+    assert all(cue["start"] >= focus.speech_start for cue in focus.subtitle_cues)
+    assert all(cue["end"] <= focus.speech_end for cue in focus.subtitle_cues)
+    for identity, row in session.segments.items():
+        old = before["segments"][identity]
+        assert (row.start, row.end, row.duration) == (old["start"], old["end"], old["duration"])
+        if identity != 26:
+            assert Path(row.audio_path).read_bytes() == before["audio"][row.audio_path]
+    audio = Path(focus.audio_path).read_bytes()
+    save_session(session)
+    for _ in range(2):
+        active_streaming_sessions.clear()
+        restored = restore_saved_session(session.task_id)
+        row = restored.segments[26]
+        assert row.dub_tail_limit == focus.dub_tail_limit
+        assert (row.dub_start, row.dub_end) == (focus.dub_start, focus.dub_end)
+        assert (row.start, row.end, row.duration) == (36.67, 37.57, pytest.approx(.9))
+        assert row.subtitle_cues == focus.subtitle_cues
+        assert Path(row.audio_path).read_bytes() == audio
+        save_session(restored)
+
+
+@pytest.mark.parametrize("stage", ["synthesis", "speech_timing"])
+def test_stop_during_tail_edit_cannot_publish_ceiling_or_replace_old_audio(session, monkeypatch, stage):
+    focus = prepare_tail_session(session)
+    before = snapshot(session)
+    manifest = session.persist()
+    persisted = manifest.read_bytes()
+    original_timing = pipeline.build_speech_timing
+
+    def synthesis(**kwargs):
+        result = synthesize_tail_fixture(**kwargs)
+        if stage == "synthesis":
+            session.is_stopped = True
+        return result
+
+    def timing(*args, **kwargs):
+        result = original_timing(*args, **kwargs)
+        if stage == "speech_timing":
+            session.is_stopped = True
+        return result
+
+    monkeypatch.setattr(pipeline, "synthesize_natural_speech", synthesis)
+    monkeypatch.setattr(pipeline, "build_speech_timing", timing)
+    with pytest.raises(asyncio.CancelledError):
+        asyncio.run(session.edit_segment(focus.id, "Bố còn khóc cả buổi chiều."))
+    assert snapshot(session) == before
+    assert manifest.read_bytes() == persisted
+    assert focus.dub_tail_limit is None
+    assert not list(session.segments_dir.glob("edit_*.wav"))
+    assert not list(session.segments_dir.glob("pending_*.wav"))
+
+
+@pytest.mark.parametrize("stage", ["synthesis", "speech_timing"])
+def test_tail_fit_failure_cannot_publish_ceiling_or_replace_old_audio(session, monkeypatch, stage):
+    focus = prepare_tail_session(session)
+    before = snapshot(session)
+    manifest = session.persist()
+    persisted = manifest.read_bytes()
+    original_timing = pipeline.build_speech_timing
+
+    def synthesis(**kwargs):
+        result = synthesize_tail_fixture(**kwargs)
+        if stage == "synthesis":
+            raise RuntimeError("Offline TTS failure after temporary waveform creation")
+        return result
+
+    def timing(*args, **kwargs):
+        result = original_timing(*args, **kwargs)
+        if stage == "speech_timing":
+            raise RuntimeError("Offline timing failure")
+        return result
+
+    monkeypatch.setattr(pipeline, "synthesize_natural_speech", synthesis)
+    monkeypatch.setattr(pipeline, "build_speech_timing", timing)
+    with pytest.raises(RuntimeError, match="Offline"):
+        asyncio.run(session.edit_segment(focus.id, "Bố còn khóc cả buổi chiều."))
+    assert snapshot(session) == before
+    assert manifest.read_bytes() == persisted
+    assert focus.dub_tail_limit is None
+    assert not list(session.segments_dir.glob("edit_*.wav"))
+
+
+@pytest.mark.parametrize("outcome", ["stop", "failure"])
+def test_automatic_tail_synthesis_aborted_after_fitting_keeps_old_media(session, monkeypatch, outcome):
+    focus = prepare_tail_session(session)
+    focus.final_vi = "Bố còn khóc cả buổi chiều."
+    before = snapshot(session)
+    original_timing = pipeline.build_speech_timing
+    monkeypatch.setattr(pipeline, "synthesize_natural_speech", synthesize_tail_fixture)
+
+    def timing(*args, **kwargs):
+        result = original_timing(*args, **kwargs)
+        if outcome == "stop":
+            session.is_stopped = True
+        else:
+            raise RuntimeError("Offline automatic tail timing failure")
+        return result
+
+    monkeypatch.setattr(pipeline, "build_speech_timing", timing)
+    with pytest.raises(asyncio.CancelledError if outcome == "stop" else RuntimeError):
+        asyncio.run(session._synthesize_segment(focus))
+    assert focus.status != "READY"
+    assert focus.dub_tail_limit is None
+    for identity, row in session.segments.items():
+        original = before["segments"][identity]
+        for field in ("start", "end", "duration", "dub_start", "dub_end", "dub_tail_limit",
+                      "subtitle_cues", "speech_start", "speech_end", "audio_path", "audio_url"):
+            assert getattr(row, field) == original[field]
+        assert Path(row.audio_path).read_bytes() == before["audio"][row.audio_path]
+    assert not list(session.segments_dir.glob("pending_*.wav"))

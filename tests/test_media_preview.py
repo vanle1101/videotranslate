@@ -61,6 +61,29 @@ def test_local_preview_transcodes_once_returns_seekable_webm_and_preserves_sourc
     assert source.read_bytes() == original
 
 
+def test_chunked_preview_uses_a_bounded_prefix_and_exposes_coverage(preview):
+    client, manager, source = preview
+    response = client.post('/api/preview', json={
+        'file_path': str(source), 'coverage_seconds': 0.2,
+    })
+    assert response.status_code == 200
+    ready = wait_ready(client, response.json())
+    assert ready['partial'] is True
+    assert ready['source_duration'] >= 0.45
+    assert 0.15 <= ready['coverage_seconds'] <= 0.25
+    probe = subprocess.run([
+        'ffprobe', '-v', 'error', '-show_entries', 'format=duration',
+        '-of', 'default=noprint_wrappers=1:nokey=1', str(manager.media(ready['preview_id'])),
+    ], capture_output=True, check=True, timeout=10)
+    assert float(probe.stdout) <= ready['coverage_seconds'] + 0.1
+    # A later prepared cursor gets its own cache entry; it must not reuse a
+    # shorter prefix or silently claim that prefix is the complete source.
+    later = client.post('/api/preview', json={
+        'file_path': str(source), 'coverage_seconds': 0.4,
+    }).json()
+    assert later['preview_id'] != ready['preview_id']
+
+
 def test_session_source_covers_downloaded_url_and_uploaded_video(preview):
     client, manager, source = preview
     with patch.object(main, 'get_streaming_session', return_value=SimpleNamespace(video_path=source)):
@@ -69,12 +92,49 @@ def test_session_source_covers_downloaded_url_and_uploaded_video(preview):
     assert client.get(ready['video_url']).status_code == 200
 
 
+def test_chunked_session_preview_defaults_to_prepared_source_cursor(preview):
+    client, _, source = preview
+    session = SimpleNamespace(video_path=source, translation_mode='preview',
+                              _source_prepared_seconds=0.2)
+    with patch.object(main, 'get_streaming_session', return_value=session):
+        response = client.post('/api/preview', json={'task_id': 'chunked-task'})
+    assert response.status_code == 200
+    ready = wait_ready(client, response.json())
+    assert ready['partial'] is True
+    assert ready['coverage_seconds'] <= 0.25
+
+
+def test_initial_source_preview_requests_a_short_compatibility_prefix(preview):
+    client, _, source = preview
+    expected = {'preview_id': 'initial', 'status': 'PROCESSING', 'video_url': None}
+    with patch.object(main.preview_manager, 'start', return_value=expected) as start:
+        response = client.post('/api/preview', json={'file_path': str(source)})
+    assert response.status_code == 200
+    start.assert_called_once_with(str(source), coverage_seconds=24.0)
+
+
+def test_chunked_preview_never_requests_beyond_prepared_cursor(preview):
+    client, _, source = preview
+    session = SimpleNamespace(video_path=source, translation_mode='full',
+                              _source_prepared_seconds=0.2)
+    expected = {'preview_id': 'clamped', 'status': 'PROCESSING', 'video_url': None}
+    with patch.object(main, 'get_streaming_session', return_value=session), \
+            patch.object(main.preview_manager, 'start', return_value=expected) as start:
+        response = client.post('/api/preview', json={
+            'task_id': 'chunked-task', 'coverage_seconds': 3,
+        })
+    assert response.status_code == 200
+    start.assert_called_once_with(source, coverage_seconds=0.2)
+
+
 def test_exported_result_preview_uses_existing_output_and_preserves_final_mp4(preview):
     client, manager, source = preview
     original = source.read_bytes()
     response = client.post('/api/preview', json={'output_filename': source.name})
     assert response.status_code == 200
     ready = wait_ready(client, response.json())
+    assert ready['partial'] is False
+    assert ready['coverage_seconds'] == pytest.approx(ready['source_duration'], abs=.05)
     media = client.get(ready['video_url'], headers={'Range': 'bytes=0-99'})
     assert media.status_code == 206 and media.headers['content-type'] == 'video/webm'
     assert source.read_bytes() == original
@@ -134,6 +194,20 @@ def test_browser_file_preview_upload_is_owned_and_cleaned(preview):
     assert response.status_code == 200
     ready = wait_ready(client, response.json())
     assert manager.media(ready['preview_id']).exists()
+    deadline = time.monotonic() + 2
+    while list(manager._root.glob('source-*')) and time.monotonic() < deadline:
+        time.sleep(0.02)
+    assert not list(manager._root.glob('source-*'))
+
+
+def test_browser_file_preview_upload_accepts_bounded_coverage(preview):
+    client, manager, source = preview
+    response = client.post('/api/preview/upload', data={'coverage_seconds': '0.2'},
+                           files={'file': ('video.mp4', source.read_bytes(), 'video/mp4')})
+    assert response.status_code == 200
+    ready = wait_ready(client, response.json())
+    assert ready['partial'] is True
+    assert ready['coverage_seconds'] <= 0.25
     deadline = time.monotonic() + 2
     while list(manager._root.glob('source-*')) and time.monotonic() < deadline:
         time.sleep(0.02)

@@ -19,7 +19,8 @@ from core.engines.alignment.speech_cache import (
 
 def synthesize_natural_speech(*, text, source, duration, output_path, engine, aligner,
                               translator=None, voice=None, ref_audio=None, context=None, on_stage=None,
-                              max_duration=None, allow_bidirectional_reflow=False):
+                              max_duration=None, allow_bidirectional_reflow=False,
+                              max_duration_limit=None):
     """Never publish chopped or excessively accelerated speech.
 
     A rewrite is allowed only for automatic translation, with independent
@@ -30,8 +31,17 @@ def synthesize_natural_speech(*, text, source, duration, output_path, engine, al
         raise ValueError("Lời đọc hoặc thời lượng không hợp lệ.")
     if max_duration is None:
         max_duration = duration
+    if max_duration_limit is not None:
+        if (isinstance(max_duration_limit, bool) or not isinstance(max_duration_limit, (int, float))
+                or not math.isfinite(max_duration_limit)
+                or max_duration_limit < duration
+                or max_duration_limit > duration + 1.35 + 1e-9):
+            raise ValueError("Giới hạn căn lời thoại không hợp lệ.")
     reflow_limit = .700001 if allow_bidirectional_reflow else .350001
-    if not math.isfinite(max_duration) or not duration <= max_duration <= duration + reflow_limit:
+    if max_duration_limit is not None:
+        reflow_limit = max(reflow_limit, float(max_duration_limit) - duration + .000001)
+    if (not math.isfinite(max_duration) or not duration <= max_duration <= duration + reflow_limit
+            or max_duration_limit is not None and max_duration > max_duration_limit + 1e-9):
         raise ValueError("Khoảng căn lời thoại không hợp lệ.")
     current = str(text).strip()
     output_path = Path(output_path)

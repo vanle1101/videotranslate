@@ -29,7 +29,7 @@ from core.engines.alignment.natural_speech import synthesize_natural_speech
 from core.engines.separator.realtime_suppressor import RealtimeVocalSuppressor
 from core.engines.alignment.speech_timing import build_speech_timing, take_tts_word_boundaries, trim_tts_padding
 from core.streaming.audio_cache import resolve_dub_timing
-from core.engines.alignment.dub_timing import available_reflow_duration, plan_reflow
+from core.engines.alignment.dub_timing import available_reflow_duration, plan_reflow, MAX_TAIL_LIMIT_EXTENSION
 
 class SegmentEditConflict(RuntimeError):
     """Editing would conflict with the current session state."""
@@ -52,6 +52,7 @@ class SegmentItem:
         self.duration = duration
         self.dub_start = None
         self.dub_end = None
+        self.dub_tail_limit = None
         self.status = "WAITING" # WAITING, ASR, TRANSLATING, TTS, ALIGNING, READY, PLAYED, FAILED
         self.text_zh = ""
         self.emotion = ""
@@ -87,6 +88,7 @@ class SegmentItem:
             "duration": self.duration,
             "dub_start": self.dub_start,
             "dub_end": self.dub_end,
+            "dub_tail_limit": self.dub_tail_limit,
             "status": self.status,
             "text_zh": self.text_zh,
             "emotion": self.emotion,
@@ -2121,7 +2123,21 @@ class StreamingPipelineSession:
         start, end = resolve_dub_timing(seg.to_dict())
         duration = end - start
         known_duration = self._source_prepared_seconds if self._chunked_source_started else self.total_duration
+        tail_limit = None
+        if self._chunked_source_started and known_duration > seg.end:
+            # Only a prepared following dialogue gap may extend the endpoint.
+            # Anchor the ceiling to source time, so retries cannot compound it.
+            following = next((row for row in rows if row["start"] >= seg.end and row["id"] != seg.id), None)
+            tail_limit = min(seg.end + MAX_TAIL_LIMIT_EXTENSION, known_duration)
+            if following is not None:
+                following_start, _ = resolve_dub_timing(following)
+                tail_limit = min(tail_limit, following["start"], following_start)
+            if tail_limit > seg.end + .35 + 1e-9:
+                rows = [{**row, "dub_tail_limit": tail_limit} if row["id"] == seg.id else row for row in rows]
+            else:
+                tail_limit = None
         capacity = max(duration, available_reflow_duration(rows, seg.id, total_duration=known_duration))
+        capacity = min(capacity, duration + 1.35) if tail_limit is not None else capacity
         if not self._chunked_source_started:
             # Existing full-source projects retain their original fitting
             # contract; only the new bounded timeline opts into two-sided fit.
@@ -2135,13 +2151,16 @@ class StreamingPipelineSession:
             output_path=output_path, engine=self.tts_engine, aligner=self.aligner,
             translator=translator, voice=self.voice, ref_audio=self.ref_audio,
             context=context, on_stage=on_stage,
-            allow_bidirectional_reflow=self._chunked_source_started)
+            allow_bidirectional_reflow=self._chunked_source_started,
+            **({"max_duration_limit": capacity} if tail_limit is not None else {}))
         measured = self._dub_audio_duration(output_path)
         plan = {}
         if measured > duration + 1e-9:
             plan = plan_reflow(rows, seg.id, measured, total_duration=known_duration)
             if plan is None:
                 raise SpeechBudgetError("Không còn khoảng nghỉ phù hợp để căn đủ lời thoại.")
+            if tail_limit is not None:
+                plan[seg.id]["dub_tail_limit"] = tail_limit
             for identity, bounds in plan.items():
                 resolve_dub_timing({**self.segments[identity].to_dict(), **bounds})
             start, end = plan[seg.id]["dub_start"], plan[seg.id]["dub_end"]
@@ -2168,6 +2187,8 @@ class StreamingPipelineSession:
             old_start, _ = resolve_dub_timing(item.to_dict())
             delta = bounds["dub_start"] - old_start
             item.dub_start, item.dub_end = bounds["dub_start"], bounds["dub_end"]
+            if "dub_tail_limit" in bounds:
+                item.dub_tail_limit = bounds["dub_tail_limit"]
             if identity == focus_id:
                 continue
             item.subtitle_cues = [{**cue, "start": cue["start"] + delta,

@@ -66,7 +66,7 @@ SEGMENT_FIELDS = frozenset((
     "id start end duration status text_zh emotion literal_vi natural_vi final_vi tts_duration speed_ratio "
     "audio_path failed_stage revision source_method translation_provider translation_model evidence_mode "
     "needs_review review_reason asr_text verification confirmed_silence subtitle_cues subtitle_timing_source "
-    "speech_start speech_end asr_pretranscribed dub_start dub_end"
+    "speech_start speech_end asr_pretranscribed dub_start dub_end dub_tail_limit"
 ).split())
 SESSION_FIELDS = frozenset((
     "initial_buffer_seconds voice tts_engine_name asr_engine_name visual_translation total_duration video_size "
@@ -438,6 +438,19 @@ def _validate(data, task_id):
         row["audio_path"] = _local_path(row.get("audio_path"), generated=True)
         if row["audio_path"] and Path(row["audio_path"]) != (settings.BASE_DIR / "workspace" / "cache" / task_id / "segments" / f"seg_{row['id']}.wav").resolve():
             raise ValueError("Âm thanh câu thoại không thuộc dự án này.")
+    ordered = sorted(rows, key=lambda item: item["start"])
+    for index, row in enumerate(ordered):
+        if row.get("dub_tail_limit") is None:
+            continue
+        following = ordered[index + 1] if index + 1 < len(ordered) else None
+        ceiling = fields.get("_source_prepared_seconds", 0)
+        if following is not None:
+            ceiling = min(ceiling, following["start"])
+            if resolve_dub_timing(row)[1] > resolve_dub_timing(following)[0] + 1e-9:
+                raise ValueError("Khoảng nghỉ lồng tiếng trùng câu kế tiếp.")
+        if (not fields.get("_chunked_source_started")
+                or row["dub_tail_limit"] > ceiling + 1e-9):
+            raise ValueError("Khoảng nghỉ lồng tiếng chưa được chuẩn bị hoặc trùng câu kế tiếp.")
     # Bounded tree and finite numbers; do not permit manifest-injected credentials.
     for key, value in fields.items():
         fields[key] = _clean(value)

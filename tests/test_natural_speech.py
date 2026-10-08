@@ -225,6 +225,29 @@ def test_available_dialogue_gap_fits_complete_number_without_rewrite(tmp_path, a
     translator.rewrite_for_pacing.assert_not_called()
 
 
+def test_opt_in_tail_limit_allows_full_measured_speech_without_speed_shortening(tmp_path, aligner):
+    # A 900 ms source row can use a proven one-second tail plus the ordinary
+    # 350 ms start shift. The measured 1.67 s narration must remain complete.
+    output = tmp_path / "voice.wav"
+    result = synthesize_natural_speech(
+        text="Mười chín.", source="十九", duration=.9, max_duration=1.67,
+        max_duration_limit=2.25, output_path=output,
+        engine=RecordedSynthesizer(1.67), aligner=aligner)
+    assert result["text"] == "Mười chín."
+    assert result["speed_ratio"] == pytest.approx(1.15)
+    # The complete waveform is retained; only the configured natural speed
+    # ceiling is used to fit it into the measured tail.
+    assert aligner.get_audio_duration(output) == pytest.approx(1.67 / 1.15, abs=.002)
+
+
+def test_tail_limit_rejects_unbounded_extra_slot(tmp_path, aligner):
+    with pytest.raises(ValueError, match="Giới hạn"):
+        synthesize_natural_speech(
+            text="Dài.", source="長", duration=.9, max_duration=2.3,
+            max_duration_limit=2.3, output_path=tmp_path / "voice.wav",
+            engine=RecordedSynthesizer(1.67), aligner=aligner)
+
+
 def test_adaptive_slot_does_not_change_already_fitting_speech(tmp_path, aligner):
     result = synthesize_natural_speech(text="Vâng.", source="", duration=.62, max_duration=.97,
         output_path=tmp_path / "voice.wav", engine=RecordedSynthesizer(.4), aligner=aligner)

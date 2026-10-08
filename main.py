@@ -39,7 +39,7 @@ from core.streaming.pipeline import (
 from core.streaming.export import HQExporter
 from core.streaming.session_store import list_saved_sessions, restore_saved_session
 from core.runtime_errors import export_failure
-from core.media_preview import preview_manager
+from core.media_preview import preview_manager, DEFAULT_COMPATIBILITY_SECONDS
 from core.voice_catalog import list_voices, resolve_voice
 from core.voice_preview import select_voice, voice_preview_manager, VoicePreviewBusy
 from core.services.muse_service import ERRORS as MUSE_ERRORS, MuseError, muse_service
@@ -1340,10 +1340,15 @@ class PreviewRequest(BaseModel):
     file_path: Optional[str] = None
     task_id: Optional[str] = None
     output_filename: Optional[str] = None
+    # For a chunked task this asks the Qt compatibility preview to transcode
+    # only the prepared prefix.  Leaving it unset preserves the full-result
+    # preview contract used by exported MP4 files.
+    coverage_seconds: Optional[float] = Field(default=None, gt=0, le=86400)
 
 
 @app.post("/api/preview")
 async def create_media_preview(req: PreviewRequest):
+    session = None
     if req.output_filename is not None:
         name = req.output_filename
         if (req.file_path is not None or req.task_id is not None or not name
@@ -1367,8 +1372,26 @@ async def create_media_preview(req: PreviewRequest):
     if not source:
         raise HTTPException(status_code=404, detail="Không tìm thấy video cần xem trước")
     reject_private_media_path(source)
+    coverage_seconds = req.coverage_seconds
+    # A compatibility fallback must never launch a full multi-hour transcode.
+    # For a chunked task keep the request inside the globally measured source
+    # cursor; when no task exists use one short prefix until the user starts it.
+    # Exported result previews bypass this block and retain full-file semantics.
+    if req.output_filename is None:
+        try:
+            prepared = float(getattr(session, "_source_prepared_seconds", 0) or 0)
+        except (TypeError, ValueError):
+            prepared = 0
+        if prepared > 0:
+            coverage_seconds = min(coverage_seconds or prepared, prepared)
+        elif coverage_seconds is None:
+            coverage_seconds = DEFAULT_COMPATIBILITY_SECONDS
     try:
-        return preview_manager.start(source)
+        if coverage_seconds is None:
+            # Preserve the original full-result call shape for integrations
+            # that provide a minimal PreviewManager implementation.
+            return preview_manager.start(source)
+        return preview_manager.start(source, coverage_seconds=coverage_seconds)
     except (FileNotFoundError, ValueError):
         raise HTTPException(status_code=404, detail="Video nguồn không tồn tại") from None
     except RuntimeError as error:
@@ -1376,9 +1399,13 @@ async def create_media_preview(req: PreviewRequest):
 
 
 @app.post("/api/preview/upload")
-async def create_uploaded_preview(file: UploadFile = File(...)):
+async def create_uploaded_preview(file: UploadFile = File(...),
+                                  coverage_seconds: Optional[float] = Form(default=None, gt=0, le=86400)):
     try:
-        return await asyncio.to_thread(preview_manager.start_upload, file.file, Path(file.filename or "video").suffix)
+        if coverage_seconds is None:
+            coverage_seconds = DEFAULT_COMPATIBILITY_SECONDS
+        return await asyncio.to_thread(preview_manager.start_upload, file.file,
+                                       Path(file.filename or "video").suffix, coverage_seconds)
     except RuntimeError as error:
         raise HTTPException(status_code=409, detail=str(error)) from None
 

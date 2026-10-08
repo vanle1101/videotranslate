@@ -18,6 +18,7 @@ from pathlib import Path
 
 from config import settings
 from core.media_process import run_media
+from core.engines.alignment.dub_timing import MAX_TAIL_LIMIT_EXTENSION
 
 
 SCHEMA = 1
@@ -37,11 +38,22 @@ def resolve_dub_timing(segment):
     if not valid(start) or not valid(end) or end <= start:
         raise ValueError("Mốc thời gian nguồn của câu thoại không hợp lệ.")
     dub_start, dub_end = segment.get("dub_start"), segment.get("dub_end")
+    tail_limit = segment.get("dub_tail_limit")
+    if tail_limit is not None and (not valid(tail_limit)
+                                   or tail_limit < end - 1e-9
+                                   or tail_limit > end + MAX_TAIL_LIMIT_EXTENSION + 1e-9):
+        raise ValueError("Bằng chứng khoảng nghỉ lồng tiếng không hợp lệ.")
     if dub_start is None and dub_end is None:
         return float(start), float(end)
+    end_limit = end + .35
+    if tail_limit is not None:
+        end_limit = max(end_limit, float(tail_limit))
+    if dub_end is not None and valid(dub_end) and dub_end > end + .35 + 1e-9 and tail_limit is None:
+        raise ValueError("Mốc lồng tiếng không hợp lệ hoặc thiếu bằng chứng khoảng nghỉ.")
     if (not valid(dub_start) or not valid(dub_end) or dub_end <= dub_start
             or abs(dub_start - start) > .35 + 1e-9
-            or abs(dub_end - end) > .35 + 1e-9):
+            or dub_end > end_limit + 1e-9
+            or dub_end < end - .35 - 1e-9):
         raise ValueError("Mốc lồng tiếng không hợp lệ hoặc lệch quá 0,35 giây so với nguồn.")
     return float(dub_start), float(dub_end)
 

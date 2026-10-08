@@ -9,6 +9,7 @@ from typing import Mapping
 
 
 _EPSILON = 1e-9
+MAX_TAIL_LIMIT_EXTENSION = 1.0
 
 
 @dataclass(frozen=True)
@@ -19,6 +20,7 @@ class _Row:
     dub_start: float
     dub_end: float
     audio_duration: float | None
+    tail_limit: float | None
 
 
 def _number(value):
@@ -48,6 +50,11 @@ def _prepare(rows, focus_id, max_shift, *, allow_forward=False):
         if (start is None or end is None or start < 0 or end <= start
                 or start < previous_end - _EPSILON):
             return None
+        tail_limit = _number(record.get("dub_tail_limit")) if record.get("dub_tail_limit") is not None else None
+        if (record.get("dub_tail_limit") is not None
+                and (tail_limit is None or tail_limit < end - _EPSILON
+                     or tail_limit > end + MAX_TAIL_LIMIT_EXTENSION + _EPSILON)):
+            return None
         # Missing fields mean an unchanged source slot. A partly persisted
         # timing pair is not enough evidence to infer a usable dub interval.
         has_start = record.get("dub_start") is not None
@@ -56,11 +63,16 @@ def _prepare(rows, focus_id, max_shift, *, allow_forward=False):
             return None
         dub_start = _number(record["dub_start"]) if has_start else start
         dub_end = _number(record["dub_end"]) if has_end else end
+        end_cap = end + (max_shift if allow_forward else 0)
+        if tail_limit is not None:
+            # The tail ceiling is an opt-in exception; the ordinary endpoint
+            # shift remains unchanged when no durable ceiling is present.
+            end_cap = max(end_cap, tail_limit)
         if (dub_start is None or dub_end is None or dub_start < 0
                 or dub_start < start - max_shift - _EPSILON
                 or dub_start > start + (max_shift if allow_forward else 0) + _EPSILON
                 or dub_end <= dub_start
-                or dub_end > end + (max_shift if allow_forward else 0) + _EPSILON
+                or dub_end > end_cap + _EPSILON
                 or dub_end < end - max_shift - _EPSILON):
             return None
         duration = _number(record.get("audio_duration"))
@@ -71,7 +83,7 @@ def _prepare(rows, focus_id, max_shift, *, allow_forward=False):
             return None
         if identity == focus_id:
             focus_index = len(parsed)
-        parsed.append(_Row(identity, start, end, dub_start, dub_end, duration))
+        parsed.append(_Row(identity, start, end, dub_start, dub_end, duration, tail_limit))
         ids.add(identity)
         previous_end = end
     if focus_index is None:
@@ -79,10 +91,19 @@ def _prepare(rows, focus_id, max_shift, *, allow_forward=False):
     return parsed, focus_index, max_shift
 
 
-def _end_limit(rows, focus_index):
-    end = rows[focus_index].end
+def _end_limit(rows, focus_index, total_duration=None):
+    focus = rows[focus_index]
+    end = focus.end
+    if focus.tail_limit is not None:
+        end = max(end, focus.tail_limit)
+    if total_duration is not None:
+        end = min(end, total_duration)
     if focus_index + 1 < len(rows):
         end = min(end, rows[focus_index + 1].dub_start)
+        if focus.tail_limit is not None:
+            # A tail is borrowed only from the actual prepared gap; do not
+            # cross the next source dialogue even if its dub slot moved later.
+            end = min(end, rows[focus_index + 1].start)
     return end
 
 
@@ -176,9 +197,17 @@ def _prepare_reflow(rows, focus_id, max_shift, total_duration):
         return None
     records, _, _ = prepared
     cursor = 0.0
-    for row in records:
+    for index, row in enumerate(records):
         if (row.end > total_duration + _EPSILON or row.dub_end > total_duration + _EPSILON
                 or row.dub_start < cursor - _EPSILON):
+            return None
+        if (row.tail_limit is not None
+                and row.dub_end > row.end + max_shift + _EPSILON
+                and index + 1 < len(records)
+                and row.dub_end > min(records[index + 1].start,
+                                      records[index + 1].dub_start) + _EPSILON):
+            # Durable evidence is never enough to cross a source cue that was
+            # discovered later, even when its current dub slot moved forward.
             return None
         cursor = row.dub_end
     return prepared
@@ -189,6 +218,8 @@ def _limits(row, duration, max_shift, total_duration, *, reserved=False):
     end_min = row.end - max_shift
     start_max = row.start + max_shift
     end_max = min(total_duration, row.end + max_shift)
+    if row.tail_limit is not None:
+        end_max = max(end_max, min(total_duration, row.tail_limit))
     if reserved:
         # Unknown audio has an exact occupied interval, not a minimum. Moving
         # it must preserve every second of its existing reservation.
@@ -227,7 +258,15 @@ def _reflow_bounds(prepared, total_duration):
         if start < low - _EPSILON or end < end_low - _EPSILON:
             return None
         cursor = start
-    latest = min(cursor, total_duration, focus.end + max_shift)
+    focus_end_cap = focus.end + max_shift
+    if focus.tail_limit is not None:
+        focus_end_cap = max(focus_end_cap, focus.tail_limit)
+    latest = min(cursor, total_duration, focus_end_cap)
+    if focus.tail_limit is not None:
+        # A persisted tail is borrowed from the gap that was measured when it
+        # was created. Reflowing a successor must not silently move that
+        # successor and extend the same tail a second time.
+        latest = min(latest, _end_limit(records, focus_index, total_duration))
     if earliest > focus.start + max_shift + _EPSILON or latest < focus.end - max_shift - _EPSILON:
         return None
     return earliest, latest
@@ -283,6 +322,26 @@ def _plan_general(prepared, required_duration, total_duration):
     return plan
 
 
+def _tail_plan_valid(prepared, plan, total_duration):
+    """Recheck only opt-in tails against the final atomic timeline."""
+    records, _, max_shift = prepared
+    for index, row in enumerate(records):
+        if row.tail_limit is None:
+            continue
+        bounds = plan.get(row.id, {"dub_start": row.dub_start, "dub_end": row.dub_end})
+        end = bounds["dub_end"]
+        if end <= row.end + max_shift + _EPSILON:
+            continue  # The original endpoint contract still governs this row.
+        if end > min(row.tail_limit, total_duration) + _EPSILON:
+            return False
+        if index + 1 < len(records):
+            next_row = records[index + 1]
+            next_start = plan.get(next_row.id, {"dub_start": next_row.dub_start})["dub_start"]
+            if end > min(next_row.start, next_start) + _EPSILON:
+                return False
+    return True
+
+
 def plan_reflow(rows, focus_id, required_duration, max_shift=0.35, *, total_duration):
     """Prefer backward borrowing, then solve bounded bidirectional reflow.
 
@@ -305,9 +364,10 @@ def plan_reflow(rows, focus_id, required_duration, max_shift=0.35, *, total_dura
     if required_duration <= focus.dub_end - focus.dub_start + _EPSILON:
         return {focus.id: {"dub_start": focus.dub_start, "dub_end": focus.dub_end}}
     backward = plan_backshift(rows, focus_id, required_duration, max_shift)
-    if backward is not None:
+    if backward is not None and _tail_plan_valid(prepared, backward, total_duration):
         return backward
-    return _plan_general(prepared, required_duration, total_duration)
+    general = _plan_general(prepared, required_duration, total_duration)
+    return general if general is not None and _tail_plan_valid(prepared, general, total_duration) else None
 
 
 def available_reflow_duration(rows, focus_id, max_shift=0.35, *, total_duration):

@@ -870,7 +870,7 @@ def test_automatic_review_fits_revised_source_and_publishes_only_verified_spoken
     proof = {"status": "verified", "text": shorter, "provider": "opencode", "reason": "Giữ đủ ý nguồn."}
     session.translator = Mock()
     session.translator.rewrite_for_pacing.return_value = {"final_vi": shorter, "pacing_verification": proof}
-    session.aligner.get_audio_duration.side_effect = lambda path: 4.2 if Path(path).read_text() == long_text else 2.7
+    session.aligner.get_audio_duration.side_effect = lambda path: 4.2 if Path(path).read_text(encoding="utf-8") == long_text else 2.7
     previous = SegmentItem(1, 0, 1.5, 1.5)
     previous.status, previous.text_zh, previous.final_vi = "READY", "前句", "Câu trước."
     session.segments[1] = previous
@@ -992,7 +992,7 @@ def test_review_pacing_failure_rolls_back_text_source_audio_proof_context_and_ou
     session.translator = Mock()
     session.translator.rewrite_for_pacing.return_value = {"final_vi": shorter,
         "pacing_verification": {"status": "verified", "text": shorter}}
-    session.aligner.get_audio_duration.side_effect = lambda path: 4.2 if Path(path).read_text() == long_text else 2.7
+    session.aligner.get_audio_duration.side_effect = lambda path: 4.2 if Path(path).read_text(encoding="utf-8") == long_text else 2.7
     if failure == "pacing":
         session.translator.rewrite_for_pacing.side_effect = RuntimeError("pacing service unavailable")
     elif failure == "timing":
@@ -1046,7 +1046,7 @@ def test_review_progress_tracks_speech_stages_until_timing_commits_and_clears_on
                                      verification={"status": "verified"})},
                 "summary": {"checked": 1, "verified": 1}}
     monkeypatch.setattr(AutomaticTranslationReviewer, "review", review)
-    session.aligner.get_audio_duration.side_effect = lambda path: 4.2 if Path(path).read_text() == long_text else 2.7
+    session.aligner.get_audio_duration.side_effect = lambda path: 4.2 if Path(path).read_text(encoding="utf-8") == long_text else 2.7
     def rewrite(*args, **kwargs):
         # A delayed callback from the finished semantic stage must not replace
         # the live TTS/pacing stage or reintroduce 100%.
