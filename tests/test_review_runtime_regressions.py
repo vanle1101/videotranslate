@@ -122,3 +122,21 @@ def test_audio_schema_failure_retries_only_requested_id_without_repeating_asr():
     assert "các ID trong ngữ cảnh chỉ để đọc" in retry
     assert set(result["segments"]) == {6}
     assert result["segments"][6]["verification"]["semantic_verified"] is True
+
+
+def test_audio_semantic_fields_are_retried_inside_bounded_schema_helper():
+    client = Mock(has_credentials=True, model="offline-semantic-schema")
+    row = {**source(6), "needs_review": True, "verification": {"source_supported": False}}
+    valid = {**source(6), "literal_vi": "Xin chào", "natural_vi": "Xin chào", "final_vi": "Xin chào",
+        "semantic_verified": True, "verification_reason": "Giữ đúng lời nguồn."}
+    malformed = {**valid}
+    malformed.pop("verification_reason")
+    client.translate.side_effect = [
+        {"segments": [malformed], "screen_texts": [], "summary": ""},
+        {"segments": [valid], "screen_texts": [], "summary": ""},
+    ]
+    reviewer = AutomaticTranslationReviewer(client, Mock())
+    data, _ = reviewer._validated_review_request(client, "prompt", [row], 6., 7., lambda: None,
+                                                 reviewer._require_semantic_fields)
+    assert client.translate.call_count == 2
+    assert data["segments"][0]["verification_reason"] == "Giữ đúng lời nguồn."

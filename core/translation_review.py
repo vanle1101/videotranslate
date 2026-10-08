@@ -150,7 +150,7 @@ class AutomaticTranslationReviewer:
         }[diagnostic["code"]]
 
     @staticmethod
-    def _validated_review_request(client, prompt, batch, lo, hi, check):
+    def _validated_review_request(client, prompt, batch, lo, hi, check, extra_validate=None):
         # Retry malformed structured replies without repeating the local OCR.
         # Authentication/transport errors propagate; invalid data never passes.
         for attempt in range(3):
@@ -171,6 +171,8 @@ class AutomaticTranslationReviewer:
             try:
                 data = VideoIntelligence._parse_json(raw)
                 validated = VideoIntelligence.validate_result(data, batch, lo, hi, [])
+                if extra_validate is not None:
+                    extra_validate(data)
                 return data, validated
             except VideoIntelligenceError as error:
                 logging.getLogger("ai").warning(
@@ -180,6 +182,15 @@ class AutomaticTranslationReviewer:
                 if attempt == 2:
                     AutomaticTranslationReviewer._diagnostic(error, "semantic_schema", batch)
                     raise
+
+    @staticmethod
+    def _require_semantic_fields(data):
+        """Keep required audit fields inside the bounded schema retry."""
+        for row in data.get("segments", []):
+            if not isinstance(row.get("semantic_verified"), bool):
+                raise VideoIntelligenceError("Kết luận ngữ nghĩa không hợp lệ.")
+            if not isinstance(row.get("verification_reason"), str):
+                raise VideoIntelligenceError("Lý do kiểm định không hợp lệ.")
 
     @staticmethod
     def _address_reading(client, batch, context, check, checkpoint=None):
@@ -470,7 +481,8 @@ class AutomaticTranslationReviewer:
             check()
             try:
                 data, validated = self._validated_review_request(client, prompt, sources,
-                    min(row["start"] for row in sources), max(row["end"] for row in sources), check)
+                    min(row["start"] for row in sources), max(row["end"] for row in sources), check,
+                    self._require_semantic_fields)
                 audits = {row["id"]: row for row in data["segments"]}
                 if any(not isinstance(row.get("semantic_verified"), bool)
                        or not isinstance(row.get("verification_reason"), str) for row in audits.values()):
@@ -485,7 +497,8 @@ class AutomaticTranslationReviewer:
                     "nếu chưa đủ chắc, giữ needs_review=true. Trả đúng cùng JSON schema và ID.\n"
                     + json.dumps(data["segments"], ensure_ascii=False))
                 checked, checked_validated = self._validated_review_request(client, recheck, sources,
-                    min(row["start"] for row in sources), max(row["end"] for row in sources), check)
+                    min(row["start"] for row in sources), max(row["end"] for row in sources), check,
+                    self._require_semantic_fields)
                 checked_audits = {row["id"]: row for row in checked["segments"]}
                 if any(not isinstance(row.get("semantic_verified"), bool)
                        or not isinstance(row.get("verification_reason"), str)
