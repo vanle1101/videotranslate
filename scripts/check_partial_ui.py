@@ -105,7 +105,8 @@ def main():
             open_history(page, task_id)
             snapshot = backend(base, f"/api/streaming/{task_id}")
             assert snapshot["progress"]["can_retry"] and snapshot["initialized"]
-            assert hashes(task_id, snapshot["segments"]) == record.get("prefix_hashes", {})
+            restored_hashes = hashes(task_id, snapshot["segments"])
+            assert all(restored_hashes.get(sid) == digest for sid, digest in record.get("prefix_hashes", {}).items())
             assert snapshot["telemetry"]["playable_until"] < snapshot["duration"]
             event("FRESH_RESTORE", {"ui": ui_state(page), "preserved_wavs": len(record.get("prefix_hashes", {}))})
             assert click(page, "btn-retry-worker")

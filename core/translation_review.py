@@ -7,6 +7,7 @@ a successful request alone makes a sentence verified.
 from __future__ import annotations
 
 from copy import deepcopy
+from difflib import SequenceMatcher
 import gc
 import json
 import math
@@ -358,7 +359,8 @@ class AutomaticTranslationReviewer:
                 row["verification"]["status"] = "corrected"
         return self._summarize(reviewed)
 
-    def resolve_audio_uncertainty(self, video_path, result, cancel_check=None, progress_callback=None):
+    def resolve_audio_uncertainty(self, video_path, result, cancel_check=None, progress_callback=None, *,
+                                  context_segments=None):
         """One additional evidence pass, then one semantic audit per bounded batch.
 
         Recognition disagreements remain visible. No majority vote, fuzzy
@@ -366,6 +368,8 @@ class AutomaticTranslationReviewer:
         """
         result = deepcopy(result)
         result["segments"] = {row["id"]: row for row in result["segments"].values()}
+        context_values = context_segments.values() if isinstance(context_segments, dict) else (context_segments or [])
+        wider_rows = {row.get("id"): row for row in map(self._row, context_values)}
         check = lambda: VideoIntelligence._check_cancelled(cancel_check)
         check()
         targets = [row for row in result["segments"].values() if row.get("needs_review")
@@ -428,8 +432,9 @@ class AutomaticTranslationReviewer:
             for item, (_, transcript) in zip(payload, batch):
                 item["agreed_audio_transcript"] = transcript
             agreed_sources = {row["id"]: transcript for row, transcript in agreed}
+            context_rows = {**wider_rows, **result["segments"]}
             context = dialogue_context([{**row, "text_zh": agreed_sources.get(row["id"], row.get("text_zh", ""))}
-                for row in result["segments"].values()], sources)
+                for row in context_rows.values()], sources)
             address_reading = self._address_reading(client, sources, context, check)
             prompt = (VIETNAMESE_ADDRESS_POLICY + "\n" +
                 "Bạn kiểm định lại bản dịch Trung-Việt dựa trên hai bộ nhận giọng tại máy độc lập "
@@ -611,6 +616,86 @@ class AutomaticTranslationReviewer:
                 ordered.append(item)
         return ordered
 
+    @classmethod
+    def _scope_evidence(cls, candidate, source, context, screens=()):
+        """Assign a spanning subtitle's words to measured dialogue intervals.
+
+        Subtitle tracks can outlive several ASR rows. Temporal intersection
+        alone does not assign their *whole* text to each of those rows. Align
+        the measured neighbouring phrases only to locate row boundaries; the
+        resulting OCR words still require exact source validation afterwards.
+        A replacement crossing a boundary is ambiguous, never corroboration.
+        """
+        original = VideoIntelligence._compact_text(candidate.get("text_zh", ""))
+        ownership_window = {"start": candidate["start"], "end": candidate["end"]}
+        for screen in screens:
+            if (screen.get("kind") != "subtitle" or not cls._overlaps(screen, candidate)
+                    or VideoIntelligence._compact_text(screen.get("text_zh", "")) != original):
+                continue
+            a, b = candidate.get("bbox"), screen.get("bbox")
+            if (isinstance(a, list) and isinstance(b, list) and len(a) == len(b) == 4
+                    and ScreenOCR._overlap(a, b) < .5):
+                continue
+            # Fresh OCR is extracted in a bounded review window, so its track
+            # may be clipped at an ASR row boundary. An already measured track
+            # of the *same words* locates neighbouring speech ownership, but
+            # does not enlarge the fresh OCR's confidence/observation interval.
+            ownership_window["start"] = min(ownership_window["start"], screen["start"])
+            ownership_window["end"] = max(ownership_window["end"], screen["end"])
+        adjacent = [row for row in context if row.get("id") != source["id"]
+            and cls._overlaps(row, ownership_window)
+            and (row["end"] <= source["start"] or row["start"] >= source["end"])]
+        # Ignore parallel/overlapping speakers, and prefer the immutable ASR
+        # transcript over an AI correction when locating a speech interval.
+        rows = [{**row, "scope_text": VideoIntelligence._compact_text(
+                    row.get("asr_text") or row.get("text_zh", ""))}
+                for row in [source, *adjacent]]
+        rows = [row for row in rows if row["scope_text"]]
+        rows.sort(key=lambda row: (row["start"], row["end"], row["id"]))
+        # A neighbouring exact phrase is a boundary anchor, not independent
+        # proof of this row's meaning. With no such anchor, retain the full
+        # box and let the existing conservative coverage check decide.
+        anchors = [row for row in rows if row["id"] != source["id"]
+            and len(row["scope_text"]) >= 2 and row["scope_text"] in original]
+        if not anchors or not any(row["id"] == source["id"] for row in rows):
+            return dict(candidate)
+        joined = "".join(row["scope_text"] for row in rows)
+        offset = 0
+        for row in rows:
+            if row["id"] == source["id"]:
+                start, end = offset, offset + len(row["scope_text"])
+                break
+            offset += len(row["scope_text"])
+        opcodes = SequenceMatcher(None, joined, original, autojunk=False).get_opcodes()
+
+        def boundary(position):
+            if position == 0:
+                return 0
+            if position == len(joined):
+                return len(original)
+            # An insertion exactly between two rows has no measured owner.
+            if any(tag == "insert" and a == position for tag, a, _, _, _ in opcodes):
+                return None
+            locations = set()
+            for tag, a, b, c, d in opcodes:
+                if tag == "equal" and a <= position <= b:
+                    locations.add(c + position - a)
+                elif a == position:
+                    locations.add(c)
+                elif b == position:
+                    locations.add(d)
+            return locations.pop() if len(locations) == 1 else None
+
+        lo, hi = boundary(start), boundary(end)
+        scoped = {**candidate, "full_text_zh": candidate.get("text_zh", ""),
+            "source_scope_ids": [row["id"] for row in rows],
+            "source_scope_window": ownership_window}
+        if lo is None or hi is None or hi <= lo:
+            scoped.update(text_zh="", source_scope_ambiguous=True)
+        else:
+            scoped.update(text_zh=original[lo:hi], source_scope_ambiguous=False)
+        return scoped
+
     @staticmethod
     def _prompt(rows, evidence, context):
         return (VIETNAMESE_ADDRESS_POLICY + "\n" +
@@ -630,6 +715,15 @@ class AutomaticTranslationReviewer:
             "Đừng đổi một phát biểu thành nghĩa ngược lại hoặc tự thêm lời cho câu bị cắt.\n"
             "Có OCR MỚI, rõ hơn, để giải quyết lỗi nhận dạng cũ. Chỉ sửa text_zh nếu OCR cùng thời điểm "
             "xác nhận ĐẦY ĐỦ chữ của câu sửa; dẫn source_evidence_ids cụ thể. Không dẫn chữ của câu khác. "
+            "Một hộp OCR có thể giữ cả câu qua nhiều mốc ASR: việc hộp giao với start/end không có nghĩa "
+            "mọi chữ trong hộp đều được nói ở ID đó. Đối chiếu asr_text và các ID trước/sau để chia đúng "
+            "phần lời theo mốc; không nhập tên, tuổi, mệnh đề hay lời đáp đã thuộc ID kế tiếp/vừa trước. "
+            "speech_scope_by_id là phần OCR đã căn ranh giới theo các cụm ASR lân cận; khi có trường này, "
+            "chỉ dùng text_zh của đúng ID làm bằng chứng cho câu đó. source_scope_ambiguous=true "
+            "nghĩa là chưa chia được ranh giới, không được dùng nguyên hộp để sửa câu nguồn. "
+            "Ví dụ một dòng OCR là '明天去学校找老师', nhưng ASR chia '明天去学校' và '找老师', "
+            "thì ID đầu chỉ dịch phần đi học ngày mai, ID sau mới dịch phần tìm giáo viên. "
+            "Không lặp nguyên dòng OCR ở mỗi ID, không gộp mốc hay kéo lời sau vào câu trước. "
             "Nếu bằng chứng mới giải quyết được lý do cần kiểm tra cũ, có thể bỏ needs_review; "
             "không được bỏ chỉ vì bản nháp nghe trôi chảy hoặc vì lần trước đã dịch như vậy. "
             "Nếu thiếu bằng chứng, giữ bản nháp có căn cứ, needs_review=true, lý do tiếng Việt cụ thể. "
@@ -780,11 +874,22 @@ class AutomaticTranslationReviewer:
                  else self._qualified_context(row, output.get(row["id"], row))
                  for row in sorted(wider_rows.values(), key=lambda item: (item["start"], item["id"]))], batch)
             address_reading = self._address_reading(client, batch, context, check, checkpoint)
-            prompt = self._prompt(prompt_rows, relevant, context) + address_review_instruction(address_reading)
+            prompt_evidence = []
+            for item in relevant:
+                scopes = []
+                for row in batch:
+                    if not self._overlaps(item, row):
+                        continue
+                    scoped = self._scope_evidence(item, row, wider_rows.values(), screen_texts)
+                    if scoped.get("source_scope_ids"):
+                        scopes.append({"id": row["id"], "text_zh": scoped["text_zh"],
+                            "source_scope_ambiguous": scoped["source_scope_ambiguous"]})
+                prompt_evidence.append({**item, **({"speech_scope_by_id": scopes} if scopes else {})})
+            prompt = self._prompt(prompt_rows, prompt_evidence, context) + address_review_instruction(address_reading)
             # Hash structured prompt inputs rather than rendered JSON. OCR key
             # ordering may differ between fresh and cached extraction.
             stage = {"kind": "review_batch", "rows": prompt_rows,
-                     "evidence": relevant, "context": context, "batch_size": self.BATCH_SIZE,
+                     "evidence": prompt_evidence, "context": context, "batch_size": self.BATCH_SIZE,
                      "address_context": list(address_reading.values())}
             saved = checkpoint.load(stage) if checkpoint else None
             cached_pair = self._cached_pair(saved, batch, lo, hi)
@@ -839,15 +944,25 @@ class AutomaticTranslationReviewer:
                 invalid_refs = any(ref not in evidence_by_id or not self._overlaps(evidence_by_id[ref], source) for ref in refs)
                 cited = [] if invalid_refs else [evidence_by_id[ref] for ref in refs]
                 usable = [item for item in cited if self._speech_evidence(item, source, screen_texts, changed_source=changed_source)]
-                coverage = self._coverage_evidence(usable, source, proposed["text_zh"])
+                scoped = [self._scope_evidence(item, source, wider_rows.values(), screen_texts) for item in usable]
+                coverage = self._coverage_evidence(scoped, source, proposed["text_zh"])
                 supported = not invalid_refs and VideoIntelligence._ocr_supports_text(proposed["text_zh"], coverage)
+                scope_conflict = bool(changed_source and not supported
+                    and any(item.get("source_scope_ids") for item in scoped)
+                    and VideoIntelligence._ocr_supports_text(proposed["text_zh"],
+                        self._coverage_evidence(usable, source, proposed["text_zh"])))
+                if scope_conflict:
+                    logging.getLogger("ai").warning(
+                        "REVIEW_SOURCE_SCOPE_REJECTED run_id=%s segment_id=%s evidence_ids=%s context_ids=%s",
+                        current_execution_context().run_id, sid, refs,
+                        sorted({value for item in scoped for value in item.get("source_scope_ids", [])}))
                 accepted = second_pass_complete and not invalid_refs and (not changed_source or supported)
-                source_facts[sid] = (changed_source, invalid_refs, usable, supported, accepted)
+                source_facts[sid] = (changed_source, invalid_refs, scoped, supported, accepted, scope_conflict)
             accepted_changes = {sid for sid, facts in source_facts.items() if facts[0] and facts[4]}
             for source in batch:
                 sid = source["id"]
                 proposed, audit = validated["segments"][sid], audit_rows[sid]
-                changed_source, invalid_refs, usable, supported, accepted = source_facts[sid]
+                changed_source, invalid_refs, usable, supported, accepted, scope_conflict = source_facts[sid]
                 verified = bool(second_pass_complete and supported and audit["semantic_verified"] and not proposed["needs_review"])
                 reason = audit["verification_reason"].strip()[:500]
                 address_applicable = self._address_applicable(audit, proposed.get("text_zh", source.get("text_zh", "")), proposed.get("final_vi", ""))
@@ -869,6 +984,8 @@ class AutomaticTranslationReviewer:
                     reason = self._diagnostic_message(second_failure) if second_failure else "Lượt kiểm tra ngữ nghĩa thứ hai chưa hoàn tất; giữ bản nháp và thử AI kiểm tra lại."
                 elif invalid_refs:
                     reason = "AI dẫn chứng sai ID hoặc sai thời điểm; giữ bản nháp trước khi kiểm tra."
+                elif scope_conflict:
+                    reason = "Bản sửa ghép lời của câu lân cận vào cùng mốc; giữ lời nguồn và bản dịch cũ để tránh lặp thoại."
                 elif changed_source and not supported:
                     reason = "Chưa đủ chữ OCR cùng thời điểm xác nhận câu nguồn sửa; giữ bản nháp trước khi kiểm tra."
                 elif not supported:
@@ -885,10 +1002,12 @@ class AutomaticTranslationReviewer:
                 target["verification"] = {
                     "status": status, **provenance, "source_supported": bool(supported),
                     "source_accepted": bool(accepted),
-                    "semantic_verified": bool(second_pass_complete and audit["semantic_verified"] and proposed["final_vi"].strip() and not address_uncertain),
+                    "source_scope_conflict": scope_conflict,
+                    "semantic_verified": bool(second_pass_complete and audit["semantic_verified"] and proposed["final_vi"].strip() and not address_uncertain and not scope_conflict),
                     "second_pass_status": "completed" if second_pass_complete else "failed",
                     "evidence_ids": [item["id"] for item in usable],
-                    "evidence": [{key: item[key] for key in ("id", "start", "end", "text_zh", "confidence", "bbox")
+                    "evidence": [{key: item[key] for key in ("id", "start", "end", "text_zh", "confidence", "bbox",
+                                  "full_text_zh", "source_scope_ids", "source_scope_ambiguous", "source_scope_window")
                                   if key in item} for item in usable],
                     "reason": reason or "AI đã đối chiếu nghĩa và chữ OCR mới cùng thời điểm.",
                     "translation_changed": changed_translation,
@@ -916,4 +1035,5 @@ class AutomaticTranslationReviewer:
                 progress_callback(round(30 + 45 * (index + 1) / batches, 1))
         result["translation_sources"].append(provenance)
         return self.resolve_audio_uncertainty(video_path, result, cancel_check,
-            (lambda value: progress_callback(75 + .25 * value)) if progress_callback else None)
+            (lambda value: progress_callback(75 + .25 * value)) if progress_callback else None,
+            context_segments=wider_rows.values())
