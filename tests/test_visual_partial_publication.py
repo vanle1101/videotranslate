@@ -51,6 +51,15 @@ def screen_at(start, end, text="Chữ trên hình"):
             "needs_review": False, "review_reason": "", "source_region_verified": True}
 
 
+def dense_rows(session, count=9):
+    session.segments = {}
+    for sid in range(count):
+        item = SegmentItem(sid, float(sid * 2), float(sid * 2 + 1), 1)
+        item.text_zh = "你好"
+        session.segments[sid] = item
+    return list(session.segments.values())
+
+
 def install_review_and_speech(session, monkeypatch, *, review_error=None):
     reviews, speech = [], []
 
@@ -352,4 +361,166 @@ def test_manual_screen_splits_survive_prepass_retry_and_full_result(partial_sess
     assert any(event == "screen_update" and len(payload["screen_texts"]) >= 3
                and payload["screen_texts"][1].get("mask_only") is True
                for event, payload in events)
+
+
+def test_each_small_review_group_publishes_audio_before_next_group(partial_session, monkeypatch):
+    from core.translation_review import AutomaticTranslationReviewer
+    session, events = partial_session
+    rows = dense_rows(session)
+    reviews, speech = install_review_and_speech(session, monkeypatch)
+    original_review = AutomaticTranslationReviewer.review
+
+    def review(reviewer, path, targets, screens, **options):
+        first = targets[0].id
+        assert speech == list(range(first)), "Earlier reviewed group must already have playable speech"
+        assert all(session.segments[sid].status == "READY" for sid in speech)
+        assert len(targets) <= 4
+        assert len(options["context_segments"]) == len(rows)
+        return original_review(reviewer, path, targets, screens, **options)
+
+    monkeypatch.setattr(AutomaticTranslationReviewer, "review", review)
+    session.is_running = True
+    asyncio.run(session._publish_visual_chunk(result_for(rows), 0, 24))
+    assert [ids for ids, context in reviews] == [[0, 1, 2, 3], [4, 5, 6, 7], [8]]
+    assert speech == list(range(9))
+
+
+def test_later_group_review_failure_keeps_prior_audio_and_flags_only_failed_group(partial_session, monkeypatch):
+    from core.translation_review import AutomaticTranslationReviewer
+    session, events = partial_session
+    rows = dense_rows(session)
+    reviews, speech = install_review_and_speech(session, monkeypatch)
+    original_review = AutomaticTranslationReviewer.review
+
+    def review(reviewer, path, targets, screens, **options):
+        if targets[0].id == 4:
+            assert speech == [0, 1, 2, 3]
+            raise OpenCodeClientError("later group transport failed")
+        return original_review(reviewer, path, targets, screens, **options)
+
+    monkeypatch.setattr(AutomaticTranslationReviewer, "review", review)
+    session.is_running = True
+    asyncio.run(session._publish_visual_chunk(result_for(rows), 0, 24))
+    assert speech == list(range(9))
+    assert all(session.segments[sid].verification["status"] == "verified" for sid in (0, 1, 2, 3, 8))
+    assert all(session.segments[sid].verification["status"] == "incomplete" for sid in (4, 5, 6, 7))
+    assert all(session.segments[sid].needs_review for sid in (4, 5, 6, 7))
+    assert all(not session.segments[sid].needs_review for sid in (0, 1, 2, 3, 8))
+    assert session.review_summary["status"] == "incomplete"
+
+
+def test_cancelling_later_group_review_keeps_already_published_audio(partial_session, monkeypatch):
+    from core.translation_review import AutomaticTranslationReviewer
+    session, events = partial_session
+    dense_rows(session)
+    reviews, speech = install_review_and_speech(session, monkeypatch)
+    original_review = AutomaticTranslationReviewer.review
+    entered, released = threading.Event(), threading.Event()
+
+    def review(reviewer, path, targets, screens, **options):
+        if targets[0].id != 4:
+            return original_review(reviewer, path, targets, screens, **options)
+        assert speech == [0, 1, 2, 3]
+        entered.set()
+        check = current_execution_context().cancel_check
+        while not check():
+            time.sleep(.01)
+        released.set()
+        raise asyncio.CancelledError
+
+    monkeypatch.setattr(AutomaticTranslationReviewer, "review", review)
+    monkeypatch.setattr(session.video_intelligence, "analyze_chunk",
+                        lambda path, start, end, rows, summary, check: result_for(rows))
+
+    async def run():
+        work = asyncio.create_task(session.start())
+        assert await asyncio.to_thread(entered.wait, 3)
+        assert all(session.segments[sid].status == "READY" for sid in range(4))
+        work.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await asyncio.wait_for(work, 3)
+        assert released.is_set()
+
+    asyncio.run(run())
+    assert speech == [0, 1, 2, 3]
+    assert all(session.segments[sid].audio_url for sid in range(4))
+    assert all(session.segments[sid].status != "READY" for sid in range(4, 9))
+
+
+def test_retry_after_group_tts_failure_keeps_exact_review_before_new_requests(partial_session, monkeypatch):
+    from core.translation_review import AutomaticTranslationReviewer
+    session, events = partial_session
+    dense_rows(session)
+    reviews, speech = install_review_and_speech(session, monkeypatch)
+    failed_once = False
+    original_speech = session._synthesize_segment
+    original_review = AutomaticTranslationReviewer.review
+
+    async def synthesize(item):
+        nonlocal failed_once
+        if item.id == 1 and not failed_once:
+            failed_once = True
+            item.status = "TTS"
+            raise TimeoutError("isolated failed speech")
+        await original_speech(item)
+
+    def review(reviewer, path, targets, screens, **options):
+        if targets[0].id == 4:
+            assert speech[:4] == [0, 1, 2, 3], "Reused audits synthesize before any fresh review"
+        return original_review(reviewer, path, targets, screens, **options)
+
+    monkeypatch.setattr(session, "_synthesize_segment", synthesize)
+    monkeypatch.setattr(AutomaticTranslationReviewer, "review", review)
+    analyzed = Mock(side_effect=lambda path, start, end, rows, summary, check: result_for(rows))
+    monkeypatch.setattr(session.video_intelligence, "analyze_chunk", analyzed)
+
+    async def run():
+        with pytest.raises(TimeoutError, match="isolated failed speech"):
+            await session.start()
+        assert session.segments[1].verification["status"] == "verified"
+        assert speech == [0]
+        await session.retry_failed_synthesis()
+        await session.start_task
+        await session.worker_task
+
+    asyncio.run(run())
+    assert [ids for ids, context in reviews] == [[0, 1, 2, 3], [4, 5, 6, 7], [8]]
+    assert speech == list(range(9))
+    assert analyzed.call_count == 2, "Restored first prepass chunk never repeats its provider request"
+
+
+@pytest.mark.parametrize("change", ["draft", "audit", "context", "model"])
+def test_changed_draft_audit_or_context_cannot_reuse_review(partial_session, monkeypatch, change):
+    session, events = partial_session
+    rows = dense_rows(session, 2)
+    reviews, speech = install_review_and_speech(session, monkeypatch)
+
+    async def fail_speech(item):
+        item.status = "TTS"
+        raise TimeoutError("speech failed")
+
+    monkeypatch.setattr(session, "_synthesize_segment", fail_speech)
+    first = result_for(rows)
+
+    async def run():
+        session.is_running = True
+        with pytest.raises(TimeoutError):
+            await session._publish_visual_chunk(first, 0, 24)
+        changed = deepcopy(first)
+        if change == "draft":
+            changed["segments"][0]["final_vi"] = "Bản nháp khác"
+        elif change == "audit":
+            session.segments[0].verification["semantic_verified"] = False
+        elif change == "model":
+            monkeypatch.setattr(settings, "OPENCODE_MODEL", "other-review-model")
+        else:
+            later = SegmentItem(99, 30, 31, 1)
+            later.text_zh = "拜托哥"
+            session.segments[99] = later
+        with pytest.raises(TimeoutError):
+            await session._publish_visual_chunk(changed, 0, 24)
+
+    asyncio.run(run())
+    assert 0 in reviews[-1][0]
+    assert len(reviews) == 2, "Changed validated inputs or accepted audit force independent review"
 

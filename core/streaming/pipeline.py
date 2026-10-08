@@ -134,6 +134,7 @@ class StreamingPipelineSession:
     Real-Time Streaming Localization Session.
     Processes segments ahead of playback using an asynchronous priority queue.
     """
+    VISUAL_REVIEW_GROUP_SIZE = 4
     def __init__(
         self,
         task_id: str,
@@ -164,6 +165,7 @@ class StreamingPipelineSession:
         self._visual_completed_seconds = 0.0
         self._visual_incremental_started = False
         self._visual_prepass_complete = False
+        self._visual_reviewed_drafts = {}
         self.progress = {
             "phase": "prepare" if video_path else "resolve",
             "stage": "Đang chuẩn bị video..." if video_path else "Đang nhận diện link video...",
@@ -894,8 +896,23 @@ class StreamingPipelineSession:
             "translation_sources": self.translation_sources,
         })
 
+    @staticmethod
+    def _visual_review_state(item):
+        from core.video_intelligence import VideoIntelligence
+        return VideoIntelligence._checkpoint_digest({field: getattr(item, field) for field in (
+            "start", "end", "text_zh", "asr_text", "literal_vi", "natural_vi", "final_vi",
+            "translation_provider", "translation_model", "needs_review", "review_reason", "verification")})
+
+    def _visual_source_context_identity(self):
+        from core.video_intelligence import VideoIntelligence
+        return VideoIntelligence._checkpoint_digest([
+            {"id": item.id, "start": item.start, "end": item.end,
+             "text_zh": item.text_zh, "asr_text": item.asr_text}
+            for item in sorted(self.segments.values(), key=lambda value: (value.start, value.id))])
+
     async def _publish_visual_chunk(self, result, start, end):
         """Commit and synthesize one measured chunk before translating another."""
+        from core.video_intelligence import VideoIntelligence
         if self.is_stopped:
             raise asyncio.CancelledError
         # The measured prefix already published in this session (or restored
@@ -912,6 +929,8 @@ class StreamingPipelineSession:
                 if screen["end"] > screen_start:
                     self.screen_texts.append({**deepcopy(screen), "start": max(screen_start, screen["start"])})
         pending = set()
+        review_candidates = set()
+        draft_identities = {}
         for sid, data in result.get("segments", {}).items():
             item = self.segments.get(sid)
             if item is None or not start <= item.start < item.end <= end:
@@ -921,6 +940,19 @@ class StreamingPipelineSession:
             if item.status in ("READY", "PLAYED"):
                 self._visual_published_ids.add(sid)
                 continue
+            draft_identity = VideoIntelligence._checkpoint_digest({
+                "row": data, "start": item.start, "end": item.end,
+                "provider": settings.LLM_PROVIDER, "review_model": settings.OPENCODE_MODEL})
+            draft_identities[sid] = draft_identity
+            reviewed = self._visual_reviewed_drafts.get(sid)
+            if (reviewed and reviewed["draft"] == draft_identity
+                    and reviewed["state"] == self._visual_review_state(item)):
+                # An exact in-session retry after TTS failure keeps the accepted
+                # source/text/audit. A changed draft or audit still reviews anew.
+                item.status, item.error, item.failed_stage = "WAITING", None, None
+                pending.add(sid)
+                continue
+            self._visual_reviewed_drafts.pop(sid, None)
             item.asr_text = item.asr_text or item.text_zh
             item.text_zh = data.get("text_zh", "").strip()
             item.literal_vi = data.get("literal_vi", "").strip()
@@ -946,10 +978,18 @@ class StreamingPipelineSession:
                 item.review_reason = item.review_reason or "Đang chờ AI đối chiếu độc lập với nguồn."
                 item.verification = {"status": "pending", "semantic_verified": False}
             pending.add(sid)
+            review_candidates.add(sid)
         for source in result.get("translation_sources", []):
             if source not in self.translation_sources:
                 self.translation_sources.append(dict(source))
         await self._invalidate_changed_address_verifications()
+        source_context = self._visual_source_context_identity()
+        for sid in pending - review_candidates:
+            reviewed = self._visual_reviewed_drafts[sid]
+            if (reviewed["context"] != source_context
+                    or reviewed["state"] != self._visual_review_state(self.segments[sid])):
+                self._visual_reviewed_drafts.pop(sid, None)
+                review_candidates.add(sid)
         if not self.initialized:
             await self._emit_initialization()
         await self.emit("screen_update", {"screen_texts": self.screen_texts,
@@ -960,36 +1000,51 @@ class StreamingPipelineSession:
         await self._update_ready()
         for sid in pending:
             await self.emit("segment_update", {**self.segments[sid].to_dict(), "screen_texts": self.screen_texts})
-        if pending and settings.LLM_PROVIDER == "opencode":
-            try:
-                await self._review_translations(segment_ids=pending)
-            except asyncio.CancelledError:
-                raise
-            except Exception as error:
-                self.review_summary = {"status": "incomplete"}
-                warning = "AI kiểm tra lại chưa hoàn tất; giữ bản nháp và cho phép thử lại."
-                if warning not in self.warnings:
-                    self.warnings.append(warning)
-                logging.getLogger("errors").error("[%s] REVIEW_FAILED error_type=%s", self.task_id, type(error).__name__)
-                for sid in pending:
-                    item = self.segments[sid]
-                    item.needs_review = True
-                    item.review_reason = "AI kiểm tra nguồn chưa hoàn tất; đây là bản nháp cần kiểm tra."
-                    item.verification = {"status": "incomplete", "semantic_verified": False,
-                                         "reason": item.review_reason}
+        groups = []
         for sid in sorted(pending, key=lambda key: self.segments[key].start):
+            if (not groups or len(groups[-1]) == self.VISUAL_REVIEW_GROUP_SIZE
+                    or (sid in review_candidates) != (groups[-1][0] in review_candidates)):
+                groups.append([])
+            groups[-1].append(sid)
+        for group in groups:
             await self.pause_event.wait()
             if self.is_stopped:
                 raise asyncio.CancelledError
-            segment = self.segments[sid]
-            try:
-                await self._process_segment(segment)
-            except Exception as error:
-                segment.failed_stage, segment.status = segment.status, "FAILED"
-                segment.error = str(error)
-                await self.emit("segment_update", segment.to_dict())
-                raise
-            self._visual_published_ids.add(sid)
+            targets = review_candidates.intersection(group)
+            if targets and settings.LLM_PROVIDER == "opencode":
+                try:
+                    await self._review_translations(segment_ids=targets)
+                    for sid in targets:
+                        self._visual_reviewed_drafts[sid] = {"draft": draft_identities[sid],
+                            "state": self._visual_review_state(self.segments[sid]),
+                            "context": self._visual_source_context_identity()}
+                except asyncio.CancelledError:
+                    raise
+                except Exception as error:
+                    self.review_summary = {"status": "incomplete"}
+                    warning = "AI kiểm tra lại chưa hoàn tất; giữ bản nháp và cho phép thử lại."
+                    if warning not in self.warnings:
+                        self.warnings.append(warning)
+                    logging.getLogger("errors").error("[%s] REVIEW_FAILED error_type=%s", self.task_id, type(error).__name__)
+                    for sid in targets:
+                        item = self.segments[sid]
+                        item.needs_review = True
+                        item.review_reason = "AI kiểm tra nguồn chưa hoàn tất; đây là bản nháp cần kiểm tra."
+                        item.verification = {"status": "incomplete", "semantic_verified": False,
+                                             "reason": item.review_reason}
+            for sid in group:
+                await self.pause_event.wait()
+                if self.is_stopped:
+                    raise asyncio.CancelledError
+                segment = self.segments[sid]
+                try:
+                    await self._process_segment(segment)
+                except Exception as error:
+                    segment.failed_stage, segment.status = segment.status, "FAILED"
+                    segment.error = str(error)
+                    await self.emit("segment_update", segment.to_dict())
+                    raise
+                self._visual_published_ids.add(sid)
         await self.report_progress("visual", "Đang đối chiếu lời thoại, phụ đề và tiêu đề",
             round(100 * end / self.total_duration, 1) if self.total_duration else 100,
             processed_seconds=end, total_seconds=self.total_duration,

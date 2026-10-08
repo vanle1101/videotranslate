@@ -10,6 +10,9 @@ import os
 from pathlib import Path
 import sys
 import time
+import urllib.error
+import urllib.request
+import wave
 
 os.environ["QT_QPA_PLATFORM"] = "offscreen"
 os.environ.setdefault("QTWEBENGINE_CHROMIUM_FLAGS", "--disable-gpu")
@@ -17,7 +20,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 sys.path.insert(0, str(ROOT / "scripts"))
 
-from check_production_ui import backend, click, evaluate, event, until, wait, ui_state, open_history
+from check_production_ui import backend, click, evaluate, event, until, wait, ui_state, open_history, check_playback
 from PySide6.QtCore import QCoreApplication, QEvent, QUrl
 from PySide6.QtWidgets import QApplication
 from config import settings
@@ -44,17 +47,21 @@ def partial_playback(page, snapshot):
     until(page, "document.getElementById('video-player').readyState>=2", timeout=90)
     state = evaluate(page, "(() => {const v=document.getElementById('video-player'); return {ready:v.readyState,time:v.currentTime,width:v.videoWidth,height:v.videoHeight,error:v.error?.message||null};})()")
     assert state["error"] is None and state["width"] > 0 and state["height"] > 0, state
-    # Autoplay came from the actual Start action. Muting prevents audible QA.
+    if evaluate(page, "document.getElementById('video-player').paused"):
+        assert click(page, "player-play-toggle")
+    # Actual Start/Play actions supply playback. Muting prevents audible QA.
     before = state["time"]
     until(page, f"document.getElementById('video-player').currentTime>{before + .2}", timeout=15)
     assert evaluate(page, "document.querySelectorAll('[id^=seg-vi-]').length") == len(snapshot["segments"])
     assert evaluate(page, "Array.from(document.querySelectorAll('[id^=seg-vi-]')).some(e=>e.textContent.trim().length>0)")
+    until(page, "window.__qaAudio.some(a=>a.currentSrc.includes('/api/streaming/audio/') && a.readyState>=2 && a.currentTime>.05 && !a.error)", timeout=20)
+    event("PARTIAL_DUB_PLAYBACK", evaluate(page, "window.__qaAudio.filter(a=>a.currentSrc.includes('/api/streaming/audio/')).map(a=>({source:a.currentSrc,time:a.currentTime,duration:a.duration,ready:a.readyState,error:a.error?.message||null}))"))
     event("PARTIAL_VIDEO_PLAYBACK", state)
 
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("mode", choices=["start-stop", "resume"])
+    parser.add_argument("mode", choices=["start-stop", "resume-stop", "resume"])
     args = parser.parse_args()
     assert SOURCE.is_file() and SOURCE.stat().st_size < 100_000_000
     assert settings.LLM_PROVIDER == "opencode", "Keep the actual configured Muse provider"
@@ -72,6 +79,8 @@ def main():
         window.show()
         until(page, "document.readyState==='complete' && !!window.loadDroppedLocalVideo")
         evaluate(page, "(() => {window.__acceptanceErrors=[];window.addEventListener('error',e=>window.__acceptanceErrors.push(String(e.message)));window.addEventListener('unhandledrejection',e=>window.__acceptanceErrors.push(String(e.reason)));return true;})()")
+        # Observe real media elements without mocking their network/playback.
+        evaluate(page, "(() => {window.__qaAudio=[];const Original=window.Audio;window.Audio=new Proxy(Original,{construct(target,args){const audio=new target(...args);window.__qaAudio.push(audio);return audio;}});return true;})()")
         if args.mode == "start-stop":
             assert not RECORD.exists(), "Refuse to replace an existing QA record; use resume"
             window.notify_js_file_selected(str(SOURCE))
@@ -96,9 +105,9 @@ def main():
             open_history(page, task_id)
             snapshot = backend(base, f"/api/streaming/{task_id}")
             assert snapshot["progress"]["can_retry"] and snapshot["initialized"]
-            assert hashes(task_id, snapshot["segments"]) == record["prefix_hashes"]
+            assert hashes(task_id, snapshot["segments"]) == record.get("prefix_hashes", {})
             assert snapshot["telemetry"]["playable_until"] < snapshot["duration"]
-            event("FRESH_RESTORE", {"ui": ui_state(page), "preserved_wavs": len(record["prefix_hashes"])})
+            event("FRESH_RESTORE", {"ui": ui_state(page), "preserved_wavs": len(record.get("prefix_hashes", {}))})
             assert click(page, "btn-retry-worker")
         event("TASK", task_id)
         deadline = time.monotonic() + 1800
@@ -117,8 +126,8 @@ def main():
             if progress["status"] == "FAILED":
                 event("REAL_FAILURE", progress)
                 raise AssertionError(f"Real provider/runtime failure: {progress.get('stage')}")
-            if (args.mode == "start-stop" and ready and ready < len(snapshot["segments"])
-                    and snapshot["telemetry"].get("ready_to_play")):
+            if (args.mode in ("start-stop", "resume-stop") and ready
+                    and ready < len(snapshot["segments"])):
                 prefix = hashes(task_id, snapshot["segments"])
                 assert prefix
                 partial_playback(page, snapshot)
@@ -129,6 +138,15 @@ def main():
                 stopped = backend(base, f"/api/streaming/{task_id}")
                 retained = hashes(task_id, stopped["segments"])
                 assert all(retained.get(sid) == digest for sid, digest in prefix.items())
+                for sid in retained:
+                    path = ROOT / "workspace/cache" / task_id / "segments" / f"seg_{sid}.wav"
+                    with wave.open(str(path)) as audio:
+                        assert audio.getnframes() > 0 and audio.getframerate() > 0
+                        assert len(audio.readframes(audio.getnframes())) > 0
+                stopped_state = [(row["id"], row["status"], row.get("revision"), row.get("final_vi")) for row in stopped["segments"]]
+                wait(5000)
+                late = backend(base, f"/api/streaming/{task_id}")
+                assert [(row["id"], row["status"], row.get("revision"), row.get("final_vi")) for row in late["segments"]] == stopped_state, "Late reply changed a stopped task"
                 record = json.loads(RECORD.read_text(encoding="utf-8"))
                 record["prefix_hashes"] = retained
                 RECORD.write_text(json.dumps(record), encoding="utf-8")
@@ -141,8 +159,21 @@ def main():
                 assert ready == len(snapshot["segments"])
                 assert snapshot["telemetry"]["playable_until"] >= snapshot["duration"] - .1
                 assert not ui_state(page)["errors"]
-                event("RESUME_PASS", {"task_id": task_id, "ready": ready, "prefix_unchanged": True, "state": ui_state(page)})
-                return
+                try:
+                    exported = backend(base, f"/api/streaming/export-hq/status/{task_id}")
+                except urllib.error.HTTPError as error:
+                    if error.code != 404:
+                        raise
+                    exported = {}
+                if exported.get("status") in ("FAILED", "CANCELLED"):
+                    raise AssertionError(f"Real final export failed: {exported}")
+                if exported.get("status") == "COMPLETED":
+                    snapshot = backend(base, f"/api/streaming/{task_id}")
+                    assert snapshot.get("output_filename") and not snapshot.get("output_outdated")
+                    until(page, "!document.getElementById('task-result-link').classList.contains('hidden')")
+                    check_playback(page)
+                    event("RESUME_EXPORT_PASS", {"task_id": task_id, "ready": ready, "prefix_unchanged": True, "output": snapshot["output_filename"], "state": ui_state(page)})
+                    return
             wait(500)
         raise AssertionError("Real partial QA exceeded 30 minutes")
     finally:

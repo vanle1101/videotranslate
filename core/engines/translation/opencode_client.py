@@ -17,6 +17,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import uuid
 from typing import Any, Mapping, Optional
@@ -34,6 +35,7 @@ FREE_CHAT_MODELS = frozenset({
 })
 DEFAULT_FREE_MODEL = "muse-spark-1.3-contributor-free"
 _AGENT = "plan"
+_IS_WINDOWS = os.name == "nt"
 
 
 class OpenCodeClientError(RuntimeError):
@@ -61,26 +63,62 @@ def _check_cancelled(context):
         raise OpenCodeCancelledError("Đã hủy yêu cầu dịch OpenCode.")
 
 
+def _poll_communication(process, request, timeout, context, deadline):
+    if context.cancel_check is None:
+        return process.communicate(request, timeout=timeout)
+    pending_input = request
+    while True:
+        _check_cancelled(context)
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise subprocess.TimeoutExpired("opencode", timeout)
+        try:
+            result = process.communicate(pending_input, timeout=min(0.25, remaining))
+            _check_cancelled(context)
+            return result
+        except subprocess.TimeoutExpired:
+            pending_input = None
+            if time.monotonic() >= deadline:
+                raise
+
+
 def _communicate(process, request, timeout, context):
-    """Poll only owned CLI work, preserving one deadline and one stdin write."""
+    """Bound the entire owned exchange, including a blocked Windows stdin write."""
+    worker = None
     try:
-        if context.cancel_check is None:
-            return process.communicate(request, timeout=timeout)
+        _check_cancelled(context)
         deadline = time.monotonic() + timeout
-        pending_input = request
+        if not _IS_WINDOWS:
+            return _poll_communication(process, request, timeout, context, deadline)
+        # Windows Popen.communicate writes stdin synchronously before checking
+        # its timeout. A CLI that never reads a large prompt can therefore block
+        # forever. One thread owns communicate; the caller independently checks
+        # cancellation/deadline and kills its process to unblock all pipe I/O.
+        completed = threading.Event()
+        outcome = []
+
+        def exchange():
+            try:
+                outcome.append((True, _poll_communication(process, request, timeout, context, deadline)))
+            except BaseException as error:
+                outcome.append((False, error))
+            finally:
+                completed.set()
+
+        worker = threading.Thread(target=exchange, name=f"opencode-io-{process.pid}", daemon=True)
+        process._opencode_communication_thread = worker
+        worker.start()
         while True:
             _check_cancelled(context)
             remaining = deadline - time.monotonic()
             if remaining <= 0:
                 raise subprocess.TimeoutExpired("opencode", timeout)
-            try:
-                result = process.communicate(pending_input, timeout=min(0.25, remaining))
-                _check_cancelled(context)
-                return result
-            except subprocess.TimeoutExpired:
-                pending_input = None
-                if time.monotonic() >= deadline:
-                    raise
+            if completed.is_set():
+                succeeded, value = outcome[0]
+                if not succeeded:
+                    raise value
+                return value
+            completed.wait(min(0.05, remaining))
     except OpenCodeCancelledError:
         _terminate_process_tree(process)
         raise
@@ -92,6 +130,11 @@ def _communicate(process, request, timeout, context):
         # TemporaryDirectory removes the files still owned by that process.
         _terminate_process_tree(process)
         raise
+    finally:
+        if worker is not None:
+            worker.join(timeout=5)
+            if not worker.is_alive():
+                del process._opencode_communication_thread
 
 
 def _retry_delay(seconds, context):
@@ -268,6 +311,14 @@ def _terminate_process_tree(process: subprocess.Popen) -> None:
     except OSError:
         pass
     try:
+        # communicate is not thread-safe. Kill/wait first, allowing its sole
+        # owner to finish the blocked write before any final pipe drain.
+        worker = getattr(process, "_opencode_communication_thread", None)
+        if isinstance(worker, threading.Thread):
+            process.wait(timeout=5)
+            worker.join(timeout=5)
+            if worker.is_alive():
+                return
         process.communicate(timeout=5)
     except (OSError, subprocess.TimeoutExpired):
         pass

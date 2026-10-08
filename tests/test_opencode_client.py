@@ -8,6 +8,8 @@ import contextvars
 import logging
 import re
 import threading
+import sys
+import time
 from pathlib import Path
 from unittest.mock import Mock
 
@@ -552,6 +554,92 @@ def test_pipe_error_terminates_owned_cli_before_raising(monkeypatch):
     with pytest.raises(BrokenPipeError):
         oc._communicate(process, "request", 1, ExecutionContext())
     terminate.assert_called_once_with(process)
+
+
+@pytest.mark.parametrize("cancel_check", [None, lambda: False])
+def test_real_unread_large_stdin_obeys_total_deadline_and_reaps_process(cancel_check, monkeypatch):
+    monkeypatch.setattr(oc, "_IS_WINDOWS", True)
+    process = subprocess.Popen(
+        [sys.executable, "-u", "-c", "import time; print('ready', flush=True); time.sleep(30)"],
+        stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        text=True, encoding="utf-8", creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+    watchdog_fired = threading.Event()
+
+    def emergency_cleanup():
+        watchdog_fired.set()
+        process.kill()
+
+    # Prevent an implementation regression from leaving pytest/its child hung.
+    watchdog = threading.Timer(5, emergency_cleanup)
+    watchdog.start()
+    try:
+        assert process.stdout.readline().strip() == "ready"
+        started = time.monotonic()
+        with pytest.raises(oc.OpenCodeRequestError, match="quá lâu") as caught:
+            oc._communicate(process, "private-prompt-" * 100_000, .2,
+                            ExecutionContext("unread-pipe", cancel_check))
+        elapsed = time.monotonic() - started
+        assert elapsed < 2, f"Pipe delivery escaped the .2s deadline: {elapsed:.2f}s"
+        assert "private-prompt" not in str(caught.value)
+        assert process.poll() is not None
+        assert all(stream.closed for stream in (process.stdin, process.stdout, process.stderr))
+        assert not any(thread.name == f"opencode-io-{process.pid}" for thread in threading.enumerate())
+        assert not watchdog_fired.is_set()
+    finally:
+        watchdog.cancel()
+        watchdog.join()
+        oc._terminate_process_tree(process)
+
+
+def test_real_unread_large_stdin_is_cancellable_before_request_timeout(monkeypatch):
+    monkeypatch.setattr(oc, "_IS_WINDOWS", True)
+    process = subprocess.Popen(
+        [sys.executable, "-u", "-c", "import time; print('ready', flush=True); time.sleep(30)"],
+        stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        text=True, encoding="utf-8", creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+    cancelled = threading.Event()
+    cancel = threading.Timer(.2, cancelled.set)
+    watchdog = threading.Timer(5, process.kill)
+    watchdog.start()
+    try:
+        assert process.stdout.readline().strip() == "ready"
+        started = time.monotonic()
+        cancel.start()
+        with pytest.raises(oc.OpenCodeCancelledError, match="Đã hủy") as caught:
+            oc._communicate(process, "private-prompt-" * 100_000, 120,
+                            ExecutionContext("cancel-unread-pipe", cancelled.is_set))
+        assert time.monotonic() - started < 2
+        assert "private-prompt" not in str(caught.value)
+        assert process.poll() is not None
+        assert all(stream.closed for stream in (process.stdin, process.stdout, process.stderr))
+        assert not any(thread.name == f"opencode-io-{process.pid}" for thread in threading.enumerate())
+    finally:
+        cancel.cancel()
+        cancel.join()
+        watchdog.cancel()
+        watchdog.join()
+        oc._terminate_process_tree(process)
+
+
+def test_real_large_bidirectional_exchange_delivers_stdin_once_and_drains_both_outputs(monkeypatch):
+    monkeypatch.setattr(oc, "_IS_WINDOWS", True)
+    request = "你好·" * 100_000
+    child = ("import sys; sys.stdout.write('o' * 200000); sys.stdout.flush(); "
+             "sys.stderr.write('e' * 200000); sys.stderr.flush(); "
+             "data = sys.stdin.read(); print('\\n' + str(len(data)))")
+    process = subprocess.Popen(
+        [sys.executable, "-X", "utf8", "-c", child],
+        stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        text=True, encoding="utf-8", creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+    try:
+        stdout, stderr = oc._communicate(process, request, 5, ExecutionContext("full-pipe", lambda: False))
+        assert stdout == "o" * 200_000 + f"\n{len(request)}\n"
+        assert stderr == "e" * 200_000
+        assert process.returncode == 0
+        assert all(stream.closed for stream in (process.stdin, process.stdout, process.stderr))
+        assert not any(thread.name == f"opencode-io-{process.pid}" for thread in threading.enumerate())
+    finally:
+        oc._terminate_process_tree(process)
 
 
 def test_cancellation_during_retry_backoff_prevents_next_process(isolated, monkeypatch):
