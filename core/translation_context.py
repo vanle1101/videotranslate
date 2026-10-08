@@ -226,7 +226,11 @@ def address_reading_prompt(rows, context):
         "câu không phụ thuộc phân lượt. Mọi vai trong ambiguous_roles phải *_uncertain=true. "
         "turn_check.evidence phải có chính ID đang xét cùng các câu làm căn cứ, trích nguồn "
         "đủ nhận ra lời tiếp hay lời đáp. Trực tiếp gọi chị/mẹ có thể rõ listener dù self chưa rõ. "
-        "Đại từ có thể rỗng nếu không cần; không chèn lời Việt nháp hay sửa lời nguồn. "
+        "Đại từ có thể rỗng nếu không cần hoặc chưa rõ; khi *_address rỗng, "
+        "bắt buộc đặt *_uncertain=true và uncertain=true. *_uncertain=false chỉ khi "
+        "*_address không rỗng và có dẫn chứng nguồn. Vai không dùng không được ghi false với "
+        "tên rỗng; bước kiểm định lời Việt sẽ xét riêng các vai thực sự dùng. "
+        "Không chèn lời Việt nháp hay sửa lời nguồn. "
         "Mỗi ID trả đúng một lần. Dẫn đủ bằng chứng nối cách gọi với câu hiện tại, không chỉ trích một từ rời.\n"
         + "ID cần kiểm định: " + json.dumps([row["id"] for row in rows])
         + "\nNguồn thoại theo thời gian: " + json.dumps(source_dialogue(context), ensure_ascii=False))
