@@ -4,6 +4,18 @@
 
 **PARTIAL: runtime recovery and media checks passed; complete semantic and long-video acceptance remain pending.** Target: Douyin2TikTok AI Studio using the configured OpenCode Muse model. Seedream/Seedance graph tests do not apply to this application. Tests honor background-only operation through the actual production Qt/WebEngine page offscreen and muted. HTTP, Muse, Edge-TTS and exported media are real. Physical desktop clicks/native file-picker and tray interaction are not claimed.
 
+### Current continuation — 06:56
+
+**FAILED full acceptance / real continuation in progress.** The production UI task `76f5aa6b` has processed 182.54 of 320.040635 source seconds, prepared source through 221.19s, and retained 111 READY/PLAYED speech rows. The first row's actual UI edit, revision and WAV hash survived the interrupted run and fresh-process Retry. The previous three-hour harness deadline stopped its owned process and preserved the checkpoint; it was not a terminal provider response. The resumed production process uses commit `616c7d2`. No complete MP4 or semantic PASS is claimed.
+
+The live failure is still measured speech capacity plus rejected rewrites: source rows such as `到底为什么` and `你们两个以后都会过得更好` exceed their safe slots, and actual Muse responses did not pass the independent semantic/natural-language gates. Healthy later rows continue; failed rows retain their source and error instead of publishing truncated speech. The current independent review still reports 47 unresolved rows. These are acceptance failures, not evidence of a broken network connection.
+
+An additional code audit found contamination in the blind Vietnamese fluency check: its neighbor list could contain the focused sentence's previous draft and distant context instead of adjacent dialogue. `semantic_translator.py` now excludes the focus by its stable ID/marker, selects the six closest chronological turns, and excludes Chinese text and legacy draft duplicates. Regression tests inspect the actual constructed blind-review request. Focused validation: **106 passed**. The running process predates this context correction; real-provider verification of that correction remains pending.
+
+Latest broad validation before this correction: **1910 Python tests passed, 1 skipped, 127 subtests**, with two upstream WebSocket deprecation warnings; **223 JavaScript tests passed**. Focused persistence/history/media suite: **179 passed**. Fresh restore checks validated existing completed, stopped and interrupted projects without initializing a provider or replacing user media. This repository has no npm/TypeScript build or lint pipeline; those checklist entries are **N/A**, not PASS.
+
+The following dated sections are historical evidence. Their in-progress statements and old test counts do not supersede this current verdict.
+
 ### Continued runtime audit — 02:50–03:15
 
 **FAILED baseline / fixes under real retest.** Original Douyin `7692745161054506290`, task `76f5aa6b`, 320.040635s, configured real OpenCode Muse and Edge-TTS. Fresh production Qt Start reached 15 READY speech rows in the 24.48s preview, but IDs 7 and 13 failed pacing. Fresh History → Retry reproduced both failures and retained all 15 prior WAVs. No complete 320s export is claimed.
@@ -49,7 +61,7 @@ Offline validation: focused speech/store/local HTTP run **237 passed, 1 skipped,
 
 - JS UI/bridge suite: **223 passed**.
 - Focused store/scope/runtime/chunk suite: **160 passed**; context/address/transcript suite: **173 passed**.
-- Latest broad suite: **1887 passed, 1 skipped, 127 subtests, 2 upstream WebSocket deprecation warnings, 1 failed** (obsolete unchanged-screen-trust assertion). That assertion is corrected and its suite passes; final broad rerun remains pending.
+- Latest broad rerun: **1910 passed, 1 skipped, 127 subtests, 2 upstream WebSocket deprecation warnings**. The obsolete unchanged-screen-trust assertion was corrected to preserve original screen geometry while requiring fresh trust evidence. The later blind-context correction has its focused validation above and awaits the next broad rerun.
 - Prior caption-only cache PCM mismatch did not recur in this broad run or repeated focused probes. Root cause remains unproven; no production audio change or claim of definitive repair.
 - Real result has **12 unresolved source/address rows**, including rows 32/33 (`我十八` / `我十九`). Row 34 was corrected to “Không thấy nó sai sai à?”; this does not resolve all semantics.
 - Full 320s translation/export and multi-hour translation are not certified yet.

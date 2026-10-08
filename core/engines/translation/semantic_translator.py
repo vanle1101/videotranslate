@@ -73,6 +73,37 @@ def pacing_candidate_key(text):
     return " ".join(unicodedata.normalize("NFC", str(text)).casefold().split())
 
 
+def fluency_dialogue_context(rows, *, target, draft, candidate):
+    """Select nearby Vietnamese turns without leaking the focus's old draft.
+
+    Source context may retain distant kinship evidence. Its last six entries
+    are therefore not necessarily adjacent to the sentence being rewritten.
+    This independent language check must see the closest spoken turns, never
+    the Chinese fields or a previous version of the focused sentence.
+    """
+    rows = [row for row in (rows or []) if isinstance(row, dict)]
+    target_id = target.get("id") if isinstance(target, dict) else None
+    focus = [index for index, row in enumerate(rows)
+             if row.get("is_focus") is True
+             or target_id is not None and row.get("id") == target_id]
+    anchor = focus[0] if focus else len(rows)
+    candidates = []
+    for index, row in enumerate(rows):
+        if index in focus:
+            continue
+        line = row.get("vi", row.get("final_vi", ""))
+        if not isinstance(line, str):
+            continue
+        line = " ".join(line.split())
+        if (not line or re.search(r"[\u3400-\u9fff]", line)
+                or not focus and line == " ".join(str(draft).split())
+                or line == " ".join(str(candidate).split())):
+            continue
+        candidates.append((index, line[:500]))
+    selected = sorted(candidates, key=lambda item: (abs(item[0] - anchor), item[0]))[:6]
+    return [line for _, line in sorted(selected)]
+
+
 class SemanticTranslator(TranslationEngine):
     STRICT_PROVIDERS = frozenset({"opencode", "openrouter-free", "gemini", "muse"})
 
@@ -615,14 +646,8 @@ Trả duy nhất JSON: {{"literal_vi":"...","natural_vi":"...","final_vi":"...",
         # rationalizing keyword-like shorthand as natural grammar.  It receives
         # only the exact candidate and bounded Vietnamese neighbors, never the
         # source, old draft, timing budget, or first verdict.
-        nearby_vi = []
-        for row in (rolling_context or []):
-            if not isinstance(row, dict) or not isinstance(row.get("vi"), str):
-                continue
-            line = " ".join(row["vi"].split())
-            if line and line != candidate["final_vi"] and line not in nearby_vi:
-                nearby_vi.append(line[:500])
-        nearby_vi = nearby_vi[-6:]
+        nearby_vi = fluency_dialogue_context(rolling_context, target=target,
+                                             draft=draft, candidate=candidate["final_vi"])
         fluency_system = (
             "Bạn là biên tập viên tiếng Việt bản ngữ. Không biết và không được suy đoán "
             "nguồn ngoại ngữ, người nói, quan hệ nhân vật, hay lý do câu được viết. "
