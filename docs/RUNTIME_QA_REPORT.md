@@ -4,6 +4,18 @@ Date: 2026-10-08, Asia/Saigon. **Overall verdict: PARTIAL — real production UI
 
 ## Latest production result
 
+### Cleanup request — October 8
+
+The user explicitly requested removal of test artifacts and a Git push. Read-only inventory identified **70,312,476 bytes** in `workspace/temp` plus **4,754,770 bytes** of pytest/Python bytecode caches outside `venv`. All deletion targets were resolved and checked to remain inside this repository; linked targets were rejected. No Studio, Python, FFmpeg or FFprobe task process was running.
+
+The scoped PowerShell removal command was rejected before execution by automatic approval review with **`blocked by policy`**. **Cleanup remains BLOCKED; no file was removed.** No alternate deletion method was attempted. The remaining scratch is:
+
+- `workspace/temp/pacing_response_qa.py`, `runtime_acceptance.py`, `runtime_lifecycle.py`, `runtime_caption_contact.png`, `caption-width-preview.png`.
+- `workspace/temp/muse-audio-probe-a4ojdako/`, five `media-preview-*` directories and the empty `alignment/` directory.
+- `.pytest_cache/` and 13 `__pycache__/` directories under the repository source/test directories, excluding `venv`.
+
+Tracked regression tests, inputs, translated MP4/review deliverables and saved projects are preserved. In particular, result project `38680e43` references prepared audio in `workspace/cache/e978c201`; removing that cache would break subsequent editing/export. Runtime artifacts are already ignored by Git. This report records the blocked cleanup without claiming success; the latest application changes are pushed.
+
 Project `38680e43`: `workspace/outputs/douyin_translated_38680e43_hq.mp4`, **12,006,295 bytes**, H.264 **1920×1080**, **15.016667s**, AAC stereo44.1kHz. This is the newly rendered result after the real UI review on backend59587/PID28148. Full FFmpeg `-v error -xerror` video/audio decode passed. All14 complete PCM WAVs fit their nonoverlapping dub intervals, every original boundary moves at most350ms, all word/caption cues stay within the dub bounds, and speed never exceeds1.15x. Source timestamps remain unchanged.
 
 The original user project `17736b77` is unchanged: SHA256 `b36f5dc1202ae6d8a71c5c44d177f6826bacc55cd6525bf7b3055341fa2b00cc`.
