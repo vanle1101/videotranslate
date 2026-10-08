@@ -184,30 +184,99 @@ def _prepare_reflow(rows, focus_id, max_shift, total_duration):
     return prepared
 
 
-def _plan_forward(prepared, required_duration, total_duration):
+def _limits(row, duration, max_shift, total_duration, *, reserved=False):
+    start_min = max(0.0, row.start - max_shift)
+    end_min = row.end - max_shift
+    start_max = row.start + max_shift
+    end_max = min(total_duration, row.end + max_shift)
+    if reserved:
+        # Unknown audio has an exact occupied interval, not a minimum. Moving
+        # it must preserve every second of its existing reservation.
+        start_min = max(start_min, end_min - duration)
+        start_max = min(start_max, end_max - duration)
+    return start_min, start_max, end_min, end_max
+
+
+def _reflow_bounds(prepared, total_duration):
+    """Earliest focus start and latest focus end from chain constraints.
+
+    Predecessors push only to the right in the earliest schedule; successors
+    push only to the left in the latest schedule. Since the graph is a chain,
+    one pass in each direction gives exact capacity without duration guessing.
+    """
     records, focus_index, max_shift = prepared
     focus = records[focus_index]
-    start = focus.dub_start
+    cursor = 0.0
+    for row in records[:focus_index]:
+        duration = row.audio_duration or row.dub_end - row.dub_start
+        low, high, end_low, end_high = _limits(row, duration, max_shift, total_duration,
+                                               reserved=row.audio_duration is None)
+        start = max(cursor, low)
+        end = max(start + duration, end_low)
+        if start > high + _EPSILON or end > end_high + _EPSILON:
+            return None
+        cursor = end
+    earliest = max(cursor, 0.0, focus.start - max_shift)
+    cursor = total_duration
+    for row in reversed(records[focus_index + 1:]):
+        duration = row.audio_duration or row.dub_end - row.dub_start
+        low, high, end_low, end_high = _limits(row, duration, max_shift, total_duration,
+                                               reserved=row.audio_duration is None)
+        end = min(cursor, end_high)
+        start = min(high, end - duration)
+        if start < low - _EPSILON or end < end_low - _EPSILON:
+            return None
+        cursor = start
+    latest = min(cursor, total_duration, focus.end + max_shift)
+    if earliest > focus.start + max_shift + _EPSILON or latest < focus.end - max_shift - _EPSILON:
+        return None
+    return earliest, latest
+
+
+def _plan_general(prepared, required_duration, total_duration):
+    bounds = _reflow_bounds(prepared, total_duration)
+    if bounds is None:
+        return None
+    earliest, latest = bounds
+    records, focus_index, max_shift = prepared
+    focus = records[focus_index]
+    latest_start = min(focus.start + max_shift, latest - required_duration)
+    if earliest > latest_start + _EPSILON:
+        return None
+    # Clamp the current start into the feasible range, changing it by the
+    # smallest amount. Then propagate only collisions outward from the focus.
+    start = max(earliest, min(focus.dub_start, latest_start))
     end = max(start + required_duration, focus.end - max_shift)
-    if end > min(total_duration, focus.end + max_shift) + _EPSILON:
+    if end > latest + _EPSILON:
         return None
     plan = {focus.id: {"dub_start": start, "dub_end": end}}
+    cursor = start
+    for row in reversed(records[:focus_index]):
+        if row.dub_end <= cursor + _EPSILON:
+            break
+        duration = row.audio_duration or row.dub_end - row.dub_start
+        new_start = min(row.dub_start, cursor - duration)
+        new_end = (new_start + duration if row.audio_duration is None
+                   else max(new_start + duration, min(row.dub_end, cursor), row.end - max_shift))
+        low, high, end_low, end_high = _limits(row, duration, max_shift, total_duration,
+                                               reserved=row.audio_duration is None)
+        if (new_start < low - _EPSILON or new_start > high + _EPSILON
+                or new_end < end_low - _EPSILON or new_end > min(cursor, end_high) + _EPSILON):
+            return None
+        plan[row.id] = {"dub_start": new_start, "dub_end": new_end}
+        cursor = new_start
     cursor = end
     for row in records[focus_index + 1:]:
         if cursor <= row.dub_start + _EPSILON:
             break
-        new_start = cursor
-        if row.audio_duration is None:
-            # An unprocessed sentence reserves all of its existing time. No
-            # guess at future synthesis length can create extra capacity.
-            new_end = new_start + row.dub_end - row.dub_start
-        else:
-            # Complete measured audio permits consuming unused trailing slot
-            # padding. Preserve the existing end if it already leaves room.
-            new_end = max(row.dub_end, new_start + row.audio_duration,
-                          row.end - max_shift)
-        if (new_start > row.start + max_shift + _EPSILON
-                or new_end > min(total_duration, row.end + max_shift) + _EPSILON):
+        duration = row.audio_duration or row.dub_end - row.dub_start
+        new_start = max(row.dub_start, cursor)
+        new_end = (new_start + duration if row.audio_duration is None
+                   else max(row.dub_end, new_start + duration, row.end - max_shift))
+        low, high, end_low, end_high = _limits(row, duration, max_shift, total_duration,
+                                               reserved=row.audio_duration is None)
+        if (new_start < low - _EPSILON or new_start > high + _EPSILON
+                or new_end < end_low - _EPSILON or new_end > end_high + _EPSILON):
             return None
         plan[row.id] = {"dub_start": new_start, "dub_end": new_end}
         cursor = new_end
@@ -215,11 +284,12 @@ def _plan_forward(prepared, required_duration, total_duration):
 
 
 def plan_reflow(rows, focus_id, required_duration, max_shift=0.35, *, total_duration):
-    """Prefer backward borrowing, then shift only the necessary future block.
+    """Prefer backward borrowing, then solve bounded bidirectional reflow.
 
     Start AND end stay within ``max_shift`` of their original source timestamps.
-    The fallback keeps the focus start and moves following rows later only when
-    needed. Unknown audio keeps its complete reserved duration; measured READY
+    The fallback keeps the focus nearest its current start and propagates only
+    collisions to preceding/following rows. Unknown audio keeps its complete
+    reserved duration; measured READY
     or PLAYED audio always retains every sample regardless of semantic flags.
     The source timeline and all input rows remain unchanged.
     """
@@ -231,10 +301,13 @@ def plan_reflow(rows, focus_id, required_duration, max_shift=0.35, *, total_dura
     prepared = _prepare_reflow(rows, focus_id, max_shift, total_duration)
     if prepared is None or required_duration is None or required_duration <= 0:
         return None
+    focus = prepared[0][prepared[1]]
+    if required_duration <= focus.dub_end - focus.dub_start + _EPSILON:
+        return {focus.id: {"dub_start": focus.dub_start, "dub_end": focus.dub_end}}
     backward = plan_backshift(rows, focus_id, required_duration, max_shift)
     if backward is not None:
         return backward
-    return _plan_forward(prepared, required_duration, total_duration)
+    return _plan_general(prepared, required_duration, total_duration)
 
 
 def available_reflow_duration(rows, focus_id, max_shift=0.35, *, total_duration):
@@ -246,17 +319,5 @@ def available_reflow_duration(rows, focus_id, max_shift=0.35, *, total_duration)
     prepared = _prepare_reflow(rows, focus_id, max_shift, total_duration)
     if prepared is None:
         return 0.0
-    records, focus_index, max_shift = prepared
-    focus = records[focus_index]
-    backward = available_dub_duration(rows, focus_id, max_shift)
-    low = 0.0
-    high = min(total_duration, focus.end + max_shift) - focus.dub_start
-    # Feasibility is monotonic for forward reflow. The search is pure and
-    # bounded; actual publication always checks the final measured WAV again.
-    for _ in range(48):
-        mid = (low + high) / 2
-        if _plan_forward(prepared, mid, total_duration) is not None:
-            low = mid
-        else:
-            high = mid
-    return max(backward, low)
+    bounds = _reflow_bounds(prepared, total_duration)
+    return max(0.0, bounds[1] - bounds[0]) if bounds is not None else 0.0

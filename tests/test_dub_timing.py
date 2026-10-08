@@ -166,7 +166,9 @@ def test_real_command_shape_uses_next_gap_without_changing_source_or_semantics()
     assert plan[10] == pytest.approx({"dub_start": 9.84 + duration,
                                      "dub_end": 9.84 + duration + .86})
     assert plan[10]["dub_end"] < 11.72
-    assert available_reflow_duration(rows, 9, total_duration=15.018688) == pytest.approx(.87)
+    capacity = available_reflow_duration(rows, 9, total_duration=15.018688)
+    assert capacity == pytest.approx(.94420833333333)
+    assert plan_reflow(rows, 9, capacity, total_duration=15.018688) is not None
     assert rows == before
 
 
@@ -228,10 +230,10 @@ def test_later_shifted_sentence_can_resume_with_its_reserved_full_duration():
     assert available_reflow_duration(rows, 2, total_duration=4) == pytest.approx(1.05)
 
 
-def test_short_focus_preserves_end_offset_limit_using_silent_slot_tail():
+def test_short_focus_preserves_unchanged_slot_when_audio_already_fits():
     rows = [row(0, 1, 3)]
     plan = plan_reflow(rows, 0, .1, total_duration=3)
-    assert plan == {0: {"dub_start": 1, "dub_end": 2.65}}
+    assert plan == {0: {"dub_start": 1, "dub_end": 3}}
 
 
 @pytest.mark.parametrize("duration", [None, 0, -1, float("nan"), True, "2"])
@@ -246,3 +248,53 @@ def test_reflow_rejects_existing_overlap_and_out_of_video_rows():
     assert plan_reflow(rows, 1, .8, total_duration=2) is None
     assert available_reflow_duration(rows, 1, total_duration=2) == 0
     assert plan_reflow([row(0, 0, 2)], 0, 1, total_duration=1.9) is None
+
+
+def test_real_next_sentence_combines_backwards_room_with_forward_reserved_shift():
+    rows = [row(4, 4.98, 6.44, 1.449, dub_start=4.98, dub_end=6.429),
+            row(5, 6.84, 7.72, .8778333333333334, dub_start=6.566375, dub_end=7.444208333333333),
+            row(6, 7.72, 8.34, .752125, dub_start=7.444208333333333, dub_end=8.196333333333333),
+            row(7, 8.34, 9, .7639583333333333, dub_start=8.196333333333333, dub_end=8.960291666666667),
+            row(8, 9, 9.84, .8797083333333333, dub_start=8.960291666666667, dub_end=9.84, needs_review=True),
+            row(9, 9.84, 10.36, .8317916666666667, dub_start=9.84, dub_end=10.671791666666667),
+            row(10, 10.36, 11.22, dub_start=10.671791666666667, dub_end=11.53179166666667),
+            row(11, 11.72, 12.42), row(12, 12.42, 13.3), row(13, 13.3, 14.88)]
+    before = deepcopy(rows)
+    required = 1.0958 / 1.15
+    capacity = available_reflow_duration(rows, 10, total_duration=15.018688)
+    assert capacity == pytest.approx(.97241666666666)
+    plan = plan_reflow(rows, 10, required, total_duration=15.018688)
+    assert set(plan) == {5, 6, 7, 8, 9, 10}
+    assert plan[10]["dub_end"] == pytest.approx(11.57)
+    assert plan[10]["dub_start"] == pytest.approx(11.57 - required)
+    combined = [{**item, **plan.get(item["id"], {})} for item in rows]
+    for index, item in enumerate(combined):
+        left, right = item.get("dub_start", item["start"]), item.get("dub_end", item["end"])
+        assert abs(left - item["start"]) <= .350000001
+        assert abs(right - item["end"]) <= .350000001
+        if item.get("audio_duration"):
+            assert right - left >= item["audio_duration"] - 1e-9
+        if index:
+            previous = combined[index - 1]
+            assert previous.get("dub_end", previous["end"]) <= left + 1e-9
+    assert rows == before
+    assert plan_reflow(rows, 10, capacity, total_duration=15.018688) is not None
+    assert plan_reflow(rows, 10, capacity + .00001, total_duration=15.018688) is None
+
+
+def test_general_reflow_moves_unknown_predecessor_as_complete_reservation():
+    rows = [row(0, .5, 1.5), row(1, 1.5, 2, dub_start=1.8, dub_end=2.3),
+            row(2, 2.4, 3.4)]
+    plan = plan_reflow(rows, 1, 1, total_duration=3.4)
+    assert plan is not None
+    assert plan[0]["dub_end"] - plan[0]["dub_start"] == pytest.approx(1)
+    assert plan[1]["dub_end"] - plan[1]["dub_start"] == pytest.approx(1)
+
+
+def test_unrelated_forward_shift_does_not_disable_preceding_backwards_room():
+    rows = [row(0, 1, 2, 1), row(1, 2, 2.5),
+            row(2, 4, 5, .7, dub_start=4.2, dub_end=5.2)]
+    plan = plan_reflow(rows, 1, 1.05, total_duration=6)
+    assert set(plan) == {0, 1}
+    assert plan[0]["dub_end"] <= plan[1]["dub_start"] + 1e-9
+    assert plan[1]["dub_end"] <= 2.85 + 1e-9

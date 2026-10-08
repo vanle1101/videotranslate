@@ -1430,9 +1430,18 @@ class StreamingPipelineSession:
     @staticmethod
     def _dub_audio_duration(path):
         with wave.open(str(path), "rb") as audio:
-            duration = audio.getnframes() / audio.getframerate()
-            if duration <= 0:
-                raise ValueError("Âm thanh lồng tiếng trống.")
+            frames, rate = audio.getnframes(), audio.getframerate()
+            width, channels = audio.getsampwidth(), audio.getnchannels()
+            if (frames <= 0 or not 8000 <= rate <= 192000 or not 1 <= channels <= 2
+                    or width not in (1, 2, 3, 4) or audio.getcomptype() != "NONE"):
+                raise ValueError("Âm thanh lồng tiếng trống hoặc không hợp lệ.")
+            remaining = frames
+            while remaining:
+                count = min(remaining, rate)
+                if len(audio.readframes(count)) != count * width * channels:
+                    raise ValueError("Âm thanh lồng tiếng bị thiếu dữ liệu.")
+                remaining -= count
+            duration = frames / rate
             return duration
 
     def _dub_rows(self):
@@ -1442,13 +1451,14 @@ class StreamingPipelineSession:
             if item.audio_path and item.status in ("READY", "PLAYED"):
                 try:
                     row["audio_duration"] = self._dub_audio_duration(item.audio_path)
-                except (OSError, EOFError, wave.Error, ZeroDivisionError):
+                except (OSError, EOFError, wave.Error, ValueError, ZeroDivisionError):
                     pass  # Unknown audio remains an occupied, immovable slot.
             rows.append(row)
         return rows
 
     async def _fit_dub(self, seg, *, text, source, output_path, translator=None, context=None, on_stage=None):
         rows = self._dub_rows()
+        revision = [(row["id"], row["revision"], row["dub_start"], row["dub_end"]) for row in rows]
         start, end = resolve_dub_timing(seg.to_dict())
         duration = end - start
         capacity = max(duration, available_reflow_duration(rows, seg.id, total_duration=self.total_duration))
@@ -1460,7 +1470,7 @@ class StreamingPipelineSession:
             context=context, on_stage=on_stage)
         measured = self._dub_audio_duration(output_path)
         plan = {}
-        if measured > duration + .0001:
+        if measured > duration + 1e-9:
             plan = plan_reflow(rows, seg.id, measured, total_duration=self.total_duration)
             if plan is None:
                 raise SpeechBudgetError("Không còn khoảng nghỉ phù hợp để căn đủ lời thoại.")
@@ -1469,6 +1479,11 @@ class StreamingPipelineSession:
             start, end = plan[seg.id]["dub_start"], plan[seg.id]["dub_end"]
         timing = await self._run_blocking(build_speech_timing, spoken.get("text", text), start, end,
             output_path, spoken["speed_ratio"], spoken["boundaries"])
+        if self.is_stopped:
+            raise asyncio.CancelledError
+        if revision != [(item.id, item.revision, item.dub_start, item.dub_end)
+                        for item in sorted(self.segments.values(), key=lambda row: row.start)]:
+            raise SegmentEditConflict("Timeline đã thay đổi trong khi tạo giọng; hãy thử lại câu này.")
         return spoken, timing, plan
 
     def _publish_dub_plan(self, plan, focus_id):
@@ -1491,7 +1506,8 @@ class StreamingPipelineSession:
                 if value is not None:
                     setattr(item, key, min(item.dub_end, value + delta))
             item.revision += 1
-            item.audio_url = f"/api/streaming/audio/{self.task_id}/{item.id}?rev={item.revision}"
+            if item.status in ("READY", "PLAYED") and item.audio_path and Path(item.audio_path).is_file():
+                item.audio_url = f"/api/streaming/audio/{self.task_id}/{item.id}?rev={item.revision}"
 
     async def _synthesize_segment(self, seg):
         """Generate playable audio without approving an uncertain translation."""
@@ -1532,8 +1548,8 @@ class StreamingPipelineSession:
                     translator=self.translator, on_stage=speech_stage,
                     context=self._dialogue_context_before(seg))
             seg.status = "ALIGNING"
-            await self._segment_progress("align", f"Đang khớp thời lượng câu {seg.id + 1}")
-            await self.emit("segment_update", seg.to_dict())
+            # Fitting already emitted ALIGNING. Publish the complete WAV and
+            # every changed timing without yielding to a concurrent edit/Stop.
             tts_dur, ratio, boundaries = spoken["tts_duration"], spoken["speed_ratio"], spoken["boundaries"]
             if self.is_stopped:
                 raise asyncio.CancelledError

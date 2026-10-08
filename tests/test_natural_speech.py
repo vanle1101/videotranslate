@@ -262,6 +262,33 @@ def test_pipeline_reflows_prior_audio_and_captions_atomically(tmp_path, aligner,
     session.translator.rewrite_for_pacing.assert_not_called()
 
 
+@pytest.mark.parametrize("change", ["stop", "revision"])
+def test_fit_does_not_publish_after_stop_or_a_concurrent_timeline_change(tmp_path, aligner, monkeypatch, change):
+    from core.streaming.pipeline import SegmentItem, StreamingPipelineSession, SegmentEditConflict
+    from core.engines.alignment.speech_timing import build_speech_timing
+    monkeypatch.setattr(settings, "BASE_DIR", tmp_path)
+    session = StreamingPipelineSession("stale-dub", None, tts_engine_name="edge-tts")
+    row = SegmentItem(0, 1, 2, 1)
+    row.final_vi = "Vâng."
+    session.segments[0] = row
+    session.total_duration = 3
+    session.aligner, session.tts_engine = aligner, RecordedSynthesizer(.8)
+    final = session.segments_dir / "seg_0.wav"
+    final.write_bytes(b"previous-complete-audio")
+    def race(*args, **kwargs):
+        if change == "stop":
+            session.is_stopped = True
+        else:
+            row.revision += 1
+        return build_speech_timing(*args, **kwargs)
+    monkeypatch.setattr("core.streaming.pipeline.build_speech_timing", race)
+    with pytest.raises(asyncio.CancelledError if change == "stop" else SegmentEditConflict):
+        asyncio.run(session._synthesize_segment(row))
+    assert final.read_bytes() == b"previous-complete-audio"
+    assert row.dub_start is None and row.dub_end is None
+    assert not list(session.segments_dir.glob("pending_*.wav"))
+
+
 def test_near_fit_238ms_pause_preserves_natural_floor_with_real_atempo(tmp_path, aligner):
     engine = PausedSynthesizer(pause=(1.7212, 1.9592), duration=2.84)
     output = tmp_path / "voice.wav"
