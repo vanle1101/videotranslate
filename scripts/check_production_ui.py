@@ -231,11 +231,20 @@ def main():
             saved = backend(base, f"/api/streaming/{args.task_id}")
             assert {k:v.lower() if isinstance(v,str) else v for k,v in saved["caption_style"].items()} == trial_style, saved["caption_style"]
             assert saved["output_outdated"] and not ui_state(page)["resultVisible"]
+            cues = [cue for row in saved["segments"] for cue in row.get("caption_layout",{}).get("cues",[])]
+            assert cues and all(cue["placement"] == "bottom" and cue["color"].lower() == "#ffffff" and cue.get("background_color","").lower() == "#334455" for cue in cues)
             reload_page(page)
             open_history(page,args.task_id)
             restored_style = read_style(page)
             assert restored_style == trial_style, restored_style
             event("STYLE_SAVE_RELOAD", {"style":restored_style,"revision":saved["caption_style_revision"],"old_output_hidden":True})
+            if saved.get("has_subtitle_regions"):
+                blur_style = {**trial_style, "blur_original":True}
+                set_style(page,blur_style)
+                blurred = backend(base, f"/api/streaming/{args.task_id}")
+                masks = [mask for row in blurred["segments"] for mask in row.get("caption_layout",{}).get("source_masks",[])]
+                assert blurred["caption_style"]["blur_original"] is True and masks, blurred["caption_style"]
+                event("ORIGINAL_SUBTITLE_BLUR", {"saved":True,"source_masks":len(masks)})
             set_style(page, original_style)
             event("STYLE_RESTORED", read_style(page))
             original_style = None
