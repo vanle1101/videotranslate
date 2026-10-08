@@ -8,6 +8,8 @@ from unittest.mock import AsyncMock, Mock
 import httpx
 import pytest
 from fastapi.testclient import TestClient
+from fastapi import WebSocketDisconnect
+from types import SimpleNamespace
 
 import main
 from config import settings
@@ -26,6 +28,41 @@ def isolated(tmp_path, monkeypatch):
     # URL normalization has its own downloader tests; isolate network here.
     monkeypatch.setattr(main.downloader, "normalize_url", lambda text: text, raising=False)
     return tmp_path
+
+
+def test_disconnect_during_broadcast_cannot_fail_worker_or_skip_other_client(isolated):
+    gone, healthy = Mock(), Mock()
+    async def close_during_send(payload):
+        main._remove_stream_socket("race", gone)
+        raise WebSocketDisconnect()
+    gone.send_json = AsyncMock(side_effect=close_during_send)
+    healthy.send_json = AsyncMock()
+    main.stream_sockets["race"] = [gone, healthy]
+    asyncio.run(main.broadcast_session_event("race", "progress", {"status": "RUNNING"}))
+    healthy.send_json.assert_awaited_once()
+    assert main.stream_sockets["race"] == [healthy]
+
+
+@pytest.mark.parametrize("error", [WebSocketDisconnect(), RuntimeError("unknown replay failure")])
+def test_initial_websocket_replay_always_releases_owner(isolated, monkeypatch, error):
+    session = SimpleNamespace(initialized=False, source_video_url=None, error=None, get_progress=lambda: {})
+    monkeypatch.setattr(main, "get_streaming_session", lambda task: session)
+    socket = Mock(accept=AsyncMock(), send_json=AsyncMock(side_effect=error), receive_json=AsyncMock())
+    if isinstance(error, WebSocketDisconnect):
+        asyncio.run(main.websocket_stream(socket, "replay"))
+    else:
+        with pytest.raises(RuntimeError, match="unknown replay failure"):
+            asyncio.run(main.websocket_stream(socket, "replay"))
+    assert "replay" not in main.stream_sockets
+    socket.receive_json.assert_not_called()
+
+
+def test_cancelled_websocket_reader_releases_owner_without_swallowing_cancel(isolated, monkeypatch):
+    monkeypatch.setattr(main, "get_streaming_session", lambda task: None)
+    socket = Mock(accept=AsyncMock(), receive_json=AsyncMock(side_effect=asyncio.CancelledError()))
+    with pytest.raises(asyncio.CancelledError):
+        asyncio.run(main.websocket_stream(socket, "cancelled"))
+    assert "cancelled" not in main.stream_sockets
 
 
 async def wait_for(predicate):

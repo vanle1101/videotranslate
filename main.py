@@ -680,17 +680,27 @@ async def stop_task(task_id: str):
 # REAL-TIME STREAMING API
 # -------------------------------------------------------------
 
+def _remove_stream_socket(task_id, websocket):
+    connections = stream_sockets.get(task_id)
+    if connections is None:
+        return
+    if websocket in connections:
+        connections.remove(websocket)
+    if not connections and stream_sockets.get(task_id) is connections:
+        stream_sockets.pop(task_id, None)
+
+
 async def broadcast_session_event(task_id: str, event_type: str, data: Dict[str, Any]):
     if task_id in stream_sockets:
         dead_conns = []
         payload = {"type": event_type, "task_id": task_id, **data}
-        for ws in stream_sockets[task_id]:
+        for ws in list(stream_sockets.get(task_id, [])):
             try:
                 await ws.send_json(payload)
             except Exception:
                 dead_conns.append(ws)
         for ws in dead_conns:
-            stream_sockets[task_id].remove(ws)
+            _remove_stream_socket(task_id, ws)
     if event_type == "finished":
         schedule_reviewed_export(task_id)
 
@@ -1685,43 +1695,43 @@ async def websocket_stream(websocket: WebSocket, task_id: str):
         stream_sockets[task_id] = []
     stream_sockets[task_id].append(websocket)
 
-    session = get_streaming_session(task_id)
-    if session:
-        if hasattr(session, "get_progress"):
-            await websocket.send_json({"type": "progress", "task_id": task_id, **session.get_progress()})
-        if getattr(session, "source_video_url", None):
-            await websocket.send_json({"type": "source_ready", "task_id": task_id, "video_url": session.source_video_url})
-    if session and getattr(session, "initialized", True):
-        # Send current state immediately upon connection
-        await websocket.send_json({
-            "type": "init",
-            "task_id": task_id,
-            "duration": session.total_duration,
-            "segments_count": len(session.segments),
-            "segments": [session.segment_snapshot(s) for s in session.segments.values()],
-            "screen_texts": getattr(session, "screen_texts", []),
-            **caption_style_details(session),
-            "visual_translation": getattr(session, "visual_translation", False),
-            "translation_sources": getattr(session, "translation_sources", []),
-            "asr_engine": session.source_processing_label() if hasattr(session, "source_processing_label") else "",
-            "warnings": list(getattr(session, "warnings", [])),
-            "initial_buffer_seconds": session.initial_buffer_seconds,
-            "bgm_url": session.bgm_url,
-            "vocal_removal_engine": session.vocal_suppressor.name,
-            "suppression_level": f"{session.vocal_suppressor.suppression_level_db:.1f} dB",
-            "suppression_rtf": session.suppression_stats.get("throughput_rtf", "75.0x")
-        })
-        await websocket.send_json({
-            "type": "telemetry",
-            "task_id": task_id,
-            **session.get_telemetry()
-        })
-        if not session.error and session.first_play_emitted:
-            await websocket.send_json({"type": "ready_to_play", "task_id": task_id})
-    if session and session.error:
-        await websocket.send_json({"type": "error", "message": session.error, "task_id": task_id})
-
     try:
+        session = get_streaming_session(task_id)
+        if session:
+            if hasattr(session, "get_progress"):
+                await websocket.send_json({"type": "progress", "task_id": task_id, **session.get_progress()})
+            if getattr(session, "source_video_url", None):
+                await websocket.send_json({"type": "source_ready", "task_id": task_id, "video_url": session.source_video_url})
+        if session and getattr(session, "initialized", True):
+            # Send current state immediately upon connection
+            await websocket.send_json({
+                "type": "init",
+                "task_id": task_id,
+                "duration": session.total_duration,
+                "segments_count": len(session.segments),
+                "segments": [session.segment_snapshot(s) for s in session.segments.values()],
+                "screen_texts": getattr(session, "screen_texts", []),
+                **caption_style_details(session),
+                "visual_translation": getattr(session, "visual_translation", False),
+                "translation_sources": getattr(session, "translation_sources", []),
+                "asr_engine": session.source_processing_label() if hasattr(session, "source_processing_label") else "",
+                "warnings": list(getattr(session, "warnings", [])),
+                "initial_buffer_seconds": session.initial_buffer_seconds,
+                "bgm_url": session.bgm_url,
+                "vocal_removal_engine": session.vocal_suppressor.name,
+                "suppression_level": f"{session.vocal_suppressor.suppression_level_db:.1f} dB",
+                "suppression_rtf": session.suppression_stats.get("throughput_rtf", "75.0x")
+            })
+            await websocket.send_json({
+                "type": "telemetry",
+                "task_id": task_id,
+                **session.get_telemetry()
+            })
+            if not session.error and session.first_play_emitted:
+                await websocket.send_json({"type": "ready_to_play", "task_id": task_id})
+        if session and session.error:
+            await websocket.send_json({"type": "error", "message": session.error, "task_id": task_id})
+
         while True:
             data = await websocket.receive_json()
             if not isinstance(data, dict):
@@ -1744,8 +1754,9 @@ async def websocket_stream(websocket: WebSocket, task_id: str):
             elif act == "stop":
                 await stop_task(task_id)
     except WebSocketDisconnect:
-        if task_id in stream_sockets and websocket in stream_sockets[task_id]:
-            stream_sockets[task_id].remove(websocket)
+        pass
+    finally:
+        _remove_stream_socket(task_id, websocket)
 
 if __name__ == "__main__":
     import uvicorn
