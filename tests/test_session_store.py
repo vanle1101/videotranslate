@@ -803,3 +803,86 @@ def test_shutdown_between_review_and_init_resumes_without_provider(persisted, mo
     assert restored.segments[0].failed_stage == "TTS"
     assert restored.review_summary == persisted.review_summary
     assert restored.video_intelligence is None and restored.worker_task is None
+
+
+def test_partial_visual_prefix_survives_reopen_and_remains_resumable(persisted, monkeypatch):
+    persisted.visual_translation = True
+    persisted.total_duration = 48
+    persisted._visual_incremental_started = True
+    persisted._visual_completed_seconds = 24
+    persisted._visual_prepass_complete = False
+    prefix = persisted.segments[0]
+    prefix.source_method, prefix.translation_provider = "text-ai", "opencode"
+    later = SegmentItem(1, 24, 26, 2)
+    later.text_zh = "下一句"
+    persisted.segments[1] = later
+    audio_before = Path(prefix.audio_path).read_bytes()
+    persisted.error = "Muse timed out after first chunk"
+    persisted.persist()
+    monkeypatch.setattr("core.video_intelligence.validate_visual_provider", Mock(side_effect=AssertionError("no provider on history open")))
+    for _ in range(2):
+        active_streaming_sessions.clear()
+        restored = restore_saved_session(persisted.task_id)
+        assert restored.initialized and restored.can_retry and restored._startup_failed
+        assert restored.get_progress()["status"] == "FAILED"
+        assert restored.playable_until == 24
+        assert restored.segments[0].final_vi == prefix.final_vi
+        assert restored.segments[0].status == "READY"
+        assert Path(restored.segments[0].audio_path).read_bytes() == audio_before
+        assert restored.segments[1].status == "FAILED"
+        assert restored.video_intelligence is None
+        restored.persist()
+
+
+def test_unfinished_silent_visual_tail_never_becomes_completed(persisted):
+    persisted.visual_translation = True
+    persisted.total_duration = 48
+    persisted._visual_incremental_started = True
+    persisted._visual_completed_seconds = 24
+    persisted._visual_prepass_complete = False
+    persisted.review_summary = {"status": "completed", "checked": 1, "verified": 1}
+    persisted.segments[0].source_method = "text-ai"
+    persisted.segments[0].translation_provider = "opencode"
+    persisted.persist()
+    listed = list_saved_sessions()[0]
+    assert listed["status"] != "COMPLETED" and listed["progress_pct"] is None
+    assert "Dịch video chưa xong" in listed["stage"]
+    restored = restore_saved_session(persisted.task_id)
+    assert restored.playable_until == 24
+    assert restored.can_retry and restored._startup_failed
+    assert restored.get_progress()["status"] == "STOPPED"
+
+
+def test_finished_visual_prepass_survives_reopen(persisted):
+    persisted.visual_translation = True
+    persisted._visual_incremental_started = True
+    persisted._visual_completed_seconds = persisted.total_duration
+    persisted._visual_prepass_complete = True
+    persisted.segments[0].source_method = "text-ai"
+    persisted.persist()
+    restored = restore_saved_session(persisted.task_id)
+    assert restored.get_progress()["status"] == "COMPLETED"
+    assert not restored.can_retry and not restored._startup_failed
+    assert restored.playable_until == persisted.total_duration
+
+
+@pytest.mark.parametrize("field,value", [
+    ("_visual_completed_seconds", -1), ("_visual_completed_seconds", 3),
+    ("_visual_completed_seconds", True), ("_visual_incremental_started", "yes"),
+    ("_visual_prepass_complete", 1),
+])
+def test_invalid_saved_visual_progress_is_rejected(persisted, field, value):
+    path = _project_path(persisted.task_id)
+    record = json.loads(path.read_text(encoding="utf-8"))
+    record["session"][field] = value
+    path.write_text(json.dumps(record), encoding="utf-8")
+    with pytest.raises(ValueError):
+        restore_saved_session(persisted.task_id)
+
+
+def test_source_duration_alone_is_not_translated_ready(persisted):
+    persisted.initialized = False
+    persisted.total_duration = 320
+    persisted.segments.clear()
+    persisted._recalculate_telemetry()
+    assert persisted.playable_until == 0 and persisted.buffer_ahead == 0

@@ -15,6 +15,7 @@ import os
 import re
 import tempfile
 import unicodedata
+from copy import deepcopy
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional
 
@@ -166,6 +167,12 @@ class VideoIntelligence:
         self.screen_ocr = ScreenOCR()
         self.used_text_fallback = False
         self._checkpoint_context = None
+
+    def _report_stage(self, step, start, end, **details):
+        callback = getattr(self, "_stage_callback", None)
+        if callback:
+            callback({"visual_step": step, "chunk_start": start, "chunk_end": end,
+                      "processed_seconds": start, "total_seconds": self._video_duration, **details})
 
     @staticmethod
     def _checkpoint_digest(value):
@@ -914,6 +921,7 @@ class VideoIntelligence:
                         combined["screen_texts"].extend(saved_result["screen_texts"])
                         combined["summary"] = saved_result["summary"] or combined["summary"]
                         continue
+                self._report_stage("source", start, end, batch_index=index + 1, batch_total=batches)
                 corrections = self._correct_source(client, batch_payload, observed, context, cancel_check)
                 all_corrections.update(corrections)
                 self._apply_source_corrections_to_context(source_dialogue, corrections)
@@ -947,6 +955,7 @@ class VideoIntelligence:
                           f"ID OCR cần xuất, vị trí/thời gian cố định: {json.dumps(batch_screens, ensure_ascii=False)}\n"
                           f"Toàn bộ ngữ cảnh đoạn (chỉ tham khảo): {context}\n"
                           f"Ngữ cảnh trước: {combined['summary'] or '(không có)'}\nĐoạn nguồn [{start:.3f}, {end:.3f}].")
+                self._report_stage("translate", start, end, batch_index=index + 1, batch_total=batches)
                 raw, result = self._request_text_result(
                     client, prompt, batch_payload, batch_screens, start, end, cancel_check)
                 result = self._merge_source_review(result, corrections)
@@ -962,6 +971,7 @@ class VideoIntelligence:
                                 "Sửa lỗi chỉ theo bằng chứng; nếu vẫn không chắc thì needs_review=true. "
                                 "Giữ mọi cờ nguồn chưa chắc chắn. Trả TOÀN BỘ JSON cuối, đủ ID, cùng schema, không thêm bình luận.\n"
                                 f"Bản nháp chưa xác minh: {raw}")
+                self._report_stage("verify", start, end, batch_index=index + 1, batch_total=batches)
                 _, verified = self._request_text_result(
                     client, verification, batch_payload, batch_screens, start, end, cancel_check)
                 verified = self._merge_source_review(verified, corrections)
@@ -1095,7 +1105,12 @@ class VideoIntelligence:
         ocr_stage = {"kind": "ocr", "start": start, "end": end}
         observed = self._read_checkpoint(ocr_stage)
         if not self._valid_observed_screens(observed, start, end):
-            observed = self.screen_ocr.extract(video_path, start, end, cancel_check=cancel_check)
+            self._report_stage("decode", start, end)
+            options = {"cancel_check": cancel_check}
+            if getattr(self, "_stage_callback", None):
+                options["progress_callback"] = lambda done, total: self._report_stage(
+                    "ocr", start, end, frames_done=done, frames_total=total)
+            observed = self.screen_ocr.extract(video_path, start, end, **options)
             self._check_cancelled(cancel_check)
             if self._valid_observed_screens(observed, start, end):
                 self._write_checkpoint(ocr_stage, observed, cancel_check)
@@ -1176,25 +1191,34 @@ class VideoIntelligence:
         return self._with_provenance(result, "gemini", model)
 
     def prepass(self, video_path: Path, segments: List[Any], total_duration: Optional[float] = None,
-                cancel_check=None, progress_callback=None) -> Dict[str, Any]:
+                cancel_check=None, progress_callback=None, chunk_callback=None, detail_callback=None) -> Dict[str, Any]:
+        """Publish detached, validated chunks with bounded caller backpressure.
+
+        Validated results are checkpointed before publication. Restored chunks
+        use the same callback, allowing a later request failure to retain the
+        translated prefix instead of hiding every successful chunk.
+        """
         self._check_cancelled(cancel_check)
         segments = sorted(segments, key=lambda seg: self._get(seg, "start"))
         previous_context = self._checkpoint_context
+        previous_stage_callback = getattr(self, "_stage_callback", None)
+        self._stage_callback = detail_callback
         previous_dialogue = getattr(self, "_source_dialogue", [])
         self._source_dialogue = [{"id": self._get(seg, "id"), "start": self._get(seg, "start"),
                                   "end": self._get(seg, "end"), "asr_text": self._get(seg, "text_zh", "")}
                                  for seg in segments]
         self._checkpoint_context = self._checkpoint_identity(video_path, segments, total_duration)
         try:
-            return self._prepass(video_path, segments, total_duration, cancel_check, progress_callback)
+            return self._prepass(video_path, segments, total_duration, cancel_check, progress_callback, chunk_callback)
         finally:
             # A later standalone analyze_chunk must not inherit another file's
             # namespace merely because the same instance is reused.
             self._checkpoint_context = previous_context
+            self._stage_callback = previous_stage_callback
             self._source_dialogue = previous_dialogue
 
     def _prepass(self, video_path: Path, segments: List[Any], total_duration: Optional[float] = None,
-                 cancel_check=None, progress_callback=None) -> Dict[str, Any]:
+                 cancel_check=None, progress_callback=None, chunk_callback=None) -> Dict[str, Any]:
         segments = sorted(segments, key=lambda seg: self._get(seg, "start"))
         for seg in segments:
             start, end = self._number(self._get(seg, "start")), self._number(self._get(seg, "end"))
@@ -1240,6 +1264,9 @@ class VideoIntelligence:
             summary = result["summary"]
             cursor = end
             completed.append(entry)
+            if chunk_callback:
+                self._check_cancelled(cancel_check)
+                chunk_callback(deepcopy(result), entry["start"], end)
         if cursor and progress_callback:
             progress_callback(round(100 * cursor / hi, 1))
         if cursor:
@@ -1290,6 +1317,9 @@ class VideoIntelligence:
             cursor = end
             if progress_callback:
                 progress_callback(round(100 * cursor / hi, 1))
+            if chunk_callback:
+                self._check_cancelled(cancel_check)
+                chunk_callback(deepcopy(result), completed[-1]["start"], end)
         self._check_cancelled(cancel_check)
         if set(output) != {self._get(s, "id") for s in segments}:
             raise VideoIntelligenceError("Phân tích hình ảnh chưa bao phủ đủ câu thoại.")

@@ -29,7 +29,8 @@ SEGMENT_FIELDS = frozenset((
 SESSION_FIELDS = frozenset((
     "initial_buffer_seconds voice tts_engine_name asr_engine_name visual_translation total_duration video_size "
     "screen_texts caption_style caption_style_revision caption_output_outdated translation_sources review_summary "
-    "suppression_stats current_playback_time warnings rolling_context initialized auto_export_result"
+    "suppression_stats current_playback_time warnings rolling_context initialized auto_export_result "
+    "_visual_incremental_started _visual_completed_seconds _visual_prepass_complete"
 ).split())
 PATH_FIELDS = ("video_path", "ref_audio", "raw_audio_16k", "bgm_audio_path")
 META_FIELDS = frozenset((
@@ -299,9 +300,13 @@ def _validate(data, task_id):
     for key in ("voice", "tts_engine_name", "asr_engine_name"):
         if not isinstance(fields.get(key), str) or not fields[key] or len(fields[key]) > 200:
             raise ValueError("Cấu hình giọng hoặc nhận diện không hợp lệ.")
-    for key in ("visual_translation", "initialized", "caption_output_outdated", "auto_export_result"):
+    for key in ("visual_translation", "initialized", "caption_output_outdated", "auto_export_result",
+                "_visual_incremental_started", "_visual_prepass_complete"):
         if key in fields and type(fields[key]) is not bool:
             raise ValueError("Trạng thái dự án không hợp lệ.")
+    completed_visual = fields.get("_visual_completed_seconds", 0)
+    if not _finite(completed_visual) or completed_visual > duration + .1:
+        raise ValueError("Mốc phân tích video đã lưu không hợp lệ.")
     for key in ("screen_texts", "translation_sources", "warnings", "rolling_context"):
         if not isinstance(fields.get(key, []), list):
             raise ValueError("Dữ liệu dự án không hợp lệ.")
@@ -547,6 +552,10 @@ def _availability(data):
         missing.append(f"Thiếu âm thanh của {len(absent_audio)} câu; bấm Tiếp tục để tạo lại phần thiếu.")
     ready = bool(fields.get("initialized") and all(row["status"] in {"READY", "PLAYED"} for row in rows)
                  and not absent_audio and not missing)
+    visual_incomplete = bool(fields.get("visual_translation") and fields.get("_visual_incremental_started")
+                             and not fields.get("_visual_prepass_complete"))
+    if visual_incomplete:
+        ready = False
     if fields.get("review_summary", {}).get("status") in {"failed", "incomplete", "running"}:
         ready = False
     output = fields.get("output_filename", "")
@@ -558,6 +567,8 @@ def _availability(data):
     message = " ".join(missing)
     if pending_download:
         message = "Tải video chưa xong; mở dự án và bấm Tiếp tục để khôi phục phần đã tải."
+    elif visual_incomplete and not message:
+        message = "Dịch video chưa xong; phần đã dịch được giữ. Mở dự án và bấm Tiếp tục để xử lý phần còn lại."
     elif review_incomplete and not message:
         message = "AI kiểm tra lại chưa hoàn tất; mở dự án và bấm AI kiểm tra lại để tiếp tục."
     elif not ready and not message and fields.get("initialized") and rows and all(
@@ -630,6 +641,12 @@ def restore_saved_session(task_id, event_callback=None):
     session.source_video_url = f"/api/local-file?path={quote(session.video_path.as_posix(), safe='')}" if session.video_path else None
     session.bgm_url = f"/api/streaming/bgm/{task_id}" if _exists(session.bgm_audio_path) else None
     needs_preparation_resume = False
+    visual_incomplete = bool(session.visual_translation and (
+        (session._visual_incremental_started and not session._visual_prepass_complete)
+        or any(row.get("source_method") not in {"text-ai", "video-ai"}
+               and row.get("status") not in {"READY", "PLAYED"}
+               and not row.get("final_vi", "").strip() and not row.get("confirmed_silence")
+               for row in data["segments"])))
     for row in data["segments"]:
         segment = SegmentItem(row["id"], row["start"], row["end"], row["duration"])
         for key, value in row.items():
@@ -685,10 +702,13 @@ def restore_saved_session(task_id, event_callback=None):
     # Earlier interrupted preparation is restarted explicitly using the same source/checkpoints.
     session._restored_can_resume = bool(session.initialized and not source_missing
         and (not needs_preparation_resume or _exists(session.raw_audio_16k)))
-    if not session.initialized and (not source_missing or available["pending_download"]):
-        session.initialized = False
+    if (not session.initialized or visual_incomplete) and (not source_missing or available["pending_download"]):
+        # A published prefix is initialized/playable while later visual chunks
+        # are still missing. Retry must resume prepass checkpoints, never send
+        # untouched source rows straight to speech generation.
         session._startup_failed = True
-        session.error = "Chuẩn bị video bị gián đoạn; bấm Tiếp tục để khôi phục phần đã lưu."
+        session.error = ("Dịch video chưa xong; các câu đã dịch và giọng đọc được giữ. Bấm Tiếp tục để xử lý phần còn lại."
+                         if visual_incomplete else "Chuẩn bị video bị gián đoạn; bấm Tiếp tục để khôi phục phần đã lưu.")
         if available["pending_download"]:
             session._source_downloader = _SavedSourceDownloader()
     session._persistence_enabled = True

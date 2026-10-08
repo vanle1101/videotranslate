@@ -558,6 +558,29 @@ document.addEventListener("DOMContentLoaded", () => {
     return `${Number.isInteger(pct) ? pct : pct.toFixed(1)}%`;
   }
 
+  function visualProgressDetail(progress) {
+    const end = Number(progress.chunk_end);
+    const start = Number(progress.chunk_start);
+    const done = Number(progress.processed_seconds ?? progress.processed_duration ?? progress.chunk_start);
+    const total = Number(progress.total_duration ?? progress.total_seconds);
+    const step = progress.visual_step || progress.visual_stage;
+    if (!step) return "Tiến độ thời lượng video đã đối chiếu lời nói và chữ trên hình / tổng thời lượng. Các đoạn xong sẽ xuất hiện trong Transcript.";
+    const duration = Number.isFinite(total) && total > 0 && Number.isFinite(done)
+      ? `Đã xử lý ${formatTime(Math.max(0, done))} / ${formatTime(total)}. ` : "";
+    const chunk = Number.isFinite(start) && Number.isFinite(end) && end > start
+      ? `Đoạn ${formatTime(start)}–${formatTime(end)}. ` : "";
+    if (step === "ocr") {
+      const frames = progress.frames_done, count = progress.frames_total;
+      const measured = Number.isInteger(frames) && Number.isInteger(count) && count > 0 && frames >= 0 && frames <= count;
+      return `${duration}${chunk}${measured ? `Đã đọc ${frames}/${count} khung hình (${Math.round(frames * 100 / count)}%).` : "Đang đọc chữ trong khung hình."}`;
+    }
+    const actions = {decode:"Đang trích khung hình để đọc chữ.", source:"Đang chờ Muse đối chiếu lời gốc.",
+      translate:"Đang chờ Muse dịch đoạn này.", verify:"Đang chờ Muse kiểm tra bản dịch."};
+    const batch = Number.isInteger(progress.batch_index) && Number.isInteger(progress.batch_total)
+      ? ` Nhóm ${progress.batch_index}/${progress.batch_total}.` : "";
+    return `${duration}${chunk}${actions[step] || "Đang xử lý đoạn này."}${batch}`;
+  }
+
   function formatBytes(value) {
     if (typeof value !== "number" || !Number.isFinite(value) || value < 0) return "";
     const units = ["B", "KB", "MB", "GB", "TB"];
@@ -1121,7 +1144,7 @@ document.addEventListener("DOMContentLoaded", () => {
       : reviewInProgress() || currentProgress.phase === "review" ? (reviewSummaryText() || "AI đang đối chiếu từng câu với lời gốc và chữ trên hình, tự sửa lỗi trước khi tạo giọng.")
       : currentProgress.phase === "export" ? "Đang tạo video kết quả từ bản dịch đã được AI kiểm tra. Tiến độ xuất được cập nhật riêng."
       : currentProgress.phase === "download" ? (pct === null ? "Đang tải video; máy chủ chưa cung cấp tổng dung lượng." : "Tiến độ tải video nguồn. Bước xử lý câu thoại sẽ có tiến độ riêng.")
-      : currentProgress.phase === "visual" ? (pct === null ? "Đang đối chiếu lời nhận dạng với chữ trên hình. Đang chờ kết quả phân tích đầu tiên." : "Tiến độ thời lượng video đã đối chiếu lời nói và chữ trên hình / tổng thời lượng. Bước tạo giọng sẽ có tiến độ riêng.")
+      : currentProgress.phase === "visual" ? visualProgressDetail(currentProgress)
       : pct !== null ? "Tiến độ xử lý câu thoại: số câu hoàn tất / tổng số câu."
       : "Bước này chưa có số liệu phần trăm. Trạng thái sẽ cập nhật khi có kết quả.";
     btnPauseWorker.classList.toggle("hidden", !currentProgress.can_pause || terminal);
@@ -1144,6 +1167,11 @@ document.addEventListener("DOMContentLoaded", () => {
       else if (status === "FAILED" && currentProgress.phase === "review" && Object.values(segments).some(s => ["READY", "PLAYED"].includes(s.status))) {
         // A review failure is independent of draft playback. Repeated status
         // polls must not pause a draft the user explicitly chose to listen to.
+        isBufferingUnderrun = false;
+        bufferingAlert.classList.add("hidden");
+      } else if (status === "FAILED" && Object.values(segments).some(s => ["READY", "PLAYED"].includes(s.status))) {
+        // A later provider timeout must not cover or pause an existing playable
+        // prefix. The error/retry remains visible in the task card.
         isBufferingUnderrun = false;
         bufferingAlert.classList.add("hidden");
       } else if (status === "FAILED") {
@@ -2298,6 +2326,23 @@ document.addEventListener("DOMContentLoaded", () => {
           workerTtsBadge.className = "px-2 py-0.5 rounded bg-gray-800 text-gray-300";
         }
       }
+      else if (msg.type === "screen_update") {
+        // Visual chunks are committed independently. Refresh OCR overlays even
+        // when a chunk contains no speech row, so the UI never waits for the
+        // full prepass before showing the completed on-screen text work.
+        if (Array.isArray(msg.screen_texts)) {
+          visualSession = true;
+          setScreenTexts(msg.screen_texts);
+          (msg.segments || []).forEach(applySegmentUpdate);
+          renderScreenTexts(videoPlayer.currentTime || 0);
+          positionVideoOverlays();
+        }
+        if (msg.processed_seconds != null && msg.total_seconds != null) {
+          showTaskProgress({phase: "visual", processed_seconds: msg.processed_seconds,
+            total_seconds: msg.total_seconds, chunk_start: msg.chunk_start,
+            chunk_end: msg.chunk_end});
+        }
+      }
       else if (msg.type === "caption_style") {
         if (!captionStyleDirty && !captionStyleRequest && (Number(msg.caption_style_revision) || 0) >= captionStyleRevision) {
           applyCaptionStyleSnapshot(msg);
@@ -2378,11 +2423,8 @@ document.addEventListener("DOMContentLoaded", () => {
         showTaskProgress({status: "FAILED", phase: "export_error", stage: msg.message || "Chưa xuất được video kết quả", progress_pct: null});
       }
       else if (msg.type === "error") {
-        isBufferingUnderrun = false;
-        videoPlayer.pause();
-        bufferingText.textContent = msg.message || msg.error || "Xử lý thất bại. Xem Diagnostics rồi thử lại.";
-        bufferingAlert.classList.remove("hidden");
-        showTaskProgress({ phase: "failed", status: "FAILED", stage: bufferingText.textContent, progress_pct: null });
+        const message = msg.message || msg.error || "Xử lý thất bại. Xem Diagnostics rồi thử lại.";
+        showTaskProgress({ phase: "failed", status: "FAILED", stage: message, progress_pct: null });
         updateTasksTable();
       }
       else if (msg.type === "finished") {

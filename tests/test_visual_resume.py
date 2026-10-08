@@ -140,6 +140,31 @@ def test_new_instance_resumes_only_remaining_chunks_and_previous_context(source,
     assert third.prepass(source, segments(), 48) == final
 
 
+def test_chunk_callback_is_detached_and_restores_before_later_timeout(source, monkeypatch):
+    first = VideoIntelligence()
+    published = []
+
+    def publish(result, start, end):
+        published.append((set(result["segments"]), start, end))
+        result["segments"][0]["final_vi"] = "Callback must not change the checkpoint"
+
+    def analyze(path, start, end, rows, summary, cancel):
+        if start:
+            assert published == [({0}, 0., 24.)]
+            raise OpenCodeClientError("later timeout")
+        return result_for(rows)
+
+    monkeypatch.setattr(first, "analyze_chunk", analyze)
+    with pytest.raises(OpenCodeClientError):
+        first.prepass(source, segments(), 48, chunk_callback=publish)
+    restored = []
+    second = VideoIntelligence()
+    monkeypatch.setattr(second, "analyze_chunk", Mock(side_effect=OpenCodeClientError("still unavailable")))
+    with pytest.raises(OpenCodeClientError):
+        second.prepass(source, segments(), 48, chunk_callback=lambda result, start, end: restored.append(result))
+    assert restored[0]["segments"][0]["final_vi"] == "Xin chào."
+
+
 @pytest.mark.parametrize("corruption", ["truncated", "digest", "missing_output", "false_complete"])
 def test_corrupt_or_false_complete_checkpoint_cannot_skip_work(source, monkeypatch, corruption):
     interrupt_after_first(source, monkeypatch)

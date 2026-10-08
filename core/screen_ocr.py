@@ -5,7 +5,7 @@ import math
 import re
 import tempfile
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 from config import settings
 from core.media_process import run_media
@@ -116,7 +116,8 @@ class ScreenOCR:
                  "text_zh": row["text_zh"], "bbox": row["bbox"], "confidence": row["confidence"]}
                 for index, row in enumerate(completed)]
 
-    def extract(self, video_path: Path, start: float, end: float, cancel_check=None) -> list[dict[str, Any]]:
+    def extract(self, video_path: Path, start: float, end: float, cancel_check=None,
+                progress_callback: Callable[[int, int], None] | None = None) -> list[dict[str, Any]]:
         try:
             start, end = float(start), float(end)
         except (TypeError, ValueError):
@@ -141,6 +142,8 @@ class ScreenOCR:
             frames = sorted(Path(directory).glob("frame_*.jpg"))
             if not frames:
                 raise ScreenOCRError("Không đọc được khung hình để nhận dạng chữ.")
+            if progress_callback:
+                progress_callback(0, len(frames))
             for index, path in enumerate(frames):
                 self._check_cancelled(cancel_check)
                 # cv2.imread on Windows cannot reliably open Vietnamese paths.
@@ -152,5 +155,7 @@ class ScreenOCR:
                 height, width = frame.shape[:2]
                 samples.append({"time": start + index / self.FPS,
                                 "detections": self.detections(result, width, height)})
+                if progress_callback:
+                    progress_callback(index + 1, len(frames))
             self._check_cancelled(cancel_check)
         return self.track_samples(samples, start, end)

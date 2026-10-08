@@ -7,6 +7,22 @@ const source = readFileSync(new URL('../static/app.js', import.meta.url), 'utf8'
 const template = readFileSync(new URL('../templates/index.html', import.meta.url), 'utf8');
 const stylesheet = readFileSync(new URL('../static/style.css', import.meta.url), 'utf8');
 
+test('speech-free visual chunk updates committed captions and duration without restarting playback or claiming completion', async () => {
+  const ui = studio(); await ui.start();
+  const socket = ui.sockets.at(-1);
+  socket.receive({type:'progress',phase:'visual',status:'RUNNING',stage:'Đang đọc chữ',
+    visual_step:'ocr',chunk_start:24,chunk_end:48,processed_seconds:24,total_seconds:72,progress_pct:33.3});
+  const plays = ui.el('video-player').playCount;
+  socket.receive({type:'screen_update',processed_seconds:48,total_seconds:72,screen_texts:[],
+    segments:[{id:0,start:0,end:10,duration:10,status:'READY',final_vi:'Lời đã lưu',revision:3,
+      audio_url:'/saved.wav?rev=3',caption_layout:{cues:[],source_masks:[]}}]});
+  assert.equal(ui.el('seg-vi-0').textContent, 'Lời đã lưu');
+  assert.equal(ui.el('task-progress').dataset.status, 'RUNNING');
+  assert.match(ui.el('task-progress-detail').textContent, /00:48.*01:12/);
+  assert.equal(ui.el('video-player').playCount, plays);
+  assert.equal(ui.el('task-result-link').classList.contains('hidden'), true);
+});
+
 function studio(cookieReply = { configured: false, count: 0, message: '' }, voiceConfig = {}) {
   const elements = new Map(), audio = [], sockets = [], requests = [], alerts = [], copied = [];
   const intervals = new Map();
@@ -1862,6 +1878,39 @@ test('visual analysis progress describes analyzed duration separately from gener
   assert.doesNotMatch(ui.el('task-progress-detail').textContent, /số câu/);
   ui.sockets.at(-1).receive({ type: 'progress', phase: 'processing', status: 'RUNNING', progress_pct: 10 });
   assert.match(ui.el('task-progress-detail').textContent, /số câu/);
+});
+
+test('visual progress shows measured frames and provider wait without inventing progress', async () => {
+  const ui = studio(); await ui.start();
+  const socket = ui.sockets.at(-1);
+  socket.receive({type:'progress',phase:'visual',status:'RUNNING',progress_pct:7.2,
+    visual_step:'ocr',chunk_start:23.18,chunk_end:47,total_seconds:320,frames_done:18,frames_total:72});
+  assert.equal(ui.el('task-progress-value').textContent,'7.2%');
+  assert.match(ui.el('task-progress-detail').textContent,/18\/72 khung hình \(25%\)/);
+  assert.match(ui.el('task-progress-detail').textContent,/Đã xử lý 00:23 \/ 05:20/);
+  socket.receive({type:'progress',phase:'visual',status:'RUNNING',progress_pct:7.2,
+    visual_step:'verify',chunk_start:23.18,chunk_end:47,total_seconds:320,batch_index:1,batch_total:2});
+  assert.equal(ui.el('task-progress-value').textContent,'7.2%');
+  assert.match(ui.el('task-progress-detail').textContent,/Đang chờ Muse kiểm tra bản dịch/);
+  assert.doesNotMatch(ui.el('task-progress-detail').textContent,/khung hình \(/);
+  socket.receive({type:'progress',phase:'visual',status:'RUNNING',progress_pct:7.2,
+    visual_step:'ocr',frames_done:9,frames_total:0});
+  assert.doesNotMatch(ui.el('task-progress-detail').textContent,/Infinity|NaN|9\/0/);
+});
+
+test('later provider failure leaves the already translated prefix visible and playable', async () => {
+  const ui = studio(); await ui.start();
+  const socket = ui.sockets.at(-1), video = ui.el('video-player');
+  await video.play();
+  const pauseBefore = video.paused;
+  socket.receive({type:'error',message:'OpenCode phản hồi quá lâu'});
+  socket.receive({type:'finished',status:'failed',error:'OpenCode phản hồi quá lâu'});
+  assert.equal(video.paused,pauseBefore);
+  assert.equal(ui.el('buffering-alert').classList.contains('hidden'),true);
+  assert.equal(ui.el('task-progress').dataset.status,'FAILED');
+  assert.match(ui.el('task-progress-stage').textContent,/OpenCode phản hồi quá lâu/);
+  assert.match(ui.el('seg-vi-0').textContent,/Xin chào/);
+  assert.equal(ui.el('btn-export-hq').disabled,true);
 });
 
 test('long translation appears as compact sequential pages with every word and sentence timing retained', async () => {

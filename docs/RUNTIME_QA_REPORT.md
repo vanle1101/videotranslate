@@ -1,5 +1,24 @@
 # Runtime QA report
 
+## Incremental translation and OCR progress — October 8
+
+The user requested that long clips expose completed translated portions immediately, and preserve them if a later request fails. The selected provider remains OpenCode Muse; no local translation LLM was added.
+
+**Reproduced failure:** production task `5a7b66a9`, source Douyin `7692745161054506290`, duration320.040635s,197ASR rows. ASR completed15:14:29. Seven Muse requests returned usable text, but request `daa2423bcaa741c086f444f60fa67010` started15:20:08 and timed out after121.015s with zero output. The task failed15:22:09. A validated0–23.18s chunk had been checkpointed, yet the manifest/UI still had no translated rows because the old pipeline published only after the whole prepass. This does not establish a network/key failure.
+
+Corrections:
+
+- Validated chunks are checkpointed and published separately: transcript → independent review with full source dialogue → real speech → playable prefix, before requesting the next chunk.
+- Later failures retain existing text, audio and manual edits; retry uses source/checkpoints and does not overwrite READY audio with earlier drafts.
+- Partial completion markers and measured duration are persisted, including unfinished silent OCR tails. History cannot label an unfinished tail Completed.
+- Every committed visual chunk refreshes screens, caption plans and buffer telemetry, including chunks without speech.
+- OCR reports actual completed frames / extracted frames. Muse waiting stages show the current source interval and batch rather than fabricated progress. Source duration alone no longer advertises a fully translated buffer.
+- Review failure keeps an explicitly flagged playable draft, with final export blocked.
+
+Offline regressions:110focused Python checks passed;175JavaScript UI checks passed. Earlier agent runs covered255translation/review checks and53API/media checks. These are not live-provider passes.
+
+Actual production Qt offscreen QA is running against a48s excerpt from the failing source (`21bfc7e5`, backend55172). Real UI Start, ASR, OCR counters and real Muse requests have been observed. Partial playback, Stop and fresh-process continuation remain pending at this code checkpoint; no end-to-end success is claimed yet.
+
 Date: 2026-10-08, Asia/Saigon. **Overall verdict: PARTIAL — real production UI review, narration, MP4 export/playback, restore and Stop/retry PASS; full semantic acceptance FAIL for two unresolved address choices.** Tests used the actual Qt WebEngine production page offscreen and muted, honoring the user's background-only instruction. No visible desktop or physical tray acceptance is claimed. Historical evidence below is retained; this section supersedes only explicitly retested scenarios.
 
 ## Latest production result

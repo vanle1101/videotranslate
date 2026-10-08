@@ -692,17 +692,23 @@ class AutomaticTranslationReviewer:
         except (VideoIntelligenceError, KeyError, TypeError, ValueError):
             return None
 
-    def review(self, video_path, segments, screen_texts, cancel_check=None, progress_callback=None, *, force_review=False):
+    def review(self, video_path, segments, screen_texts, cancel_check=None, progress_callback=None, *,
+               force_review=False, context_segments=None):
         """Review existing speech once, returning copies and explicit audit status.
 
         Transport/schema errors propagate; callers retain the existing playable
         draft. A valid but unsupported audit retains uncertainty. No paid or
         alternative provider is selected implicitly.
+        ``context_segments`` supplies the wider source dialogue for a bounded
+        subset; those extra IDs are never reviewed or returned as completed.
         """
         check = lambda: VideoIntelligence._check_cancelled(cancel_check)
         check()
         values = segments.values() if isinstance(segments, dict) else segments
         rows = [self._row(item) for item in values]
+        context_values = context_segments.values() if isinstance(context_segments, dict) else (context_segments or [])
+        wider_rows = {row.get("id"): row for row in map(self._row, context_values)}
+        wider_rows.update({row.get("id"): row for row in rows})
         output = {}
         for row in rows:
             sid = row.get("id")
@@ -768,9 +774,11 @@ class AutomaticTranslationReviewer:
             # window. Draft Vietnamese is never proof of a relationship.
             lo, hi = min(row["start"] for row in batch), max(row["end"] for row in batch)
             context = dialogue_context(
-                [output[row["id"]] if ((output[row["id"]].get("verification") or {}).get("source_accepted")
+                [output[row["id"]] if (row["id"] in output
+                    and (output[row["id"]].get("verification") or {}).get("source_accepted")
                     and (output[row["id"]].get("verification") or {}).get("source_supported"))
-                 else self._qualified_context(row, output[row["id"]]) for row in rows], batch)
+                 else self._qualified_context(row, output.get(row["id"], row))
+                 for row in sorted(wider_rows.values(), key=lambda item: (item["start"], item["id"]))], batch)
             address_reading = self._address_reading(client, batch, context, check, checkpoint)
             prompt = self._prompt(prompt_rows, relevant, context) + address_review_instruction(address_reading)
             # Hash structured prompt inputs rather than rendered JSON. OCR key

@@ -49,6 +49,22 @@ def test_later_batch_uses_evidence_qualified_corrected_context():
     assert next(row for row in context if row["start"] == 10)["final_vi"] == "Xin chào"
 
 
+def test_subset_review_retains_remote_source_context_without_reviewing_other_ids():
+    client, scanner, prompts = components()
+    reviewer = AutomaticTranslationReviewer(client, scanner, audio_evidence=False)
+    target = source(12)
+    prior = {**source(0), "text_zh": "拜托姐"}
+    later = {**source(30), "text_zh": "下一句"}
+    reviewer._address_reading = Mock(return_value={})
+    result = reviewer.review("unused", [target], [], context_segments=[prior, target, later])
+    context = json.loads(prompts[0].split("Ngữ cảnh lân cận (không tạo thêm ID): ", 1)[1])
+    assert next(row for row in context if row["id"] == 0)["text_zh"] == "拜托姐"
+    assert next(row for row in context if row["id"] == 30)["text_zh"] == "下一句"
+    assert set(result["segments"]) == {12}
+    assert result["summary"]["checked"] == 1
+    assert scanner.extract.call_args.args[1:3] == (12., 13.)
+
+
 def test_resume_reuses_verified_work_but_force_review_runs_again(tmp_path):
     video = tmp_path / "input.mp4"
     video.write_bytes(b"offline-source-identity")

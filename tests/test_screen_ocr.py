@@ -122,6 +122,59 @@ def test_extract_keeps_unicode_paths_and_exact_sample_windows(tmp_path, monkeypa
     assert not list(directory.iterdir())
 
 
+def test_extract_reports_actual_frame_count_only_after_each_inference(tmp_path, monkeypatch):
+    cv2 = pytest.importorskip("cv2")
+    np = pytest.importorskip("numpy")
+    monkeypatch.setattr(settings, "TEMP_DIR", tmp_path)
+
+    def fake_decode(cmd, cancel_check):
+        # The video may contain fewer frames than the requested sampling window.
+        for i in range(2):
+            path = Path(cmd[-1].replace("%04d", f"{i + 1:04d}"))
+            cv2.imencode(".jpg", np.zeros((100, 200, 3), dtype=np.uint8))[1].tofile(path)
+
+    monkeypatch.setattr("core.screen_ocr.run_media", fake_decode)
+    engine = Mock(return_value=([], []))
+    progress = []
+
+    def on_progress(done, total):
+        progress.append((done, total, engine.call_count))
+
+    assert ScreenOCR(engine=engine).extract(
+        Path("unused"), 0, 1, progress_callback=on_progress) == []
+    assert progress == [(0, 2, 0), (1, 2, 1), (2, 2, 2)]
+    assert not list(tmp_path.iterdir())
+
+
+def test_extract_cancellation_stops_progress_before_claiming_processed_frame(tmp_path, monkeypatch):
+    cv2 = pytest.importorskip("cv2")
+    np = pytest.importorskip("numpy")
+    monkeypatch.setattr(settings, "TEMP_DIR", tmp_path)
+
+    def fake_decode(cmd, cancel_check):
+        for i in range(3):
+            path = Path(cmd[-1].replace("%04d", f"{i + 1:04d}"))
+            cv2.imencode(".jpg", np.zeros((100, 200, 3), dtype=np.uint8))[1].tofile(path)
+
+    monkeypatch.setattr("core.screen_ocr.run_media", fake_decode)
+    cancelled = False
+
+    def infer(frame):
+        nonlocal cancelled
+        cancelled = True
+        return [], []
+
+    engine = Mock(side_effect=infer)
+    progress = []
+    with pytest.raises(ScreenOCRError, match="hủy"):
+        ScreenOCR(engine=engine).extract(
+            Path("unused"), 0, 1, lambda: cancelled,
+            lambda done, total: progress.append((done, total)))
+    assert progress == [(0, 3)]
+    assert engine.call_count == 1
+    assert not list(tmp_path.iterdir())
+
+
 def test_real_chinese_image_inference_offline(tmp_path):
     pytest.importorskip("rapidocr_onnxruntime")
     np = pytest.importorskip("numpy")
