@@ -6,6 +6,8 @@ Date: 2026-10-08, Asia/Saigon. **Overall verdict: PARTIAL — real production UI
 
 ### Cleanup request — October 8
 
+**Latest result: grouped for manual deletion.** Following the user's explicit request to move disposable files into one folder, **168 files / 78,736,767 bytes** were moved, without copying or deletion, into the repository-root `cleanup/` directory. This includes the inventoried scratch/preview files, pytest cache, 13 source/test bytecode-cache directories and six inactive runtime logs. Original relative paths are preserved inside the folder. `workspace/temp` was recreated empty; inputs, outputs, model files, credentials, tracked tests and editable project media remain in their original locations. `cleanup/` is ignored by Git and can be removed manually as a whole. The earlier deletion rejection below remains historical evidence, not the current grouping outcome.
+
 The user explicitly requested removal of test artifacts and a Git push. Read-only inventory identified **70,312,476 bytes** in `workspace/temp` plus **4,754,770 bytes** of pytest/Python bytecode caches outside `venv`. All deletion targets were resolved and checked to remain inside this repository; linked targets were rejected. No Studio, Python, FFmpeg or FFprobe task process was running.
 
 The scoped PowerShell removal command was rejected before execution by automatic approval review with **`blocked by policy`**. **Cleanup remains BLOCKED; no file was removed.** No alternate deletion method was attempted. The remaining scratch is:
