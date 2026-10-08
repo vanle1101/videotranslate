@@ -1,19 +1,19 @@
 import sys
 from pathlib import Path
 from unittest.mock import patch
+import pytest
 
 # Ensure root directory is in sys.path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from PySide6.QtWidgets import QApplication
 from desktop_app import StudioSplashScreen, StudioMainWindow, create_app_icon
 
-def test_qt_components():
+def test_qt_components(qt_app, qt_objects):
     print("=" * 80)
     print("TEST: QT DESKTOP APPLICATION COMPONENTS")
     print("=" * 80)
 
-    app = QApplication.instance() or QApplication(sys.argv)
+    app = qt_app
     
     # 1. Test Icon Generation
     icon = create_app_icon()
@@ -21,14 +21,15 @@ def test_qt_components():
     print("[+] App icon generated successfully.")
 
     # 2. Test Splash Screen Instantiation
-    splash = StudioSplashScreen()
+    splash = qt_objects(StudioSplashScreen())
     splash.set_progress(45, "Testing splash status update...")
     print("[+] Splash screen initialized and styled correctly.")
 
     # 3. Test Main Window Instantiation with Dynamic Free Port
     from core.services.service_manager import service_manager
     dynamic_port = service_manager.find_free_port()
-    win = StudioMainWindow(dynamic_port)
+    win = qt_objects(StudioMainWindow(dynamic_port))
+    assert win.bridge.parent() is win
     available = app.primaryScreen().availableGeometry()
     assert win.minimumWidth() == min(1024, available.width())
     assert win.minimumHeight() == min(640, available.height())
@@ -51,4 +52,4 @@ def test_qt_components():
     print("=" * 80)
 
 if __name__ == "__main__":
-    test_qt_components()
+    raise SystemExit(pytest.main([__file__]))

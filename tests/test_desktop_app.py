@@ -13,16 +13,15 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from core.services.service_manager import service_manager
 
 
-@pytest.fixture(scope="module")
-def fullscreen_window_factory():
+@pytest.fixture
+def fullscreen_window_factory(qt_app, qt_objects):
     # These windows never load the backend or touch the user's Studio instance.
     with pytest.MonkeyPatch.context() as patch:
         patch.setenv("QT_QPA_PLATFORM", "offscreen")
         from desktop_app import StudioMainWindow
-        from PySide6.QtWidgets import QApplication, QMainWindow
+        from PySide6.QtWidgets import QMainWindow
 
-        app = QApplication.instance() or QApplication([])
-        windows = []
+        app = qt_app
 
         class PlayerWindow(QMainWindow):
             _on_fullscreen_requested = StudioMainWindow._on_fullscreen_requested
@@ -33,20 +32,16 @@ def fullscreen_window_factory():
                 self._fullscreen_restore_state = None
 
         def create_window(maximized=False):
-            window = PlayerWindow()
+            window = qt_objects(PlayerWindow())
             window.resize(900, 600)
             if maximized:
                 window.showMaximized()
             else:
                 window.showNormal()
-            windows.append(window)
             app.processEvents()
             return window, app
 
         yield create_window
-        for window in windows:
-            window.close()
-        app.processEvents()
 
 
 class FullscreenRequest:

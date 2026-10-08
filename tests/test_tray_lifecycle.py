@@ -12,12 +12,12 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 
 @pytest.fixture
-def tray_window(monkeypatch):
+def tray_window(monkeypatch, qt_app, qt_objects):
     monkeypatch.setenv("QT_QPA_PLATFORM", "offscreen")
     import desktop_app
-    from PySide6.QtWidgets import QApplication, QMainWindow
+    from PySide6.QtWidgets import QMainWindow
 
-    app = QApplication.instance() or QApplication([])
+    app = qt_app
     previous_quit_policy = app.quitOnLastWindowClosed()
     app.setQuitOnLastWindowClosed(False)
 
@@ -67,7 +67,7 @@ def tray_window(monkeypatch):
             desktop_app.StudioMainWindow.closeEvent(self, event)
             self.last_close_accepted = event.isAccepted()
 
-    window = LifecycleWindow()
+    window = qt_objects(LifecycleWindow())
     window.show()
     app.processEvents()
     state = SimpleNamespace(
@@ -83,8 +83,6 @@ def tray_window(monkeypatch):
     )
     yield state
     window.hide()
-    window.deleteLater()
-    app.processEvents()
     app.setQuitOnLastWindowClosed(previous_quit_policy)
 
 

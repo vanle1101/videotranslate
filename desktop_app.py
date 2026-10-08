@@ -94,7 +94,9 @@ class DesktopBridge(QObject):
     exportSaved = Signal(str)
 
     def __init__(self, main_window):
-        super().__init__()
+        # The bridge's native lifetime belongs to the window just like its
+        # WebEngine view and channel; registerObject() does not take ownership.
+        super().__init__(main_window)
         self.main_window = main_window
 
     @Slot(result=str)
