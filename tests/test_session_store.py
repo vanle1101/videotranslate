@@ -16,6 +16,58 @@ from core.streaming.pipeline import SegmentItem, StreamingPipelineSession, activ
 from core.streaming.session_store import list_saved_sessions, restore_saved_session, _project_path
 
 
+def test_large_project_compression_roundtrip_and_tamper_detection():
+    from core.streaming.session_store import _encode_project, _decode_project
+    payload = {"segments": [{"id": sid, "source": "字幕" * 200, "audit": "Bằng chứng nguồn. " * 100}
+                            for sid in range(1500)]}
+    encoded = _encode_project(payload)
+    assert json.loads(encoded)["storage"] == "zlib-project-1"
+    assert len(encoded.encode()) < len(json.dumps(payload, ensure_ascii=False).encode()) / 5
+    assert _decode_project(encoded) == payload
+    envelope = json.loads(encoded)
+    envelope["sha256"] = "0" * 64
+    with pytest.raises(ValueError, match="thiếu hoặc hỏng"):
+        _decode_project(json.dumps(envelope))
+
+
+def test_compressed_project_expansion_is_bounded_and_legacy_remains_plain():
+    from core.streaming.session_store import _encode_project, _decode_project, MAX_EXPANDED_BYTES
+    small = {"version": 1, "segments": []}
+    assert json.loads(_encode_project(small)) == small
+    assert _decode_project(_encode_project(small)) == small
+    invalid = {"storage": "zlib-project-1", "raw_bytes": MAX_EXPANDED_BYTES + 1, "payload": ""}
+    with pytest.raises(ValueError, match="Dung lượng"):
+        _decode_project(json.dumps(invalid))
+
+
+def test_large_editable_project_reopens_with_source_identity_and_summary(persisted, monkeypatch):
+    import core.streaming.session_store as store
+    monkeypatch.setattr(store, "COMPRESS_AFTER_BYTES", 1)
+    persisted._chunked_source_identity = "a" * 64
+    persisted._visual_context_summary = "Bản tóm tắt nháp, không phải bằng chứng."
+    before = persisted.segments[0].final_vi
+    path = persisted.persist()
+    assert json.loads(path.read_text(encoding="utf-8"))["storage"] == "zlib-project-1"
+    restored = restore_saved_session(persisted.task_id)
+    assert restored.segments[0].final_vi == before
+    assert restored._chunked_source_identity == "a" * 64
+    assert restored._visual_context_summary == persisted._visual_context_summary
+
+
+def test_capacity_failure_stops_processing_instead_of_silently_ignoring_saves(persisted, monkeypatch):
+    import core.streaming.session_store as store
+    path = _project_path(persisted.task_id)
+    durable = path.read_bytes()
+    monkeypatch.setattr(store, "MAX_EXPANDED_BYTES", 64)
+    with pytest.raises(store.ProjectCapacityError, match="giới hạn"):
+        persisted._persist_if_enabled()
+    assert persisted._persistence_capacity_failed and not persisted.can_retry
+    assert path.read_bytes() == durable
+    # The terminal error/finished event cannot recurse into failed saving.
+    persisted._persist_if_enabled()
+    assert any("giới hạn" in message for message in persisted.warnings)
+
+
 @pytest.fixture
 def persisted(tmp_path, monkeypatch):
     for name, value in {

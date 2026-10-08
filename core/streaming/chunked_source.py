@@ -29,8 +29,31 @@ def _source_identity(session):
     source = session.video_path.resolve(strict=True)
     stat = source.stat()
     return {"version": VERSION, "source": str(source), "size": stat.st_size,
-            "mtime_ns": stat.st_mtime_ns, "model": settings.WHISPER_MODEL_SIZE,
+            "mtime_ns": stat.st_mtime_ns, "ctime_ns": stat.st_ctime_ns, "file_id": stat.st_ino,
+            "model": settings.WHISPER_MODEL_SIZE,
             "compute": settings.WHISPER_COMPUTE_TYPE, "suppression": settings.SUPPRESSION_MODE}
+
+
+def ensure_source_identity(session):
+    """Pin the media across intervals, promotion, retry and export."""
+    current = _source_identity(session)
+    media = {key: current[key] for key in ("source", "size", "mtime_ns", "ctime_ns", "file_id")}
+    signature = hashlib.sha256(json.dumps(media, sort_keys=True).encode("utf-8")).hexdigest()
+    saved = getattr(session, "_chunked_source_identity", "")
+    if not saved:
+        # Existing bounded sessions already own measured source checkpoints.
+        # Do not adopt a replacement video when migrating their identity.
+        first = _record_path(session, 0.0)
+        if first.exists():
+            if first.is_symlink() or first.stat().st_size > 4_000_000:
+                raise ValueError("Checkpoint nguồn đầu tiên không hợp lệ.")
+            original = json.loads(first.read_text(encoding="utf-8"))["identity"]
+            if any(original.get(key) != media[key] for key in media if key in original):
+                raise ValueError("Video nguồn đã thay đổi; hãy tạo tác vụ mới để tránh ghép lời từ hai video.")
+        session._chunked_source_identity = signature
+    elif saved != signature:
+        raise ValueError("Video nguồn đã thay đổi; hãy tạo tác vụ mới để tránh ghép lời từ hai video.")
+    return signature
 
 
 def _digest(path):
@@ -106,6 +129,7 @@ def owned_boundary(rows, start, scan_end, total_duration):
 
 async def prepare_interval(session, start, nominal_end):
     """Prepare at most 56 seconds; restore the exact same interval on Retry."""
+    await session._run_blocking(ensure_source_identity, session)
     saved = await session._run_blocking(_load, session, start)
     if saved is not None:
         await session.report_progress("prepare", "Đã dùng lại lời nhận diện của đoạn đã lưu", None,

@@ -628,3 +628,50 @@ def test_dub_duration_cache_rechecks_replacement_and_rejects_truncated_pcm(previ
     path.write_bytes(data[:-10])
     with pytest.raises(ValueError, match="thiếu dữ liệu"):
         session._cached_dub_audio_duration(path)
+
+
+def test_source_replacement_between_intervals_is_rejected_even_with_original_size_and_mtime(preview):
+    import os
+    from core.streaming.chunked_source import ensure_source_identity
+    session, *_ = preview
+    original = session.video_path.stat()
+    signature = ensure_source_identity(session)
+    assert ensure_source_identity(session) == signature
+    replacement = session.video_path.parent / "replacement.mp4"
+    replacement.write_bytes(b"X" * original.st_size)
+    os.utime(replacement, ns=(original.st_atime_ns, original.st_mtime_ns))
+    replacement.replace(session.video_path)
+    with pytest.raises(ValueError, match="nguồn đã thay đổi"):
+        ensure_source_identity(session)
+
+
+def test_legacy_bounded_checkpoint_cannot_adopt_replaced_source(preview):
+    from core.streaming.chunked_source import ensure_source_identity, _record_path, _source_identity
+    session, *_ = preview
+    original = _source_identity(session)
+    checkpoint = _record_path(session, 0.0)
+    checkpoint.parent.mkdir(parents=True, exist_ok=True)
+    checkpoint.write_text(json.dumps({"identity": original}), encoding="utf-8")
+    session.video_path.write_bytes(b"replacement-source-video")
+    with pytest.raises(ValueError, match="nguồn đã thay đổi"):
+        ensure_source_identity(session)
+
+
+def test_published_summary_reaches_the_next_bounded_prepass_as_untrusted_context(preview, monkeypatch):
+    session, prepared, analyzed, *_ = preview
+    original = session.video_intelligence.prepass
+    seen = []
+    def prepass(path, rows, **options):
+        seen.append(options["previous_summary"])
+        result = original(path, rows, **options)
+        session._visual_context_summary = "Tóm tắt nháp đoạn trước."
+        return result
+    monkeypatch.setattr(session.video_intelligence, "prepass", prepass)
+    async def run():
+        await session.start()
+        await session.worker_task
+        await session.translate_full()
+        await session.start_task
+        await session.worker_task
+    asyncio.run(run())
+    assert seen[0] == "" and all(value == "Tóm tắt nháp đoạn trước." for value in seen[1:])

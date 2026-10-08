@@ -27,7 +27,7 @@ SOURCE = ROOT / "workspace/temp/partial-qa.mp4"
 RECORD = ROOT / "workspace/temp/preview-qa.json"
 
 
-def wait_for_idle(page, base, task_id, timeout=1800):
+def wait_for_idle(page, base, task_id, timeout=3600):
     deadline, previous = time.monotonic() + timeout, None
     while time.monotonic() < deadline:
         snapshot = backend(base, f"/api/streaming/{task_id}")

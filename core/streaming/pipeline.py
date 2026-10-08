@@ -264,10 +264,18 @@ class StreamingPipelineSession:
         return path
 
     def _persist_if_enabled(self):
-        if not self._persistence_enabled:
+        if not self._persistence_enabled or getattr(self, "_persistence_capacity_failed", False):
             return
+        from core.streaming.session_store import ProjectCapacityError
         try:
             self.persist()
+        except ProjectCapacityError as exc:
+            self._persistence_capacity_failed = True
+            message = str(exc)
+            if message not in self.warnings:
+                self.warnings.append(message)
+            logging.getLogger("errors").error("[%s] PROJECT_CAPACITY_EXCEEDED", self.task_id)
+            raise
         except (OSError, ValueError, TypeError) as exc:
             message = PROJECT_SAVE_FAILURE_WARNING
             if message not in self.warnings:
@@ -362,6 +370,8 @@ class StreamingPipelineSession:
 
     @property
     def can_retry(self):
+        if getattr(self, "_persistence_capacity_failed", False):
+            return False
         if getattr(self, "_restored_source_missing", False):
             return False
         if (self._startup_failed and not self.is_running
@@ -469,6 +479,9 @@ class StreamingPipelineSession:
         if (not self.can_translate_full or (self.start_task and not self.start_task.done())
                 or (self.worker_task and not self.worker_task.done())):
             raise SegmentEditConflict("Hãy chờ bản xem trước sẵn sàng trước khi dịch toàn bộ.")
+        if self._chunked_source_started:
+            from core.streaming.chunked_source import ensure_source_identity
+            ensure_source_identity(self)
         # Reserve before yielding. Two clicks cannot launch two providers/workers.
         self.translation_mode = "full"
         self._preview_ready = False
@@ -799,6 +812,8 @@ class StreamingPipelineSession:
             except asyncio.CancelledError:
                 raise
             except Exception as error:
+                if getattr(self, "_persistence_capacity_failed", False):
+                    raise
                 self.review_summary = {"status": "incomplete"}
                 warning = "AI kiểm tra lại chưa hoàn tất; giữ bản nháp và cho phép thử lại."
                 if warning not in self.warnings:
@@ -1047,6 +1062,9 @@ class StreamingPipelineSession:
         published_until = self._visual_completed_seconds
         self._visual_incremental_started = True
         self._visual_completed_seconds = max(self._visual_completed_seconds, end)
+        summary = result.get("summary")
+        if isinstance(summary, str) and summary.strip():
+            self._visual_context_summary = summary[:4000]
         if end > published_until:
             screen_start = max(start, published_until)
             self.screen_texts = [row for row in self.screen_texts
@@ -1147,6 +1165,8 @@ class StreamingPipelineSession:
                 except asyncio.CancelledError:
                     raise
                 except Exception as error:
+                    if getattr(self, "_persistence_capacity_failed", False):
+                        raise
                     self.review_summary = {"status": "incomplete"}
                     warning = "AI kiểm tra lại chưa hoàn tất; giữ bản nháp và cho phép thử lại."
                     if warning not in self.warnings:
@@ -1166,6 +1186,8 @@ class StreamingPipelineSession:
                 try:
                     await self._process_segment(segment)
                 except Exception as error:
+                    if getattr(self, "_persistence_capacity_failed", False):
+                        raise
                     segment.failed_stage, segment.status = segment.status, "FAILED"
                     segment.error = str(error)
                     await self.emit("segment_update", segment.to_dict())
@@ -1454,11 +1476,12 @@ class StreamingPipelineSession:
 
     async def _start_chunked_visual(self):
         """Prepare, translate and publish one source interval at a time."""
-        from core.streaming.chunked_source import prepare_interval, publish_background_prefix
+        from core.streaming.chunked_source import prepare_interval, publish_background_prefix, ensure_source_identity
         from core.streaming.export import HQExporter
         from core.video_intelligence import VideoIntelligence
         self._chunked_source_started = True
         self._preview_ready = False
+        await self._run_blocking(ensure_source_identity, self)
         if not self.total_duration:
             info = await self._run_blocking(VideoIntelligence.media_info, self.video_path,
                                             cancel_check=lambda: self.is_stopped)
@@ -1531,6 +1554,8 @@ class StreamingPipelineSession:
                     try:
                         await self._process_segment(row)
                     except Exception as error:
+                        if getattr(self, "_persistence_capacity_failed", False):
+                            raise
                         row.failed_stage, row.status, row.error = row.status, "FAILED", str(error)
                         await self.emit("segment_update", row.to_dict())
                         logging.getLogger("errors").error(
@@ -1587,7 +1612,8 @@ class StreamingPipelineSession:
                            for row in self.segments.values()]
                 await self._run_blocking(self.video_intelligence.prepass, self.video_path, source_rows,
                     total_duration=self.total_duration, start_time=cursor, end_time=end,
-                    context_segments=context, cancel_check=lambda: self.is_stopped,
+                    context_segments=context, previous_summary=getattr(self, "_visual_context_summary", ""),
+                    cancel_check=lambda: self.is_stopped,
                     chunk_callback=chunk_callback, detail_callback=detail_callback)
             finally:
                 active = False

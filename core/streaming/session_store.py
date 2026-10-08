@@ -1,6 +1,8 @@
 """Durable editable projects. Runtime tasks, engines and credentials never enter a manifest."""
 import json
 import hashlib
+import base64
+import zlib
 import math
 import numbers
 import os
@@ -19,6 +21,46 @@ from core.streaming.audio_cache import resolve_dub_timing
 
 VERSION = 1
 MAX_BYTES = 16 * 1024 * 1024
+MAX_EXPANDED_BYTES = 64 * 1024 * 1024
+MAX_ROWS = 50000
+COMPRESS_AFTER_BYTES = 1024 * 1024
+
+
+class ProjectCapacityError(ValueError):
+    """Stop bounded execution before durable project capacity is exhausted."""
+
+
+def _encode_project(payload):
+    raw = json.dumps(payload, ensure_ascii=False, allow_nan=False, separators=(",", ":")).encode("utf-8")
+    if len(raw) > MAX_EXPANDED_BYTES:
+        raise ProjectCapacityError("Dự án đạt giới hạn dữ liệu lưu; phần đã lưu vẫn giữ nguyên. Hãy dùng video ngắn hơn.")
+    if len(raw) <= COMPRESS_AFTER_BYTES:
+        return raw.decode("utf-8")
+    envelope = {"storage": "zlib-project-1", "raw_bytes": len(raw), "sha256": hashlib.sha256(raw).hexdigest(),
+                "payload": base64.b64encode(zlib.compress(raw, 6)).decode("ascii")}
+    encoded = json.dumps(envelope, separators=(",", ":"))
+    if len(encoded.encode("utf-8")) > MAX_BYTES:
+        raise ProjectCapacityError("Dự án đạt giới hạn dữ liệu lưu; phần đã lưu vẫn giữ nguyên. Hãy dùng video ngắn hơn.")
+    return encoded
+
+
+def _decode_project(encoded):
+    record = json.loads(encoded)
+    if not isinstance(record, dict) or record.get("storage") != "zlib-project-1":
+        return record
+    count = record.get("raw_bytes")
+    if type(count) is not int or not 0 < count <= MAX_EXPANDED_BYTES:
+        raise ValueError("Dung lượng dự án nén không hợp lệ.")
+    try:
+        compressed = base64.b64decode(record["payload"], validate=True)
+        decoder = zlib.decompressobj()
+        raw = decoder.decompress(compressed, count + 1)
+        if (len(raw) != count or not decoder.eof or decoder.unconsumed_tail or decoder.unused_data
+                or hashlib.sha256(raw).hexdigest() != record.get("sha256")):
+            raise ValueError("Dữ liệu dự án nén thiếu hoặc hỏng.")
+        return json.loads(raw)
+    except (KeyError, TypeError, zlib.error) as error:
+        raise ValueError("Dữ liệu dự án nén không hợp lệ.") from error
 ID_PATTERN = re.compile(r"^[a-zA-Z0-9_-]{1,80}$")
 SEGMENT_FIELDS = frozenset((
     "id start end duration status text_zh emotion literal_vi natural_vi final_vi tts_duration speed_ratio "
@@ -32,6 +74,7 @@ SESSION_FIELDS = frozenset((
     "suppression_stats current_playback_time warnings rolling_context initialized auto_export_result "
     "_visual_incremental_started _visual_completed_seconds _visual_prepass_complete"
     " translation_mode preview_seconds _chunked_source_started _source_prepared_seconds _preview_ready"
+    " _chunked_source_identity _visual_context_summary"
 ).split())
 PATH_FIELDS = ("video_path", "ref_audio", "raw_audio_16k", "bgm_audio_path")
 META_FIELDS = frozenset((
@@ -159,8 +202,8 @@ def _clean(value, *, depth=0):
             value = value.replace(secret, "[redacted]")
         return value
     if isinstance(value, (list, tuple)):
-        if len(value) > 10000:
-            raise ValueError("Dự án có quá nhiều phần tử.")
+        if len(value) > MAX_ROWS:
+            raise ProjectCapacityError("Dự án đạt giới hạn số phần tử lưu; phần đã lưu vẫn giữ nguyên. Hãy dùng video ngắn hơn.")
         return [_clean(item, depth=depth + 1) for item in value]
     if isinstance(value, dict):
         result = {}
@@ -254,9 +297,7 @@ def save_session(session):
                "RUNNING" if session.is_running or session.is_editing else "READY",
                "session": fields, "segments": rows}
     _validate(payload, session.task_id)
-    encoded = json.dumps(payload, ensure_ascii=False, allow_nan=False, separators=(",", ":"))
-    if len(encoded.encode("utf-8")) > MAX_BYTES:
-        raise ValueError("Dự án vượt quá dung lượng lưu cho phép.")
+    encoded = _encode_project(payload)
     target.parent.mkdir(parents=True, exist_ok=True)
     if target.is_symlink():
         raise ValueError("Tệp dự án không được là liên kết.")
@@ -351,7 +392,9 @@ def _validate(data, task_id):
     size = fields.get("video_size", [1080, 1920])
     if not isinstance(size, list) or len(size) != 2 or any(type(v) is not int or not 0 < v <= 16384 for v in size):
         raise ValueError("Kích thước video không hợp lệ.")
-    if not isinstance(rows, list) or len(rows) > 10000:
+    if isinstance(rows, list) and len(rows) > MAX_ROWS:
+        raise ProjectCapacityError("Dự án đạt giới hạn số câu lưu; phần đã lưu vẫn giữ nguyên. Hãy dùng video ngắn hơn.")
+    if not isinstance(rows, list):
         raise ValueError("Danh sách câu thoại không hợp lệ.")
     ids = set()
     for row in rows:
@@ -410,7 +453,7 @@ def _read(task_id):
         raise FileNotFoundError("Không tìm thấy dự án đã lưu.")
     if path.is_symlink() or not path.is_file() or path.stat().st_size > MAX_BYTES:
         raise ValueError("Không tìm thấy tệp dự án hợp lệ.")
-    return _validate(json.loads(path.read_text(encoding="utf-8")), task_id)
+    return _validate(_decode_project(path.read_text(encoding="utf-8")), task_id)
 
 
 def _exists(value):

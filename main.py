@@ -1053,8 +1053,16 @@ async def export_hq(req: ExportHQRequest):
     if not session:
         raise HTTPException(status_code=404, detail="Session not found")
 
+    if getattr(session, "_chunked_source_started", False):
+        from core.streaming.chunked_source import ensure_source_identity
+        try:
+            ensure_source_identity(session)
+        except (OSError, ValueError, KeyError, TypeError):
+            raise HTTPException(status_code=409, detail="Video nguồn đã thay đổi hoặc mất; hãy tạo tác vụ mới trước khi xuất.") from None
     if getattr(session, "is_editing", False):
         raise HTTPException(status_code=409, detail="Đang lưu lời thoại và tạo lại giọng đọc. Hãy chờ lưu xong trước khi xuất.")
+    if getattr(session, "_persistence_capacity_failed", False):
+        raise HTTPException(status_code=409, detail="Dự án đạt giới hạn dữ liệu lưu. Phần đã lưu được giữ; hãy dùng video ngắn hơn.")
     if (getattr(session, "translation_mode", "full") == "preview"
             and not getattr(session, "_visual_prepass_complete", False)):
         raise HTTPException(status_code=409, detail="Đây là bản xem trước. Bấm Dịch toàn bộ trước khi xuất video đầy đủ.")
