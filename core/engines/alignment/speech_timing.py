@@ -150,6 +150,49 @@ def compact_tts_pauses(path, target_duration):
     return [(left / rate, right / rate) for left, right in cuts]
 
 
+def compact_tts_edge_padding(path, target_duration):
+    """Reclaim near-digital-silence at the outer edges, retaining 20 ms guards.
+
+    Only used after a fit failure. Every sample above three PCM16 quantization
+    levels (-80.8 dBFS) is retained, in every channel. This never cuts internal
+    pauses, quiet consonants or the end of speech to meet a duration target.
+    """
+    if not math.isfinite(target_duration) or target_duration <= 0:
+        return []
+    try:
+        with wave.open(str(path), "rb") as audio:
+            if audio.getsampwidth() != 2 or audio.getcomptype() != "NONE":
+                return []
+            params = audio.getparams()
+            rate, channels = audio.getframerate(), audio.getnchannels()
+            frames = np.frombuffer(audio.readframes(audio.getnframes()), dtype="<i2").reshape(-1, channels)
+        if rate <= 0 or not len(frames):
+            return []
+        needed = len(frames) - math.floor(target_duration * rate)
+        if needed <= 0:
+            return []
+        active = np.flatnonzero(np.any(np.abs(frames.astype(np.int32)) > 3, axis=1))
+        if not len(active) or audio_activity_span(path, threshold=.0001) is None:
+            return []
+        guard = math.ceil(.02 * rate)
+        left_capacity = max(0, int(active[0]) - guard)
+        right_capacity = max(0, len(frames) - int(active[-1]) - 1 - guard)
+        left = min(needed, left_capacity)
+        right_cut = min(needed - left, right_capacity)
+        right = len(frames) - right_cut
+        if not left and not right_cut:
+            return []
+    except (OSError, EOFError, wave.Error, ValueError, ZeroDivisionError):
+        return []
+    with tempfile.TemporaryDirectory(prefix="tts-edges-", dir=Path(path).parent) as directory:
+        temporary = Path(directory) / "speech.wav"
+        with wave.open(str(temporary), "wb") as audio:
+            audio.setparams(params)
+            audio.writeframes(frames[left:right].tobytes())
+        temporary.replace(path)
+    return ([(0.0, left / rate)] if left else []) + ([(right / rate, len(frames) / rate)] if right_cut else [])
+
+
 def retime_tts_word_boundaries(boundaries, *, trim_offset=0.0, removed_intervals=(), speech_onset=None):
     """Copy valid provider boundaries onto the trimmed/compacted PCM timeline."""
     origin = None

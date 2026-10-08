@@ -11,7 +11,7 @@ import numpy as np
 import pytest
 
 from core.engines.alignment.speech_timing import (
-    audio_activity_span, build_speech_timing, compact_tts_pauses, retime_tts_word_boundaries,
+    audio_activity_span, build_speech_timing, compact_tts_pauses, compact_tts_edge_padding, retime_tts_word_boundaries,
 )
 from core.engines.tts.edge_fallback import EdgeTTSFallbackEngine
 from core.streaming.pipeline import SegmentItem, StreamingPipelineSession
@@ -46,6 +46,40 @@ def test_pcm_activity_excludes_encoder_silence(tmp_path):
     onset, offset = audio_activity_span(audio)
     assert .4 <= onset <= .42
     assert offset == pytest.approx(2.6, abs=.01)
+
+
+def test_edge_compaction_retains_quiet_speech_and_all_channels(tmp_path):
+    path = tmp_path / "edge.wav"
+    rate = 24000
+    frames = np.full((rate, 2), 3, dtype="<i2")
+    frames[2400:21600, 0] = 1000
+    frames[1200:2400, 1] = 4  # Quiet opening must not be mistaken for padding.
+    frames[21600:22800, 1] = -32768  # abs(int16) overflow must not hide activity.
+    with wave.open(str(path), "wb") as w:
+        w.setparams((2, 2, rate, 0, "NONE", "not compressed"))
+        w.writeframes(frames.tobytes())
+    cuts = compact_tts_edge_padding(path, .94)
+    assert cuts == [(0.0, .03), (.97, 1.0)]
+    with wave.open(str(path), "rb") as w:
+        actual = np.frombuffer(w.readframes(w.getnframes()), dtype="<i2").reshape(-1, 2)
+    assert np.array_equal(actual, frames[720:23280])
+    assert not list(tmp_path.glob("tts-edges-*"))
+
+
+def test_edge_compaction_does_not_cut_content_for_an_impossible_budget(tmp_path):
+    path = tmp_path / "edge.wav"
+    pcm(path, duration=1, onset=.02, offset=.98)
+    original = path.read_bytes()
+    assert compact_tts_edge_padding(path, .5) == []
+    assert path.read_bytes() == original
+
+
+def test_edge_compaction_never_changes_audio_that_already_fits(tmp_path):
+    path = tmp_path / "edge.wav"
+    pcm(path, duration=1, onset=.1, offset=.9)
+    original = path.read_bytes()
+    assert compact_tts_edge_padding(path, 1) == []
+    assert path.read_bytes() == original
 
 
 def test_scaled_word_boundaries_start_after_fitted_voice_onset(tmp_path):

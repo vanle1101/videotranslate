@@ -7,7 +7,7 @@ from pathlib import Path
 
 from core.runtime_context import current_execution_context
 from core.engines.alignment.speech_timing import (
-    audio_activity_span, compact_tts_pauses, retime_tts_word_boundaries,
+    audio_activity_span, compact_tts_pauses, compact_tts_edge_padding, retime_tts_word_boundaries,
     take_tts_word_boundaries, trim_tts_padding,
 )
 from core.engines.alignment.timing_aligner import SpeechBudgetError
@@ -96,9 +96,15 @@ def synthesize_natural_speech(*, text, source, duration, output_path, engine, al
                         # an actual fit failure activates this path; normal
                         # speech stays unchanged. Leave 2% for atempo rounding.
                         cuts = compact_tts_pauses(raw, raw_budget * .98)
-                        if not cuts:
+                        edge_cuts = compact_tts_edge_padding(raw, raw_budget * .98)
+                        # Both cut lists use the original waveform coordinate
+                        # system; map provider boundaries once after all safe
+                        # reclamation so edge and internal offsets cannot be
+                        # applied twice or in mixed timelines.
+                        boundaries = retime_tts_word_boundaries(
+                            boundaries, removed_intervals=cuts + edge_cuts)
+                        if not cuts and not edge_cuts:
                             raise
-                        boundaries = retime_tts_word_boundaries(boundaries, removed_intervals=cuts)
                         before = measured
                         measured = aligner.get_audio_duration(raw)
                         if not math.isfinite(measured) or measured <= 0:
@@ -107,7 +113,7 @@ def synthesize_natural_speech(*, text, source, duration, output_path, engine, al
                         measurements[-1]["measured_seconds"] = round(measured, 4)
                         logger.info("PACING_COMPACTED run_id=%s speech_id=%s attempt=%d before_seconds=%.4f measured_seconds=%.4f removed_seconds=%.4f pauses=%d",
                                     execution.run_id, speech_id, attempt + 1, before, measured,
-                                    sum(right - left for left, right in cuts), len(cuts))
+                                    sum(right - left for left, right in cuts + edge_cuts), len(cuts) + len(edge_cuts))
             except SpeechBudgetError:
                 if translator is None or attempt == 2:
                     logger.warning("PACING_FAILED run_id=%s speech_id=%s attempt=%d reason=%s",
