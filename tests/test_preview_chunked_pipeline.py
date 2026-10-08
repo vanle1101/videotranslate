@@ -203,6 +203,31 @@ def test_interrupted_preview_does_not_prepare_translate_rest_before_full_click(p
     asyncio.run(run())
 
 
+def test_startup_resume_retries_earlier_known_speech_without_discarding_ready_prefix(preview):
+    session, prepared, analyzed, speech, events = preview
+    async def run():
+        await session.start()
+        await session.worker_task
+        first = session.segments[0]
+        first_bytes = Path(first.audio_path).read_bytes()
+        missing = session.segments[1]
+        Path(missing.audio_path).unlink()
+        missing.audio_path = missing.audio_url = None
+        missing.status, missing.failed_stage = "FAILED", "TTS"
+        session._startup_failed = True
+        session.error = "source work interrupted"
+        session._preview_ready = False
+        await session.retry_failed_synthesis()
+        await session.start_task
+        await session.worker_task
+        assert missing.status == "READY" and missing.final_vi
+        assert Path(first.audio_path).read_bytes() == first_bytes
+        assert session.get_progress()["status"] == "PREVIEW_READY"
+    asyncio.run(run())
+    assert prepared == [(0, 24)]
+    assert speech == [0, 1, 2, 1]
+
+
 def test_turning_ocr_review_off_still_uses_bounded_preview_then_full(preview, monkeypatch):
     session, prepared, analyzed, speech, events = preview
     session.visual_translation = False

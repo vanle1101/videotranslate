@@ -128,6 +128,7 @@ def main():
             else:
                 assert snapshot["progress"]["can_retry"]
                 assert click(page, "btn-retry-worker")
+                until(page, "document.getElementById('task-progress').dataset.status==='RUNNING'", timeout=30)
         event("TASK", task_id)
         snapshot = wait_for_idle(page, base, task_id)
         if snapshot["progress"]["status"] == "FAILED":

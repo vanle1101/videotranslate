@@ -382,6 +382,15 @@ class StreamingPipelineSession:
                 or (self.start_task and not self.start_task.done())):
             raise SegmentEditConflict("Chỉ tiếp tục khi tác vụ đã dừng do lỗi và không có thao tác khác đang chạy.")
         if self._startup_failed:
+            # Resume may advance source analysis from its durable cursor while
+            # earlier speech failed. Explicit Retry must also schedule those
+            # known translations; otherwise the cursor skips them forever.
+            for segment in self.segments.values():
+                if (segment.status == "FAILED" and segment.failed_stage in {"TTS", "ALIGNING"}
+                        and (segment.final_vi.strip() or segment.confirmed_silence)):
+                    segment.status = "WAITING"
+                    segment.error = None
+                    segment._retry_synthesis = True
             self._restored_interrupted = False
             self.is_running = True
             self.error = None
@@ -1951,6 +1960,10 @@ class StreamingPipelineSession:
         duration = end - start
         known_duration = self._source_prepared_seconds if self._chunked_source_started else self.total_duration
         capacity = max(duration, available_reflow_duration(rows, seg.id, total_duration=known_duration))
+        if not self._chunked_source_started:
+            # Existing full-source projects retain their original fitting
+            # contract; only the new bounded timeline opts into two-sided fit.
+            capacity = min(capacity, duration + .35)
         # The planner bounds both source endpoints to +/-350 ms and can borrow
         # on both sides. Capping the *duration* to +350 ms discarded a valid
         # additional 350 ms at the other endpoint (the real 1.3 s row could
