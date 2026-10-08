@@ -45,7 +45,7 @@ The original user project `17736b77` is unchanged: SHA256 `b36f5dc1202ae6d8a71c5
 ## Validation, files, and cleanup
 
 - Real providers: OpenCode Muse `muse-spark-1.3-contributor-free`, Edge Hoài My; real OCR/ASR, FFmpeg mix/export and local WebM preview. Runtime dependency/model readiness passed; none reinstalled.
-- Full suite before final lifecycle/WMI changes: **1,666passed,1skipped,127subtests**. Focused final storage/lifecycle/hardware checks: **85passed**. JavaScript interactions: **172passed**. Final full-suite result recorded below.
+- Final full suite: **1,671passed,1skipped,127subtests**. Focused final storage/lifecycle/hardware checks: **85passed**. JavaScript interactions: **172passed**. Final full-suite result recorded below.
 - No TypeScript/npm production build or configured lint/typecheck pipeline exists in this Python/Qt/FastAPI/static-JS repository. JavaScript syntax and Git whitespace checks pass; production UI executes the real application directly.
 - Main fixes this continuation: `core/translation_review.py`, `core/review_checkpoint.py`, `core/video_intelligence.py`, `core/streaming/session_store.py`, `core/streaming/pipeline.py`, `core/services/service_manager.py`, `core/hardware.py`, `static/app.js`; regression tests and `scripts/check_production_ui.py`. Earlier timing/context files are listed in historical entries.
 - Pushed code checkpoints: `8668cfd`, `aecd849`, `289eb50`, `be5f655`. Final report/follow-up commits appear in Git history. Media, credentials and runtime caches are not committed.
@@ -375,3 +375,4 @@ Earlier failures were stale exporter fixtures omitting required audio/duration m
 The current15s result `142bb90d` is retained with its review sidecar; original source and user media remain unchanged. User was asked to exit via the tray so the latest executor-cancellation fix can load; that live Stop retest is pending. No test server or watcher is intentionally left running; the normal Studio application remains open for the user.
 
 Automatic policy review rejected cleanup of the superseded task-generated `f8500b88` MP4/sidecar and task-created pytest temporary directories220–222, returning only “blocked by policy”. The cleanup command did not execute; those files remain. No alternative deletion route was attempted. No backup repository or dependency reinstall was created.
+
