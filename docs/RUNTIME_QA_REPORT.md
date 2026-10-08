@@ -1,6 +1,21 @@
 # Runtime QA report
 
-Date: 2026-10-07, Asia/Saigon. **Overall verdict: FAIL / broader audit remains incomplete.** Historical sections below retain their original evidence; the latest retests in this section supersede their pending statuses only for the listed scenarios.
+Date: 2026-10-08, Asia/Saigon. **Overall verdict: FAIL / broader audit remains incomplete.** Historical sections below retain their original evidence; the latest retests in this section supersede their pending statuses only for the listed scenarios.
+
+## Headless production retest — October 8
+
+The user explicitly requested background operation without opening Studio or Chrome. These tests use the production service manager and real HTTP endpoints, OpenCode Muse and Edge TTS. They are not native UI acceptance. The previous Studio processes are no longer running; the earlier stop/relaunch policy blocker is historical.
+
+| Test / exact steps | Expected result | Actual result / cause / retest |
+| --- | --- | --- |
+| Start fresh backend PID6756, port63197 → POST `/api/streaming/start-local-file` with the existing 15.018688s dialogue clip, Hoài My, Edge TTS and visual translation → poll task `e978c201` | Real reviewed speech and a validated full MP4 | **FAIL, 09:47:05:** Muse/OCR/ASR review completed, then TTS stopped at segment4 (fifth sentence), `我问你几岁了快说`. “Tôi hỏi bạn mấy tuổi rồi, nói mau!” measured2.390s against1.460s slot/1.679s raw budget. Three proposed rewrites were rejected as uncertain. Output filename remained empty; no false MP4 success. Backend shut down normally. |
+| Same production run, segment1 “Hả?” at1.55–1.95 | Complete utterance in0.400s, speed≤1.15 | **PASS real runtime, 09:44:57:** Edge produced0.460s; bounded Rubber Band at1.15 produced0.400000s. Segment became READY only after valid audio. |
+| Reproduce segment4 pacing with saved source context and real Muse | Capture actual rejection cause | **FAIL reproduced:** Muse proposed “Hỏi mấy tuổi rồi, nói mau!” and explained it preserved the question and imperative, but marked uncertainty solely because relationship was unknown. Shared policy demanded that flag even for faithful neutral ellipsis. Proposal/verification instructions now distinguish semantic ellipsis from relationship proof; independent equivalent/natural/address checks and speed ceiling stay enforced. |
+| Review direct address `拜托姐` | Accept only the roles actually supported and used | Found whole-row uncertainty rejected a listener-only “chị” because self-address/identity was unknown. Added separately cited self/listener certainty and complete candidate-term/role coverage. Unknown self-address still cannot authorize “em”; matching OCR alone still cannot authorize either role. Real fresh-run retest is pending below. |
+
+Additional fixes: speech-cache revision is captured once by the loaded process (including enabled TTS adapter code), preventing old loaded behavior from claiming a newly edited source revision; unreadable revision inputs disable cache identity safely. The native tray exit action and Ctrl+Q share the existing graceful-exit path; X still hides to tray. Native Ctrl+Q operation has not been claimed as manually tested.
+
+Automated checkpoint before the latest ellipsis/role changes: **1,486 passed, 1 skipped, 127 subtests**, two upstream WebSocket deprecation warnings. After the role changes, **137 focused review/context tests passed**. Full final suite and new media acceptance remain pending. No dependencies were reinstalled, and no local translation LLM was added.
 
 ## Final address-applicability correction — October 7, 23:02 onward
 
@@ -15,6 +30,8 @@ Root causes and corrections:
 Files in the final applicability correction: `core/translation_context.py`, `core/translation_review.py`, `core/streaming/session_store.py`, `tests/test_address_applicability.py`, `tests/test_translation_context.py`, `tests/test_natural_speech.py`, `tests/test_session_store.py`. Earlier context/timing corrections are recorded in commits `9b9e197`, `ef6fc54`, `15d7972`, `a2c75c6`, and `55e073b`. Session regressions preserve applicable, neutral and unresolved flags through two reopen cycles; code hashes prevent the previous review/visual/speech policy from reusing the old cache namespace.
 
 The production Studio process remains on the earlier code. Its stop/relaunch action was rejected by automatic approval review with `blocked by policy`; no alternative termination mechanism was used. A passing isolated provider or audio probe is **not** a production UI end-to-end pass. No new fully validated MP4 has been published for task `17736b77`.
+
+Speech-cache runtime guard: the cache namespace is now captured when the Python process imports the speech fitter. It no longer hashes edited files on every request, so an old process cannot label old loaded behavior with a newer on-disk revision. This guard itself still requires a real process restart before production UI acceptance.
 
 ### Real Muse retest with the new applicability gate — October 7, 23:02–23:08
 

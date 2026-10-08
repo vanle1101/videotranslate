@@ -510,6 +510,10 @@ cho ngữ điệu; không dùng từ viết tắt khó đọc, không bỏ mất
 câu và dùng cách diễn đạt tương đương trong văn nói; không bắt buộc giữ từng từ
 của bản nháp hay cụm dịch sát chữ. Bảo toàn thông điệp trong ngữ cảnh, không bám
 hình thức từ ngữ khiến câu dài hoặc thiếu tự nhiên.
+Có thể lược chủ ngữ/đối tượng theo ngữ pháp hội thoại Việt nếu mạch nguồn xác định
+rõ hành động vẫn do ai làm với ai và câu Việt không đổi quan hệ hay thái độ.
+Đây là tỉnh lược có căn cứ, không phải bỏ ý: không được lược người đang được
+nhấn mạnh hoặc đối lập, người thứ ba, phủ định, lời gọi hay chi tiết riêng của nguồn.
 Giữ rõ cách thức, góc nhìn và quan hệ không gian/thời gian nếu nguồn có nêu;
 không thay một chi tiết cụ thể bằng cảm giác chung mà người nghe phải tự đoán.
 Không rút thuật ngữ thành cụm sai nghĩa, không bỏ động từ hoặc quan hệ ngữ pháp
@@ -517,6 +521,10 @@ thành danh sách từ khóa. Số và đơn vị phải đọc được đầy 
 để giả vờ đã rút ngắn thời lượng.
 Nếu không thể rút mà vẫn đúng nghĩa, trả lại câu nháp và needs_review=true.
 {VIETNAMESE_ADDRESS_POLICY}
+needs_review ở bước này đánh giá chính câu đề xuất: chưa biết quan hệ nhân vật
+không tự làm câu trung tính, đủ nghĩa thành không chắc chắn. Nêu căn cứ tỉnh lược
+trong review_reason; không coi tỉnh lược là xác nhận quan hệ. Nếu câu còn dựa vào
+một chiều xưng hô chưa rõ hoặc mất đối lập chủ thể thì vẫn needs_review=true.
 Trả duy nhất JSON: {{"literal_vi":"...","natural_vi":"...","final_vi":"...",\
 "needs_review":false,"review_reason":"..."}}"""
         target = focus_identity(rolling_context or [])
@@ -556,7 +564,7 @@ Trả duy nhất JSON: {{"literal_vi":"...","natural_vi":"...","final_vi":"...",
         verdict = self._json_response(self._opencode_request(
             'Kiểm định độc lập lời lồng tiếng Việt với câu Trung. Kiểm tra chủ thể, phủ định, '
             'mức độ, tên, số, hành động và giọng điệu. Bỏ từ đệm được phép; không bỏ ý. '
-            'Tách nguồn thành từng ý, đối chiếu từng ý với từ ngữ thực có trong candidate, '
+            'Tách nguồn thành từng ý, đối chiếu từng ý với từ ngữ và cấu trúc thực có trong candidate, '
             'đặc biệt cách thức, góc nhìn, quan hệ không gian/thời gian. Không dùng previous '
             'để bù ý thiếu trong candidate. Cảm giác chung hoặc lời gợi liên tưởng không '
             'thay được chi tiết cụ thể của nguồn; phải equivalent=false nếu người nghe '
@@ -569,7 +577,14 @@ Trả duy nhất JSON: {{"literal_vi":"...","natural_vi":"...","final_vi":"...",
             + '\nNếu sai vai người nói/người nghe hoặc đổi mức độ lịch sự, equivalent=false. '
               'Nêu căn cứ xưng hô trong reason, không lấy bản Việt cũ làm bằng chứng. '
               'address_preserved=true chỉ khi candidate giữ chiều và sắc thái xưng hô có căn cứ. '
-              'Không tự đổi em thành chị hoặc con thành tôi chỉ để rút nhịp; false nếu còn nghi ngờ.',
+              'Không tự đổi em thành chị hoặc con thành tôi chỉ để rút nhịp; false nếu còn nghi ngờ. '
+              'Cho phép tỉnh lược đại từ theo ngữ pháp hội thoại Việt khi nguồn/ngữ cảnh xác định '
+              'người làm và người nhận mà candidate vẫn giữ đủ hành động, thái độ và nghĩa. '
+              'Phải giải thích rõ vai nào được lược và vì sao không đổi nghĩa; không yêu cầu '
+              'mỗi đại từ Trung có một từ Việt tương ứng. Không cho phép lược chủ thể được '
+              'nhấn mạnh/đối lập, người thứ ba hoặc lời gọi. Chưa biết quan hệ xã hội không '
+              'tự bác câu trung tính đủ nghĩa; address_preserved ở đây xác nhận không đổi '
+              'chiều/sắc thái, không chứng nhận một quan hệ chưa biết.',
             json.dumps({"target": target, "source": clean_zh, "previous": draft, "candidate": candidate["final_vi"],
                         "context": context}, ensure_ascii=False)))
         if (not isinstance(verdict, dict) or verdict.get("equivalent") is not True

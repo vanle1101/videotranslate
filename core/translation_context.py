@@ -10,7 +10,7 @@ import json
 import re
 
 
-ADDRESS_POLICY_REVISION = 3
+ADDRESS_POLICY_REVISION = 4
 
 VIETNAMESE_ADDRESS_POLICY = """
 QUY TẮC XƯNG HÔ THEO NGỮ CẢNH (áp dụng cả dịch, kiểm định và rút gọn lời đọc):
@@ -33,9 +33,13 @@ QUY TẮC XƯNG HÔ THEO NGỮ CẢNH (áp dụng cả dịch, kiểm định v�
 - Mệnh lệnh, dấu chấm than, 快说 hoặc giọng gấp KHÔNG tự cho phép dùng tao/mày.
   Chỉ dùng xưng hô thô khi ngữ cảnh gốc đủ chứng minh; không tự làm thoại gây gổ.
   Không viết tắt đại từ thành m/t, ko, hoặc tiếng chat trong lời để đọc.
-- Nếu chưa xác định được người nói/người nghe hoặc quan hệ: dùng câu trung tính,
-  lược đại từ khi tự nhiên và không mất nghĩa; needs_review=true và nêu điều chưa
-  rõ ở review_reason. Không tự coi bản dịch trôi chảy là bằng chứng quan hệ.
+- Nếu chưa xác định được người nói/người nghe hoặc quan hệ: ưu tiên câu trung tính,
+  lược đại từ khi tự nhiên và không mất nghĩa. Đánh giá điều chưa rõ có ảnh hưởng
+  đến CHÍNH lời Việt hay không: câu trung tính giữ đủ người làm/người chịu tác động,
+  đối lập và sắc thái có thể được xác nhận nghĩa mà không xác nhận quan hệ. Chỉ giữ
+  needs_review=true nếu lời Việt còn dựa vào cách phân vai chưa rõ hoặc việc lược
+  làm mất ý. Tôi/bạn vẫn là cách xưng hô cần rà, không tự xem là trung tính an toàn.
+  Không tự coi bản dịch trôi chảy là bằng chứng quan hệ.
 - Lời gọi trực tiếp trong chính câu nguồn cũng là bằng chứng: 妈妈，我饿了 có
   thể là 'Mẹ ơi, con đói rồi' dù không có speaker_id. Ngược lại, ID người nói
   đơn lẻ không chứng minh tuổi, quan hệ hoặc người đang nghe. Nếu cách xưng hô
@@ -143,7 +147,7 @@ def focus_identity(rows):
     return {key: focus[0][key] for key in ("id", "start", "end") if key in focus[0]}
 
 
-def contains_address_expression(candidate):
+def address_expressions(candidate):
     """Select text needing a pronoun audit; never infer roles or translate it.
 
     Selection and verification must use the same vocabulary. Remove ordinary
@@ -155,9 +159,13 @@ def contains_address_expression(candidate):
     # A small set of unambiguous numeric-unit spans is not an address. Keep
     # the rest of the sentence: 'Ba chờ ba phút' still contains the parent.
     text = re.sub(r"\bba\s+(?:phút|giây|giờ|ngày|tuần|tháng|năm|lần|chiếc|cái)\b", "", text, flags=re.I)
-    return bool(re.search(
+    return re.findall(
         r"(?<!\w)(?:tôi|tao|tớ|mình|bạn|mày|chị|em|anh|cô|chú|bác|con|bố|ba|mẹ|má|"
-        r"thầy|cậu|ông|bà|ta|cháu|dì|cụ|cưng|ngươi|mi)(?!\w)", text, re.I))
+        r"thầy|cậu|ông|bà|ta|cháu|dì|cụ|cưng|ngươi|mi)(?!\w)", text, re.I)
+
+
+def contains_address_expression(candidate):
+    return bool(address_expressions(candidate))
 
 
 def needs_address_audit(rows, context=()):
@@ -184,8 +192,15 @@ def address_reading_prompt(rows, context):
         "và lời gọi/đáp nếu đủ rõ; nếu hai cách phân vai vẫn hợp lý thì uncertain=true. "
         "Chưa dịch câu; chỉ đề xuất xưng hô cho từng ID cần kiểm định, dẫn câu nguồn chính xác. "
         "Trả JSON {\"address_context\":[{\"id\":0,\"self_address\":\"\","
-        "\"listener_address\":\"\",\"uncertain\":false,\"reason\":\"lý do nối người nói\","
+        "\"listener_address\":\"\",\"self_uncertain\":true,\"listener_uncertain\":true,"
+        "\"uncertain\":true,\"reason\":\"lý do cho từng vai\","
         "\"evidence\":[{\"id\":0,\"quote\":\"câu nguồn thực có\"}]}]}. "
+        "Xét self_uncertain và listener_uncertain RIÊNG: biết lời gọi người nghe không đồng nghĩa "
+        "biết người nói phải tự xưng gì. Ví dụ 拜托姐 xác nhận listener_address=chị, "
+        "listener_uncertain=false; nếu chưa rõ tự xưng thì self_address rỗng, self_uncertain=true, "
+        "uncertain=true. Không cần biết tên, giới tính, tuổi hay ruột thịt để giữ đúng lời gọi trực tiếp. "
+        "Không suy sự chắc chắn này sang câu kế chỉ vì gần thời gian. uncertain là kết luận toàn bộ; "
+        "true nếu còn vai chưa xác định. Mỗi *_address chỉ ghi cách xưng/gọi được đề xuất, không ghi giải thích. "
         "Đại từ có thể rỗng nếu không cần; không chèn lời Việt nháp hay sửa lời nguồn. "
         "Mỗi ID trả đúng một lần. Dẫn đủ bằng chứng nối cách gọi với câu hiện tại, không chỉ trích một từ rời.\n"
         + "ID cần kiểm định: " + json.dumps([row["id"] for row in rows])
@@ -209,6 +224,14 @@ def validate_address_reading(data, rows, context):
             raise ValueError("Kết quả ngữ cảnh xưng hô không đúng cấu trúc.")
         if not row["uncertain"] and not row["evidence"]:
             raise ValueError("Chưa có bằng chứng cho kết luận xưng hô.")
+        for role in ("self", "listener"):
+            flag = f"{role}_uncertain"
+            if flag in row and type(row[flag]) is not bool:
+                raise ValueError("Kết luận từng vai xưng hô phải là boolean.")
+            if row.get(flag) is False and (not row[f"{role}_address"].strip() or not row["evidence"]):
+                raise ValueError("Vai xưng hô đã xác định phải có cách gọi và dẫn chứng nguồn.")
+            if row.get(flag) is True and row["uncertain"] is False:
+                raise ValueError("Kết luận toàn bộ không được bỏ qua vai xưng hô chưa rõ.")
         for citation in row["evidence"]:
             if (not isinstance(citation, dict) or type(citation.get("id")) is not int
                     or citation["id"] not in by_id or not isinstance(citation.get("quote"), str)
@@ -231,13 +254,22 @@ def address_review_instruction(reading):
           "Kiểm tra final_vi theo "
           "vai người nói/người nghe và nối câu liên tục, sửa bản Việt nếu sai chiều. "
           "Mỗi segment phải thêm address_verified (boolean) và address_reason (lý do cụ thể) nếu áp dụng. "
+          "Thêm address_uses là mảng theo thứ tự TỪNG lần xuất hiện xưng hô trong final_vi, "
+          "mỗi mục {\"term\":\"chị\",\"role\":\"listener\"}; role chỉ self hoặc listener. "
+          "Ghi đủ cả từ lặp, đúng từ đã dùng; 'Chị ơi, nhờ chị đấy!' có hai mục chị/listener. "
+          "'Em nhờ chị' có em/self và chị/listener. Không đổi vai của từ để né kết luận chưa rõ. "
           "address_verified=true chỉ khi cách xưng hô của final_vi thực tế phù hợp nguồn/mạch thoại; "
           "Nếu address_applicable=false, thêm address_neutral_faithful=true chỉ khi đã kiểm tra "
           "câu nguồn và final_vi giữ đủ ý/người làm/người chịu tác động mà không cần phân vai; "
           "nêu đối chiếu cụ thể trong address_reason. Không được đặt true chỉ vì đã bỏ đại từ; "
           "bỏ người thực hiện hoặc mất đối lập 'tôi mới là người hỏi' phải false và needs_review=true. "
-          "OCR trùng chữ không đủ. Nếu address_applicable=true và uncertain=true hoặc còn hai cách phân vai, "
-          "address_verified=false, needs_review=true; không xác nhận chỉ vì bỏ đại từ. "
+          "OCR trùng chữ không đủ. Đối chiếu CHỈ các vai thực sự xuất hiện trong final_vi: "
+          "uncertain=true toàn bộ không chặn lời gọi listener đã được listener_uncertain=false xác nhận "
+          "nếu final_vi không tự xưng hoặc thêm quan hệ khác. Tương tự cho self. "
+          "Ví dụ chưa rõ tự xưng không ngăn 'Chị ơi, nhờ chị đấy!' khi nguồn trực tiếp 拜托姐. "
+          "Nếu bất kỳ vai được dùng còn *_uncertain=true/thiếu kết luận, hoặc còn hai cách phân vai "
+          "ảnh hưởng đến lời Việt, address_verified=false, needs_review=true. "
+          "Không tự xác nhận em/chị ở câu tiếp theo chỉ vì mốc thời gian gần; không xác nhận chỉ vì bỏ đại từ. "
           "Nếu lời nguồn mới được sửa làm thay đổi căn cứ, address_verified=false để đọc lại nguồn.")
 
 

@@ -149,6 +149,82 @@ def test_address_source_snapshot_and_stale_ids_round_trip(persisted):
     assert audit["address_stale_source_ids"] == [12]
 
 
+def test_granular_address_evidence_preserves_gate_and_pacing_context_after_restarts(persisted):
+    from core.translation_context import dialogue_context
+    from core.translation_review import AutomaticTranslationReviewer
+    segment = persisted.segments[0]
+    segment.text_zh = "拜托姐"
+    segment.final_vi = "Chị ơi, nhờ chị đấy!"
+    segment.needs_review = False
+    reading = {"id": 0, "self_address": "", "listener_address": "chị", "uncertain": True,
+        "self_uncertain": True, "listener_uncertain": False,
+        "reason": "Lời gọi trực tiếp xác nhận chị, chưa xác định tự xưng.",
+        "evidence": [{"id": 0, "quote": "拜托姐"}]}
+    uses = [{"term": "Chị", "role": "listener"}, {"term": "chị", "role": "listener"}]
+    segment.verification = {"status": "verified", "source_supported": True, "semantic_verified": True,
+        "address_applicable": True, "address_verified": True, "address_reason": "Chỉ dùng lời gọi chị.",
+        "address_uses": uses, "address_context": reading, "address_context_sources": {"0": "拜托姐"}}
+    persisted.rolling_context = [{"id": 0, "text_zh": segment.text_zh,
+        "reviewed_address_context": reading}]
+    persisted.persist()
+    for _ in range(2):
+        active_streaming_sessions.clear()
+        restored = restore_saved_session(persisted.task_id)
+        row = restored.segments[0]
+        assert row.verification == segment.verification
+        assert restored.rolling_context == persisted.rolling_context
+        audit = row.verification
+        assert not AutomaticTranslationReviewer._address_gate(
+            {0: audit["address_context"]}, 0, audit, row.text_zh, row.final_vi)
+        # Source certainty still cannot authorize an added self address after reload.
+        changed = {**audit, "address_uses": [{"term": "Em", "role": "self"},
+                                              {"term": "chị", "role": "listener"}]}
+        assert AutomaticTranslationReviewer._address_gate(
+            {0: audit["address_context"]}, 0, changed, row.text_zh, "Em nhờ chị!")
+        context = dialogue_context([row.to_dict()])
+        assert context[0]["reviewed_address_context"] == reading
+        assert context[0]["reviewed_address_context"]["self_uncertain"] is True
+        restored.persist()
+
+
+@pytest.mark.parametrize("value", [None, {}, ["chị"], [{"term": "chị", "role": "both"}],
+    [{"term": "", "role": "listener"}], [{"term": 12, "role": "listener"}]])
+def test_corrupt_address_uses_cannot_restore_as_verified(persisted, value):
+    path = _project_path(persisted.task_id)
+    record = json.loads(path.read_text(encoding="utf-8"))
+    record["segments"][0]["verification"] = {"status": "verified", "address_verified": True,
+                                                "address_uses": value}
+    path.write_text(json.dumps(record), encoding="utf-8")
+    with pytest.raises(ValueError, match="xưng hô"):
+        restore_saved_session(persisted.task_id)
+    assert list_saved_sessions()[0]["can_open"] is False
+
+
+@pytest.mark.parametrize("field", ["self_uncertain", "listener_uncertain"])
+@pytest.mark.parametrize("value", ["false", 0, None, []])
+def test_role_certainty_never_coerces_non_boolean_values(persisted, field, value):
+    persisted.segments[0].verification = {"address_context": {field: value}}
+    with pytest.raises(ValueError, match="boolean"):
+        persisted.persist()
+
+
+def test_role_usage_scope_excludes_unrelated_fields_and_redacts_secrets(persisted, monkeypatch):
+    secret = "private-address-term-fixture"
+    monkeypatch.setattr(settings, "OPENCODE_API_KEY", secret)
+    persisted.segments[0].verification = {"status": "unresolved", "address_verified": False,
+        "address_uses": [{"term": secret, "role": "listener", "api_key": "unknown-private-key",
+                          "headers": {"Authorization": "private"}, "reason": "unexpected-provider-body"}],
+        "term": "outside-approved-usage", "role": "outside-approved-role"}
+    persisted.persist()
+    audit = restore_saved_session(persisted.task_id).segments[0].verification
+    assert audit["address_uses"] == [{"term": "[redacted]", "role": "listener"}]
+    assert "term" not in audit and "role" not in audit
+    text = _project_path(persisted.task_id).read_text(encoding="utf-8")
+    for omitted in (secret, "unknown-private-key", "Authorization", "unexpected-provider-body",
+                    "outside-approved-usage", "outside-approved-role"):
+        assert omitted not in text
+
+
 def test_address_source_snapshot_rejects_non_numeric_keys(persisted):
     persisted.segments[0].verification = {
         "status": "unresolved", "address_context_sources": {"source": "private"},

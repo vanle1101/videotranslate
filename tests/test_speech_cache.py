@@ -2,6 +2,7 @@
 import asyncio
 import json
 import logging
+import runpy
 import shutil
 import wave
 import zipfile
@@ -92,7 +93,7 @@ def test_code_and_reference_audio_revisions_invalidate(tmp_path, monkeypatch):
     audio(reference, .7)
     assert identity(ref_audio=reference).key != first.key
     first = identity()
-    monkeypatch.setattr(cache, "_code_revision", lambda: {"revision": "changed"})
+    monkeypatch.setattr(cache, "_PROCESS_CODE_REVISION", {"revision": "changed"})
     assert identity().key != first.key
 
 
@@ -303,13 +304,55 @@ def test_unknown_translator_cannot_reuse_verified_production_result(production_i
     assert production_identity(engine, translator=OtherTranslator("opencode")) is None
 
 
-def test_all_enabled_review_adapters_are_in_implementation_identity(monkeypatch):
+def test_all_enabled_review_and_voice_adapters_are_in_implementation_identity(monkeypatch):
     before = cache._code_revision()
     original = cache._file_hash
-    for name in ("gemini_client.py", "openrouter_client.py", "opencode_client.py"):
+    loaded = cache._loaded_code_revision()
+    for name in ("gemini_client.py", "openrouter_client.py", "opencode_client.py",
+                 "edge_fallback.py", "piper_engine.py", "vieneu_engine.py", "voice_preview.py"):
+        assert loaded[name] == before[name]
         monkeypatch.setattr(cache, "_file_hash", lambda path, target=name:
                             "changed" if path.name == target else original(path))
         assert cache._code_revision()[name] != before[name]
+        assert cache._loaded_code_revision()[name] == before[name]
+
+
+def test_running_process_does_not_stamp_new_disk_code_as_loaded(monkeypatch):
+    before = identity()
+    loaded = cache._loaded_code_revision()
+    monkeypatch.setattr(cache, "_file_hash", lambda path: "new-disk-code")
+    assert cache._code_revision() != loaded
+    assert identity().key == before.key
+    # A newly imported process captures the new code and uses another namespace.
+    monkeypatch.setattr(cache, "_PROCESS_CODE_REVISION", cache._code_revision())
+    assert identity().key != before.key
+
+
+def test_returned_runtime_revision_cannot_mutate_process_identity():
+    before = identity()
+    returned = cache._loaded_code_revision()
+    returned["natural_speech.py"] = "accidental-caller-mutation"
+    assert identity().key == before.key
+
+
+@pytest.mark.parametrize("failure", [FileNotFoundError, PermissionError])
+def test_unreadable_revision_source_disables_cache_without_breaking_import(monkeypatch, failure):
+    original_open = cache.Path.open
+
+    def guarded_open(path, *args, **kwargs):
+        if path.name == "natural_speech.py":
+            raise failure("Source temporarily unavailable")
+        return original_open(path, *args, **kwargs)
+
+    monkeypatch.setattr(cache.Path, "open", guarded_open)
+    # Execute a fresh module namespace without changing the already loaded
+    # production module. Import must survive, but no fallback key may be issued.
+    imported = runpy.run_path(str(cache.__file__))
+    assert imported["_PROCESS_CODE_REVISION"] is None
+    with pytest.raises(OSError, match="runtime code revision"):
+        imported["build_speech_cache_identity"](
+            source="啥", text="Hả?", duration=.4, voice="vi-VN-HoaiMyNeural",
+            engine="edge-tts", engine_revision="test", provider="opencode", model="muse")
 
 
 class PcmAligner:

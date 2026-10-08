@@ -428,6 +428,13 @@ def candidate_response(*, needs_review=False):
                       ensure_ascii=False)
 
 
+def rewrite_response(text, *, needs_review=False, reason=""):
+    """Build a provider rewrite response with an explicitly chosen candidate."""
+    return json.dumps({"literal_vi": text, "natural_vi": text, "final_vi": text,
+                       "needs_review": needs_review, "review_reason": reason},
+                      ensure_ascii=False)
+
+
 def test_rewrite_verifies_exact_candidate_in_a_separate_provider_request(monkeypatch):
     translator = SemanticTranslator(provider="opencode")
     request = Mock(side_effect=[candidate_response(), json.dumps({
@@ -446,6 +453,149 @@ def test_rewrite_verifies_exact_candidate_in_a_separate_provider_request(monkeyp
     assert "Làm chưa?" in review_input["context"]
     assert result["pacing_verification"]["text"] == review_input["candidate"]
     assert result["pacing_verification"]["status"] == "verified"
+
+
+def test_neutral_ellipsis_passes_only_after_independent_address_safe_verdict(monkeypatch):
+    """Vietnamese dialogue may omit recoverable pronouns, but the verifier must approve it."""
+    translator = SemanticTranslator(provider="opencode")
+    candidate = "Hỏi mấy tuổi rồi, nói mau!"
+    request = Mock(side_effect=[
+        rewrite_response(candidate),
+        json.dumps({
+            "equivalent": True,
+            "natural": True,
+            "address_preserved": True,
+            "reason": "Lược tôi/bạn theo khẩu ngữ; người hỏi và người bị hỏi vẫn rõ trong mạch câu.",
+        }, ensure_ascii=False),
+    ])
+    monkeypatch.setattr(translator, "_opencode_request", request)
+
+    result = translator.rewrite_for_pacing(
+        "我问你几岁了快说",
+        "Tôi hỏi bạn mấy tuổi rồi, nói mau!",
+        1.5,
+        [{"zh": "我问你几岁了快说", "vi": "Tôi hỏi bạn mấy tuổi rồi, nói mau!"}],
+    )
+
+    assert request.call_count == 2
+    assert result["final_vi"] == candidate
+    assert result["pacing_verification"]["address_preserved"] is True
+    review_input = json.loads(request.call_args_list[1].args[1])
+    assert review_input["candidate"] == candidate
+
+
+@pytest.mark.parametrize("field", ["equivalent", "natural", "address_preserved"])
+@pytest.mark.parametrize("value", [False, None, "true"])
+def test_neutral_ellipsis_does_not_bypass_any_independent_gate(monkeypatch, field, value):
+    translator = SemanticTranslator(provider="opencode")
+    candidate = "Hỏi mấy tuổi rồi, nói mau!"
+    verdict = {"equivalent": True, "natural": True, "address_preserved": True,
+               "reason": "Đối chiếu nguồn và câu rút gọn."}
+    verdict[field] = value
+    request = Mock(side_effect=[rewrite_response(candidate), json.dumps(verdict)])
+    monkeypatch.setattr(translator, "_opencode_request", request)
+
+    with pytest.raises(PacingReviewRejected):
+        translator.rewrite_for_pacing("我问你几岁了快说", "Tôi hỏi bạn mấy tuổi rồi, nói mau!", 1.5)
+
+    assert request.call_count == 2
+    assert json.loads(request.call_args_list[1].args[1])["candidate"] == candidate
+
+
+@pytest.mark.parametrize("uncertainty", ["source", "address"])
+def test_successful_pacing_does_not_clear_existing_pipeline_uncertainty(
+        tmp_path, aligner, monkeypatch, uncertainty):
+    from core.streaming.pipeline import SegmentItem, StreamingPipelineSession
+
+    monkeypatch.setattr(settings, "BASE_DIR", tmp_path)
+    session = StreamingPipelineSession("pacing-uncertainty", None,
+                                       voice="vi-VN-HoaiMyNeural", tts_engine_name="edge-tts")
+    segment = SegmentItem(0, 0, 1.5, 1.5)
+    original, shorter = "Tôi hỏi bạn mấy tuổi rồi, nói mau!", "Hỏi mấy tuổi, nói mau!"
+    segment.text_zh, segment.final_vi = "我问你几岁了快说", original
+    segment.needs_review = True
+    segment.review_reason = "Nguồn chưa chắc." if uncertainty == "source" else "Chưa rõ quan hệ nhân vật."
+    segment.verification = {
+        "status": "unresolved", "source_supported": uncertainty != "source",
+        "semantic_verified": False, "address_verified": False,
+        "address_context": {"uncertain": uncertainty == "address"},
+    }
+    session.segments[0] = segment
+    session.total_duration = 1.5
+    session.aligner = aligner
+    session.tts_engine = RecordedSynthesizer({original: 2.39, shorter: 1.0})
+    session.translator = SemanticTranslator(provider="opencode")
+    proof = {"equivalent": True, "natural": True, "address_preserved": True,
+             "reason": "Giữ câu hỏi tuổi và thúc giục, không xác nhận quan hệ nhân vật."}
+    request = Mock(side_effect=[rewrite_response(shorter), json.dumps(proof)])
+    monkeypatch.setattr(session.translator, "_opencode_request", request)
+
+    asyncio.run(session._synthesize_segment(segment))
+
+    assert request.call_count == 2
+    assert segment.final_vi == shorter and segment.audio_path
+    assert segment.status == "READY"
+    assert segment.needs_review is True
+    assert segment.review_reason == ("Nguồn chưa chắc." if uncertainty == "source" else "Chưa rõ quan hệ nhân vật.")
+    assert segment.verification["status"] == "unresolved"
+    assert segment.verification["source_supported"] is (uncertainty != "source")
+    assert segment.verification["semantic_verified"] is False
+    assert segment.verification["address_verified"] is False
+    assert segment.verification["address_context"]["uncertain"] is (uncertainty == "address")
+    assert segment.verification["pacing"]["status"] == "verified"
+    assert segment.verification["pacing"]["text"] == shorter
+
+
+def test_dropped_contrastive_subject_is_rejected_even_when_candidate_is_fluent(monkeypatch):
+    """Dropping 我 in 我来问 changes the contrastive speaker and is not safe ellipsis."""
+    translator = SemanticTranslator(provider="opencode")
+    candidate = "Phải hỏi mới đúng chứ."
+    request = Mock(side_effect=[
+        rewrite_response(candidate),
+        json.dumps({
+            "equivalent": False,
+            "natural": True,
+            "address_preserved": False,
+            "reason": "Mất đối lập: nguồn nhấn mạnh tôi mới là người hỏi.",
+        }, ensure_ascii=False),
+    ])
+    monkeypatch.setattr(translator, "_opencode_request", request)
+
+    with pytest.raises(PacingReviewRejected) as rejected:
+        translator.rewrite_for_pacing(
+            "这话应该我来问吧",
+            "Câu này phải để tôi hỏi mới đúng chứ.",
+            1.2,
+        )
+
+    assert rejected.value.code == "semantic_mismatch"
+    assert request.call_count == 2
+
+
+def test_role_changing_pacing_candidate_is_rejected_by_address_gate(monkeypatch):
+    """A rewrite cannot turn an unresolved speaker into chị just to save syllables."""
+    translator = SemanticTranslator(provider="opencode")
+    candidate = "Chị phải hỏi chứ."
+    request = Mock(side_effect=[
+        rewrite_response(candidate),
+        json.dumps({
+            "equivalent": True,
+            "natural": True,
+            "address_preserved": False,
+            "reason": "Candidate đổi người nói thành chị khi nguồn chưa xác định vai.",
+        }, ensure_ascii=False),
+    ])
+    monkeypatch.setattr(translator, "_opencode_request", request)
+
+    with pytest.raises(PacingReviewRejected) as rejected:
+        translator.rewrite_for_pacing(
+            "这话应该我来问吧",
+            "Câu này phải để tôi hỏi mới đúng chứ.",
+            1.2,
+        )
+
+    assert rejected.value.code == "invalid_review"
+    assert request.call_count == 2
 
 
 @pytest.mark.parametrize("verdict", [

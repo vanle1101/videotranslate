@@ -39,7 +39,7 @@ META_FIELDS = frozenset((
     "checked corrected unresolved manual incomplete version method speech_id duration ratio "
     "background_color text_color position blur_original suppression_level_db throughput_rtf "
     "zh vi source_evidence_ids speaker theme terms pronouns name src tgt note "
-    "address_context address_context_sources address_stale_source_ids address_applicable address_neutral_faithful address_verified address_reason address_preserved self_address listener_address uncertain quote "
+    "address_context address_context_sources address_stale_source_ids address_applicable address_neutral_faithful address_verified address_reason address_preserved self_address listener_address self_uncertain listener_uncertain address_uses uncertain quote "
     "reviewed_address_context is_focus speaker_id addressee_id source_needs_review source_truncated translation_is_draft "
     "tts_seconds slot_seconds fit_ratio semantic_status acoustic_status source_region_verified "
     "reference_zh reference_vi equivalent different_source same_meaning text_preserved "
@@ -122,6 +122,20 @@ def _clean_address_context_sources(value, *, depth):
     return result
 
 
+def _clean_address_uses(value, *, depth):
+    """Keep only candidate terms and roles, never arbitrary provider metadata."""
+    if not isinstance(value, list) or len(value) > 10000:
+        raise ValueError("Các cách xưng hô đã dùng không hợp lệ.")
+    result = []
+    for item in value:
+        if (not isinstance(item, dict) or not isinstance(item.get("term"), str)
+                or not item["term"].strip() or len(item["term"]) > 100
+                or item.get("role") not in ("self", "listener")):
+            raise ValueError("Cách xưng hô đã dùng thiếu từ hoặc vai hợp lệ.")
+        result.append({"term": _clean(item["term"], depth=depth + 1), "role": item["role"]})
+    return result
+
+
 def _clean(value, *, depth=0):
     if depth > 12:
         raise ValueError("Dữ liệu dự án lồng quá sâu.")
@@ -152,6 +166,12 @@ def _clean(value, *, depth=0):
                 result[key] = _clean_audio_evidence(item, depth=depth + 1)
             elif key == "address_context_sources":
                 result[key] = _clean_address_context_sources(item, depth=depth + 1)
+            elif key == "address_uses":
+                result[key] = _clean_address_uses(item, depth=depth + 1)
+            elif key in ("self_uncertain", "listener_uncertain"):
+                if type(item) is not bool:
+                    raise ValueError("Kết luận từng vai xưng hô phải là boolean.")
+                result[key] = item
             elif key == "audio_consensus":
                 if type(item) is bool:
                     result[key] = item

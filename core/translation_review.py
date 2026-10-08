@@ -23,6 +23,7 @@ from core.runtime_context import current_execution_context
 from core.chinese_text import comparable_chinese
 from core.translation_context import (
     VIETNAMESE_ADDRESS_POLICY, dialogue_context, needs_address_audit, contains_address_expression,
+    address_expressions,
     address_reading_prompt, validate_address_reading, address_review_instruction,
 )
 
@@ -201,11 +202,37 @@ class AutomaticTranslationReviewer:
             return reading
 
     @staticmethod
-    def _address_verified(reading, sid, audit):
+    def _address_verified(reading, sid, audit, candidate=None):
         if sid not in reading:
+            # A positive provider field cannot replace the independent source
+            # reading. Callers that need a relation verdict must have a row in
+            # the reading map; the gate separately handles neutral text.
+            return False
+        if (audit.get("address_verified") is not True
+                or not isinstance(audit.get("address_reason"), str) or not audit["address_reason"].strip()):
+            return False
+        item = reading[sid]
+        if not item["uncertain"]:
             return True
-        return (not reading[sid]["uncertain"] and audit.get("address_verified") is True
-                and isinstance(audit.get("address_reason"), str) and bool(audit["address_reason"].strip()))
+        # A known listener address does not prove a self address (or vice
+        # versa). Overall uncertainty only permits the independently grounded
+        # roles actually used by this candidate. Legacy/incomplete replies
+        # retain the conservative whole-sentence gate.
+        uses = audit.get("address_uses")
+        terms = address_expressions(candidate)
+        if (audit.get("semantic_verified") is not True or not item.get("evidence")
+                or not isinstance(uses, list) or not terms or len(uses) != len(terms)):
+            return False
+        for term, use in zip(terms, uses):
+            if (not isinstance(use, dict) or not isinstance(use.get("term"), str)
+                    or use["term"].casefold() != term.casefold() or use.get("role") not in {"self", "listener"}):
+                return False
+            role = use["role"]
+            if (item.get(f"{role}_uncertain") is not False
+                    or not isinstance(item.get(f"{role}_address"), str)
+                    or term.casefold() != item[f"{role}_address"].strip().casefold()):
+                return False
+        return True
 
     @staticmethod
     def _address_applicable(audit, source, candidate):
@@ -232,7 +259,7 @@ class AutomaticTranslationReviewer:
             return False
         if sid not in reading:
             return True
-        return not cls._address_verified(reading, sid, audit)
+        return not cls._address_verified(reading, sid, audit, candidate)
 
     @staticmethod
     def _address_cites_changed_source(reading, sid, changed_ids):
@@ -488,6 +515,10 @@ class AutomaticTranslationReviewer:
                 target["verification"]["address_neutral_faithful"] = audit.get("address_neutral_faithful") is True
                 target["verification"]["address_verified"] = bool(address_applicable and not address_uncertain)
                 target["verification"]["address_reason"] = audit.get("address_reason", "")
+                if isinstance(audit.get("address_uses"), list):
+                    target["verification"]["address_uses"] = deepcopy(audit["address_uses"])
+                else:
+                    target["verification"].pop("address_uses", None)
                 result["segments"][sid] = target
             if progress_callback:
                 progress_callback(60 + 40 * (index + 1) / batches)
@@ -856,6 +887,8 @@ class AutomaticTranslationReviewer:
                 target["verification"]["address_neutral_faithful"] = audit.get("address_neutral_faithful") is True
                 target["verification"]["address_verified"] = bool(address_applicable and not address_uncertain)
                 target["verification"]["address_reason"] = audit.get("address_reason", "")
+                if isinstance(audit.get("address_uses"), list):
+                    target["verification"]["address_uses"] = deepcopy(audit["address_uses"])
                 if second_failure:
                     target["verification"]["diagnostic"] = second_failure
                 output[sid] = target

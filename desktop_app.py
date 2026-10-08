@@ -22,7 +22,8 @@ from PySide6.QtWidgets import (
     QFileDialog, QGraphicsDropShadowEffect
 )
 from PySide6.QtGui import (
-    QIcon, QPixmap, QPainter, QColor, QFont, QLinearGradient, QAction, QPen
+    QIcon, QPixmap, QPainter, QColor, QFont, QLinearGradient, QAction, QPen,
+    QKeySequence
 )
 from PySide6.QtWebEngineWidgets import QWebEngineView
 from PySide6.QtWebEngineCore import QWebEngineSettings, QWebEnginePage
@@ -342,12 +343,23 @@ class StudioMainWindow(QMainWindow):
         self.web_view.page().setWebChannel(self.channel)
         self.web_view.page().fullScreenRequested.connect(self._on_fullscreen_requested)
 
+        # Keep explicit exit accessible even when the tray is hidden/unavailable.
+        self._setup_exit_action()
+
         # Setup System Tray
         self._setup_system_tray()
 
         # Load Studio URL
         logger.info(f"Loading Desktop UI from internal backend: {self.backend_url}")
         self.web_view.load(QUrl(self.backend_url))
+
+    def _setup_exit_action(self):
+        self.exit_action = QAction("Thoát hoàn toàn", self)
+        self.exit_action.setObjectName("exitStudioAction")
+        self.exit_action.setShortcut(QKeySequence("Ctrl+Q"))
+        self.exit_action.setShortcutContext(Qt.ShortcutContext.WindowShortcut)
+        self.exit_action.triggered.connect(self.request_exit)
+        self.addAction(self.exit_action)
 
     def _setup_system_tray(self):
         """Creates system tray icon and context menu."""
@@ -373,9 +385,7 @@ class StudioMainWindow(QMainWindow):
 
         menu.addSeparator()
 
-        act_exit = QAction("Thoát hoàn toàn", self)
-        act_exit.triggered.connect(self.request_exit)
-        menu.addAction(act_exit)
+        menu.addAction(self.exit_action)
 
         self.tray_icon.setContextMenu(menu)
         self.tray_icon.activated.connect(self._on_tray_activated)
@@ -386,7 +396,7 @@ class StudioMainWindow(QMainWindow):
             self.restore_window()
 
     def request_exit(self):
-        """Only the explicit tray action ends processing and the application."""
+        """Explicit exit (tray or Ctrl+Q) uses the normal close confirmation."""
         self._exit_requested = True
         self.close()
 

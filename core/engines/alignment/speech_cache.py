@@ -68,8 +68,33 @@ def _code_revision():
              directory.parent.parent / "translation_context.py",
              directory.parent / "translation" / "opencode_client.py",
              directory.parent / "translation" / "gemini_client.py",
-             directory.parent / "translation" / "openrouter_client.py")
+             directory.parent / "translation" / "openrouter_client.py",
+             directory.parent / "tts" / "edge_fallback.py",
+             directory.parent / "tts" / "piper_engine.py",
+             directory.parent / "tts" / "vieneu_engine.py",
+             directory.parent.parent / "voice_preview.py")
     return {path.name: _file_hash(path) for path in files}
+
+
+def _capture_code_revision():
+    try:
+        return _code_revision()
+    except OSError:
+        # This cache is optional. An unreadable source file must not prevent
+        # Studio from importing; without a complete snapshot, disable caching.
+        return None
+
+
+# Bind the cache namespace to the code that was actually imported into this
+# process. Hashing files on every request would let an old long-running Studio
+# process stamp newly edited files with a revision it has never loaded.
+_PROCESS_CODE_REVISION = _capture_code_revision()
+
+
+def _loaded_code_revision():
+    if _PROCESS_CODE_REVISION is None:
+        raise OSError("Speech cache unavailable: runtime code revision could not be captured.")
+    return dict(_PROCESS_CODE_REVISION)
 
 
 def build_speech_cache_identity(*, source, text, duration, voice, engine,
@@ -92,7 +117,7 @@ def build_speech_cache_identity(*, source, text, duration, voice, engine,
               "engine": engine, "engine_revision": engine_revision,
               "provider": provider, "model": model, "context": context,
               "reference_audio": _file_hash(ref_audio) if ref_audio else None,
-              "implementation": _code_revision()}
+              "implementation": _loaded_code_revision()}
     _reject_secrets(inputs)
     encoded = _json(inputs)
     if len(encoded) > 1024 * 1024:

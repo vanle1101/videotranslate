@@ -48,6 +48,7 @@ def tray_window(monkeypatch):
     monkeypatch.setattr(desktop_app.QMessageBox, "question", question)
 
     class LifecycleWindow(QMainWindow):
+        _setup_exit_action = desktop_app.StudioMainWindow._setup_exit_action
         request_exit = desktop_app.StudioMainWindow.request_exit
         restore_window = desktop_app.StudioMainWindow.restore_window
         _on_tray_activated = desktop_app.StudioMainWindow._on_tray_activated
@@ -60,6 +61,7 @@ def tray_window(monkeypatch):
             self.tray_icon = Mock()
             self.tray_icon.isVisible.return_value = True
             self.last_close_accepted = None
+            self._setup_exit_action()
 
         def closeEvent(self, event):
             desktop_app.StudioMainWindow.closeEvent(self, event)
@@ -209,3 +211,67 @@ def test_close_without_tray_can_cancel_active_work(tray_window):
     state.question.assert_called_once()
     state.shutdown.assert_not_called()
     state.quit_app.assert_not_called()
+
+
+@pytest.mark.parametrize("work", ["idle", "running", "editing", "RUNNING"])
+def test_quit_shortcut_uses_normal_exit_with_child_focused(tray_window, work):
+    from PySide6.QtCore import Qt
+    from PySide6.QtTest import QTest
+    from PySide6.QtWidgets import QLineEdit
+
+    state = tray_window
+    window = state.window
+    if work != "idle":
+        add_work(state, work)
+    editor = QLineEdit(window)
+    window.setCentralWidget(editor)
+    window.activateWindow()
+    editor.setFocus()
+    state.app.processEvents()
+
+    QTest.keyClick(editor, Qt.Key.Key_Q, Qt.KeyboardModifier.ControlModifier)
+    state.app.processEvents()
+
+    assert window.last_close_accepted is True
+    assert window._exit_requested
+    state.shutdown.assert_called_once_with()
+    state.quit_app.assert_called_once_with()
+    if work == "idle":
+        state.question.assert_not_called()
+    else:
+        state.question.assert_called_once()
+
+
+def test_quit_action_keeps_running_work_when_exit_cancelled(tray_window):
+    state = tray_window
+    session = add_work(state, "running")
+    state.question.return_value = state.desktop.QMessageBox.StandardButton.Cancel
+
+    state.window.exit_action.trigger()
+    state.app.processEvents()
+
+    assert state.window.last_close_accepted is False
+    assert not state.window._exit_requested
+    assert state.window.isVisible()
+    state.question.assert_called_once()
+    state.shutdown.assert_not_called()
+    state.quit_app.assert_not_called()
+    session.stop.assert_not_called()
+
+    # The next title-bar close still only hides; cancelled exit is not sticky.
+    assert state.window.close() is False
+    assert not state.window.isVisible()
+    state.shutdown.assert_not_called()
+
+
+def test_quit_action_available_without_system_tray(tray_window):
+    state = tray_window
+    state.window.tray_icon = None
+
+    assert state.window.exit_action in state.window.actions()
+    assert state.window.exit_action.shortcut().toString() == "Ctrl+Q"
+    state.window.exit_action.trigger()
+
+    assert state.window.last_close_accepted is True
+    state.shutdown.assert_called_once_with()
+    state.quit_app.assert_called_once_with()
