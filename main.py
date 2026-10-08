@@ -113,6 +113,7 @@ class StreamUrlRequest(BaseModel):
     tts_engine: Optional[str] = None
     asr_engine: Optional[str] = None
     visual_translation: bool = False
+    translation_mode: Literal["preview", "full"] = "preview"
 
 class SeekRequest(BaseModel):
     task_id: str
@@ -497,6 +498,8 @@ def schedule_reviewed_export(task_id):
             or getattr(session, "review_summary", {}).get("status") != "completed"
             or session.is_running or session.error or getattr(session, "is_stopped", False)
             or getattr(session, "is_editing", False) or not session.segments
+            or (getattr(session, "translation_mode", "full") == "preview"
+                and not getattr(session, "_visual_prepass_complete", False))
             or any(s.status not in ("READY", "PLAYED") for s in session.segments.values())):
         return
     if active_export_tasks.get(f"export_{task_id}", {}).get("status") in {"RUNNING", "CANCELLING"}:
@@ -728,6 +731,7 @@ async def start_streaming_url(req: StreamUrlRequest):
                 or existing.voice != voice or existing.tts_engine_name != engine
                 or existing.asr_engine_name != (req.asr_engine or settings.ASR_ENGINE)
                 or existing.visual_translation != req.visual_translation
+                or getattr(existing, "translation_mode", "full") != req.translation_mode
                 or getattr(existing, "_retry_config_signature", None) != config_signature
                 or existing.is_stopped):
             continue
@@ -752,6 +756,7 @@ async def start_streaming_url(req: StreamUrlRequest):
         tts_engine_name=engine,
         asr_engine_name=req.asr_engine or settings.ASR_ENGINE,
         visual_translation=req.visual_translation,
+        translation_mode=req.translation_mode,
         event_callback=lambda event_type, data: broadcast_session_event(task_id, event_type, data)
     )
     session.auto_export_result = bool(req.visual_translation and settings.LLM_PROVIDER == "opencode")
@@ -784,6 +789,7 @@ async def start_streaming_upload(
     tts_engine: Optional[str] = Form(None),
     asr_engine: str = Form(settings.ASR_ENGINE),
     visual_translation: bool = Form(False),
+    translation_mode: Literal["preview", "full"] = Form("preview"),
     ref_audio: Optional[UploadFile] = File(None)
 ):
     validate_visual_translation(visual_translation)
@@ -814,6 +820,7 @@ async def start_streaming_upload(
         tts_engine_name=tts_engine,
         asr_engine_name=asr_engine,
         visual_translation=visual_translation,
+        translation_mode=translation_mode,
         ref_audio=ref_audio_path,
         event_callback=lambda event_type, data: broadcast_session_event(task_id, event_type, data)
     )
@@ -970,6 +977,21 @@ async def retry_streaming_synthesis(task_id: str):
         raise HTTPException(status_code=409, detail=str(exc)) from None
     return {"task_id": task_id, "status": "retrying", "progress": progress}
 
+
+@app.post("/api/streaming/{task_id}/translate-full")
+async def translate_full_video(task_id: str):
+    session = await editable_session(task_id)
+    if not session:
+        raise HTTPException(status_code=404, detail="Phiên dịch không còn tồn tại.")
+    if active_export_tasks.get(f"export_{task_id}", {}).get("status") in {"RUNNING", "CANCELLING"}:
+        raise HTTPException(status_code=409, detail="Hãy chờ xuất video kết thúc trước khi dịch tiếp.")
+    try:
+        progress = await session.translate_full()
+    except SegmentEditConflict as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from None
+    persist_session(session)
+    return {"task_id": task_id, "status": "started", "progress": progress}
+
 @app.post("/api/streaming/{task_id}/review")
 async def review_streaming_translation(task_id: str):
     session = get_streaming_session(task_id)
@@ -1033,6 +1055,9 @@ async def export_hq(req: ExportHQRequest):
 
     if getattr(session, "is_editing", False):
         raise HTTPException(status_code=409, detail="Đang lưu lời thoại và tạo lại giọng đọc. Hãy chờ lưu xong trước khi xuất.")
+    if (getattr(session, "translation_mode", "full") == "preview"
+            and not getattr(session, "_visual_prepass_complete", False)):
+        raise HTTPException(status_code=409, detail="Đây là bản xem trước. Bấm Dịch toàn bộ trước khi xuất video đầy đủ.")
     review_status = getattr(session, "review_summary", {}).get("status")
     if review_status in {"failed", "running", "incomplete"}:
         raise HTTPException(status_code=409, detail="AI kiểm tra lại chưa hoàn tất. Bấm AI kiểm tra lại để tiếp tục trước khi xuất.")
@@ -1245,6 +1270,7 @@ class StreamLocalFileRequest(BaseModel):
     tts_engine: Optional[str] = None
     asr_engine: Optional[str] = None
     visual_translation: bool = False
+    translation_mode: Literal["preview", "full"] = "preview"
 
 
 def validate_visual_translation(enabled):
@@ -1279,6 +1305,7 @@ async def start_streaming_local_file(req: StreamLocalFileRequest):
         tts_engine_name=engine,
         asr_engine_name=req.asr_engine or settings.ASR_ENGINE,
         visual_translation=req.visual_translation,
+        translation_mode=req.translation_mode,
         event_callback=lambda event_type, data: broadcast_session_event(task_id, event_type, data)
     )
     session.source_video_url = f"/api/local-file?path={quote(p.as_posix(), safe='')}"

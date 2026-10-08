@@ -117,6 +117,9 @@ class VideoIntelligence:
     MAX_INLINE_BYTES = 14_000_000
     MAX_WIDTH = 720
     CHECKPOINT_VERSION = 1
+    OPENCODE_SPEECH_BATCH_SIZE = 4
+    OPENCODE_SCREEN_BATCH_SIZE = 8
+    OPENCODE_SOURCE_EVIDENCE_LIMIT = 32
 
     @staticmethod
     def suppress_diagnostic_placeholder(row):
@@ -546,7 +549,7 @@ class VideoIntelligence:
             "provided overlapping OCR IDs. An unchanged ASR can have no evidence IDs; changed ASR requires evidence.\n"
             f"Requested ASR: {json.dumps(payload, ensure_ascii=False)}\n"
             f"Measured OCR: {json.dumps(observed, ensure_ascii=False)}\nContext: {context}")
-        raw = client.translate(prompt, max_tokens=5000)
+        raw = client.translate(prompt, max_tokens=2500 if getattr(self, "provider", None) == "opencode" else 5000)
         self._check_cancelled(cancel_check)
         data = self._parse_json(raw)
         if not isinstance(data.get("segments"), list):
@@ -769,7 +772,10 @@ class VideoIntelligence:
         failed_flags = {"segments": {}, "screen_texts": {}}
         for attempt in range(2):
             self._check_cancelled(cancel_check)
-            raw = client.translate(request_prompt, max_tokens=12000)
+            # Four speech turns and eight screen regions do not need a 12k
+            # output budget. Keep the selected free model's responses bounded
+            # as well as its input, including the schema repair request.
+            raw = client.translate(request_prompt, max_tokens=6000 if getattr(self, "provider", None) == "opencode" else 12000)
             self._check_cancelled(cancel_check)
             try:
                 result = self.validate_result(raw, self._fallback_segments(payload), start, end, observed)
@@ -851,6 +857,35 @@ class VideoIntelligence:
                                                 if len(occurrences.get(translated["id"], [])) == 1 else False)})
         return {**result, "screen_texts": sorted(expanded, key=lambda row: row["start"])}
 
+    @classmethod
+    def _source_batch_evidence(cls, payload, observed):
+        """Bound simultaneous OCR fairly across the requested speech turns.
+
+        Screens unrelated to this batch cannot repair its ASR. If a very dense
+        frame exceeds the request budget, keep that loss explicit instead of
+        treating a partial evidence window as a definitive source review.
+        Full measured screens still receive their own translation batches.
+        """
+        candidates = [[screen for screen in observed
+                       if screen["start"] < row["end"] and screen["end"] > row["start"]]
+                      for row in payload]
+        selected, identities = [], set()
+        for offset in range(max((len(rows) for rows in candidates), default=0)):
+            for rows in candidates:
+                if offset >= len(rows):
+                    continue
+                screen = rows[offset]
+                if screen["id"] not in identities:
+                    selected.append(screen)
+                    identities.add(screen["id"])
+                    if len(selected) == cls.OPENCODE_SOURCE_EVIDENCE_LIMIT:
+                        break
+            if len(selected) == cls.OPENCODE_SOURCE_EVIDENCE_LIMIT:
+                break
+        truncated = {row["id"] for row, screens in zip(payload, candidates)
+                     if any(screen["id"] not in identities for screen in screens)}
+        return sorted(selected, key=lambda screen: (screen["start"], screen["id"])), truncated
+
     def _translate_text(self, payload, observed, previous_summary, start, end, cancel_check=None, *, quota_fallback=False):
         """Primary free translation and explicit quota fallback share text checks."""
         self._check_cancelled(cancel_check)
@@ -858,7 +893,7 @@ class VideoIntelligence:
         label = "OpenCode" if provider == "opencode" else "OpenRouter"
         model_setting = settings.OPENCODE_MODEL if provider == "opencode" else settings.OPENROUTER_MODEL
         try:
-            client = (OpenCodeZenClient(model=model_setting, timeout=120) if provider == "opencode"
+            client = (OpenCodeZenClient(model=model_setting, timeout=90, max_retries=1) if provider == "opencode"
                       else OpenRouterFreeClient(model=model_setting, timeout=120))
             if not client.has_credentials:
                 raise VideoIntelligenceError(f"Chưa có thông tin đăng nhập {label}.")
@@ -873,18 +908,24 @@ class VideoIntelligence:
                     current_execution_context().run_id, len(observed), len(representatives))
             # Bound response size even when rapid subtitle changes produce many
             # local OCR IDs. Every requested ID belongs to exactly one batch.
-            batches = max(1, math.ceil(len(payload) / 12), math.ceil(len(representatives) / 24))
+            speech_limit = self.OPENCODE_SPEECH_BATCH_SIZE if provider == "opencode" else 12
+            screen_limit = self.OPENCODE_SCREEN_BATCH_SIZE if provider == "opencode" else 24
+            batches = max(1, math.ceil(len(payload) / speech_limit), math.ceil(len(representatives) / screen_limit))
             source_dialogue = [dict(row) for row in (getattr(self, "_source_dialogue", []) or payload)
                                if isinstance(row, dict)]
             for index in range(batches):
                 self._check_cancelled(cancel_check)
-                batch_payload = payload[index * 12:(index + 1) * 12]
-                batch_screens = representatives[index * 24:(index + 1) * 24]
+                batch_payload = payload[index * speech_limit:(index + 1) * speech_limit]
+                batch_screens = representatives[index * screen_limit:(index + 1) * screen_limit]
+                source_evidence, truncated_evidence = (self._source_batch_evidence(batch_payload, observed)
+                    if provider == "opencode" else (observed, set()))
+                context_screens = {row["id"]: row for row in [*source_evidence, *batch_screens]}
                 context_payload = {"speech": [{"start": row["start"], "end": row["end"],
                                                 "asr_text": row.get("asr_text", "")} for row in payload],
                                    "wider_source_dialogue": dialogue_context(source_dialogue, payload),
                                    "ocr": [{"start": row["start"], "end": row["end"],
-                                             "text_zh": row["text_zh"]} for row in representatives]}
+                                             "text_zh": row["text_zh"]} for row in context_screens.values()],
+                                   "ocr_context_truncated_for_ids": sorted(truncated_evidence)}
                 context = json.dumps(context_payload, ensure_ascii=False)
                 batch_stage = {"kind": "text_batch", "start": start, "end": end, "index": index,
                                "provider": provider, "model": model_setting, "quota_fallback": quota_fallback,
@@ -922,7 +963,10 @@ class VideoIntelligence:
                         combined["summary"] = saved_result["summary"] or combined["summary"]
                         continue
                 self._report_stage("source", start, end, batch_index=index + 1, batch_total=batches)
-                corrections = self._correct_source(client, batch_payload, observed, context, cancel_check)
+                corrections = self._correct_source(client, batch_payload, source_evidence, context, cancel_check)
+                for sid in truncated_evidence:
+                    corrections[sid].update(needs_review=True, source_supported=False,
+                        review_reason="Đoạn có quá nhiều vùng chữ; chỉ đối chiếu một phần OCR, cần kiểm tra nguồn riêng.")
                 all_corrections.update(corrections)
                 self._apply_source_corrections_to_context(source_dialogue, corrections)
                 # The translation request must see the corrected current batch
@@ -1191,7 +1235,8 @@ class VideoIntelligence:
         return self._with_provenance(result, "gemini", model)
 
     def prepass(self, video_path: Path, segments: List[Any], total_duration: Optional[float] = None,
-                cancel_check=None, progress_callback=None, chunk_callback=None, detail_callback=None) -> Dict[str, Any]:
+                cancel_check=None, progress_callback=None, chunk_callback=None, detail_callback=None,
+                start_time=0.0, end_time=None, context_segments=None, previous_summary="") -> Dict[str, Any]:
         """Publish detached, validated chunks with bounded caller backpressure.
 
         Validated results are checkpointed before publication. Restored chunks
@@ -1206,10 +1251,16 @@ class VideoIntelligence:
         previous_dialogue = getattr(self, "_source_dialogue", [])
         self._source_dialogue = [{"id": self._get(seg, "id"), "start": self._get(seg, "start"),
                                   "end": self._get(seg, "end"), "asr_text": self._get(seg, "text_zh", "")}
-                                 for seg in segments]
+                                 for seg in (segments if context_segments is None else context_segments)]
         self._checkpoint_context = self._checkpoint_identity(video_path, segments, total_duration)
+        if self._checkpoint_context and (start_time or end_time is not None or context_segments is not None or previous_summary):
+            key = self._checkpoint_digest([self._checkpoint_context["key"], start_time, end_time,
+                                           self._source_dialogue, previous_summary])
+            self._checkpoint_context = {**self._checkpoint_context, "key": key,
+                "directory": Path(settings.WORKSPACE_DIR) / "cache" / "visual_checkpoints" / key}
         try:
-            return self._prepass(video_path, segments, total_duration, cancel_check, progress_callback, chunk_callback)
+            return self._prepass(video_path, segments, total_duration, cancel_check, progress_callback, chunk_callback,
+                                 start_time=start_time, end_time=end_time, previous_summary=previous_summary)
         finally:
             # A later standalone analyze_chunk must not inherit another file's
             # namespace merely because the same instance is reused.
@@ -1218,7 +1269,8 @@ class VideoIntelligence:
             self._source_dialogue = previous_dialogue
 
     def _prepass(self, video_path: Path, segments: List[Any], total_duration: Optional[float] = None,
-                 cancel_check=None, progress_callback=None, chunk_callback=None) -> Dict[str, Any]:
+                 cancel_check=None, progress_callback=None, chunk_callback=None,
+                 start_time=0.0, end_time=None, previous_summary="") -> Dict[str, Any]:
         segments = sorted(segments, key=lambda seg: self._get(seg, "start"))
         for seg in segments:
             start, end = self._number(self._get(seg, "start")), self._number(self._get(seg, "end"))
@@ -1228,11 +1280,18 @@ class VideoIntelligence:
         if self._number(hi) is None or hi < 0:
             raise VideoIntelligenceError("Thời lượng video không hợp lệ.")
         self._video_duration = float(hi)
+        origin = self._number(start_time)
+        limit = self._number(end_time) if end_time is not None else float(hi)
+        if (origin is None or limit is None or not 0 <= origin <= limit <= hi
+                or not isinstance(previous_summary, str)
+                or any(self._get(seg, "start") < origin or self._get(seg, "end") > limit for seg in segments)):
+            raise VideoIntelligenceError("Khoảng phân tích video hoặc câu thoại không hợp lệ.")
+        hi = limit
         output: Dict[int, Dict[str, Any]] = {}
         screens: List[Dict[str, Any]] = []
         sources = []
-        summary = ""
-        cursor = 0.0
+        summary = previous_summary
+        cursor = origin
         completed = []
         restored = self._read_checkpoint({"kind": "chunks"})
         for entry in restored if isinstance(restored, list) else []:
@@ -1267,9 +1326,9 @@ class VideoIntelligence:
             if chunk_callback:
                 self._check_cancelled(cancel_check)
                 chunk_callback(deepcopy(result), entry["start"], end)
-        if cursor and progress_callback:
+        if cursor > origin and progress_callback:
             progress_callback(round(100 * cursor / hi, 1))
-        if cursor:
+        if cursor > origin:
             logging.getLogger("pipeline").info("Tiếp tục phân tích video từ %.1f/%.1f giây (%d đoạn đã lưu)", cursor, hi, len(completed))
         while cursor < hi:
             self._check_cancelled(cancel_check)
@@ -1282,6 +1341,15 @@ class VideoIntelligence:
             crossing = [s for s in segments if self._get(s, "start") < end < self._get(s, "end")]
             if crossing:
                 end = min(float(self._get(s, "start")) for s in crossing)
+            if end_time is not None and self.provider == "opencode":
+                # A bounded request alone is insufficient if all of its
+                # neighbours must finish before any audio becomes visible.
+                # Publish each speech batch, with the full known source context
+                # still available to the provider and independent reviewer.
+                candidates = [s for s in segments if cursor <= self._get(s, "start")
+                              and self._get(s, "end") <= end]
+                if len(candidates) > self.OPENCODE_SPEECH_BATCH_SIZE:
+                    end = float(self._get(candidates[self.OPENCODE_SPEECH_BATCH_SIZE], "start"))
             if end <= cursor:
                 raise VideoIntelligenceError("Không thể chia đoạn video mà vẫn giữ mốc câu thoại.")
             chunk_segments = [s for s in segments if self._get(s, "start") >= cursor and self._get(s, "end") <= end]

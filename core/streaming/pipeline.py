@@ -135,6 +135,7 @@ class StreamingPipelineSession:
     Processes segments ahead of playback using an asynchronous priority queue.
     """
     VISUAL_REVIEW_GROUP_SIZE = 4
+    PREVIEW_SECONDS = 24.0
     def __init__(
         self,
         task_id: str,
@@ -146,6 +147,7 @@ class StreamingPipelineSession:
         ref_audio: Optional[Path] = None,
         event_callback: Optional[Callable[[str, Dict[str, Any]], Any]] = None,
         visual_translation: bool = False,
+        translation_mode: str = "full",
         _restoring: bool = False,
     ):
         self.task_id = task_id
@@ -160,6 +162,13 @@ class StreamingPipelineSession:
         self._source_downloader = None
         self._startup_failed = False
         self._prepared = False
+        if translation_mode not in ("preview", "full"):
+            raise ValueError("Chế độ dịch phải là preview hoặc full.")
+        self.translation_mode = translation_mode
+        self.preview_seconds = self.PREVIEW_SECONDS
+        self._preview_ready = False
+        self._chunked_source_started = False
+        self._source_prepared_seconds = 0.0
         self._visual_result = None
         self._visual_published_ids = set()
         self._visual_completed_seconds = 0.0
@@ -184,6 +193,8 @@ class StreamingPipelineSession:
         self.translation_sources: List[Dict[str, str]] = []
         self.review_summary: Dict[str, Any] = {}
         self.review_task: Optional[asyncio.Task] = None
+        self._review_scope = None
+        self._reviewing_segment_ids = []
         if self.visual_translation and not _restoring:
             from core.video_intelligence import validate_visual_provider, VideoIntelligenceError
             try:
@@ -410,7 +421,8 @@ class StreamingPipelineSession:
                 segment.error = None
                 segment._retry_synthesis = segment.failed_stage in ("TTS", "ALIGNING")
                 retried.append(segment)
-            if segment.status == "WAITING":
+            if (segment.status == "WAITING" and (not self._chunked_source_started
+                    or segment.end <= self._visual_completed_seconds + .001)):
                 self.queue.put_nowait((segment.start, segment.id))
         ready = sum(segment.status in ("READY", "PLAYED") for segment in self.segments.values())
         self.progress = {"phase": "tts", "stage": "Đang thử lại tạo giọng, giữ nguyên các câu đã xong…",
@@ -433,6 +445,38 @@ class StreamingPipelineSession:
 
         self.worker_task = asyncio.create_task(resumed_worker())
         self.worker_task.add_done_callback(lambda task: self._release_runtime() if task.cancelled() else None)
+        return self.get_progress()
+
+    @property
+    def can_translate_full(self):
+        return bool(self.translation_mode == "preview" and self._preview_ready
+                    and self.initialized and not self.is_running and not self.is_stopped
+                    and not self.is_editing and self.video_path
+                    and self.video_path.is_file())
+
+    async def translate_full(self):
+        """Promote a measured preview without replacing its source or edited rows."""
+        if (not self.can_translate_full or (self.start_task and not self.start_task.done())
+                or (self.worker_task and not self.worker_task.done())):
+            raise SegmentEditConflict("Hãy chờ bản xem trước sẵn sàng trước khi dịch toàn bộ.")
+        # Reserve before yielding. Two clicks cannot launch two providers/workers.
+        self.translation_mode = "full"
+        self._preview_ready = False
+        self.is_running = True
+        self.is_paused = False
+        self.pause_event.set()
+        self.error = None
+        self._visual_result = None
+        self.progress = {"phase": "prepare", "stage": "Đang dịch phần còn lại, giữ các câu đã sửa…",
+                         "progress_pct": None, "status": "RUNNING"}
+        self._persist_if_enabled()
+        async def continue_source():
+            try:
+                await self._start_guarded()
+            except Exception:
+                # The guarded owner records an actionable failure and checkpoint.
+                pass
+        self.start_task = asyncio.create_task(continue_source())
         return self.get_progress()
 
     async def edit_segment(self, segment_id: int, text: str, *, confirm_silence: bool = False,
@@ -656,6 +700,8 @@ class StreamingPipelineSession:
 
     async def _review_translations(self, *, regenerate_audio=False, force_review=False, segment_ids=None):
         from core.translation_review import AutomaticTranslationReviewer
+        self._review_scope = "chunk" if segment_ids is not None else "all"
+        self._reviewing_segment_ids = sorted(segment_ids) if segment_ids is not None else sorted(self.segments)
         await self.report_progress("review", "AI đang kiểm tra lại từng câu với nguồn…", 0)
         loop = asyncio.get_running_loop()
         semantic_active = True
@@ -671,21 +717,27 @@ class StreamingPipelineSession:
                 loop.call_soon_threadsafe(lambda: asyncio.create_task(publish_review_progress(percent)))
         targets = [segment for segment in self.segments.values()
                    if segment_ids is None or segment.id in segment_ids]
+        target_revisions = {segment.id: segment.revision for segment in targets}
         options = {"cancel_check": lambda: self.is_stopped, "progress_callback": progress,
                    "force_review": force_review}
         if segment_ids is not None:
             options["context_segments"] = list(self.segments.values())
         try:
             result = await self._run_blocking(
-                AutomaticTranslationReviewer().review, self.video_path, targets, self.screen_texts, **options)
+                AutomaticTranslationReviewer().review, self.video_path, deepcopy(targets), deepcopy(self.screen_texts), **options)
         finally:
             semantic_active = False
+            self._review_scope = None
+            self._reviewing_segment_ids = []
         # Audio edits publish one row at a time. Every pacing request must see
         # the same complete reviewed exchange, including future source fixes,
         # while each row's visible text/audio still commits transactionally.
         review_context = deepcopy(result["segments"])
         for sid, row in sorted(result["segments"].items(), key=lambda item: (self.segments[item[0]].start, item[0])):
             segment = self.segments[sid]
+            if segment.revision != target_revisions[sid]:
+                # A newer user commit wins over an older review response.
+                continue
             if regenerate_audio and row["final_vi"] != segment.final_vi:
                 await self.edit_segment(sid, row["final_vi"], _review_result=row,
                                         _review_context=review_context)
@@ -777,7 +829,13 @@ class StreamingPipelineSession:
         snapshot = dict(self.progress)
         snapshot.update(self._review_metadata())
         snapshot["can_retry"] = self.can_retry
+        snapshot.update(translation_mode=self.translation_mode, preview_seconds=self.preview_seconds,
+                        source_prepared_seconds=self._source_prepared_seconds,
+                        processed_seconds=self._visual_completed_seconds,
+                        total_seconds=self.total_duration, can_translate_full=self.can_translate_full)
         snapshot["review_summary"] = self.review_summary
+        snapshot["review_scope"] = self._review_scope
+        snapshot["reviewing_segment_ids"] = list(self._reviewing_segment_ids)
         snapshot["can_review"] = bool(self.initialized and not self.is_running and not self.is_stopped
                                       and not self.is_editing and not self.error and settings.LLM_PROVIDER == "opencode"
                                       and all(s.status in ("READY", "PLAYED") for s in self.segments.values()))
@@ -792,6 +850,8 @@ class StreamingPipelineSession:
                 snapshot.update(status="FAILED", phase="failed", stage=self.error)
         elif self.is_paused and self.is_running:
             snapshot["status"] = "PAUSED"
+        elif self._preview_ready and not self.is_running:
+            snapshot.update(status="PREVIEW_READY", phase="preview", stage="Bản xem trước đã sẵn sàng. Có thể sửa lời và dịch toàn bộ.")
         elif not self.is_running and self.review_summary.get("status") in {"failed", "incomplete"}:
             snapshot.update(status="FAILED", phase="review", stage=self._review_message())
         snapshot["can_resume"] = bool(self.initialized and self.is_running and snapshot["status"] == "PAUSED")
@@ -802,7 +862,7 @@ class StreamingPipelineSession:
         phase_changed = self.progress.get("phase") != phase
         self.progress = {
             "phase": phase, "stage": stage, "progress_pct": progress_pct,
-            "status": "COMPLETED" if phase == "complete" else "RUNNING", **details,
+            "status": "COMPLETED" if phase == "complete" else "PREVIEW_READY" if phase == "preview" else "RUNNING", **details,
         }
         logging.getLogger("pipeline").info("[%s] %s%s", self.task_id, stage,
                                            "" if progress_pct is None else f" ({progress_pct:g}%)")
@@ -867,7 +927,8 @@ class StreamingPipelineSession:
         except Exception as exc:
             self.is_running = False
             self.error = str(exc)
-            self._startup_failed = (self._visual_result is None if self.visual_translation else not self.initialized)
+            self._startup_failed = (not self._visual_prepass_complete if self._chunked_source_started
+                                    else self._visual_result is None if self.visual_translation else not self.initialized)
             logging.getLogger("errors").error("[%s] Không thể xử lý video: %s", self.task_id, self.error)
             self._release_runtime()
             await self.emit("progress", self.get_progress())
@@ -1043,7 +1104,17 @@ class StreamingPipelineSession:
                     segment.failed_stage, segment.status = segment.status, "FAILED"
                     segment.error = str(error)
                     await self.emit("segment_update", segment.to_dict())
-                    raise
+                    # A single unfit sentence or transient speech request must
+                    # not hide all following chunks of a long video. Keep the
+                    # failed row actionable and carry on; final completion is
+                    # decided by the worker from all rows, never this callback.
+                    logging.getLogger("errors").error(
+                        "[%s] SEGMENT_FAILED_CONTINUING segment_id=%s stage=%s error_type=%s",
+                        self.task_id, sid, segment.failed_stage, type(error).__name__)
+                    warning = f"Câu {sid + 1} chưa tạo được giọng; giữ phần đã xong và tiếp tục các câu sau."
+                    if warning not in self.warnings:
+                        self.warnings.append(warning)
+                    continue
                 self._visual_published_ids.add(sid)
         await self.report_progress("visual", "Đang đối chiếu lời thoại, phụ đề và tiêu đề",
             round(100 * end / self.total_duration, 1) if self.total_duration else 100,
@@ -1073,6 +1144,9 @@ class StreamingPipelineSession:
         elif not self.visual_translation and self.asr_engine_name not in ("faster-whisper", "whisper"):
             raise ValueError(f"ASR engine không được hỗ trợ: {self.asr_engine_name}")
         self._ensure_tts_engine()
+
+        if self.translation_mode == "preview" or self._chunked_source_started:
+            return await self._start_chunked_visual()
 
         if not self._prepared:
             from core.streaming.preparation_checkpoint import load
@@ -1299,7 +1373,8 @@ class StreamingPipelineSession:
 
         # 3. Enqueue all segments with initial priority based on time
         for item in self.segments.values():
-            await self.queue.put((item.start, item.id))
+            if item.status == "WAITING":
+                await self.queue.put((item.start, item.id))
 
         # 4. Emit initialization info to client
         if not self.initialized:
@@ -1311,6 +1386,159 @@ class StreamingPipelineSession:
         self.worker_task.add_done_callback(
             lambda task: self._release_runtime() if task.cancelled() else None
         )
+
+    async def _start_chunked_visual(self):
+        """Prepare, translate and publish one source interval at a time."""
+        from core.streaming.chunked_source import prepare_interval, publish_background_prefix
+        from core.streaming.export import HQExporter
+        from core.video_intelligence import VideoIntelligence
+        self._chunked_source_started = True
+        self._preview_ready = False
+        if not self.total_duration:
+            info = await self._run_blocking(VideoIntelligence.media_info, self.video_path,
+                                            cancel_check=lambda: self.is_stopped)
+            if not info["has_audio"]:
+                raise ValueError("Video không có luồng âm thanh để dịch.")
+            self.total_duration = float(info["duration"])
+            self.video_size = await self._run_blocking(HQExporter._video_size, self.video_path, lambda: self.is_stopped)
+            self._persist_if_enabled()
+        target = min(self.total_duration, self.preview_seconds) if self.translation_mode == "preview" else self.total_duration
+        while self._visual_completed_seconds < target - .001:
+            await self.pause_event.wait()
+            if self.is_stopped:
+                raise asyncio.CancelledError
+            cursor = self._visual_completed_seconds
+            nominal_end = min(self.total_duration, cursor + self.preview_seconds)
+            while self._source_prepared_seconds < nominal_end - .001:
+                record = await prepare_interval(self, self._source_prepared_seconds,
+                    min(self.total_duration, self._source_prepared_seconds + self.preview_seconds))
+                old_background = self.bgm_audio_path
+                background = await publish_background_prefix(self, record)
+                next_id = max(self.segments, default=-1) + 1
+                for row in record["rows"]:
+                    item = SegmentItem(next_id, row["start"], row["end"], row["duration"])
+                    item.text_zh = item.asr_text = row["text_zh"]
+                    item.emotion = row.get("emotion") or "<|NEUTRAL|>"
+                    item.asr_pretranscribed = True
+                    self.segments[next_id] = item
+                    next_id += 1
+                self.raw_audio_16k = Path(record["raw_audio"]["path"])
+                self.bgm_audio_path = background
+                self.suppression_stats = record["suppression_stats"]
+                self._source_prepared_seconds = record["end"]
+                self._prepared = True
+                self.bgm_url = f"/api/streaming/bgm/{self.task_id}?coverage={round(record['end'] * 1000)}"
+                self._persist_if_enabled()
+                # Old containers are task-generated prefix views. Keep all
+                # immutable per-interval packets/checkpoints for exact Retry.
+                if old_background and old_background != background and old_background.parent == background.parent:
+                    try:
+                        old_background.unlink(missing_ok=True)
+                    except OSError:
+                        pass
+                await self.emit("background_update", {"bgm_url": self.bgm_url,
+                    "source_prepared_seconds": self._source_prepared_seconds})
+            end = min(nominal_end, self._source_prepared_seconds)
+            crossing = [row for row in self.segments.values() if row.start < end < row.end]
+            if crossing:
+                end = max(row.end for row in crossing)
+            if end <= cursor or end > self._source_prepared_seconds + .05:
+                raise ValueError("Không tìm được ranh giới câu thoại trong đoạn đã nhận diện.")
+            source_rows = []
+            for row in self.segments.values():
+                if cursor <= row.start < row.end <= end + .001:
+                    source = SegmentItem(row.id, row.start, row.end, row.duration)
+                    source.text_zh = row.asr_text or row.text_zh
+                    source_rows.append(source)
+            if not self.visual_translation:
+                # Turning OCR review off must still honor preview-first. Use
+                # the same bounded recognition timeline and selected text
+                # provider, rather than eagerly recognizing the entire video.
+                self.asr_engine = self.faster_whisper
+                if not self.initialized:
+                    await self._emit_initialization()
+                for source in source_rows:
+                    row = self.segments[source.id]
+                    if row.status in ("READY", "PLAYED"):
+                        continue
+                    await self.pause_event.wait()
+                    try:
+                        await self._process_segment(row)
+                    except Exception as error:
+                        row.failed_stage, row.status, row.error = row.status, "FAILED", str(error)
+                        await self.emit("segment_update", row.to_dict())
+                        logging.getLogger("errors").error(
+                            "[%s] SEGMENT_FAILED_CONTINUING segment_id=%s stage=%s error_type=%s",
+                            self.task_id, row.id, row.failed_stage, type(error).__name__)
+                self._visual_incremental_started = True
+                self._visual_completed_seconds = end
+                await self._update_ready()
+                self._persist_if_enabled()
+                continue
+            event_loop = asyncio.get_running_loop()
+            active = True
+            def detail_callback(detail):
+                if active and not self.is_stopped:
+                    labels = {"decode": "Đang chuẩn bị khung hình", "ocr": "Đang đọc chữ trong khung hình",
+                              "source": "Đang đối chiếu lời nguồn", "translate": "Đang chờ Muse dịch đoạn video",
+                              "verify": "Đang chờ Muse kiểm tra bản dịch"}
+                    value = dict(detail)
+                    stage = labels.get(value.get("visual_step"), "Đang phân tích đoạn video")
+                    async def publish_detail():
+                        if active and self.is_running and not self.is_stopped and not self.error:
+                            await self.report_progress("visual", stage,
+                                round(100 * self._visual_completed_seconds / self.total_duration, 1), **value)
+                    event_loop.call_soon_threadsafe(lambda: asyncio.create_task(publish_detail()))
+            def chunk_callback(result, start, stop):
+                entered, finished = threading.Event(), threading.Event()
+                async def publish():
+                    entered.set()
+                    try:
+                        await self._publish_visual_chunk(result, start, stop)
+                    finally:
+                        finished.set()
+                future = asyncio.run_coroutine_threadsafe(publish(), event_loop)
+                check = current_execution_context().cancel_check
+                while True:
+                    if self.is_stopped or (check and check()):
+                        if not entered.wait(.1):
+                            continue
+                        future.cancel()
+                        while not finished.wait(.1):
+                            pass
+                        raise asyncio.CancelledError
+                    try:
+                        return future.result(timeout=.1)
+                    except FutureTimeoutError:
+                        if future.done():
+                            raise
+            try:
+                # Only known source is provided. Recognition lookahead retains
+                # adjacent turns with stable global IDs; later hours are unknown.
+                context = [{"id": row.id, "start": row.start, "end": row.end,
+                            "text_zh": row.text_zh or row.asr_text, "asr_text": row.asr_text,
+                            "source_needs_review": row.source_method == "audio"}
+                           for row in self.segments.values()]
+                await self._run_blocking(self.video_intelligence.prepass, self.video_path, source_rows,
+                    total_duration=self.total_duration, start_time=cursor, end_time=end,
+                    context_segments=context, cancel_check=lambda: self.is_stopped,
+                    chunk_callback=chunk_callback, detail_callback=detail_callback)
+            finally:
+                active = False
+            if self._visual_completed_seconds < end - .001:
+                raise ValueError("Đoạn dịch chưa xuất bản đủ dữ liệu hợp lệ.")
+            self._persist_if_enabled()
+        self._visual_prepass_complete = self._visual_completed_seconds >= self.total_duration - .05
+        while not self.queue.empty():
+            self.queue.get_nowait()
+            self.queue.task_done()
+        for row in self.segments.values():
+            if row.status == "WAITING" and row.end <= self._visual_completed_seconds + .001:
+                self.queue.put_nowait((row.start, row.id))
+        if not self.initialized:
+            await self._emit_initialization()
+        self.worker_task = asyncio.create_task(self._worker_loop())
+        self.worker_task.add_done_callback(lambda task: self._release_runtime() if task.cancelled() else None)
 
     def _grounded_visual_segments(self, recognized):
         """Retain ASR sentence boundaries and words instead of fixed VAD slots."""
@@ -1479,6 +1707,8 @@ class StreamingPipelineSession:
 
         if self._visual_incremental_started and not self._visual_prepass_complete:
             playable = min(playable, self._visual_completed_seconds)
+        if self._chunked_source_started:
+            playable = min(playable, self._visual_completed_seconds)
         self.playable_until = round(playable, 2)
         self.buffer_ahead = round(max(0.0, self.playable_until - self.current_playback_time), 2)
 
@@ -1501,6 +1731,11 @@ class StreamingPipelineSession:
             "translation_sources": list(self.translation_sources),
             **self._review_metadata(),
             "can_retry": self.can_retry,
+            "translation_mode": self.translation_mode,
+            "preview_seconds": self.preview_seconds,
+            "processed_seconds": self._visual_completed_seconds,
+            "source_prepared_seconds": self._source_prepared_seconds,
+            "can_translate_full": self.can_translate_full,
             "vocal_removal_engine": self.vocal_suppressor.name,
             "suppression_level": f"{self.vocal_suppressor.suppression_level_db:.1f} dB",
             "suppression_rtf": self.suppression_stats.get("throughput_rtf", "0.0x")
@@ -1711,20 +1946,24 @@ class StreamingPipelineSession:
 
     async def _fit_dub(self, seg, *, text, source, output_path, translator=None, context=None, on_stage=None):
         rows = self._dub_rows()
-        revision = [(row["id"], row["revision"], row["dub_start"], row["dub_end"]) for row in rows]
+        revision = {row["id"]: (row["revision"], row["dub_start"], row["dub_end"]) for row in rows}
         start, end = resolve_dub_timing(seg.to_dict())
         duration = end - start
-        capacity = max(duration, available_reflow_duration(rows, seg.id, total_duration=self.total_duration))
-        capacity = min(capacity, duration + .35)
+        known_duration = self._source_prepared_seconds if self._chunked_source_started else self.total_duration
+        capacity = max(duration, available_reflow_duration(rows, seg.id, total_duration=known_duration))
+        # The planner bounds both source endpoints to +/-350 ms and can borrow
+        # on both sides. Capping the *duration* to +350 ms discarded a valid
+        # additional 350 ms at the other endpoint (the real 1.3 s row could
+        # safely fit 2.0 s, yet pacing was told its limit was only 1.65 s).
         spoken = await self._run_blocking(synthesize_natural_speech,
             text=text, source=source, duration=duration, max_duration=capacity,
             output_path=output_path, engine=self.tts_engine, aligner=self.aligner,
             translator=translator, voice=self.voice, ref_audio=self.ref_audio,
-            context=context, on_stage=on_stage)
+            context=context, on_stage=on_stage, allow_bidirectional_reflow=True)
         measured = self._dub_audio_duration(output_path)
         plan = {}
         if measured > duration + 1e-9:
-            plan = plan_reflow(rows, seg.id, measured, total_duration=self.total_duration)
+            plan = plan_reflow(rows, seg.id, measured, total_duration=known_duration)
             if plan is None:
                 raise SpeechBudgetError("Không còn khoảng nghỉ phù hợp để căn đủ lời thoại.")
             for identity, bounds in plan.items():
@@ -1734,9 +1973,16 @@ class StreamingPipelineSession:
             output_path, spoken["speed_ratio"], spoken["boundaries"])
         if self.is_stopped:
             raise asyncio.CancelledError
-        if revision != [(item.id, item.revision, item.dub_start, item.dub_end)
-                        for item in sorted(self.segments.values(), key=lambda row: row.start)]:
+        current = {item.id: (item.revision, item.dub_start, item.dub_end) for item in self.segments.values()}
+        if any(current.get(sid) != state for sid, state in revision.items()):
             raise SegmentEditConflict("Timeline đã thay đổi trong khi tạo giọng; hãy thử lại câu này.")
+        # Appending a later source interval is independent of an earlier edit.
+        # A newly discovered row near the fitted plan is a genuine conflict.
+        affected_end = max([end, *[bounds["dub_end"] for bounds in plan.values()]])
+        affected_start = min([start, *[bounds["dub_start"] for bounds in plan.values()]])
+        if any(item.id not in revision and item.start < affected_end and item.end > affected_start
+               for item in self.segments.values()):
+            raise SegmentEditConflict("Một câu nguồn mới trùng thời gian giọng đang tạo; hãy thử lại câu này.")
         return spoken, timing, plan
 
     def _publish_dub_plan(self, plan, focus_id):
@@ -1893,9 +2139,36 @@ class StreamingPipelineSession:
         finally:
             self.is_running = False
             self._release_runtime()
-            if not self.is_stopped and not self.error:
-                stage = self._review_message() if self.review_summary or any(s.needs_review for s in self.segments.values()) else "Dịch và lồng tiếng hoàn tất"
-                await self.report_progress("complete", stage, 100)
+            owned = [s for s in self.segments.values() if not self._chunked_source_started
+                     or s.end <= self._visual_completed_seconds + .001]
+            # A failed sentence keeps FAILED status, but must not strand the
+            # entire remaining video behind the preview button. The user may
+            # inspect its completed rows, Retry missing speech, or explicitly
+            # process later intervals. Full export still refuses every gap.
+            if self.translation_mode == "preview" and self._chunked_source_started and not self.is_stopped:
+                self._preview_ready = bool(self._visual_completed_seconds > 0
+                    and (not owned or any(s.status in {"READY", "PLAYED"} for s in owned)))
+            failed = [s for s in owned if s.status == "FAILED"]
+            if failed and not self.is_stopped and not self.error:
+                self.error = f"{len(failed)} câu chưa tạo được giọng. Phần đã xong được giữ; bấm Tiếp tục để thử lại."
+                await self.emit("error", {"message": self.error, "segment_ids": [s.id for s in failed]})
+            if (not self.is_stopped and not self.error and self.translation_mode == "preview"
+                    and self._chunked_source_started):
+                if any(s.status not in ("READY", "PLAYED") for s in owned):
+                    self.error = "Bản xem trước còn câu chưa xử lý xong; phần đã lưu được giữ."
+                    await self.emit("progress", self.get_progress())
+                else:
+                    self._preview_ready = True
+                    await self.report_progress("preview", "Bản xem trước đã sẵn sàng. Có thể sửa lời và dịch toàn bộ.",
+                                               None, completed_segments=len(owned), total_segments=len(self.segments))
+            elif not self.is_stopped and not self.error:
+                if self._chunked_source_started and not self._visual_prepass_complete:
+                    self.error = "Chưa dịch hết video; các đoạn đã hoàn tất được giữ để tiếp tục."
+                    self._startup_failed = True
+                    await self.emit("progress", self.get_progress())
+                else:
+                    stage = self._review_message() if self.review_summary or any(s.needs_review for s in self.segments.values()) else "Dịch và lồng tiếng hoàn tất"
+                    await self.report_progress("complete", stage, 100)
             else:
                 await self.emit("progress", self.get_progress())
             await self.emit("finished", self.get_telemetry())
@@ -1974,6 +2247,7 @@ def create_streaming_session(
     ref_audio: Optional[Path] = None,
     event_callback: Optional[Callable] = None,
     visual_translation: bool = False,
+    translation_mode: str = "full",
 ) -> StreamingPipelineSession:
     sess = StreamingPipelineSession(
         task_id=task_id,
@@ -1985,6 +2259,7 @@ def create_streaming_session(
         ref_audio=ref_audio,
         event_callback=event_callback,
         visual_translation=visual_translation,
+        translation_mode=translation_mode,
     )
     active_streaming_sessions[task_id] = sess
     sess._persistence_enabled = True

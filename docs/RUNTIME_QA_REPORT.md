@@ -1,5 +1,15 @@
 # Runtime QA report
 
+## Preview-first bounded processing — October 8, evening
+
+User flow implemented: Start requests `translation_mode=preview`, prepares only a bounded source/audio/ASR interval (24 seconds plus measured lookahead), publishes independent groups of four speech rows, and waits for the explicit **Dịch toàn bộ** action. Promotion retains the task ID, source, checkpoints, committed edits and WAVs. Further intervals publish progressively. Preview is not full completion and cannot export a full MP4. A failed speech row remains FAILED while healthy following rows continue; full export rejects gaps. Early READY rows remain editable during later chunk review. Source offsets and IDs stay global across preparation windows. Saved preview and partial states reopen without automatically contacting Muse.
+
+Root causes addressed: full-source ASR/separation delayed preview; bounded Muse requests were still held until all sibling batches completed; first TTS/pacing failure hid subsequent rows; global review UI locked unrelated early edits; a timeline revision comparison treated an unrelated later source append as a conflicting edit. Additionally, the real 1.3-second sentence's reflow planner proved 2.0 seconds available, while speech fitting incorrectly capped that budget at 1.65 seconds. Both endpoints remain bounded to ±350 ms, voice speed remains capped at 1.15×, and semantic verification remains required for rewrites. The speech boundary now accepts the planner's bounded bidirectional budget explicitly.
+
+Regression evidence so far: 191 API/store/checkpoint/publication/export checks passed; 91 store/preview checks passed; 84 batching/ranged-publication/preview checks passed; 152 edit/natural-speech/preview checks passed. Updated rewrite-only fixtures exceed the newly valid reflow capacity (4.8 seconds instead of 4.2), preserving their original rollback/semantic-validation intent. These isolated checks are not a real provider PASS.
+
+**Runtime in progress, not certified:** production offscreen/muted Qt process9620/backend51270 started local48-second excerpt `partial-qa.mp4` via the actual file-selection bridge and Start button, task `db1fd7bb`,20:30. Real Faster-Whisper prepared only0–32 seconds, then real Muse and Edge requests ran. Several early READY rows are visible while later groups continue. The initial process predates the final four-row publication and bidirectional budget correction; its outcome must be retested after a fresh process. No successful full MP4 or multi-hour real run is claimed at this point.
+
 ## Incremental translation and OCR progress — October 8
 
 The user requested that long clips expose completed translated portions immediately, and preserve them if a later request fails. The selected provider remains OpenCode Muse; no local translation LLM was added.

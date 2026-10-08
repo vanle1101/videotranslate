@@ -252,7 +252,7 @@ def test_pause_after_prefix_blocks_next_provider_chunk(partial_session, monkeypa
     assert requests == [0., 24.]
 
 
-def test_tts_timeout_in_chunk_callback_propagates_instead_of_polling_forever(partial_session, monkeypatch):
+def test_tts_timeout_keeps_failed_rows_and_finishes_later_chunks_without_hanging(partial_session, monkeypatch):
     session, events = partial_session
     install_review_and_speech(session, monkeypatch)
     monkeypatch.setattr(session.video_intelligence, "analyze_chunk",
@@ -265,13 +265,41 @@ def test_tts_timeout_in_chunk_callback_propagates_instead_of_polling_forever(par
     monkeypatch.setattr(session, "_synthesize_segment", fail_speech)
 
     async def run():
-        with pytest.raises(TimeoutError, match="isolated speech"):
-            await asyncio.wait_for(session.start(), 2)
+        await asyncio.wait_for(session.start(), 2)
+        await asyncio.wait_for(session.worker_task, 2)
 
     asyncio.run(run())
     assert session.can_retry
     assert session.segments[0].status == "FAILED"
     assert session.segments[0].failed_stage == "TTS"
+    assert session.segments[1].status == "FAILED"
+    assert session._visual_prepass_complete
+    assert session.get_progress()["status"] == "FAILED"
+
+
+def test_one_failed_row_does_not_block_later_rows_and_keeps_exact_failure(partial_session, monkeypatch):
+    session, events = partial_session
+    rows = dense_rows(session, 5)
+    reviews, speech = install_review_and_speech(session, monkeypatch)
+    original = session._synthesize_segment
+
+    async def synthesize(item):
+        if item.id == 1:
+            item.status = "ALIGNING"
+            raise RuntimeError("Actual speech exceeds measured slot")
+        await original(item)
+
+    monkeypatch.setattr(session, "_synthesize_segment", synthesize)
+    session.is_running = True
+    asyncio.run(session._publish_visual_chunk(result_for(rows), 0., 24.))
+    assert speech == [0, 2, 3, 4]
+    failed = session.segments[1]
+    assert failed.status == "FAILED" and failed.failed_stage == "ALIGNING"
+    assert failed.error == "Actual speech exceeds measured slot"
+    assert failed.final_vi == "Chị giúp em nhé.", "An error must preserve the editable script"
+    assert any(payload["id"] == 1 and payload["status"] == "FAILED"
+               for event, payload in events if event == "segment_update")
+    assert session._visual_published_ids == {0, 2, 3, 4}
 
 
 def test_ocr_only_chunks_emit_full_screen_snapshots_and_advance_silent_tail(partial_session):
@@ -466,7 +494,7 @@ def test_retry_after_group_tts_failure_keeps_exact_review_before_new_requests(pa
 
     def review(reviewer, path, targets, screens, **options):
         if targets[0].id == 4:
-            assert speech[:4] == [0, 1, 2, 3], "Reused audits synthesize before any fresh review"
+            assert speech[:3] == [0, 2, 3], "Healthy rows synthesize even when one earlier row failed"
         return original_review(reviewer, path, targets, screens, **options)
 
     monkeypatch.setattr(session, "_synthesize_segment", synthesize)
@@ -475,18 +503,19 @@ def test_retry_after_group_tts_failure_keeps_exact_review_before_new_requests(pa
     monkeypatch.setattr(session.video_intelligence, "analyze_chunk", analyzed)
 
     async def run():
-        with pytest.raises(TimeoutError, match="isolated failed speech"):
-            await session.start()
+        await session.start()
+        await session.worker_task
         assert session.segments[1].verification["status"] == "verified"
-        assert speech == [0]
+        assert speech == [0, 2, 3, 4, 5, 6, 7, 8], "One failed row cannot block later reviewed speech"
+        assert session.get_progress()["status"] == "FAILED"
+        assert session.can_retry
         await session.retry_failed_synthesis()
-        await session.start_task
         await session.worker_task
 
     asyncio.run(run())
     assert [ids for ids, context in reviews] == [[0, 1, 2, 3], [4, 5, 6, 7], [8]]
-    assert speech == list(range(9))
-    assert analyzed.call_count == 2, "Restored first prepass chunk never repeats its provider request"
+    assert speech == [0, 2, 3, 4, 5, 6, 7, 8, 1]
+    assert analyzed.call_count == 2, "Retry resumes only failed TTS without a new prepass request"
 
 
 @pytest.mark.parametrize("change", ["draft", "audit", "context", "model"])
@@ -504,8 +533,8 @@ def test_changed_draft_audit_or_context_cannot_reuse_review(partial_session, mon
 
     async def run():
         session.is_running = True
-        with pytest.raises(TimeoutError):
-            await session._publish_visual_chunk(first, 0, 24)
+        await session._publish_visual_chunk(first, 0, 24)
+        assert all(item.status == "FAILED" for item in session.segments.values())
         changed = deepcopy(first)
         if change == "draft":
             changed["segments"][0]["final_vi"] = "Bản nháp khác"
@@ -517,8 +546,7 @@ def test_changed_draft_audit_or_context_cannot_reuse_review(partial_session, mon
             later = SegmentItem(99, 30, 31, 1)
             later.text_zh = "拜托哥"
             session.segments[99] = later
-        with pytest.raises(TimeoutError):
-            await session._publish_visual_chunk(changed, 0, 24)
+        await session._publish_visual_chunk(changed, 0, 24)
 
     asyncio.run(run())
     assert 0 in reviews[-1][0]

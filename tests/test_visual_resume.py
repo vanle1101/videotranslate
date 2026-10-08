@@ -36,6 +36,58 @@ def result_for(rows, summary="previous context"):
             "translation_sources": [{"provider": "opencode", "model": "test-model", "evidence_mode": "asr-ocr-text"}]}
 
 
+def test_bounded_prepass_owns_only_global_interval_and_keeps_context(source, monkeypatch):
+    intelligence = VideoIntelligence()
+    rows = segments()
+    calls = []
+    def analyze(path, start, end, owned, summary, cancel):
+        calls.append((start, end, [row.id for row in owned], list(intelligence._source_dialogue), summary))
+        return result_for(owned)
+    monkeypatch.setattr(intelligence, "analyze_chunk", analyze)
+    result = intelligence.prepass(source, rows[1:], total_duration=48, start_time=24, end_time=48,
+                                  context_segments=rows, previous_summary="previous exchange")
+    assert set(result["segments"]) == {1}
+    assert calls[0][:3] == (24, 48, [1])
+    assert [row["id"] for row in calls[0][3]] == [0, 1]
+    assert calls[0][4] == "previous exchange"
+    assert intelligence._source_dialogue == []
+    calls.clear()
+    intelligence.prepass(source, rows[1:], total_duration=48, start_time=24, end_time=48,
+                          context_segments=rows, previous_summary="previous exchange")
+    assert not calls, "Exact interval resumes from its validated checkpoint"
+    intelligence.prepass(source, rows[1:], total_duration=48, start_time=24, end_time=48,
+                          context_segments=rows, previous_summary="changed exchange")
+    assert calls, "Changed context must invalidate its provider cache"
+
+
+def test_bounded_dense_interval_publishes_four_speech_rows_before_next_request(source, monkeypatch):
+    intelligence = VideoIntelligence()
+    rows = [SimpleNamespace(id=sid, start=sid * 2., end=sid * 2. + 1., text_zh="你好") for sid in range(10)]
+    lifecycle = []
+    def analyze(path, start, end, owned, summary, cancel):
+        lifecycle.append(("request", [row.id for row in owned]))
+        return result_for(owned)
+    def publish(result, start, end):
+        lifecycle.append(("publish", list(result["segments"])))
+    monkeypatch.setattr(intelligence, "analyze_chunk", analyze)
+    result = intelligence.prepass(source, rows, total_duration=7200, start_time=0, end_time=24,
+                                  context_segments=rows, chunk_callback=publish)
+    assert set(result["segments"]) == set(range(10))
+    assert lifecycle == [("request", [0, 1, 2, 3]), ("publish", [0, 1, 2, 3]),
+                         ("request", [4, 5, 6, 7]), ("publish", [4, 5, 6, 7]),
+                         ("request", [8, 9]), ("publish", [8, 9])]
+
+
+@pytest.mark.parametrize("start,end", [(-1, 24), (24, 49), (30, 24), (0, 25)])
+def test_bounded_prepass_rejects_invalid_range_before_provider(source, monkeypatch, start, end):
+    intelligence = VideoIntelligence()
+    provider = Mock()
+    monkeypatch.setattr(intelligence, "analyze_chunk", provider)
+    with pytest.raises(VideoIntelligenceError):
+        intelligence.prepass(source, segments()[1:], total_duration=48, start_time=start, end_time=end)
+    provider.assert_not_called()
+
+
 def test_text_batch_cache_key_includes_wider_dialogue_and_source_corrections():
     payload = [{"id": 1, "start": 1.0, "end": 2.0, "asr_text": "这话应该我来问吧"}]
     observed = []
@@ -282,13 +334,14 @@ def test_verified_text_batch_survives_next_batch_timeout(source, monkeypatch):
     monkeypatch.setattr(first, "_request_text_result", request)
     with pytest.raises(VideoIntelligenceError, match="timeout"):
         first.prepass(source, rows, 13)
-    assert requests == [list(range(12)), list(range(12)), [12]]
+    assert requests == [list(range(4)), list(range(4)), list(range(4, 8))]
     second = VideoIntelligence()
     monkeypatch.setattr(second.screen_ocr, "extract", Mock(side_effect=AssertionError("OCR already retained")))
     monkeypatch.setattr(second, "_correct_source", correction)
     monkeypatch.setattr(second, "_request_text_result", request)
     final = second.prepass(source, rows, 13)
-    assert requests[3:] == [[12], [12]]
+    assert requests[3:] == [list(range(4, 8)), list(range(4, 8)),
+                           list(range(8, 12)), list(range(8, 12)), [12], [12]]
     assert set(final["segments"]) == set(range(13))
     assert all(item["needs_review"] for item in final["segments"].values())
 

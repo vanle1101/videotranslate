@@ -23,6 +23,188 @@ test('speech-free visual chunk updates committed captions and duration without r
   assert.equal(ui.el('task-result-link').classList.contains('hidden'), true);
 });
 
+test('preview checkpoint exposes explicit full-translation promotion and keeps earlier rows editable', async () => {
+  const ui = studio(); await ui.start();
+  const socket = ui.sockets.at(-1);
+  socket.receive({type:'progress', status:'PREVIEW_READY', phase:'preview_ready', stage:'Đoạn xem trước đã sẵn sàng',
+    translation_mode:'preview', preview_seconds:24, processed_seconds:24, total_seconds:240,
+    can_translate_full:true, can_stop:false, progress_pct:null});
+  assert.equal(ui.el('btn-translate-full').classList.contains('hidden'), false);
+  assert.equal(ui.el('btn-translate-full').disabled, false);
+  assert.match(ui.el('task-progress-detail').textContent, /Dịch toàn bộ/);
+
+  // A completed early row remains a normal editor while later work is idle.
+  await ui.el('seg-vi-0').click();
+  const row = ui.el('seg-row-0');
+  const editor = row.querySelectorAll('.transcript-editor')[0];
+  assert.equal(editor.hidden, false);
+  await editor.querySelectorAll('button')[1].click();
+  await ui.el('btn-translate-full').click();
+  assert.equal(ui.requests.at(-1).url, '/api/streaming/fixture/translate-full');
+  assert.equal(ui.el('btn-translate-full').classList.contains('hidden'), true);
+});
+
+test('all actual start paths request the same preview mode and bounded interval', async () => {
+  for (const path of ['local', 'url', 'upload']) {
+    const ui = studio(); await ui.flush();
+    if (path === 'local') ui.window.loadDroppedLocalVideo('D:/clip.mp4');
+    else if (path === 'url') ui.el('video-url').value = 'https://www.douyin.com/video/7692745161054506290';
+    else {
+      ui.el('video-file').files = [{name:'clip.mp4', type:'video/mp4', size:200}];
+      await ui.el('video-file').emit('change');
+    }
+    const endpoint = path === 'local' ? 'start-local-file' : path === 'url' ? 'start-url' : 'start-upload';
+    ui.replies.set(`/api/streaming/${endpoint}`, {task_id:'preview-start'});
+    await ui.el('btn-start').click();
+    const request = ui.requests.find(item => item.url === `/api/streaming/${endpoint}`);
+    const payload = path === 'upload' ? Object.fromEntries(request.options.body.parts.map(item => [item.name,item.value])) : JSON.parse(request.options.body);
+    assert.equal(payload.translation_mode, 'preview', path);
+    assert.equal(Number(payload.preview_seconds), 24, path);
+    assert.equal(ui.requests.some(item => item.url.endsWith('/translate-full')), false, path);
+  }
+});
+
+test('finished preview never becomes Completed or exportable and survives polling and history restore', async () => {
+  const ui = studio(); await ui.start();
+  const progress = {status:'PREVIEW_READY',phase:'preview_ready',translation_mode:'preview',
+    preview_seconds:24,processed_seconds:24,total_seconds:240,can_translate_full:true,progress_pct:null};
+  ui.sockets.at(-1).receive({type:'finished', ...progress});
+  assert.equal(ui.el('task-progress').dataset.status,'PREVIEW_READY');
+  assert.equal(ui.el('btn-export-hq').disabled,true);
+  assert.equal(ui.el('btn-save-result').disabled,true);
+  assert.equal(ui.el('btn-stop-worker').classList.contains('hidden'),true);
+  assert.equal(ui.el('task-progress-track').classList.contains('hidden'),true);
+  assert.equal(ui.el('btn-translate-full').disabled,false);
+  ui.replies.set('/api/tasks',{tasks:[{task_id:'fixture',saved:true,duration:240,...progress}]});
+  await ui.tickIntervals(2000);
+  assert.match(ui.el('tasks-table-body').children[0].innerHTML,/XEM TRƯỚC SẴN SÀNG/);
+  assert.doesNotMatch(ui.el('tasks-table-body').children[0].innerHTML,/ĐÃ DỊCH · CHƯA XUẤT|LỖI/);
+
+  ui.replies.set('/api/streaming/preview-saved',{task_id:'preview-saved',initialized:true,
+    video_url:'/saved.mp4',duration:240,progress,segments_count:1,
+    segments:[{id:0,start:0,end:10,status:'READY',audio_url:'/saved.wav',final_vi:'Câu đã chỉnh',revision:2}]});
+  assert.equal(await ui.window.studioAttachTask('preview-saved'),true);
+  assert.equal(ui.el('task-progress').dataset.status,'PREVIEW_READY');
+  assert.equal(ui.el('btn-translate-full').classList.contains('hidden'),false);
+  assert.equal(ui.el('btn-translate-full').disabled,false);
+  assert.equal(ui.el('seg-vi-0').textContent,'Câu đã chỉnh');
+});
+
+test('full promotion never drops an unsaved draft or allows duplicate submission', async () => {
+  const ui = studio(); await ui.start();
+  const progress = {status:'PREVIEW_READY',phase:'preview_ready',translation_mode:'preview',can_translate_full:true};
+  ui.sockets.at(-1).receive({type:'progress',...progress});
+  await ui.el('seg-vi-0').click();
+  ui.el('seg-input-0').value = 'Bản sửa chưa lưu';
+  await ui.el('seg-input-0').emit('input');
+  assert.equal(ui.el('btn-translate-full').disabled,true);
+  await ui.window.translateFullTask();
+  assert.equal(ui.requests.some(item => item.url.endsWith('/translate-full')),false);
+  assert.equal(ui.el('seg-input-0').value,'Bản sửa chưa lưu');
+  await ui.el('seg-row-0').querySelector('.transcript-editor').querySelectorAll('button')[1].click();
+  let release;
+  ui.replies.set('/api/streaming/fixture/translate-full', () => new Promise(resolve => {release=resolve;}));
+  const promoting = ui.el('btn-translate-full').click();
+  await ui.flush();
+  assert.equal(ui.el('btn-translate-full').disabled,true);
+  await ui.window.translateFullTask();
+  assert.equal(ui.requests.filter(item => item.url.endsWith('/translate-full')).length,1);
+  release({ok:true,json:async()=>({progress:{status:'RUNNING',translation_mode:'full',can_translate_full:false}})});
+  await promoting;
+  assert.equal(ui.el('seg-vi-0').textContent,'<b>Xin chào</b>');
+});
+
+test('late full-promotion acknowledgement cannot overwrite newer socket completion', async () => {
+  const ui = studio(); await ui.start();
+  const socket = ui.sockets.at(-1);
+  socket.receive({type:'progress',status:'PREVIEW_READY',phase:'preview_ready',translation_mode:'preview',can_translate_full:true});
+  let release;
+  ui.replies.set('/api/streaming/fixture/translate-full', () => new Promise(resolve => {release=resolve;}));
+  const promoting = ui.el('btn-translate-full').click();
+  await ui.flush();
+  socket.receive({type:'progress',status:'COMPLETED',phase:'complete',translation_mode:'full',can_translate_full:false,
+    stage:'Toàn bộ video đã dịch',progress_pct:100});
+  release({ok:true,json:async()=>({progress:{status:'RUNNING',phase:'prepare',translation_mode:'full',can_translate_full:false}})});
+  await promoting;
+  assert.equal(ui.el('task-progress').dataset.status,'COMPLETED');
+  assert.equal(ui.el('task-progress-stage').textContent,'Toàn bộ video đã dịch');
+});
+
+test('incremental review locks only current rows and retains an earlier open draft', async () => {
+  const ui = studio(); await ui.start();
+  const socket = ui.sockets.at(-1);
+  await ui.el('seg-vi-0').click();
+  ui.el('seg-input-0').value = 'Câu đầu tôi đang sửa';
+  await ui.el('seg-input-0').emit('input');
+  socket.receive({type:'segment_update',id:1,start:10,end:20,status:'READY',audio_url:'/second.wav',final_vi:'Câu sau'});
+  socket.receive({type:'progress',status:'RUNNING',phase:'review',review_scope:'chunk',reviewing_segment_ids:[1],
+    review_summary:{status:'running'}});
+  assert.equal(ui.el('seg-vi-0').disabled,false);
+  assert.equal(ui.el('seg-input-0').disabled,false);
+  assert.equal(ui.el('seg-input-0').value,'Câu đầu tôi đang sửa');
+  assert.equal(ui.el('seg-vi-1').disabled,true);
+  // Explicit whole-project review still protects every row against concurrent mutation.
+  socket.receive({type:'progress',status:'RUNNING',phase:'review',review_scope:'all',reviewing_segment_ids:[0,1],review_summary:{status:'running'}});
+  assert.equal(ui.el('seg-vi-0').disabled,true);
+  assert.equal(ui.el('seg-input-0').disabled,true);
+});
+
+test('growing background prefix keeps the global playhead and playback mix', async () => {
+  const ui = studio(); await ui.start();
+  const socket = ui.sockets.at(-1);
+  const video = ui.el('video-player');
+  video.currentTime=7; video.playbackRate=1.25;
+  await video.play();
+  const prior = ui.audio.find(item=>item.src==='/bgm.m4a');
+  assert.equal(prior.paused,false);
+  socket.receive({type:'background_update',bgm_url:'/api/streaming/bgm/fixture?coverage=48000',source_prepared_seconds:48});
+  const next = ui.audio.find(item=>item.src==='/api/streaming/bgm/fixture?coverage=48000');
+  assert.equal(next.currentTime,7);
+  assert.equal(next.playbackRate,1.25);
+  assert.equal(next.volume,0.3);
+  assert.equal(next.paused,false);
+  assert.equal(prior.paused,true);
+  assert.equal(video.currentTime,7);
+  assert.equal(ui.el('task-progress').dataset.status,'RUNNING');
+});
+
+test('preview playback stops at its measured translated boundary without a loading spinner', async () => {
+  const ui = studio(); await ui.start();
+  const video = ui.el('video-player');
+  ui.sockets.at(-1).receive({type:'progress',status:'PREVIEW_READY',phase:'preview_ready',translation_mode:'preview',
+    can_translate_full:true,processed_seconds:24,total_seconds:240});
+  video.currentTime=25;
+  await video.play();
+  assert.equal(video.paused,true);
+  assert.equal(video.currentTime,24);
+  assert.equal(ui.el('buffering-alert').classList.contains('hidden'),true);
+  assert.match(ui.el('player-task-status').textContent,/hết đoạn xem trước.*Dịch toàn bộ/);
+  assert.equal(ui.el('btn-translate-full').disabled,false);
+});
+
+test('telemetry finished event from preview is normalized to PREVIEW_READY', async () => {
+  const ui = studio(); await ui.start();
+  const socket = ui.sockets.at(-1);
+  socket.receive({type:'progress',status:'RUNNING',translation_mode:'preview',can_translate_full:true,
+    processed_seconds:24,total_seconds:240});
+  socket.receive({type:'finished',status:'finished',translation_mode:'preview',can_translate_full:true,
+    processed_seconds:24,total_seconds:240});
+  assert.equal(ui.el('task-progress').dataset.status,'PREVIEW_READY');
+  assert.equal(ui.el('btn-translate-full').disabled,false);
+  assert.equal(ui.el('btn-export-hq').disabled,true);
+});
+
+test('failed or stopped preview never retains a stale full-promotion button', async () => {
+  for (const status of ['FAILED','STOPPED']) {
+    const ui = studio(); await ui.start();
+    const socket=ui.sockets.at(-1);
+    socket.receive({type:'progress',status:'PREVIEW_READY',phase:'preview_ready',translation_mode:'preview',can_translate_full:true});
+    assert.equal(ui.el('btn-translate-full').classList.contains('hidden'),false);
+    socket.receive({type:'progress',status,phase:status==='FAILED'?'failed':'stopped'});
+    assert.equal(ui.el('btn-translate-full').classList.contains('hidden'),true,status);
+  }
+});
+
 function studio(cookieReply = { configured: false, count: 0, message: '' }, voiceConfig = {}) {
   const elements = new Map(), audio = [], sockets = [], requests = [], alerts = [], copied = [];
   const intervals = new Map();

@@ -103,7 +103,7 @@ def test_opencode_muse_routes_asr_ocr_only_to_selected_model(free_config, monkey
     segment = SegmentItem(0, 0, 2, 2)
     segment.text_zh = "你来了"
     result = processor.analyze_chunk(free_config / "video.mp4", 0, 2, [segment])
-    constructor.assert_called_once_with(model=settings.OPENCODE_MODEL, timeout=120)
+    constructor.assert_called_once_with(model=settings.OPENCODE_MODEL, timeout=90, max_retries=1)
     assert result["segments"][0]["translation_provider"] == "opencode"
     assert result["segments"][0]["translation_model"] == settings.OPENCODE_MODEL
     assert result["segments"][0]["evidence_mode"] == "asr-ocr-text"
@@ -128,6 +128,65 @@ def test_opencode_failure_preserves_provider_without_openrouter_fallback(free_co
     with pytest.raises(VideoIntelligenceError, match="OpenCode FreeTierError"):
         processor._translate_text([{"id": 0, "start": 0, "end": 2, "asr_text": "你来了"}], [evidence()], "", 0, 2)
     forbidden.assert_not_called()
+
+
+def test_muse_dense_text_batches_bound_every_id_and_use_previous_verified_context(free_config, monkeypatch):
+    monkeypatch.setattr(settings, "LLM_PROVIDER", "opencode")
+    processor = VideoIntelligence()
+    payload = [{"id": index, "start": float(index), "end": index + .8,
+                "asr_text": f"你好{index}"} for index in range(9)]
+    observed = [evidence(text=f"你好{index}", id=f"s{index}", start=float(index), end=index + .8)
+                for index in range(9)]
+    # Lots of unrelated visible labels must not enter the ASR repair body.
+    observed += [evidence(text=f"标签{index}", id=f"t{index}", start=15., end=16.)
+                 for index in range(16)]
+    requests, repairs = [], []
+    client = Mock(has_credentials=True, model="offline-muse")
+    constructor = Mock(return_value=client)
+    monkeypatch.setattr("core.video_intelligence.OpenCodeZenClient", constructor)
+
+    def correct(client, rows, screens, context, cancel):
+        repairs.append(([row["id"] for row in rows], [screen["id"] for screen in screens]))
+        assert len(rows) <= 4 and len(screens) <= 32
+        assert all(screen["start"] < row["end"] and screen["end"] > row["start"]
+                   for screen in screens for row in rows if screen["id"] == f's{row["id"]}')
+        assert all(not screen["id"].startswith("t") for screen in screens)
+        return {row["id"]: {"text_zh": row["asr_text"], "evidence_ids": [f's{row["id"]}'],
+                           "needs_review": False, "review_reason": "", "source_supported": True}
+                for row in rows}
+
+    def request(client, prompt, rows, screens, start, end, cancel):
+        requests.append(([row["id"] for row in rows], [screen["id"] for screen in screens]))
+        assert len(rows) <= 4 and len(screens) <= 8
+        if len(requests) > 2:
+            assert "verified prior chunk context" in prompt
+        raw = {"segments": [{**translation(row["asr_text"], id=row["id"], start=row["start"], end=row["end"])}
+                            for row in rows],
+               "screen_texts": [{"id": screen["id"], "text_vi": "Chữ đã dịch", "kind": "title",
+                                  "needs_review": False, "review_reason": ""} for screen in screens],
+               "summary": "verified prior chunk context"}
+        return json.dumps(raw), processor.validate_result(raw, processor._fallback_segments(rows), start, end, screens)
+
+    monkeypatch.setattr(processor, "_correct_source", correct)
+    monkeypatch.setattr(processor, "_request_text_result", request)
+    result = processor._translate_text(payload, observed, "", 0., 18.)
+    assert set(result["segments"]) == set(range(9))
+    assert {screen["id"] for screen in result["screen_texts"]} == {screen["id"] for screen in observed}
+    assert [sid for speech, _ in requests[::2] for sid in speech] == list(range(9))
+    assert [sid for _, screens in requests[::2] for sid in screens] == [screen["id"] for screen in observed]
+    assert repairs[:3] == [([0, 1, 2, 3], ["s0", "s1", "s2", "s3"]),
+                           ([4, 5, 6, 7], ["s4", "s5", "s6", "s7"]), ([8], ["s8"])]
+
+
+def test_dense_ocr_source_budget_is_fair_and_cannot_claim_full_evidence():
+    payload = [{"id": index, "start": index * 10., "end": index * 10. + 1., "asr_text": "你好"}
+               for index in range(4)]
+    observed = [evidence(id=f"s{index}_{offset}", start=row["start"], end=row["end"])
+                for index, row in enumerate(payload) for offset in range(20)]
+    selected, truncated = VideoIntelligence._source_batch_evidence(payload, observed)
+    assert len(selected) == 32 and truncated == {0, 1, 2, 3}
+    assert all(sum(screen["id"].startswith(f"s{index}_") for screen in selected) == 8
+               for index in range(4))
 
 
 @pytest.mark.parametrize("case", ["no_ocr", "low_confidence", "other_time", "contradiction",

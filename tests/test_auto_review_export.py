@@ -15,6 +15,19 @@ import main
 from core.streaming.pipeline import SegmentItem
 
 
+def test_preview_cannot_export_full_source_or_auto_export(session):
+    item, exporter = session
+    item.translation_mode = "preview"
+    item._visual_prepass_complete = False
+    with pytest.raises(HTTPException) as failure:
+        asyncio.run(main.export_hq(main.ExportHQRequest(task_id=item.task_id)))
+    assert failure.value.status_code == 409
+    assert "xem trước" in failure.value.detail
+    main.schedule_reviewed_export(item.task_id)
+    assert not main.active_export_tasks
+    exporter.export.assert_not_called()
+
+
 @pytest.fixture
 def session(monkeypatch, tmp_path):
     # /api/tasks merges durable history as well as the in-memory registry.

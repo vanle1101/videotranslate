@@ -9,6 +9,37 @@ import pytest
 
 import main
 from config import settings
+from core.streaming.pipeline import SegmentEditConflict
+
+
+def test_translate_full_restores_same_session_and_returns_runtime_state(monkeypatch):
+    session = SimpleNamespace(translate_full=AsyncMock(return_value={"status": "RUNNING", "translation_mode": "full"}),
+                              persist=Mock())
+    resolve = AsyncMock(return_value=session)
+    monkeypatch.setattr(main, "editable_session", resolve)
+    monkeypatch.setattr(main, "active_export_tasks", {})
+    async def request():
+        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=main.app), base_url="http://test") as api:
+            return await api.post("/api/streaming/same-session/translate-full")
+    response = asyncio.run(request())
+    assert response.status_code == 200
+    assert response.json()["task_id"] == "same-session"
+    assert response.json()["progress"]["translation_mode"] == "full"
+    resolve.assert_awaited_once_with("same-session")
+    session.translate_full.assert_awaited_once()
+    session.persist.assert_called_once()
+
+
+def test_translate_full_conflict_never_returns_started(monkeypatch):
+    session = SimpleNamespace(translate_full=AsyncMock(side_effect=SegmentEditConflict("Chưa có bản xem trước")))
+    monkeypatch.setattr(main, "editable_session", AsyncMock(return_value=session))
+    monkeypatch.setattr(main, "active_export_tasks", {})
+    async def request():
+        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=main.app), base_url="http://test") as api:
+            return await api.post("/api/streaming/same-session/translate-full")
+    response = asyncio.run(request())
+    assert response.status_code == 409
+    assert response.json()["detail"] == "Chưa có bản xem trước"
 
 
 @pytest.fixture
@@ -66,6 +97,7 @@ def test_visual_choice_reaches_session_for_every_source(source_api, route, enabl
     source_api.factory.assert_called_once()
     args = source_api.factory.call_args.kwargs
     assert args["visual_translation"] is bool(enabled)
+    assert args["translation_mode"] == "preview"
     if route == "url":
         assert args["video_path"] is None
         source_api.session.start_from_url.assert_awaited_once_with(main.downloader, source_api.normalize.return_value)

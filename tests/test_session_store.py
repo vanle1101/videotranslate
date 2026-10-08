@@ -55,6 +55,31 @@ def test_corrupt_manifest_is_listed_but_cannot_open(persisted):
         restore_saved_session(persisted.task_id)
 
 
+def test_intentional_preview_reopens_without_interrupted_error_and_retains_future_source(persisted):
+    persisted.visual_translation = True
+    persisted.translation_mode = "preview"
+    persisted.total_duration = 100
+    persisted._chunked_source_started = True
+    persisted._source_prepared_seconds = 32
+    persisted._visual_incremental_started = True
+    persisted._visual_completed_seconds = 24
+    persisted._preview_ready = True
+    future = SegmentItem(1, 26, 28, 2)
+    future.text_zh = "后面的话"
+    persisted.segments[1] = future
+    persisted.persist()
+    listed = list_saved_sessions()[0]
+    assert listed["status"] == "PREVIEW_READY"
+    assert listed["can_translate_full"] is True
+    assert listed["output_filename"] == "" and listed["missing_media"] == ""
+    restored = restore_saved_session(persisted.task_id)
+    assert restored.error is None and not restored._startup_failed
+    assert restored.get_progress()["status"] == "PREVIEW_READY"
+    assert restored.can_translate_full
+    assert restored.segments[1].status == "WAITING"
+    assert restored.segments[0].final_vi == persisted.segments[0].final_vi
+
+
 @pytest.mark.parametrize("style", [
     {"position": "diagonal"}, {"text_color": "red"}, {"background_color": "#zzzzzz"},
     {"blur_original": "false"}, {"position": []},
