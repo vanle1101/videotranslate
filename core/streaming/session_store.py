@@ -86,7 +86,8 @@ META_FIELDS = frozenset((
     "background_color text_color position blur_original suppression_level_db throughput_rtf "
     "zh vi source_evidence_ids speaker theme terms pronouns name src tgt note "
     "address_context address_context_sources address_stale_source_ids address_applicable address_neutral_faithful address_verified address_reason address_preserved self_address listener_address self_uncertain listener_uncertain address_uses uncertain quote "
-    "reviewed_address_context is_focus speaker_id addressee_id source_needs_review source_truncated translation_is_draft "
+    "source_accepted source_scope_conflict full_text_zh source_scope_ids source_scope_window source_scope_ambiguous "
+    "reviewed_address_context turn_check ambiguous_roles is_focus speaker_id addressee_id source_needs_review source_truncated translation_is_draft "
     "tts_seconds slot_seconds fit_ratio semantic_status acoustic_status source_region_verified "
     "reference_zh reference_vi equivalent different_source same_meaning text_preserved "
     "mode input_duration output_duration sample_rate channels elapsed_seconds rtf "
@@ -101,6 +102,7 @@ DIAGNOSTIC_CODES = frozenset((
 ).split())
 _OUTPUT_CHECKS = OrderedDict()
 _OUTPUT_CHECK_LOCK = threading.Lock()
+_SAVE_REPLACE_LOCK = threading.RLock()
 OUTPUT_FAILURE_WARNING = ("Chưa xác minh được video đã xuất (có thể thiếu, hỏng hoặc kiểm tra hết thời gian); "
                           "bản dịch và giọng đọc vẫn được giữ. Hãy xuất MP4 lại.")
 PERSISTENCE_FAILURE_WARNINGS = frozenset((
@@ -186,6 +188,24 @@ def _clean_address_uses(value, *, depth):
     return result
 
 
+def _clean_source_scope_ids(value):
+    """Persist only non-negative dialogue row IDs used to scope OCR evidence."""
+    if (not isinstance(value, list) or len(value) > MAX_ROWS
+            or any(type(item) is not int or item < 0 for item in value)):
+        raise ValueError("Danh sách câu nguồn đối chiếu không hợp lệ.")
+    return list(value)
+
+
+def _clean_source_scope_window(value):
+    """Persist a finite, ordered ownership interval and no arbitrary fields."""
+    if not isinstance(value, dict) or set(value) != {"start", "end"}:
+        raise ValueError("Khoảng thời gian câu nguồn đối chiếu không hợp lệ.")
+    start, end = value.get("start"), value.get("end")
+    if not _finite(start) or not _finite(end) or end <= start or end > 86400:
+        raise ValueError("Khoảng thời gian câu nguồn đối chiếu không hợp lệ.")
+    return {"start": float(start), "end": float(end)}
+
+
 def _clean(value, *, depth=0):
     if depth > 12:
         raise ValueError("Dữ liệu dự án lồng quá sâu.")
@@ -218,6 +238,23 @@ def _clean(value, *, depth=0):
                 result[key] = _clean_address_context_sources(item, depth=depth + 1)
             elif key == "address_uses":
                 result[key] = _clean_address_uses(item, depth=depth + 1)
+            elif key == "source_scope_ids":
+                result[key] = _clean_source_scope_ids(item)
+            elif key == "source_scope_window":
+                result[key] = _clean_source_scope_window(item)
+            elif key == "full_text_zh":
+                if not isinstance(item, str) or len(item) > 100_000 or "\x00" in item:
+                    raise ValueError("Văn bản nguồn đối chiếu không hợp lệ.")
+                result[key] = item
+            elif key in ("source_accepted", "source_scope_conflict", "source_scope_ambiguous"):
+                if type(item) is not bool:
+                    raise ValueError("Trạng thái đối chiếu phạm vi nguồn phải là boolean.")
+                result[key] = item
+            elif key == "ambiguous_roles":
+                if (not isinstance(item, list) or len(item) > 2
+                        or any(role not in ("self", "listener") for role in item)):
+                    raise ValueError("Các vai phân lượt chưa rõ không hợp lệ.")
+                result[key] = list(item)
             elif key in ("self_uncertain", "listener_uncertain"):
                 if type(item) is not bool:
                     raise ValueError("Kết luận từng vai xưng hô phải là boolean.")
@@ -230,6 +267,13 @@ def _clean(value, *, depth=0):
                     result[key] = item
             else:
                 result[key] = _clean(item, depth=depth + 1)
+        # Reload must retain the same conservative gate as a fresh source
+        # reading, even when contradictory confidence fields were saved.
+        turn = result.get("turn_check")
+        if isinstance(turn, dict):
+            for role in turn.get("ambiguous_roles", []):
+                result[f"{role}_uncertain"] = True
+                result["uncertain"] = True
         return result
     raise ValueError("Dự án chứa dữ liệu không thể lưu.")
 
@@ -308,7 +352,12 @@ def save_session(session):
             handle.write(encoded)
             handle.flush()
             os.fsync(handle.fileno())
-        temporary.replace(target)
+        # Windows can briefly deny replacing a manifest that another process
+        # has opened without delete sharing (Defender/indexing and a concurrent
+        # history read are common examples). Retry only the documented sharing
+        # errors, while serializing in-process replacements so two saves from
+        # the same runtime cannot contend for the destination.
+        _replace_project_with_retry(temporary, target)
         # Only a committed atomic save clears the live disk-failure warning.
         # A failed write must retain it; unrelated review/media warnings stay.
         session.warnings[:] = [warning for warning in session.warnings
@@ -317,6 +366,25 @@ def save_session(session):
         if temporary:
             temporary.unlink(missing_ok=True)
     return target
+
+
+def _replace_project_with_retry(temporary, target):
+    """Atomically replace a project, bounded to transient Windows locks."""
+    delays = (0.05, 0.1, 0.2, 0.4)
+    with _SAVE_REPLACE_LOCK:
+        for attempt, delay in enumerate(delays):
+            try:
+                temporary.replace(target)
+                return
+            except PermissionError as error:
+                # ERROR_ACCESS_DENIED (5), ERROR_SHARING_VIOLATION (32), and
+                # ERROR_LOCK_VIOLATION (33) are the only retryable Windows
+                # replace failures. Permanent ACL/path failures must surface.
+                if (os.name != "nt"
+                        or getattr(error, "winerror", None) not in {5, 32, 33}
+                        or attempt == len(delays) - 1):
+                    raise
+                time.sleep(delay)
 
 
 def _finite(value, minimum=0):
@@ -462,11 +530,16 @@ def _validate(data, task_id):
 
 def _read(task_id):
     path = _project_path(task_id)
-    if not path.exists():
-        raise FileNotFoundError("Không tìm thấy dự án đã lưu.")
-    if path.is_symlink() or not path.is_file() or path.stat().st_size > MAX_BYTES:
-        raise ValueError("Không tìm thấy tệp dự án hợp lệ.")
-    return _validate(_decode_project(path.read_text(encoding="utf-8")), task_id)
+    # Keep internal history reads from overlapping the atomic replace.  The
+    # lock only covers the short open/read window; validation runs afterwards
+    # on the detached string, so large manifests do not block a later save.
+    with _SAVE_REPLACE_LOCK:
+        if not path.exists():
+            raise FileNotFoundError("Không tìm thấy dự án đã lưu.")
+        if path.is_symlink() or not path.is_file() or path.stat().st_size > MAX_BYTES:
+            raise ValueError("Không tìm thấy tệp dự án hợp lệ.")
+        encoded = path.read_text(encoding="utf-8")
+    return _validate(_decode_project(encoded), task_id)
 
 
 def _exists(value):
@@ -488,6 +561,20 @@ def _valid_audio(value):
             audio.setpos(frames - 1)
             return len(audio.readframes(1)) == width * channels
     except (OSError, EOFError, ValueError, wave.Error):
+        return False
+
+
+def _valid_row_audio(row, value):
+    """Validate an audio file and reject samples wider than its saved dub slot."""
+    if not _valid_audio(value):
+        return False
+    try:
+        start, end = resolve_dub_timing(row)
+        with wave.open(str(value), "rb") as audio:
+            rate = audio.getframerate()
+            duration = audio.getnframes() / rate
+        return duration <= end - start + (1 / rate) + 1e-9
+    except (OSError, EOFError, ValueError, ZeroDivisionError, wave.Error, TypeError):
         return False
 
 
@@ -610,7 +697,7 @@ def _availability(data):
     if fields.get("bgm_audio_path") and not _exists(fields["bgm_audio_path"]):
         missing.append("Thiếu âm thanh nền đã lưu; bản xem trước chưa phát đầy đủ.")
     absent_audio = [row["id"] for row in rows if row.get("final_vi", "").strip()
-                    and row["status"] in {"READY", "PLAYED"} and not _valid_audio(row.get("audio_path"))]
+                    and row["status"] in {"READY", "PLAYED"} and not _valid_row_audio(row, row.get("audio_path"))]
     if absent_audio:
         missing.append(f"Thiếu âm thanh của {len(absent_audio)} câu; bấm Tiếp tục để tạo lại phần thiếu.")
     ready = bool(fields.get("initialized") and all(row["status"] in {"READY", "PLAYED"} for row in rows)
@@ -746,7 +833,7 @@ def restore_saved_session(task_id, event_callback=None):
                 needs_preparation_resume = True
             segment.status = "FAILED"
             segment.error = "Câu thoại bị gián đoạn hoặc thiếu tệp âm thanh; cần tiếp tục xử lý."
-        if _valid_audio(segment.audio_path):
+        if _valid_row_audio(row, segment.audio_path):
             segment.audio_url = f"/api/streaming/audio/{task_id}/{segment.id}?rev={segment.revision}"
         else:
             segment.audio_path = segment.audio_url = None

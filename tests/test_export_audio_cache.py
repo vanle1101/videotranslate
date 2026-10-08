@@ -61,7 +61,18 @@ def test_real_caption_only_export_skips_all_audio_processing_and_keeps_audio_byt
     assert not any("Trích xuất" in stage or "Trộn giọng" in stage for stage in stages)
     assert len(records(root)) == 1
     reused = run_media(["ffmpeg", "-v", "error", "-i", result["output_path"], "-map", "0:a", "-f", "s16le", "pipe:1"], capture_output=True)
-    assert original == reused and original
+    assert original, 'First real export has no decoded audio'
+    if original != reused:
+        mismatch = next((i for i, pair in enumerate(zip(original, reused)) if pair[0] != pair[1]),
+                        min(len(original), len(reused)))
+        details = {"original_pcm_bytes": len(original), "reused_pcm_bytes": len(reused),
+                   "first_different_byte": mismatch}
+        for label, rendered in (("original", first), ("reused", result)):
+            details[label] = json.loads(run_media(
+                ["ffprobe", "-v", "error", "-select_streams", "a:0", "-show_streams",
+                 "-show_entries", "stream=sample_rate,channels,duration,nb_frames,time_base,start_time",
+                 "-of", "json", rendered["output_path"]], capture_output=True))
+        pytest.fail(f'Caption-only export changed decoded audio: {details}')
     HQExporter.validate_output(result["output_path"], 1)
 
 

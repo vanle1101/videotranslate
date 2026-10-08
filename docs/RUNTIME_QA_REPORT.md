@@ -1,5 +1,45 @@
 # Runtime QA report
 
+## Current audit — October 9, 2026
+
+**PARTIAL: runtime recovery and media checks passed; complete semantic and long-video acceptance remain pending.** Target: Douyin2TikTok AI Studio using the configured OpenCode Muse model. Seedream/Seedance graph tests do not apply to this application. Tests honor background-only operation through the actual production Qt/WebEngine page offscreen and muted. HTTP, Muse, Edge-TTS and exported media are real. Physical desktop clicks/native file-picker and tray interaction are not claimed.
+
+### Reproduced root causes and corrections
+
+| Root cause | Files / correction | Retest |
+| --- | --- | --- |
+| Reviewed source imported a later sentence. Row 5 ASR `小满` was expanded to `小满今年19`, duplicating row 6 and producing 1.96s speech for a 0.72s slot. User edits had split one OCR track into touching pieces, including a mask-only piece; ownership lookup stopped before the later ASR row. | `core/translation_review.py`: coalesce touching same-text/compatible-box tracks transitively; preserve measured OCR times and separate later repeats. `core/streaming/pipeline.py`: re-review failed corrected speech before retry, including legacy saved metadata and the WAITING retry reservation. | **PASS real UI Retry 02:09–02:12:** scoped row 5 is `小满` → “Tiểu Mãn.”, real Edge WAV 0.731625s, 1.15×; all 34 prior healthy WAVs retained and 35 rows ready. |
+| Failed/missing reviewed speech could still appear completed; restored READY WAVs were not checked against allocated dub intervals. | `core/streaming/pipeline.py`, `core/streaming/session_store.py`: reject missing/overlong audio and retain healthy rows. | Runtime retry above; all 35 WAVs independently checked against nonoverlapping dub intervals, no overflow. |
+| OCR text agreement did not prove speaker/addressee direction, and fresh responses could omit the requested alternative-turn check. | `core/engines/translation/semantic_translator.py`, `core/translation_context.py`, `core/translation_review.py`: retain actual IDs; validate source-only, per-role and competing-turn evidence. Fresh requests/checkpoints require `turn_check`; legacy records stay readable. | Fresh-schema omission is rejected in bounded retry; 173 context/address/transcript regressions pass. Latest real result still has 12 unresolved semantic rows. |
+| Screen translations stayed displayed after overlapping speech became unresolved. | `core/video_intelligence.py`, `core/subtitle_cues.py`, pipeline hook: invalidate uncertain hardsubs and refuse explicitly unverified subtitle anchors; preserve titles and measured geometry. | Visual/caption tests pass; prior regression expected unchanged trust flags and was corrected to assert original geometry/text retention with review required. |
+| Project replacement failed with PermissionError; source ownership provenance was stripped on reload. | `core/streaming/session_store.py`: serialize internal reads/replacements, bound Windows sharing retry, preserve typed/bounded source provenance. | **PASS actual Windows lock:** CreateFileW reader denying delete-sharing first causes real replace failure, then atomic publication succeeds after release. 160 store/scope/runtime/chunk tests pass. The owner of the original 01:51 lock is unknown. |
+| Export validation checked only the opening second. | `core/streaming/export.py`: full video/audio decode before publication. | Damaged later packets are rejected; complete fresh 48s MP4 decode passes. Pushed `67a1ef1`. |
+| Compatibility preview used prefix-local time for the complete source. | `core/media_preview.py`, `main.py`, `static/app.js`: bounded 120s windows, global/local mapping, cancellation and serialized publication. | **PASS real UI:** 21-minute source; seek 15:00 loads 887.008–1007.008s, seek 5s loads 0–120s. This does not certify 21-minute translation. Pushed `67a1ef1`. |
+| Hard Stop could retain download bytes beyond the durable checkpoint; test also confused completed-before-Stop with partial transfer. | `core/downloader.py`, download regressions: trim uncommitted tails and test both race outcomes. | **PASS** real HTTP/subprocess Range resume and validated completed-file reuse; 62 tests. Pushed `c4ec0c9`. |
+| NumPy 2.5.3 violated this environment's requirements; simulated test failures polluted user logs. | Preflight checks, existing venv corrected only to NumPy 1.26.4; pytest logging isolation and safe edit diagnostics. | Runtime preflight passes. Logs did not grow from the broad offline suite; real UI logs remain available. Pushed `67a1ef1`. |
+
+### Real production UI/provider/media tests
+
+| Steps | Expected | Actual |
+| --- | --- | --- |
+| History `db1fd7bb` → Tiếp tục → real Muse source review → real Edge speech → automatic MP4 → result playback, 02:09–02:12 | Repair failed speech without repeating healthy rows; readable new output | **PASS execution/media.** 35 ready rows; output `workspace/outputs/douyin_translated_db1fd7bb_hq.mp4`, 9,270,272 bytes, H.264/AAC 960×540, 48.000s, complete FFmpeg decode. Qt readyState 4, playback +0.355s, no JS/media error. Semantic qualification: 12 unresolved rows. |
+| Fresh process → History `db1fd7bb` → result playback, 02:15 | Persisted current output and transcript reload | **PASS.** Same result/35 rows, readyState 4, playback +0.492s; no JS/media error. |
+| Fresh process → History stopped `e978c201` → Tiếp tục → actual RUNNING → Stop, 02:14 | Cancel owned work, retain transcript/audio, no late writes | **PASS.** Stop 0.360s, UI/backend STOPPED, four healthy WAV hashes unchanged, no mutation after 5s; Retry remains available. Backend released its listener. |
+| Existing source of failing Douyin modal `7692745161054506290` → native bridge file input → actual Start preview, from 02:21 | Bounded translated prefix; full output unavailable until full processing | **IN PROGRESS.** New QA task `76f5aa6b`; source remains original 489,511,802 bytes / 320.040635s; original user task `5a7b66a9` untouched. Actual ASR/OCR/Muse stages running. |
+
+### Automated validation and remaining issues
+
+- JS UI/bridge suite: **223 passed**.
+- Focused store/scope/runtime/chunk suite: **160 passed**; context/address/transcript suite: **173 passed**.
+- Latest broad suite: **1887 passed, 1 skipped, 127 subtests, 2 upstream WebSocket deprecation warnings, 1 failed** (obsolete unchanged-screen-trust assertion). That assertion is corrected and its suite passes; final broad rerun remains pending.
+- Prior caption-only cache PCM mismatch did not recur in this broad run or repeated focused probes. Root cause remains unproven; no production audio change or claim of definitive repair.
+- Real result has **12 unresolved source/address rows**, including rows 32/33 (`我十八` / `我十九`). Row 34 was corrected to “Không thấy nó sai sai à?”; this does not resolve all semantics.
+- Full 320s translation/export and multi-hour translation are not certified yet.
+- Windows Proactor 10054 callbacks and zero-task graceful-shutdown warnings occurred. Processes actually exited; these warnings are not claimed eliminated.
+- No full-project “done” verdict while these acceptance gaps remain.
+
+User inputs, saved projects, credentials and referenced media are preserved. Disposable task-owned probes/caches/processes are cleaned after the final checks.
+
 ## Latest chunked-runtime retest — October 8, 23:02–23:28
 
 The previous real run reproduced a failure after the first 34 of 35 speech rows: row 26 (`36.67–37.57s`) produced a measured 1.64s WAV, while the old timing guard allowed only the 0.35s endpoint tolerance. The provider response and semantic review were valid; the failure was the local speech-window planner, not Muse or the network. The failed row was retained and the other 34 rows were not regenerated.

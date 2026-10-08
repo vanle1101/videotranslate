@@ -754,6 +754,15 @@ class StreamingPipelineSession:
                 segment.needs_review = bool(snapshot.get("needs_review"))
                 segment.review_reason = snapshot.get("review_reason")
                 await self.emit("segment_update", segment.to_dict())
+        await self._invalidate_reviewed_screen_texts()
+
+    async def _invalidate_reviewed_screen_texts(self):
+        from core.subtitle_cues import invalidate_screen_texts_for_segments
+        updated = invalidate_screen_texts_for_segments(
+            self.screen_texts, [segment.to_dict() for segment in self.segments.values()])
+        if updated != self.screen_texts:
+            self.screen_texts = updated
+            await self.emit("screen_update", {"screen_texts": self.screen_texts})
 
     async def _review_translations(self, *, regenerate_audio=False, force_review=False, segment_ids=None):
         from core.translation_review import AutomaticTranslationReviewer
@@ -841,9 +850,11 @@ class StreamingPipelineSession:
         # Pacing may change a verified translation while rebuilding its audio.
         # Report the committed text/audio state, not the earlier review draft.
         self._refresh_review_counts()
+        await self._invalidate_reviewed_screen_texts()
         if self.review_summary.get("status") == "completed":
             self.warnings[:] = [warning for warning in self.warnings if warning not in REVIEW_FAILURE_WARNINGS]
-        await self.emit("review_complete", {"review_summary": self.review_summary, "warnings": list(self.warnings)})
+        await self.emit("review_complete", {"review_summary": self.review_summary,
+            "warnings": list(self.warnings), "screen_texts": self.screen_texts})
 
     async def _resume_pending_chunk_reviews(self):
         """Finish interrupted review ownership before retrying its saved speech.
@@ -857,10 +868,24 @@ class StreamingPipelineSession:
         if not (self._chunked_source_started and self.visual_translation
                 and settings.LLM_PROVIDER == "opencode"):
             return
+        def needs_source_scope_recheck(row):
+            # A saved OCR correction may have imported the next utterance's
+            # words. Revalidate failed speech against measured neighbouring
+            # ASR before retrying the same overlong text indefinitely.
+            audit = row.verification or {}
+            retried_speech = row.status == "FAILED" or (
+                row.status == "WAITING" and row._retry_synthesis)
+            return (retried_speech and row.failed_stage in {"TTS", "ALIGNING"}
+                and audit.get("status") != "manual"
+                and bool(row.asr_text) and row.text_zh != row.asr_text
+                and audit.get("source_supported") is True
+                and any(isinstance(proof, dict) and proof.get("text_zh")
+                        for proof in audit.get("evidence", [])))
         pending = sorted((row for row in self.segments.values()
             if row.end <= self._visual_completed_seconds + .001
             and row.source_method == "text-ai" and row.translation_provider == "opencode"
-            and (row.verification or {}).get("status") in (None, "pending", "incomplete")),
+            and ((row.verification or {}).get("status") in (None, "pending", "incomplete")
+                 or needs_source_scope_recheck(row))),
             key=lambda row: (row.start, row.id))
         for offset in range(0, len(pending), self.VISUAL_REVIEW_GROUP_SIZE):
             await self.pause_event.wait()
@@ -931,8 +956,18 @@ class StreamingPipelineSession:
                 self.is_running = False
                 self.review_task = None
                 if not self.is_stopped:
-                    await self.report_progress("complete", self._review_message(),
-                                               100 if self.review_summary.get("status") == "completed" else None)
+                    failed_audio = [segment.id for segment in self.segments.values()
+                                    if segment.status == "FAILED"
+                                    or (segment.final_vi.strip() and segment.status in ("READY", "PLAYED")
+                                        and not segment.audio_path)]
+                    if failed_audio:
+                        self.error = (f"{len(failed_audio)} câu chưa tạo được giọng; bản dịch được giữ, "
+                                      "hãy bấm Tiếp tục để thử lại.")
+                        await self.report_progress("failed", self.error, None,
+                                                   failed_segment_ids=failed_audio)
+                    else:
+                        await self.report_progress("complete", self._review_message(),
+                                                   100 if self.review_summary.get("status") == "completed" else None)
                     await self.emit("finished", self.get_telemetry())
                 self._release_runtime()
         self.review_task = asyncio.create_task(run_review())
@@ -1016,7 +1051,7 @@ class StreamingPipelineSession:
         total = len(self.segments)
         await self.report_progress(
             phase, f"{stage} · Đã hoàn tất {count}/{total} câu",
-            round(count * 100 / total, 1) if total else 100,
+            round(count * 100 / total, 1) if total else None,
             completed_segments=count, total_segments=total,
         )
 

@@ -32,6 +32,17 @@ class OpenCodeTranslationTests(unittest.TestCase):
         self.assertEqual(request.call_count, 2)
         self.assertIn("mình - bạn", request.call_args.args[0])
 
+    def test_batch_translation_request_keeps_speaker_and_addressee_metadata(self):
+        segment = {**self.segment, "speaker_id": "child", "addressee_id": "mother"}
+        responses = [json.dumps(self.context), json.dumps({"results": [{"id": "2", **self.translation}]})]
+        with patch.object(self.translator, "_opencode_request", side_effect=responses) as request:
+            self.translator.translate([segment])
+        request_payload = json.loads(request.call_args.args[1].split("Dịch từng câu tiếng Trung", 1)[-1]
+                                     if "Dịch từng câu tiếng Trung" in request.call_args.args[1]
+                                     else request.call_args.args[1].split("Danh sách các câu thoại cần chuyển ngữ:\n", 1)[1])
+        self.assertEqual(request_payload[0]["speaker_id"], "child")
+        self.assertEqual(request_payload[0]["addressee_id"], "mother")
+
     def test_single_keeps_short_dialogue_context_and_passes_budget(self):
         context = [{"zh": f"previous-{i}", "vi": f"bản dịch {i}"} for i in range(7)]
         with patch.object(self.translator, "_opencode_request", return_value=json.dumps(self.translation)) as request:

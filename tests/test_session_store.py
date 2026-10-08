@@ -128,6 +128,20 @@ def test_corrupt_manifest_is_listed_but_cannot_open(persisted):
         restore_saved_session(persisted.task_id)
 
 
+def test_saved_ready_wav_longer_than_dub_window_is_missing_audio_not_completed(persisted):
+    segment = persisted.segments[0]
+    with wave.open(segment.audio_path, "wb") as audio:
+        audio.setparams((1, 2, 24000, 0, "NONE", "not compressed"))
+        audio.writeframes(b"\x01\x00" * (3 * 24000))
+    row = next(item for item in list_saved_sessions() if item["task_id"] == persisted.task_id)
+    assert row["status"] == "FAILED"
+    assert row["progress_pct"] is None
+    restored = restore_saved_session(persisted.task_id)
+    assert restored.segments[0].status == "FAILED"
+    assert restored.segments[0].audio_path is None
+    assert restored.can_retry
+
+
 def test_intentional_preview_reopens_without_interrupted_error_and_retains_future_source(persisted):
     persisted.visual_translation = True
     persisted.translation_mode = "preview"
@@ -322,6 +336,34 @@ def test_granular_address_evidence_preserves_gate_and_pacing_context_after_resta
         context = dialogue_context([row.to_dict()])
         assert context[0]["reviewed_address_context"] == reading
         assert context[0]["reviewed_address_context"]["self_uncertain"] is True
+        restored.persist()
+
+
+def test_competing_turn_reading_cannot_gain_certainty_after_restart(persisted):
+    from core.translation_review import AutomaticTranslationReviewer
+    segment = persisted.segments[0]
+    segment.text_zh, segment.final_vi = "我十八", "Con 18 tuổi."
+    reading = {"id": 0, "self_address": "con", "listener_address": "bố",
+        "self_uncertain": False, "listener_uncertain": False, "uncertain": False,
+        "reason": "Chưa loại được cách đọc hai người đáp nhau.",
+        "evidence": [{"id": 0, "quote": "我十八"}],
+        "turn_check": {"ambiguous_roles": ["self"], "reason": "Có hai cách phân lượt.",
+                       "evidence": [{"id": 0, "quote": "我十八"}]}}
+    segment.verification = {"status": "unresolved", "semantic_verified": True,
+        "address_verified": True, "address_applicable": True,
+        "address_reason": "Bản nháp.", "address_context": reading,
+        "address_uses": [{"term": "Con", "role": "self"}]}
+    persisted.persist()
+    for _ in range(2):
+        active_streaming_sessions.clear()
+        restored = restore_saved_session(persisted.task_id)
+        audit = restored.segments[0].verification
+        context = audit["address_context"]
+        assert context["turn_check"] == reading["turn_check"]
+        assert context["self_uncertain"] is True and context["uncertain"] is True
+        assert context["listener_uncertain"] is False
+        assert AutomaticTranslationReviewer._address_gate(
+            {0: context}, 0, audit, segment.text_zh, segment.final_vi)
         restored.persist()
 
 
@@ -629,6 +671,105 @@ def test_failed_atomic_save_keeps_previous_project(persisted, monkeypatch):
         persisted.persist()
     assert path.read_bytes() == before
     assert not list(path.parent.glob("*.tmp"))
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows sharing errors are platform-specific")
+def test_atomic_save_retries_transient_windows_sharing_violation(persisted, monkeypatch):
+    import core.streaming.session_store as store
+    real_replace = Path.replace
+    attempts = []
+
+    def flaky_replace(source, target):
+        if len(attempts) < 2:
+            attempts.append(len(attempts))
+            error = PermissionError(32, "sharing violation")
+            error.winerror = 32
+            raise error
+        attempts.append(len(attempts))
+        return real_replace(source, target)
+
+    monkeypatch.setattr(Path, "replace", flaky_replace)
+    persisted.segments[0].final_vi = "Đã vượt qua khóa tệp tạm thời."
+    path = persisted.persist()
+    assert path.is_file()
+    assert len(attempts) == 3
+    assert json.loads(path.read_text(encoding="utf-8"))["segments"][0]["final_vi"] == persisted.segments[0].final_vi
+    assert not list(path.parent.glob("*.tmp"))
+
+
+def test_source_scope_provenance_survives_save_reload(persisted):
+    segment = persisted.segments[0]
+    segment.verification = {
+        "status": "unresolved", "source_supported": False, "source_accepted": False,
+        "source_scope_conflict": True, "source_scope_ambiguous": False,
+        "evidence": [{"id": "review0", "text_zh": "小满", "full_text_zh": "小满今年19",
+                      "source_scope_ids": [4, 5, 6],
+                      "source_scope_window": {"start": 7.88, "end": 11.333}}],
+    }
+    persisted.persist()
+    restored = restore_saved_session(persisted.task_id)
+    assert restored.segments[0].verification == segment.verification
+    saved = json.loads(_project_path(persisted.task_id).read_text(encoding="utf-8"))
+    assert saved["segments"][0]["verification"]["evidence"][0]["source_scope_ids"] == [4, 5, 6]
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Real Windows file sharing contract")
+def test_real_windows_reader_lock_releases_during_atomic_save(persisted):
+    import ctypes
+    from ctypes import wintypes
+    import threading
+    import core.streaming.session_store as store
+
+    path = persisted.persist()
+    before = path.read_bytes()
+    api = ctypes.WinDLL("kernel32", use_last_error=True)
+    api.CreateFileW.argtypes = [wintypes.LPCWSTR, wintypes.DWORD, wintypes.DWORD,
+                               ctypes.c_void_p, wintypes.DWORD, wintypes.DWORD, wintypes.HANDLE]
+    api.CreateFileW.restype = wintypes.HANDLE
+    api.CloseHandle.argtypes = [wintypes.HANDLE]
+    api.CloseHandle.restype = wintypes.BOOL
+    # Permit reads/writes but deny delete-sharing, reproducing Windows' actual
+    # atomic-replace failure without substituting Path.replace or its error.
+    handle = api.CreateFileW(str(path), 0x80000000, 3, None, 3, 0x80, None)
+    assert handle != ctypes.c_void_p(-1).value
+    staging = path.parent / "sharing-probe.tmp"
+    staging.write_bytes(before)
+    released = threading.Event()
+    thread = None
+    try:
+        with pytest.raises(PermissionError) as failure:
+            staging.replace(path)
+        assert failure.value.winerror in {5, 32, 33}
+        assert path.read_bytes() == before
+
+        def release_lock():
+            released.wait(.12)
+            api.CloseHandle(handle)
+        thread = threading.Thread(target=release_lock)
+        thread.start()
+        store._replace_project_with_retry(staging, path)
+        assert path.read_bytes() == before and not staging.exists()
+    finally:
+        released.set()
+        if thread is not None:
+            thread.join(timeout=2)
+            assert not thread.is_alive()
+        else:
+            api.CloseHandle(handle)
+        staging.unlink(missing_ok=True)
+
+
+@pytest.mark.parametrize("field,value", [
+    ("source_accepted", "true"),
+    ("source_scope_conflict", 1),
+    ("source_scope_ambiguous", None),
+    ("source_scope_ids", ["5"]),
+    ("source_scope_window", {"start": 1.0, "end": 1.0}),
+])
+def test_source_scope_provenance_rejects_untyped_or_invalid_values(persisted, field, value):
+    persisted.segments[0].verification = {field: value}
+    with pytest.raises(ValueError, match="phạm vi nguồn|câu nguồn đối chiếu|Khoảng thời gian"):
+        persisted.persist()
 
 
 def test_fresh_process_restores_visual_project_without_provider_credentials(persisted):

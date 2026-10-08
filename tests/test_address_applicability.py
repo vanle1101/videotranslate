@@ -61,6 +61,8 @@ def listener_reading():
     return {12: {"id": 12, "self_address": "", "listener_address": "chị",
         "self_uncertain": True, "listener_uncertain": False, "uncertain": True,
         "reason": "Lời gọi trực tiếp 姐 xác nhận người nghe được gọi chị, chưa biết cách tự xưng.",
+        "turn_check": {"ambiguous_roles": ["self"], "reason": "Nguồn chưa xác định vai người nói.",
+                       "evidence": [{"id": 12, "quote": "拜托姐"}]},
         "evidence": [{"id": 12, "quote": "拜托姐"}]}}
 
 
@@ -212,6 +214,8 @@ def test_real_review_path_requests_reading_for_existing_pronoun_and_records_new_
         if "ID cần kiểm định: " in prompt:
             return {"address_context": [{"id": 0, "self_address": "tôi", "listener_address": "",
                 "uncertain": False, "reason": "Người nói tự nói đang làm việc, không suy thêm quan hệ.",
+                "turn_check": {"ambiguous_roles": [], "reason": "Không có lời đối chiếu của người khác.",
+                               "evidence": [{"id": 0, "quote": "我在工作"}]},
                 "evidence": [{"id": 0, "quote": "我在工作"}]}]}
         return {"segments": [{**source, "literal_vi": candidate, "natural_vi": candidate, "final_vi": candidate,
             "semantic_verified": True, "verification_reason": "Giữ đang làm việc.",
@@ -237,6 +241,8 @@ def test_uncertain_first_person_warning_does_not_claim_a_sibling_relationship(mo
         if "ID cần kiểm định: " in prompt:
             return {"address_context": [{"id": 0, "self_address": "", "listener_address": "",
                 "uncertain": True, "reason": "Chưa có căn cứ xác định quan hệ giữa hai người.",
+                "turn_check": {"ambiguous_roles": ["self", "listener"], "reason": "Chưa rõ người nói/người nghe.",
+                               "evidence": [{"id": 0, "quote": "跟我走"}]},
                 "evidence": [{"id": 0, "quote": "跟我走"}]}]}
         return {"segments": [{**source, "semantic_verified": True,
             "verification_reason": "Giữ hành động đi theo người nói.",

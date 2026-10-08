@@ -18,8 +18,11 @@ def address_response(prompt):
     ids = json.loads(prompt.split("ID cần kiểm định: ")[1].split("\nNguồn thoại", 1)[0])
     context = json.loads(prompt.split("Nguồn thoại theo thời gian: ")[1])
     ref = context[-1]
+    sources = {item["id"]: item["text_zh"] for item in context}
     return {"address_context": [{"id": sid, "self_address": "con", "listener_address": "mẹ",
         "uncertain": False, "reason": "Mạch lời gọi phụ huynh.",
+        "turn_check": {"ambiguous_roles": [], "reason": "Đã xét câu hiện tại và lời gọi phụ huynh.",
+                       "evidence": [{"id": sid, "quote": sources[sid]}]},
         "evidence": [{"id": ref["id"], "quote": ref["text_zh"]}]} for sid in ids]}
 
 

@@ -12,7 +12,7 @@ from core.translation_context import (
     dialogue_context, address_reading_prompt, validate_address_reading,
 )
 from core.translation_review import AutomaticTranslationReviewer
-from core.video_intelligence import VISUAL_TRANSLATION_PROMPT
+from core.video_intelligence import VISUAL_TRANSLATION_PROMPT, VideoIntelligenceError
 
 
 def source(index, text, vi="Lời nháp"):
@@ -130,6 +130,8 @@ def test_reviewer_receives_early_source_context_in_both_passes(monkeypatch):
             assert "Lời nháp" not in prompt and "Câu này phải để tao" not in prompt
             return {"address_context": [{"id": sid, "self_address": "em", "listener_address": "chị",
                 "uncertain": False, "reason": "Lời gọi chị trong mạch thoại.",
+                "turn_check": {"ambiguous_roles": [], "reason": "Đã xét lời nối tiếp trong ngữ cảnh.",
+                    "evidence": [{"id": sid, "quote": rows[sid]["text_zh"]}]},
                 "evidence": [{"id": 0, "quote": "拜托姐"}]} for sid in ids]}
         batch = json.loads(prompt.split("Câu cần kiểm định: ", 1)[1].split("\nOCR mới tại máy", 1)[0])
         return {"segments": [{**row, "semantic_verified": True,
@@ -191,6 +193,8 @@ def test_actual_reviewer_keeps_ocr_and_address_decisions_separate(monkeypatch, a
             assert "Con đói rồi." not in prompt
             return {"address_context": [{"id": row["id"], "self_address": "con", "listener_address": "mẹ",
                 "uncertain": False, "reason": "Cùng mạch về nhà rồi nói đói với mẹ.",
+                "turn_check": {"ambiguous_roles": [], "reason": "Lượt hiện tại tiếp tục lời gọi mẹ.",
+                    "evidence": [{"id": row["id"], "quote": row["text_zh"]}]},
                 "evidence": [{"id": 0, "quote": "妈妈我回来了"}, {"id": 1, "quote": "我饿了"}]} for row in rows]}
         return {"segments": [{**row, "semantic_verified": True, "verification_reason": "OCR xác nhận lời nguồn.",
             "source_evidence_ids": [f"review{row['id']}"], "address_applicable": True, "address_verified": address_verified,
@@ -245,3 +249,118 @@ def test_fluent_pacing_cannot_pass_without_separate_address_preservation(monkeyp
     monkeypatch.setattr(translator, "_opencode_request", request)
     with pytest.raises(PacingReviewRejected):
         translator.rewrite_for_pacing("这话应该我来问吧", "Câu này phải để em hỏi mới đúng chứ.", 1.2)
+
+
+def test_source_turn_policy_compares_parses_without_assuming_real_world_chronology():
+    rows = [source(0, "我是你儿子"), source(1, "我三十五"), source(2, "我二十七")]
+    rows[1]["speaker_id"] = "A"
+    prompt = address_reading_prompt(rows, dialogue_context(rows, rows))
+    assert "cách đọc cùng người nói" in prompt
+    assert "'không thấy đổi lượt' không đủ" in prompt
+    assert "lịch hiện tại" in prompt and "du hành thời gian" in prompt
+    assert "giữ nguyên đối lập" in prompt.casefold()
+    assert "turn_check" in prompt and "ambiguous_roles" in prompt
+    payload = json.loads(prompt.split("Nguồn thoại theo thời gian: ", 1)[1])
+    assert payload[1]["speaker_id"] == "A"
+    assert all("final_vi" not in row for row in payload)
+
+
+def turn_reading(rows, *, roles=("self",)):
+    return {"address_context": [{"id": rows[-1]["id"], "self_address": "con",
+        "listener_address": "bố", "self_uncertain": False, "listener_uncertain": False,
+        "uncertain": False, "reason": "Cách đọc nối vai ban đầu.",
+        "evidence": [{"id": rows[0]["id"], "quote": rows[0]["text_zh"]}],
+        "turn_check": {"ambiguous_roles": list(roles),
+            "reason": "Lời tuổi khác nhau có thể là sửa lời hoặc hai người đối chiếu; chưa đủ căn cứ loại một cách.",
+            "evidence": [{"id": row["id"], "quote": row["text_zh"]} for row in rows]}}]}
+
+
+def test_unresolved_competing_turns_cannot_be_verified_by_confidence_or_exact_ocr():
+    rows = [source(0, "我是你女儿"), source(1, "我十八"), source(2, "我十九")]
+    data = turn_reading(rows)
+    original = deepcopy(data)
+    reading = validate_address_reading(data, [rows[-1]], rows)
+    assert reading[2]["uncertain"] is True and reading[2]["self_uncertain"] is True
+    assert reading[2]["listener_uncertain"] is False
+    assert "Kiểm tra phân lượt:" in reading[2]["reason"]
+    audit = {"semantic_verified": True, "address_verified": True,
+        "address_reason": "OCR trùng từng chữ.", "address_applicable": True,
+        "address_uses": [{"term": "Con", "role": "self"}]}
+    assert AutomaticTranslationReviewer._address_gate(reading, 2, audit, "我十九", "Con mười chín.")
+    assert data == original
+    # A later correction to either side of this exchange must invalidate the
+    # reading, not just a correction to the original relationship anchor.
+    assert AutomaticTranslationReviewer._address_cites_changed_source(reading, 2, {1})
+    assert AutomaticTranslationReviewer._address_cites_changed_source(reading, 2, {2})
+
+
+def test_competing_speaker_parses_preserve_independently_grounded_listener():
+    rows = [source(0, "你怎么知道"), source(1, "拜托姐")]
+    data = turn_reading(rows)
+    data["address_context"][0]["listener_address"] = "chị"
+    reading = validate_address_reading(data, [rows[-1]], rows)
+    audit = {"semantic_verified": True, "address_verified": True,
+        "address_reason": "Chỉ giữ lời gọi chị trực tiếp trong câu, không thêm tự xưng.",
+        "address_applicable": True, "address_uses": [{"term": "Chị", "role": "listener"}]}
+    assert not AutomaticTranslationReviewer._address_gate(reading, 1, audit, "拜托姐", "Chị ơi!")
+
+
+@pytest.mark.parametrize("change", [
+    {"ambiguous_roles": ["speaker"]}, {"ambiguous_roles": [{}]},
+    {"ambiguous_roles": "self"}, {"reason": ""}, {"evidence": []},
+    {"evidence": [{"id": 0, "quote": "我是你女儿"}]},
+    {"evidence": [{"id": 2, "quote": "我二十"}]},
+])
+def test_turn_analysis_requires_valid_current_source_evidence(change):
+    rows = [source(0, "我是你女儿"), source(1, "我十八"), source(2, "我十九")]
+    data = turn_reading(rows)
+    data["address_context"][0]["turn_check"].update(change)
+    with pytest.raises(ValueError):
+        validate_address_reading(data, [rows[-1]], rows)
+
+
+def test_resolved_turn_analysis_does_not_force_alternation_or_clear_existing_uncertainty():
+    rows = [source(0, "妈妈我回来了"), source(1, "我饿了")]
+    data = turn_reading(rows, roles=())
+    reading = validate_address_reading(data, [rows[-1]], rows)
+    assert reading[1]["uncertain"] is False
+    data["address_context"][0].update(self_uncertain=True, uncertain=True)
+    reading = validate_address_reading(data, [rows[-1]], rows)
+    assert reading[1]["self_uncertain"] is True and reading[1]["uncertain"] is True
+
+
+def test_explicit_null_turn_check_is_rejected_instead_of_becoming_legacy_success():
+    rows = [source(0, "妈妈我回来了")]
+    data = turn_reading(rows)
+    data["address_context"][0]["turn_check"] = None
+    with pytest.raises(ValueError):
+        validate_address_reading(data, rows, rows)
+
+
+def test_fresh_address_reading_cannot_skip_turn_analysis_but_legacy_remains_readable():
+    rows = [source(0, "我十八", "Tôi mười tám.")]
+    legacy = {"address_context": [{"id": 0, "self_address": "tôi", "listener_address": "",
+        "uncertain": False, "reason": "Người nói nêu tuổi.",
+        "evidence": [{"id": 0, "quote": "我十八"}]}]}
+    assert validate_address_reading(legacy, rows, rows)[0]["self_address"] == "tôi"
+    with pytest.raises(ValueError, match="phân lượt"):
+        validate_address_reading(legacy, rows, rows, require_turn_check=True)
+    client = Mock(translate=Mock(return_value=legacy))
+    with pytest.raises(VideoIntelligenceError):
+        AutomaticTranslationReviewer._address_reading(client, rows, rows, lambda: None)
+    assert client.translate.call_count == 2
+
+
+def test_invalid_source_citation_retry_explains_rejection_without_loosening_the_gate(caplog):
+    rows = [source(0, "妈妈我回来了"), source(1, "我饿了")]
+    valid = turn_reading(rows, roles=())
+    invalid = deepcopy(valid)
+    invalid['address_context'][0]['turn_check']['evidence'][-1]['quote'] = '爸爸'
+    client = Mock(translate=Mock(side_effect=[invalid, valid]))
+    reading = AutomaticTranslationReviewer._address_reading(client, [rows[-1]], rows, lambda: None)
+    assert reading[1]['uncertain'] is False
+    second_prompt = client.translate.call_args_list[1].args[0]
+    assert 'LƯỢT TRƯỚC KHÔNG QUA KIỂM TRA CẤU TRÚC' in second_prompt
+    assert 'Dẫn chứng phân lượt không khớp lời nguồn.' in second_prompt
+    assert 'Không đoán vai để sửa schema.' in second_prompt
+    assert 'ADDRESS_CONTEXT_INVALID' in caplog.text

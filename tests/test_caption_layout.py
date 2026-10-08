@@ -196,6 +196,17 @@ def test_placement_can_use_verified_source_region_without_approving_translation(
     assert plan[0]["text"] == "Anh đã đến rồi."
 
 
+def test_explicit_false_source_geometry_does_not_anchor_unreviewed_caption():
+    unverified = region(needs_review=False, source_region_verified=False)
+    plan = layout([speech()], [unverified], (1080, 1920))
+    assert plan[0]["source_bbox"] is None and plan[0]["background"] == "white"
+    # An editor-created mask-only region remains geometry-only; it is not an
+    # approval of whatever old OCR translation happened to be stored there.
+    manual = {**unverified, "mask_only": True, "text_vi": ""}
+    plan = layout([speech()], [manual], (1080, 1920))
+    assert plan[0]["source_bbox"] == manual["bbox"]
+
+
 def test_completed_speech_review_can_anchor_its_local_ocr_box_without_trusting_titles():
     reviewed = speech(text_zh="你来了", verification={
         "status": "corrected", "source_supported": True,

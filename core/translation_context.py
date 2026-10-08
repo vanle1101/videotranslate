@@ -10,7 +10,7 @@ import json
 import re
 
 
-ADDRESS_POLICY_REVISION = 4
+ADDRESS_POLICY_REVISION = 5
 
 VIETNAMESE_ADDRESS_POLICY = """
 QUY TẮC XƯNG HÔ THEO NGỮ CẢNH (áp dụng cả dịch, kiểm định và rút gọn lời đọc):
@@ -24,8 +24,20 @@ QUY TẮC XƯNG HÔ THEO NGỮ CẢNH (áp dụng cả dịch, kiểm định v�
   Một lời gọi chị và câu giải thích ngay sau có thể vẫn do cùng người nói tiếp.
   Segment/đổi mốc ASR không đồng nghĩa đổi
   người nói. 我 phải theo ĐÚNG người đang nói; giữ chiều xưng hô khi nói tiếp,
-  chỉ đổi chiều khi có căn cứ đổi lượt. Không mặc định tao hoặc tự luân phiên
+  chỉ đổi chiều khi có căn cứ đổi lượt. Tuy nhiên, thiếu dấu đổi lượt KHÔNG là
+  bằng chứng cùng người nói: phải xét cả cách đọc nối lời và hỏi–đáp/đối chiếu
+  giữa những người khác nhau. Không mặc định tao hoặc tự luân phiên
   chị/em theo số câu; không gán một chiều đại từ cho toàn bộ nhân vật.
+- Các câu tự giới thiệu, tuổi hoặc quan điểm đối lập ở gần nhau có thể là hai
+  người đáp nhau, lời sửa lại của một người, hoặc lời trích. Kiểm tra từng cách
+  đọc với cả câu trước và sau; không ép hai 我 thành cùng người chỉ vì không có
+  speaker_id. Giữ nguyên đối lập, số và người sở hữu ý, không bỏ 我 khi việc bỏ
+  khiến hai lời tự giới thiệu thành một chuỗi số không rõ ai nói.
+- Phân biệt quan hệ với tuổi ở thời điểm cảnh đang diễn ra. Trong phim có thể
+  có hồi tưởng, du hành thời gian, đổi thân phận hoặc lời giả định. Năm sinh/tuổi
+  không tự chứng minh người đang nói, không dùng lịch hiện tại hoặc giả định
+  bố/mẹ luôn lớn tuổi hơn để loại một cách phân vai hợp lời nguồn. Không tự bịa
+  du hành thời gian; giữ các cách đọc còn hợp lý và báo chưa rõ nếu nguồn thiếu.
 - 姐/哥 có thể là cách gọi xã giao; 爸/妈/老师 có thể nằm trong lời kể hoặc lời trích.
   Một từ đơn lẻ không chứng minh quan hệ ruột thịt, người nói, tuổi hay giới tính.
   Không gán quan hệ của cảnh trước cho nhân vật mới. Dùng mốc câu, lời gọi/đáp,
@@ -190,10 +202,18 @@ def address_reading_prompt(rows, context):
         "không bắt buộc có speaker_id, không tự gán danh tính, giới tính hoặc luân phiên theo segment. "
         "OCR chỉ chứng minh chữ nguồn, KHÔNG tự chứng minh ai nói. Được kết luận từ mạch đối thoại "
         "và lời gọi/đáp nếu đủ rõ; nếu hai cách phân vai vẫn hợp lý thì uncertain=true. "
+        "Với câu phụ thuộc nối vai từ câu khác, so sánh ÍT NHẤT cách đọc cùng người nói và "
+        "cách đọc đổi người/hỏi–đáp/đối chiếu; xét thêm tự sửa và trích dẫn khi phù hợp. "
+        "Phải có căn cứ khẳng định cách đọc được chọn; 'không thấy đổi lượt' không đủ. "
+        "Tìm mâu thuẫn về người sở hữu lời, số tuổi, năm sinh, lời đáp và câu kế tiếp. "
+        "Không loại cách đọc chỉ bằng suy luận tuổi theo lịch hiện tại hoặc vai bố/mẹ. "
         "Chưa dịch câu; chỉ đề xuất xưng hô cho từng ID cần kiểm định, dẫn câu nguồn chính xác. "
         "Trả JSON {\"address_context\":[{\"id\":0,\"self_address\":\"\","
         "\"listener_address\":\"\",\"self_uncertain\":true,\"listener_uncertain\":true,"
         "\"uncertain\":true,\"reason\":\"lý do cho từng vai\","
+        "\"turn_check\":{\"ambiguous_roles\":[\"self\"],"
+        "\"reason\":\"so sánh cách đọc cùng/khác người; căn cứ loại hoặc giữ mỗi cách\","
+        "\"evidence\":[{\"id\":0,\"quote\":\"câu nguồn thực có\"}]},"
         "\"evidence\":[{\"id\":0,\"quote\":\"câu nguồn thực có\"}]}]}. "
         "Xét self_uncertain và listener_uncertain RIÊNG: biết lời gọi người nghe không đồng nghĩa "
         "biết người nói phải tự xưng gì. Ví dụ 拜托姐 xác nhận listener_address=chị, "
@@ -201,13 +221,18 @@ def address_reading_prompt(rows, context):
         "uncertain=true. Không cần biết tên, giới tính, tuổi hay ruột thịt để giữ đúng lời gọi trực tiếp. "
         "Không suy sự chắc chắn này sang câu kế chỉ vì gần thời gian. uncertain là kết luận toàn bộ; "
         "true nếu còn vai chưa xác định. Mỗi *_address chỉ ghi cách xưng/gọi được đề xuất, không ghi giải thích. "
+        "Mỗi ID có turn_check. ambiguous_roles chỉ chứa self/listener: ghi vai mà các cách phân "
+        "lượt còn hợp lý khiến xưng hô khác nhau; [] khi đã có căn cứ loại các cách còn lại hoặc "
+        "câu không phụ thuộc phân lượt. Mọi vai trong ambiguous_roles phải *_uncertain=true. "
+        "turn_check.evidence phải có chính ID đang xét cùng các câu làm căn cứ, trích nguồn "
+        "đủ nhận ra lời tiếp hay lời đáp. Trực tiếp gọi chị/mẹ có thể rõ listener dù self chưa rõ. "
         "Đại từ có thể rỗng nếu không cần; không chèn lời Việt nháp hay sửa lời nguồn. "
         "Mỗi ID trả đúng một lần. Dẫn đủ bằng chứng nối cách gọi với câu hiện tại, không chỉ trích một từ rời.\n"
         + "ID cần kiểm định: " + json.dumps([row["id"] for row in rows])
         + "\nNguồn thoại theo thời gian: " + json.dumps(source_dialogue(context), ensure_ascii=False))
 
 
-def validate_address_reading(data, rows, context):
+def validate_address_reading(data, rows, context, *, require_turn_check=False):
     """Validate cited source text; this is not itself proof of interpretation."""
     if not isinstance(data, dict) or not isinstance(data.get("address_context"), list):
         raise ValueError("Thiếu kết quả đọc ngữ cảnh xưng hô.")
@@ -237,7 +262,45 @@ def validate_address_reading(data, rows, context):
                     or citation["id"] not in by_id or not isinstance(citation.get("quote"), str)
                     or not citation["quote"].strip() or citation["quote"] not in by_id[citation["id"]]):
                 raise ValueError("Dẫn chứng xưng hô không khớp lời nguồn.")
-        result[row["id"]] = row
+        checked = dict(row)
+        # Older saved readings did not contain a competing-turn analysis. Do
+        # not invent one on their behalf. When the provider does declare that
+        # several parses remain possible, its positive confidence fields must
+        # never override that declaration, even if its quotes are exact.
+        turn_check = row.get("turn_check")
+        if require_turn_check and "turn_check" not in row:
+            raise ValueError("Thiếu kiểm tra các cách phân lượt đối thoại.")
+        if "turn_check" in row:
+            if (not isinstance(turn_check, dict)
+                    or not isinstance(turn_check.get("ambiguous_roles"), list)
+                    or any(not isinstance(role, str) or role not in {"self", "listener"}
+                           for role in turn_check["ambiguous_roles"])
+                    or not isinstance(turn_check.get("reason"), str)
+                    or not turn_check["reason"].strip()
+                    or not isinstance(turn_check.get("evidence"), list)
+                    or not turn_check["evidence"]):
+                raise ValueError("Thiếu kiểm tra các cách phân lượt đối thoại.")
+            turn_refs = set()
+            for citation in turn_check["evidence"]:
+                if (not isinstance(citation, dict) or type(citation.get("id")) is not int
+                        or citation["id"] not in by_id or not isinstance(citation.get("quote"), str)
+                        or not citation["quote"].strip() or citation["quote"] not in by_id[citation["id"]]):
+                    raise ValueError("Dẫn chứng phân lượt không khớp lời nguồn.")
+                turn_refs.add(citation["id"])
+            if row["id"] not in turn_refs:
+                raise ValueError("Kiểm tra phân lượt chưa dẫn chính câu đang xét.")
+            for role in turn_check["ambiguous_roles"]:
+                checked[f"{role}_uncertain"] = True
+                checked["uncertain"] = True
+            if turn_check["ambiguous_roles"]:
+                checked["reason"] = row["reason"] + " Kiểm tra phân lượt: " + turn_check["reason"]
+            # These citations must also participate in the source-version
+            # invalidation used by later corrections and persisted reviews.
+            checked["evidence"] = list(row["evidence"])
+            for citation in turn_check["evidence"]:
+                if citation not in checked["evidence"]:
+                    checked["evidence"].append(dict(citation))
+        result[row["id"]] = checked
     if set(result) != expected:
         raise ValueError("Thiếu câu khi đọc ngữ cảnh xưng hô.")
     return result
@@ -253,6 +316,10 @@ def address_review_instruction(reading):
           "chiều xưng hô; câu trung tính, số, tên riêng, thán từ và lời kể không áp dụng. "
           "Kiểm tra final_vi theo "
           "vai người nói/người nghe và nối câu liên tục, sửa bản Việt nếu sai chiều. "
+          "Rà lại turn_check với cả lời trước và sau: thiếu dấu đổi lượt không chứng minh cùng "
+          "người; không dùng tuổi/năm sinh và lịch hiện tại để tự bác cách phân vai trong phim. "
+          "Không ép các lời tự giới thiệu/đối chiếu của hai người thành cùng người, và không bỏ "
+          "chủ thể để làm mất đối lập. Các vai còn nhiều cách đọc phải giữ chưa xác nhận. "
           "Mỗi segment phải thêm address_verified (boolean) và address_reason (lý do cụ thể) nếu áp dụng. "
           "Thêm address_uses là mảng theo thứ tự TỪNG lần xuất hiện xưng hô trong final_vi, "
           "mỗi mục {\"term\":\"chị\",\"role\":\"listener\"}; role chỉ self hoặc listener. "

@@ -151,6 +151,13 @@ def normalize_screen_texts(items, duration=None):
         if not isinstance(item, dict) or item.get("needs_review"):
             continue
         mask_only = item.get("mask_only") is True
+        # An explicit false source-region verdict means the translated OCR
+        # text was not tied to speech at its measured timestamp. Keep absent
+        # legacy metadata compatible; provider-produced rows always carry the
+        # boolean. Manual mask-only rows are geometry-only and remain valid.
+        if (item.get("kind") == "subtitle" and item.get("source_region_verified") is False
+                and not mask_only):
+            continue
         text = str(item.get("text_vi") or "").strip()
         box = item.get("bbox")
         if (not text and not mask_only) or not isinstance(box, (list, tuple)) or len(box) != 4:
@@ -177,6 +184,61 @@ def normalize_screen_texts(items, duration=None):
                        "kind": "title" if item.get("kind") == "title" else "subtitle",
                        "bbox": [left, top, right - left, bottom - top]})
     return result
+
+
+def invalidate_screen_texts_for_segments(screen_texts, segments):
+    """Mark hardsub translations stale when their speech review is unresolved.
+
+    OCR geometry remains useful for placement/masking, so this deliberately
+    leaves ``source_region_verified`` untouched. The visible OCR translation is
+    hidden by ``needs_review`` until the overlapping speech row has a completed
+    semantic review. Titles and editor-created mask-only rows are independent
+    of spoken-turn review and are preserved.
+    """
+    values = segments.values() if isinstance(segments, dict) else (segments or [])
+    speech = []
+    for segment in values:
+        if not isinstance(segment, dict):
+            continue
+        try:
+            start, end = float(segment["start"]), float(segment["end"])
+        except (KeyError, TypeError, ValueError):
+            continue
+        if not math.isfinite(start) or not math.isfinite(end) or end <= start:
+            continue
+        verification = segment.get("verification")
+        status = verification.get("status") if isinstance(verification, dict) else None
+        unresolved = bool(segment.get("needs_review"))
+        if status in {"pending", "running", "incomplete", "unresolved", "failed"}:
+            unresolved = True
+        if (isinstance(verification, dict) and status != "manual"
+                and (verification.get("semantic_verified") is False
+                     or verification.get("source_supported") is False
+                     or verification.get("second_pass_status") in {"failed", "incomplete"})):
+            unresolved = True
+        if unresolved:
+            speech.append((start, end))
+
+    output = []
+    for item in screen_texts or []:
+        if not isinstance(item, dict):
+            continue
+        row = dict(item)
+        if row.get("kind") != "subtitle" or row.get("mask_only") is True:
+            output.append(row)
+            continue
+        try:
+            start, end = float(row["start"]), float(row["end"])
+        except (KeyError, TypeError, ValueError):
+            output.append(row)
+            continue
+        if any(start < seg_end and end > seg_start for seg_start, seg_end in speech):
+            row["needs_review"] = True
+            reason = str(row.get("review_reason") or "").strip()
+            pending_reason = "Lời thoại chồng lên vùng chữ chưa được AI kiểm tra xong; giữ chữ gốc."
+            row["review_reason"] = " · ".join(dict.fromkeys(value for value in (reason, pending_reason) if value))
+        output.append(row)
+    return output
 
 
 def uncovered_intervals(start, end, screen_texts):
@@ -286,6 +348,7 @@ def _trusted_speech_regions(screen_texts, segments=None):
         return False
     for row in screen_texts or []:
         if (not isinstance(row, dict) or row.get("kind") != "subtitle"
+                or (row.get("source_region_verified") is False and not row.get("mask_only"))
                 or (row.get("needs_review") and row.get("source_region_verified") is not True)
                 or row.get("source_method") != "local-ocr"):
             continue

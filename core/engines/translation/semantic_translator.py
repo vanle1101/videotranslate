@@ -261,6 +261,16 @@ class SemanticTranslator(TranslationEngine):
             }
             for seg in segments
         ]
+        # Keep explicit diarization/target metadata in the actual translation
+        # request as well as in the context summary.  The previous payload
+        # silently dropped it here, so Muse had to guess the speaker turn from
+        # text alone and could invert chị/em or tôi/con in a batch response.
+        for item, source in zip(payload, segments):
+            for key in ("speaker_id", "addressee_id"):
+                value = source.get(key)
+                if (isinstance(value, (str, int, float)) and not isinstance(value, bool)
+                        and value != ""):
+                    item[key] = value
 
         results_map = self._execute_3tier_translation(payload, context_info)
 

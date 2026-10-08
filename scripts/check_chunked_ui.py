@@ -96,10 +96,17 @@ def inspect_extended_tail(page, snapshot):
 
 
 def main():
+    global SOURCE, RECORD
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("mode", choices=["preview", "full", "resume", "resume-stop", "inspect", "inspect-tail"])
+    parser.add_argument("mode", choices=["preview", "full", "resume", "resume-stop", "inspect", "inspect-tail", "review"])
+    parser.add_argument("--source", type=Path, default=SOURCE, help="Existing authorized QA source; never copied or downloaded by this harness.")
+    parser.add_argument("--record", type=Path, default=RECORD, help="Durable QA task record within workspace/temp.")
+    parser.add_argument("--timeout", type=int, default=3600, help="Real provider acceptance deadline in seconds.")
     args = parser.parse_args()
-    assert SOURCE.is_file() and SOURCE.stat().st_size < 100_000_000
+    SOURCE, RECORD = args.source.resolve(), args.record.resolve()
+    assert SOURCE.is_file() and SOURCE.is_relative_to((ROOT / "workspace").resolve())
+    assert RECORD.parent == (ROOT / "workspace/temp").resolve() and RECORD.suffix == ".json"
+    assert 60 <= args.timeout <= 10800
     assert settings.LLM_PROVIDER == "opencode"
     app = QApplication.instance() or QApplication([])
     app.setQuitOnLastWindowClosed(False)
@@ -147,7 +154,14 @@ def main():
                 check_playback(page)
                 event("FINAL_REOPEN_PASS", {"task_id": task_id, "output": snapshot["output_filename"]})
                 return
-            if args.mode == "full":
+            if args.mode == "review":
+                assert snapshot['progress']['status'] in {'COMPLETED', 'FAILED'}
+                assert snapshot['progress']['can_review']
+                prior_output = ROOT / 'workspace/outputs' / (snapshot['output_filename'] or f'douyin_translated_{task_id}_hq.mp4')
+                prior_stamp = prior_output.stat().st_mtime_ns if prior_output.is_file() else None
+                assert click(page, 'btn-review-worker')
+                until(page, "document.getElementById('task-progress').dataset.status==='RUNNING'", timeout=30)
+            elif args.mode == "full":
                 if snapshot["progress"]["can_translate_full"]:
                     assert click(page, "btn-translate-full")
                 else:
@@ -188,7 +202,7 @@ def main():
                           "edited_revision": record.get("edited", {}).get("revision"), "state": ui_state(page)})
                     return
         event("TASK", task_id)
-        snapshot = wait_for_idle(page, base, task_id)
+        snapshot = wait_for_idle(page, base, task_id, timeout=args.timeout)
         if snapshot["progress"]["status"] == "FAILED":
             event("REAL_FAILURE", {"progress": snapshot["progress"], "rows": [row for row in snapshot["segments"] if row["status"] == "FAILED"]})
             raise AssertionError(snapshot["progress"]["stage"])
@@ -210,6 +224,10 @@ def main():
             until(page, "!document.getElementById('task-result-link').classList.contains('hidden')", timeout=180)
             snapshot = backend(base, f"/api/streaming/{task_id}")
             assert snapshot["output_filename"] and all(row["status"] in {"READY", "PLAYED"} for row in snapshot["segments"])
+            if args.mode == 'review':
+                final_output = ROOT / 'workspace/outputs' / snapshot['output_filename']
+                assert final_output.stat().st_mtime_ns != prior_stamp, 'Review reused the old MP4 instead of exporting'
+                assert snapshot['progress']['review_summary']['status'] == 'completed'
             if record.get("edited"):
                 edited = next(row for row in snapshot["segments"] if row["id"] == record["edited"]["id"])
                 assert edited["revision"] == record["edited"]["revision"] and edited["final_vi"] == record["edited"]["text"]
@@ -220,15 +238,19 @@ def main():
             event("FULL_PASS", {"task_id": task_id, "output": snapshot["output_filename"], "state": ui_state(page)})
         assert not ui_state(page)["errors"], ui_state(page)
     finally:
-        service_manager.shutdown_all()
-        if window is not None:
-            window.web_view.stop()
-            window.web_view.setUrl(QUrl("about:blank"))
-            wait(200)
-            window.hide()
-            window.deleteLater()
-            QCoreApplication.sendPostedEvents(None, QEvent.Type.DeferredDelete)
-            app.processEvents()
+        try:
+            # Release the real page's websocket/media requests while its
+            # backend still exists, then stop its owned runtime workers.
+            if window is not None:
+                window.web_view.stop()
+                window.web_view.setUrl(QUrl("about:blank"))
+                wait(200)
+                window.hide()
+                window.deleteLater()
+                QCoreApplication.sendPostedEvents(None, QEvent.Type.DeferredDelete)
+                app.processEvents()
+        finally:
+            service_manager.shutdown_all()
 
 
 if __name__ == "__main__":

@@ -91,6 +91,45 @@ def test_review_window_clipping_does_not_hide_original_spanning_track_ownership(
     assert proof["source_scope_window"] == {"start": 7.76, "end": 11.33}
 
 
+def test_split_mask_only_track_coalesces_transitively_at_next_speech_boundary():
+    """Speech edits split one OCR track; ownership must still reach row 6."""
+    source = row(5, 7.88, 9.4, "小满")
+    neighbor = row(6, 10.17, 11.03, "今年19")
+    later = row(7, 14.0, 15.0, "小满")
+    text = "小满今年19"
+    box = [.1, .7, .8, .08]
+    evidence = {"start": 7.88, "end": 9.4, "text_zh": text, "bbox": box}
+    screens = [
+        {"start": 8.0, "end": 10.17, "text_zh": text, "kind": "subtitle", "bbox": box},
+        {"start": 10.17, "end": 11.03, "text_zh": text, "kind": "subtitle", "mask_only": True, "bbox": box},
+        {"start": 11.03, "end": 11.333, "text_zh": text, "kind": "subtitle", "mask_only": True, "bbox": box},
+    ]
+    scoped = AutomaticTranslationReviewer._scope_evidence(
+        evidence, source, [source, neighbor], screens)
+    assert scoped["text_zh"] == "小满"
+    assert scoped["source_scope_ids"] == [5, 6]
+    assert scoped["source_scope_window"] == {"start": 7.88, "end": 11.333}
+
+
+def test_split_mask_only_track_does_not_join_a_later_repeat():
+    source = row(5, 7.88, 9.4, "小满")
+    neighbor = row(6, 10.17, 11.03, "今年19")
+    later = row(7, 14.0, 15.0, "小满今年19")
+    text = "小满今年19"
+    box = [.1, .7, .8, .08]
+    evidence = {"start": 7.88, "end": 9.4, "text_zh": text, "bbox": box}
+    screens = [
+        {"start": 8.0, "end": 10.17, "text_zh": text, "kind": "subtitle", "bbox": box},
+        {"start": 10.17, "end": 11.03, "text_zh": text, "kind": "subtitle", "mask_only": True, "bbox": box},
+        {"start": 11.03, "end": 11.333, "text_zh": text, "kind": "subtitle", "mask_only": True, "bbox": box},
+        {"start": 14.0, "end": 15.0, "text_zh": text, "kind": "subtitle", "bbox": box},
+    ]
+    scoped = AutomaticTranslationReviewer._scope_evidence(
+        evidence, source, [source, neighbor, later], screens)
+    assert scoped["source_scope_ids"] == [5, 6]
+    assert scoped["source_scope_window"]["end"] == 11.333
+
+
 def test_clipped_ocr_still_supports_the_measured_target_without_future_words(monkeypatch):
     source = row(1, 1., 2., "明天去学校")
     neighbor = row(2, 2., 3., "找老师")

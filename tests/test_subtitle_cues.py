@@ -8,7 +8,9 @@ import pytest
 
 from config import settings
 from core.subtitle import SubtitleGenerator
-from core.subtitle_cues import build_subtitle_cues, fit_title_text, normalize_screen_texts, uncovered_intervals, speech_caption_cues
+from core.subtitle_cues import (build_subtitle_cues, fit_title_text,
+    invalidate_screen_texts_for_segments, normalize_screen_texts,
+    uncovered_intervals, speech_caption_cues)
 from core.streaming.export import HQExporter
 from core.video_composer import _escape_filter_filename
 
@@ -142,6 +144,55 @@ def test_visual_metadata_is_bounded_and_uncertain_text_does_not_cover_video():
     assert len(rows) == 1
     assert rows[0]["start"] == 0 and rows[0]["end"] == 4
     assert rows[0]["bbox"] == pytest.approx([0, .8, .3, .2])
+
+
+def test_explicit_unverified_subtitle_region_is_hidden_but_title_and_mask_survive():
+    rows = normalize_screen_texts([
+        screen_row(source_region_verified=False),
+        screen_row(kind="title", source_region_verified=False),
+        screen_row(text_vi="", mask_only=True, source_region_verified=False),
+    ])
+    assert len(rows) == 2
+    assert rows[0]["kind"] == "title"
+    assert rows[1]["mask_only"] is True
+
+
+def test_unresolved_speech_invalidates_only_overlapping_translated_hardsub():
+    rows = [screen_row(start=0, end=2), screen_row(start=3, end=4),
+            screen_row(start=0, end=2, kind="title"),
+            screen_row(start=0, end=2, text_vi="", mask_only=True)]
+    segments = [{"id": 1, "start": .5, "end": 1.5, "needs_review": True,
+                 "verification": {"status": "unresolved", "semantic_verified": True}},
+                {"id": 2, "start": 3, "end": 4, "needs_review": False,
+                 "verification": {"status": "verified", "semantic_verified": True}}]
+    updated = invalidate_screen_texts_for_segments(rows, segments)
+    assert updated[0]["needs_review"] is True
+    assert "chưa được AI kiểm tra" in updated[0]["review_reason"]
+    assert updated[1].get("needs_review", False) is False
+    assert updated[2].get("needs_review", False) is False  # title is not speech-gated
+    assert updated[3].get("needs_review", False) is False  # mask-only edit is preserved
+    assert rows[0].get("needs_review", False) is False  # no mutation
+
+
+@pytest.mark.parametrize("audit", [
+    {"status": "unresolved"}, {"status": "incomplete"}, {"status": "pending"},
+    {"status": "verified", "source_supported": False},
+    {"status": "corrected", "semantic_verified": False},
+    {"status": "verified", "second_pass_status": "failed"},
+])
+def test_false_positive_speech_flag_does_not_approve_overlapping_ocr(audit):
+    rows = [screen_row(source_region_verified=True, needs_review=False)]
+    segment = {"start": 1, "end": 2, "needs_review": False, "verification": audit}
+    updated = invalidate_screen_texts_for_segments(rows, [segment])
+    assert updated[0]["needs_review"] is True
+    assert updated[0]["source_region_verified"] is True  # geometry alone can remain grounded
+
+
+def test_screen_invalidation_does_not_reapprove_old_unresolved_translation():
+    rows = [screen_row(needs_review=True, review_reason="Chữ chưa rõ")]
+    result = invalidate_screen_texts_for_segments(rows, [{"start": 1, "end": 2, "needs_review": False,
+        "verification": {"status": "verified", "semantic_verified": True, "source_supported": True}}])
+    assert result[0]["needs_review"] is True and result[0]["review_reason"] == "Chữ chưa rõ"
 
 
 def test_title_does_not_hide_speech_but_detected_hardsub_prevents_duplicates(tmp_path):

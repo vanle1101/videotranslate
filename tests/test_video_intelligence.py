@@ -94,6 +94,41 @@ def test_measured_ocr_ids_geometry_source_and_timing_cannot_be_replaced_by_model
     assert observed == original
 
 
+def test_unmatched_subtitle_ocr_cannot_be_marked_display_verified():
+    seg = SegmentItem(0, 3, 5, 2)
+    seg.text_zh = "你来了"
+    observed = [measured_screen(text_zh="画面上的另一句", start=3, end=5)]
+    model = translated_screen(kind="subtitle", text_zh="画面上的另一句")
+    result = VideoIntelligence.validate_result(
+        response(seg, screen_texts=[model]), [seg], 3, 5, observed)
+    screen = result["screen_texts"][0]
+    assert screen["source_region_verified"] is False
+    assert screen["needs_review"] is True
+    assert "khớp lời thoại nguồn" in screen["review_reason"]
+
+
+def test_provider_mask_only_flag_cannot_bypass_unmatched_subtitle_review():
+    seg = SegmentItem(0, 3, 5, 2)
+    seg.text_zh = "你来了"
+    observed = [measured_screen(text_zh="另一句", start=3, end=5)]
+    model = translated_screen(kind="subtitle", mask_only=True)
+    result = VideoIntelligence.validate_result(response(seg, screen_texts=[model]), [seg], 3, 5, observed)
+    assert result["screen_texts"][0]["needs_review"] is True
+    assert "mask_only" not in result["screen_texts"][0]
+
+
+def test_repeated_subtitles_require_per_interval_speech_evidence_but_titles_do_not():
+    translated = {**measured_screen(), "text_vi": "Chữ trên hình", "kind": "subtitle",
+                  "needs_review": False, "review_reason": "", "source_region_verified": True}
+    occurrences = {"o0": [measured_screen(), measured_screen(identifier="o1", start=7, end=9)]}
+    result = VideoIntelligence._expand_repeated_screens({"screen_texts": [translated]}, occurrences)
+    assert len(result["screen_texts"]) == 2
+    assert all(row["needs_review"] and not row["source_region_verified"] for row in result["screen_texts"])
+    titles = VideoIntelligence._expand_repeated_screens(
+        {"screen_texts": [{**translated, "kind": "title"}]}, occurrences)
+    assert all(row["kind"] == "title" and not row["needs_review"] for row in titles["screen_texts"])
+
+
 @pytest.mark.parametrize("rows", [[], [translated_screen("other")],
                                    [translated_screen(), translated_screen()],
                                    [translated_screen("o0"), translated_screen("o1")],

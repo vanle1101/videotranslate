@@ -458,18 +458,37 @@ class VideoIntelligence:
                     continue
                 review = bool(source_screen.get("needs_review")) or row["needs_review"] or not text.strip() or bool(re.search(r"[\u3400-\u9fff]", text))
                 reasons = [str(source_screen.get("review_reason") or "").strip(), reason.strip()]
-                reason = " · ".join(dict.fromkeys(value for value in reasons if value))
-                if review and not reason:
-                    reason = "Nội dung OCR hoặc bản dịch chưa chắc chắn; giữ nguyên vùng chữ để kiểm tra."
                 source_text = cls._compact_text(source_screen.get("text_zh", ""))
+                spoken_candidates = []
+                for seg_id, seg in source.items():
+                    if (float(cls._get(seg, "start")) < source_screen["end"]
+                            and float(cls._get(seg, "end")) > source_screen["start"]):
+                        spoken_candidates.append(cls._compact_text(
+                            cls._get(seg, "asr_text", "") or cls._get(seg, "text_zh", "")))
+                        proposed = parsed.get(seg_id, {})
+                        if isinstance(proposed.get("text_zh"), str):
+                            # A grounded source correction may repair an ASR
+                            # spelling (e.g. homophones) while the OCR box is
+                            # still the same measured subtitle region.
+                            spoken_candidates.append(cls._compact_text(proposed["text_zh"]))
                 source_region_verified = (row["kind"] == "subtitle"
                     and not source_screen.get("needs_review")
                     and (cls._number(source_screen.get("confidence")) or 0) >= .90
                     and bool(source_text)
-                    and any(float(cls._get(seg, "start")) < source_screen["end"]
-                            and float(cls._get(seg, "end")) > source_screen["start"]
-                            and source_text in cls._compact_text(cls._get(seg, "asr_text", "") or cls._get(seg, "text_zh", ""))
-                            for seg in source.values()))
+                    and any(source_text and source_text in candidate
+                            for candidate in spoken_candidates))
+                # A subtitle translation is not display-safe merely because
+                # the model returned text. If local OCR cannot tie this box to
+                # a spoken source at the same moment, retain the source glyphs
+                # and require review. Titles are independent of speech and
+                # keep their existing OCR-only gate. Mask-only rows are editor
+                # output and do not arrive through this provider schema.
+                if row["kind"] == "subtitle" and source and not source_region_verified:
+                    review = True
+                    reasons.append("Vùng phụ đề chưa khớp lời thoại nguồn tại cùng thời điểm.")
+                reason = " · ".join(dict.fromkeys(value for value in reasons if value))
+                if review and not reason:
+                    reason = "Nội dung OCR hoặc bản dịch chưa chắc chắn; giữ nguyên vùng chữ để kiểm tra."
                 screens.append({**source_screen, "text_vi": text.strip(), "kind": row["kind"],
                                 "needs_review": review, "review_reason": reason[:500],
                                 "source_region_verified": source_region_verified,
@@ -729,7 +748,13 @@ class VideoIntelligence:
                           and not item["needs_review"]]
                 # A visible subtitle may show only a fragment of a sentence
                 # whose complete source has already passed the OCR gate.
-                if not any(cls._compact_text(row["text_zh"]) in cls._compact_text(item["text_zh"]) for item in speech):
+                matched_speech = any(cls._compact_text(row["text_zh"]) in cls._compact_text(item["text_zh"]) for item in speech)
+                # OCR-only batches have no speech rows during validate_result.
+                # Resolve their source geometry once the independently sliced
+                # batches have been joined, before publishing the chunk.
+                row["source_region_verified"] = bool(matched_speech
+                    and (cls._number(row.get("confidence")) or 0) >= .90)
+                if not matched_speech:
                     row["needs_review"] = True
                     row["review_reason"] = row.get("review_reason") or "Chưa xác nhận chữ trên hình trùng lời thoại; giữ hình gốc."
         return result
@@ -849,12 +874,18 @@ class VideoIntelligence:
             for original in occurrences.get(translated["id"], [translated]):
                 # Only the translation/classification is shared. Every source
                 # ID, OCR spelling, box, confidence and interval stays measured.
+                repeated = len(occurrences.get(translated["id"], [])) != 1
+                expanded_source_verified = (translated.get("source_region_verified", False)
+                                             if not repeated else False)
+                repeated_reason = ("Vùng phụ đề xuất hiện nhiều lần; chưa xác định đủ từng mốc nguồn."
+                                   if repeated and translated.get("kind") == "subtitle" else "")
                 expanded.append({**translated, **original,
                     "text_vi": translated["text_vi"], "kind": translated["kind"],
-                    "needs_review": bool(translated["needs_review"] or original.get("needs_review")),
-                    "review_reason": translated.get("review_reason", ""),
-                    "source_region_verified": (translated.get("source_region_verified", False)
-                                                if len(occurrences.get(translated["id"], [])) == 1 else False)})
+                    "needs_review": bool(translated["needs_review"] or original.get("needs_review")
+                                          or (repeated and translated.get("kind") == "subtitle")),
+                    "review_reason": " · ".join(dict.fromkeys(value for value in (
+                        translated.get("review_reason", ""), repeated_reason) if value)),
+                    "source_region_verified": expanded_source_verified})
         return {**result, "screen_texts": sorted(expanded, key=lambda row: row["start"])}
 
     @classmethod

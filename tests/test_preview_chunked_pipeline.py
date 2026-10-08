@@ -552,6 +552,39 @@ def test_resume_rechecks_interrupted_review_before_advancing_source(preview, mon
     assert session.segments[4].verification["status"] == "pending"
 
 
+@pytest.mark.parametrize('reserved', [False, True])
+@pytest.mark.parametrize('legacy_metadata', [False, True])
+def test_resume_revalidates_failed_spanning_ocr_correction_before_resynthesizing(preview, monkeypatch, reserved, legacy_metadata):
+    session, *_ = preview
+    session._chunked_source_started = True
+    session._visual_completed_seconds = 24
+    for sid, status in ((5, "FAILED"), (6, "READY")):
+        row = SegmentItem(sid, 8.68 if sid == 5 else 10.17, 9.4 if sid == 5 else 11.03, .72)
+        row.source_method, row.translation_provider = "text-ai", "opencode"
+        row.asr_text, row.text_zh = "小满", "小满今年19"
+        row.final_vi, row.status, row.failed_stage = "Tiểu Mãn, năm nay mười chín.", status, "TTS"
+        proof = {'text_zh': '小满今年19'}
+        if not legacy_metadata:
+            proof.update(full_text_zh='我是你女儿小满今年19', source_scope_ids=[4, 5])
+        row.verification = {'status': 'corrected', 'source_supported': True, 'evidence': [proof]}
+        session.segments[sid] = row
+    if reserved:
+        session.segments[5].status = 'WAITING'
+        session.segments[5]._retry_synthesis = True
+    calls = []
+    async def review(**options):
+        calls.append(options)
+        assert session.segments[5].status == ('WAITING' if reserved else 'FAILED')
+        session.segments[5].text_zh, session.segments[5].final_vi = '小满', 'Tiểu Mãn.'
+        session.segments[5].verification = {'status': 'corrected', 'semantic_verified': True}
+    monkeypatch.setattr(session, '_review_translations', review)
+    asyncio.run(session._resume_pending_chunk_reviews())
+    assert calls == [{'regenerate_audio': True, 'segment_ids': {5}}]
+    assert session.segments[5].status == 'WAITING' and session.segments[5]._retry_synthesis
+    assert session.segments[5].final_vi == 'Tiểu Mãn.'
+    assert session.segments[6].status == 'READY'
+
+
 def test_pending_review_cannot_be_hidden_by_a_later_completed_group(preview):
     session, *_ = preview
     early = SegmentItem(0, 0, 1, 1)

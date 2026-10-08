@@ -1166,7 +1166,12 @@ def test_review_removes_old_placeholder_audio_without_claiming_source_silence(se
     assert segment.audio_path is None and segment.audio_url is None
     assert segment.subtitle_cues == [] and segment.subtitle_timing_source == "unresolved"
     assert segment.speech_start is None and segment.speech_end is None
-    assert segment.revision == 1 and session.screen_texts == screens_before
+    assert segment.revision == 1
+    # Preserve the measured region and original wording, but stop displaying
+    # its Vietnamese translation after the overlapping speech is unresolved.
+    assert [{key: item[key] for key in screens_before[0]} for item in session.screen_texts] == screens_before
+    assert session.screen_texts[0]["needs_review"] is True
+    assert session.screen_texts[0]["review_reason"]
     session.tts_engine.synthesize.assert_not_called()
 
 

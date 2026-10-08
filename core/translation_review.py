@@ -211,7 +211,7 @@ class AutomaticTranslationReviewer:
         saved = checkpoint.load(stage) if checkpoint else None
         if saved is not None:
             try:
-                return validate_address_reading(saved, batch, context)
+                return validate_address_reading(saved, batch, context, require_turn_check=True)
             except ValueError:
                 pass
         prompt = address_reading_prompt(batch, context)
@@ -223,10 +223,23 @@ class AutomaticTranslationReviewer:
             check()
             try:
                 data = VideoIntelligence._parse_json(raw)
-                reading = validate_address_reading(data, batch, context)
+                reading = validate_address_reading(data, batch, context, require_turn_check=True)
             except (ValueError, VideoIntelligenceError) as error:
+                # The validator's fixed messages contain no provider response
+                # or credentials. Preserve the actual rejection instead of
+                # retrying the identical request with no diagnostic.
+                logging.getLogger("ai").warning(
+                    "ADDRESS_CONTEXT_INVALID run_id=%s segment_ids=%s attempt=%s validation=%s",
+                    current_execution_context().run_id, [row["id"] for row in batch], attempt + 1, str(error))
                 if attempt:
                     raise VideoIntelligenceError("AI chưa trả kết luận ngữ cảnh xưng hô có dẫn chứng hợp lệ.") from error
+                prompt += ("\nLƯỢT TRƯỚC KHÔNG QUA KIỂM TRA CẤU TRÚC: " + str(error)
+                    + ". Hãy trả lại toàn bộ đúng schema, mỗi ID cần kiểm định đúng một lần. "
+                    "quote phải sao chép nguyên văn text_zh của đúng ID nguồn, không đổi chữ số/tuổi. "
+                    "turn_check.evidence phải dẫn chính ID đang xét. "
+                    "Vai đã xác định (*_uncertain=false) phải có cách gọi không rỗng và dẫn chứng; "
+                    "vai chưa rõ phải *_uncertain=true và uncertain=true. Không đoán vai để sửa schema. "
+                    "Chỉ trả JSON, không trả bản Việt hay danh sách ID ngữ cảnh.")
                 continue
             if checkpoint:
                 checkpoint.store(stage, data)
@@ -411,7 +424,7 @@ class AutomaticTranslationReviewer:
             return self._summarize(result)
         if str(getattr(settings, "LLM_PROVIDER", "")).strip().lower() != "opencode":
             raise VideoIntelligenceError("Kiểm tra lại miễn phí dùng OpenCode; hãy chọn OpenCode trong Cài đặt.")
-        client = self.client or OpenCodeZenClient(model=settings.OPENCODE_MODEL, timeout=120)
+        client = self.client or OpenCodeZenClient(model=settings.OPENCODE_MODEL, timeout=120, max_retries=1)
         if not client.has_credentials:
             raise VideoIntelligenceError("Chưa kết nối OpenCode để AI kiểm tra lại bản dịch.")
         failure = None
@@ -657,20 +670,54 @@ class AutomaticTranslationReviewer:
         """
         original = VideoIntelligence._compact_text(candidate.get("text_zh", ""))
         ownership_window = {"start": candidate["start"], "end": candidate["end"]}
+        # Editing a speech row splits the persisted OCR track at that row's
+        # boundaries. The resulting mask-only pieces must still be treated as
+        # one track when locating neighbouring ASR rows. Start from a piece
+        # overlapping the fresh candidate and coalesce only transitively
+        # touching/overlapping pieces with the same text and box. A later
+        # repeat of the same subtitle has a real gap and therefore remains a
+        # separate track. This window is used only for ownership lookup; the
+        # candidate's own measured interval and confidence are never widened.
+        matching = []
+        candidate_box = candidate.get("bbox")
         for screen in screens:
-            if (screen.get("kind") != "subtitle" or not cls._overlaps(screen, candidate)
-                    or VideoIntelligence._compact_text(screen.get("text_zh", "")) != original):
+            if screen.get("kind") != "subtitle":
                 continue
-            a, b = candidate.get("bbox"), screen.get("bbox")
-            if (isinstance(a, list) and isinstance(b, list) and len(a) == len(b) == 4
-                    and ScreenOCR._overlap(a, b) < .5):
+            if VideoIntelligence._compact_text(screen.get("text_zh", "")) != original:
                 continue
-            # Fresh OCR is extracted in a bounded review window, so its track
-            # may be clipped at an ASR row boundary. An already measured track
-            # of the *same words* locates neighbouring speech ownership, but
-            # does not enlarge the fresh OCR's confidence/observation interval.
-            ownership_window["start"] = min(ownership_window["start"], screen["start"])
-            ownership_window["end"] = max(ownership_window["end"], screen["end"])
+            screen_box = screen.get("bbox")
+            if (isinstance(candidate_box, list) and isinstance(screen_box, list)
+                    and len(candidate_box) == len(screen_box) == 4
+                    and ScreenOCR._overlap(candidate_box, screen_box) < .5):
+                continue
+            try:
+                screen_start, screen_end = float(screen["start"]), float(screen["end"])
+            except (KeyError, TypeError, ValueError):
+                continue
+            if not math.isfinite(screen_start) or not math.isfinite(screen_end) or screen_end <= screen_start:
+                continue
+            matching.append((screen_start, screen_end, screen))
+
+        # Use a very small tolerance for decimal serialization at a split
+        # boundary, but never the broad speech merge tolerance used by
+        # ``_windows``. This prevents a later repeated subtitle from being
+        # pulled into the current source row.
+        boundary_epsilon = 1e-3
+        pending = [item for item in matching
+                   if item[0] < candidate["end"] and item[1] > candidate["start"]]
+        selected = set()
+        while pending:
+            start, end, screen = pending.pop()
+            marker = id(screen)
+            if marker in selected:
+                continue
+            selected.add(marker)
+            ownership_window["start"] = min(ownership_window["start"], start)
+            ownership_window["end"] = max(ownership_window["end"], end)
+            pending.extend(item for item in matching
+                           if id(item[2]) not in selected
+                           and item[0] <= ownership_window["end"] + boundary_epsilon
+                           and item[1] >= ownership_window["start"] - boundary_epsilon)
         adjacent = [row for row in context if row.get("id") != source["id"]
             and cls._overlaps(row, ownership_window)
             and (row["end"] <= source["start"] or row["start"] >= source["end"])]
@@ -846,7 +893,7 @@ class AutomaticTranslationReviewer:
             return result
         if str(getattr(settings, "LLM_PROVIDER", "")).strip().lower() != "opencode":
             raise VideoIntelligenceError("Kiểm tra lại miễn phí dùng OpenCode; hãy chọn OpenCode trong Cài đặt.")
-        client = self.client or OpenCodeZenClient(model=settings.OPENCODE_MODEL, timeout=120)
+        client = self.client or OpenCodeZenClient(model=settings.OPENCODE_MODEL, timeout=120, max_retries=1)
         self.client = client
         if not client.has_credentials:
             raise VideoIntelligenceError("Chưa kết nối OpenCode để AI kiểm tra lại bản dịch.")
