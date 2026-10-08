@@ -64,6 +64,20 @@ def implementation_revision():
     return {str(path.relative_to(root)): file_digest(path) for path in paths}
 
 
+try:
+    _PROCESS_IMPLEMENTATION_REVISION = implementation_revision()
+except OSError:
+    _PROCESS_IMPLEMENTATION_REVISION = None
+
+
+def loaded_implementation_revision():
+    # A long-running Studio may still execute old imported code after an edit.
+    # Never let that process stamp its results with the newer files on disk.
+    if _PROCESS_IMPLEMENTATION_REVISION is None:
+        raise OSError("Review cache unavailable: no complete runtime revision.")
+    return dict(_PROCESS_IMPLEMENTATION_REVISION)
+
+
 def evidence_revision(check):
     versions, assets = {}, {}
     for package in ("rapidocr-onnxruntime", "onnxruntime", "faster-whisper", "sherpa-onnx"):
@@ -95,7 +109,7 @@ class ReviewCheckpoint:
         self.source_stat = (info.st_size, info.st_mtime_ns, info.st_ctime_ns)
         self.namespace = {"schema": SCHEMA, "source": file_digest(self.source, check),
             "source_bytes": info.st_size, "provider": "opencode", "model": model,
-            "code": implementation_revision(),
+            "code": loaded_implementation_revision(),
             "evidence": evidence_revision(check) if runtime_revision is None else runtime_revision}
 
     def _path(self, stage):

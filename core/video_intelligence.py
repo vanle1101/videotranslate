@@ -28,6 +28,17 @@ from core.screen_ocr import ScreenOCR
 from core.translation_context import VIETNAMESE_ADDRESS_POLICY, dialogue_context
 
 
+def _capture_visual_revision():
+    try:
+        return [hashlib.sha256(Path(__file__).with_name(name).read_bytes()).hexdigest()
+                for name in ("video_intelligence.py", "screen_ocr.py", "chinese_text.py", "translation_context.py")]
+    except OSError:
+        return None
+
+
+_PROCESS_VISUAL_REVISION = _capture_visual_revision()
+
+
 VISUAL_TRANSLATION_PROMPT = """Bạn biên dịch chính xác video tiếng Trung sang tiếng Việt.
 Video đính kèm gồm hình ảnh và âm thanh liên tục. Đối chiếu lời nói với phụ đề để
 sửa nhận dạng sai; không dựa vào phụ đề tiêu đề để bịa thêm lời thoại. Dùng toàn
@@ -177,6 +188,8 @@ class VideoIntelligence:
         hashes prevent a previous result from approving changed inputs/prompts.
         """
         try:
+            if _PROCESS_VISUAL_REVISION is None:
+                return None
             path = Path(video_path).resolve(strict=True)
             stat = path.stat()
             if not path.is_file() or stat.st_size <= 0:
@@ -195,10 +208,7 @@ class VideoIntelligence:
                                       ("id", "start", "end", "text_zh", "asr_text")} for seg in segments],
                         "chunking": [self.MAX_CHUNK_SECONDS, self.TARGET_CHUNK_SECONDS, self.MAX_WIDTH],
                         "ocr": [ScreenOCR.FPS, ScreenOCR.MAX_DIMENSION, ScreenOCR.MIN_CONFIDENCE],
-                        "code": [hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),
-                                  hashlib.sha256(Path(__file__).with_name("screen_ocr.py").read_bytes()).hexdigest(),
-                                   hashlib.sha256(Path(__file__).with_name("chinese_text.py").read_bytes()).hexdigest(),
-                                   hashlib.sha256(Path(__file__).with_name("translation_context.py").read_bytes()).hexdigest()]}
+                        "code": list(_PROCESS_VISUAL_REVISION)}
             key = self._checkpoint_digest(identity)
             return {"key": key, "source": source,
                     "directory": Path(settings.WORKSPACE_DIR) / "cache" / "visual_checkpoints" / key}

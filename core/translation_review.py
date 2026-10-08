@@ -20,6 +20,7 @@ from core.screen_ocr import ScreenOCR
 from core.media_process import run_media
 from core.video_intelligence import VideoIntelligence, VideoIntelligenceError
 from core.runtime_context import current_execution_context
+from core.review_checkpoint import ReviewCheckpoint
 from core.chinese_text import comparable_chinese
 from core.translation_context import (
     VIETNAMESE_ADDRESS_POLICY, dialogue_context, needs_address_audit, contains_address_expression,
@@ -33,6 +34,11 @@ class _ReviewScreenOCR(ScreenOCR):
     # 960px/3fps scan, without retaining frames after extraction.
     FPS = 5
     MAX_DIMENSION = 1440
+    # Evidence acceptance below requires .90. Filter individual samples
+    # before tracking so a blurred transition frame cannot lower an entire
+    # otherwise-clear subtitle track below that threshold. Missing samples
+    # break tracks, preserving the exact intervals actually corroborated.
+    MIN_CONFIDENCE = .90
 
 
 class _LocalAudioEvidence:
@@ -661,7 +667,6 @@ class AutomaticTranslationReviewer:
     def _checkpoint(self, video_path, model, check, force_review):
         if not self._checkpoint_enabled:
             return None
-        from core.review_checkpoint import ReviewCheckpoint
         try:
             return ReviewCheckpoint(video_path, model, directory=self._checkpoint_directory,
                 check=check, force=force_review,

@@ -55,6 +55,27 @@ def test_detector_filters_latin_low_confidence_invalid_boxes_and_pads_two_pixels
     assert rows[0]["bbox"] == pytest.approx([.08, .09, .44, .12])
 
 
+def test_review_ocr_keeps_clear_evidence_around_a_blurred_transition():
+    from core.translation_review import _ReviewScreenOCR, AutomaticTranslationReviewer
+
+    # Real failure: .999/.889/.998 samples of the same subtitle were merged
+    # with min=.889, discarding both clear observations at the .90 review
+    # gate. Filter before merging; never extend evidence through the blur.
+    box = [[40, 160], [160, 160], [160, 180], [40, 180]]
+    samples = [sample(9.26 + index / _ReviewScreenOCR.FPS,
+                      *_ReviewScreenOCR.detections([[box, "但够了", confidence]], 200, 200))
+               for index, confidence in enumerate((.999, .889, .998))]
+    rows = _ReviewScreenOCR.track_samples(samples, 9.26, 9.86)
+    assert [(row["start"], row["end"]) for row in rows] == [(9.26, 9.46), (9.66, 9.86)]
+    assert all(row["confidence"] >= .90 for row in rows)
+    source = {"start": 9.0, "end": 9.84, "text_zh": "但够了"}
+    assert all(AutomaticTranslationReviewer._speech_evidence(
+        row, source, [], changed_source=False) for row in rows)
+    blur_only_source = {"start": 9.47, "end": 9.65, "text_zh": "但够了"}
+    assert not any(AutomaticTranslationReviewer._speech_evidence(
+        row, blur_only_source, [], changed_source=False) for row in rows)
+
+
 @pytest.mark.parametrize("start,end", [(0, 46), (1, 0), (-1, 3), (0, math.nan), (True, "bad")])
 def test_invalid_or_overlong_ranges_fail_before_decoding(start, end):
     with pytest.raises(ScreenOCRError):
