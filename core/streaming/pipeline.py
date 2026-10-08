@@ -281,6 +281,19 @@ class StreamingPipelineSession:
             if message not in self.warnings:
                 self.warnings.append(message)
             logging.getLogger("errors").error("[%s] PROJECT_SAVE_FAILED error_type=%s", self.task_id, type(exc).__name__)
+            # A bounded session must never keep advancing after its latest
+            # durable checkpoint can no longer be written.  Otherwise a
+            # multi-hour run can appear to continue successfully in memory,
+            # then lose all work after a restart.  Reuse the existing terminal
+            # persistence guard so every provider/chunk callback re-raises and
+            # terminal event emission cannot recurse into a failing save.
+            if ((self._chunked_source_started or self.translation_mode == "preview")
+                    and self.is_running and not self.is_stopped):
+                self._persistence_failure_blocked = True
+                self._persistence_capacity_failed = True
+                self.is_running = False
+                self.error = message
+                raise RuntimeError(message) from None
 
     def _dialogue_context_before(self, segment, *, focus_source=None, focus_vi=None,
                                  _review_context=None):
@@ -454,6 +467,16 @@ class StreamingPipelineSession:
                 for segment in retried:
                     await self.emit("segment_update", segment.to_dict())
                 await self._resume_pending_chunk_reviews()
+                # Review may replace a playable draft and defer failed speech.
+                # Rebuild the reserved queue before its sole worker starts so
+                # newly missing audio is retried with its accepted audit.
+                while not self.queue.empty():
+                    self.queue.get_nowait()
+                    self.queue.task_done()
+                for segment in self.segments.values():
+                    if (segment.status == "WAITING" and (not self._chunked_source_started
+                            or segment.end <= self._visual_completed_seconds + .001)):
+                        self.queue.put_nowait((segment.start, segment.id))
             except asyncio.CancelledError:
                 self.is_stopped = True
                 self.is_running = False
@@ -773,8 +796,36 @@ class StreamingPipelineSession:
                 continue
             if (regenerate_audio and segment.status in ("READY", "PLAYED", "NEEDS_REVIEW")
                     and row["final_vi"] != segment.final_vi):
-                await self.edit_segment(sid, row["final_vi"], _review_result=row,
-                                        _review_context=review_context)
+                try:
+                    await self.edit_segment(sid, row["final_vi"], _review_result=row,
+                                            _review_context=review_context)
+                except asyncio.CancelledError:
+                    raise
+                except Exception as error:
+                    if not self._chunked_source_started or getattr(self, "_persistence_capacity_failed", False):
+                        raise
+                    if segment.revision != target_revisions[sid]:
+                        continue
+                    # Semantic review succeeded. Retain that evidence even if
+                    # rebuilding speech fails; an old WAV must not be served as
+                    # audio for the corrected text. The old file stays on disk
+                    # until the resumed worker atomically replaces it.
+                    self._apply_review_metadata(segment, row)
+                    segment.revision += 1
+                    segment.status, segment.failed_stage = "FAILED", "TTS"
+                    segment.error = str(error)
+                    segment.audio_path = segment.audio_url = None
+                    segment.tts_duration, segment.speed_ratio = 0., 1.
+                    segment.subtitle_cues = []
+                    segment.speech_start = segment.speech_end = None
+                    segment.subtitle_timing_source = "pending"
+                    segment._retry_synthesis = True
+                    self._invalidate_output()
+                    logging.getLogger("errors").error(
+                        "[%s] REVIEW_AUDIO_DEFERRED segment_id=%s error_type=%s",
+                        self.task_id, sid, type(error).__name__)
+                    await self.emit("segment_update", segment.to_dict())
+                    await self._update_ready()
             else:
                 self._apply_review_metadata(segment, row)
                 if regenerate_audio:
@@ -2289,6 +2340,10 @@ class StreamingPipelineSession:
                 self._preview_ready = bool(self._visual_completed_seconds > 0
                     and (not owned or any(s.status in {"READY", "PLAYED"} for s in owned)))
             failed = [s for s in owned if s.status == "FAILED"]
+            ready = sum(s.status in {"READY", "PLAYED"} for s in owned)
+            self.progress.update(completed_segments=ready, total_segments=len(owned))
+            if failed:
+                self.progress["progress_pct"] = round(100 * ready / len(owned), 1)
             if failed and not self.is_stopped and not self.error:
                 self.error = f"{len(failed)} câu chưa tạo được giọng. Phần đã xong được giữ; bấm Tiếp tục để thử lại."
                 await self.emit("error", {"message": self.error, "segment_ids": [s.id for s in failed]})

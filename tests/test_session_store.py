@@ -68,6 +68,27 @@ def test_capacity_failure_stops_processing_instead_of_silently_ignoring_saves(pe
     assert any("giới hạn" in message for message in persisted.warnings)
 
 
+def test_active_chunked_save_failure_blocks_runtime_and_keeps_durable_checkpoint(persisted, monkeypatch):
+    path = _project_path(persisted.task_id)
+    durable = path.read_bytes()
+    persisted._chunked_source_started = True
+    persisted.is_running = True
+    failing_save = Mock(side_effect=OSError("disk full: private detail"))
+    monkeypatch.setattr(persisted, "persist", failing_save)
+
+    with pytest.raises(RuntimeError, match="Không lưu được dự án"):
+        persisted._persist_if_enabled()
+
+    assert not persisted.is_running
+    assert persisted._persistence_failure_blocked is True
+    # Existing callback guards use this terminal flag to prevent more work or
+    # recursive saves after the durable checkpoint becomes unavailable.
+    assert persisted._persistence_capacity_failed is True
+    assert path.read_bytes() == durable
+    persisted._persist_if_enabled()
+    assert failing_save.call_count == 1
+
+
 @pytest.fixture
 def persisted(tmp_path, monkeypatch):
     for name, value in {

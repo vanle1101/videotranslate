@@ -749,3 +749,36 @@ def test_queue_capacity_failure_cannot_become_completed(preview, monkeypatch):
     asyncio.run(session._worker_loop())
     assert not session.is_running and session.get_progress()["status"] == "FAILED"
     assert "giới hạn" in session.error
+
+
+def test_accepted_review_survives_failed_speech_rebuild_and_queues_only_missing_audio(preview, monkeypatch):
+    session, *_ = preview
+    saved_full_queue(session)
+    session.visual_translation = True
+    row = session.segments[0]
+    row.source_method, row.translation_provider = "text-ai", "opencode"
+    row.verification = {"status": "pending"}
+    row.audio_path = str(session.segments_dir / "seg_0.wav")
+    wav(Path(row.audio_path))
+    old_audio = Path(row.audio_path).read_bytes()
+    result = {"segments": {0: {**row.to_dict(), "final_vi": "Lời đã kiểm tra.", "needs_review": False,
+        "verification": {"status": "corrected", "semantic_verified": True}}},
+        "summary": {"checked": 1, "corrected": 1}, "translation_sources": []}
+    calls = []
+    def review(*args, **kwargs):
+        calls.append(True)
+        return result
+    monkeypatch.setattr("core.translation_review.AutomaticTranslationReviewer.review", review)
+    monkeypatch.setattr(session, "_review_translations", StreamingPipelineSession._review_translations.__get__(session))
+    async def fail_speech(*args, **kwargs):
+        raise RuntimeError("Empty speech response")
+    monkeypatch.setattr(session, "edit_segment", fail_speech)
+    async def run():
+        await session.retry_failed_synthesis()
+        await session.worker_task
+    asyncio.run(run())
+    assert calls == [True]
+    assert row.final_vi == "Lời đã kiểm tra." and row.status == "READY"
+    assert row.verification == {"status": "corrected", "semantic_verified": True}
+    assert row.revision == 1 and row.audio_url
+    assert Path(row.audio_path).read_bytes() == old_audio

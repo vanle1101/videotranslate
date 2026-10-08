@@ -193,6 +193,15 @@ class AutomaticTranslationReviewer:
                 raise VideoIntelligenceError("Lý do kiểm định không hợp lệ.")
 
     @staticmethod
+    def _require_ocr_semantic_fields(data):
+        AutomaticTranslationReviewer._require_semantic_fields(data)
+        for row in data.get("segments", []):
+            refs = row.get("source_evidence_ids")
+            if (not isinstance(refs, list) or len(refs) > 100
+                    or any(not isinstance(ref, str) for ref in refs)):
+                raise VideoIntelligenceError("Danh sách dẫn chứng kiểm định không hợp lệ.")
+
+    @staticmethod
     def _address_reading(client, batch, context, check, checkpoint=None):
         if not needs_address_audit(batch, context):
             return {}
@@ -797,11 +806,7 @@ class AutomaticTranslationReviewer:
             for raw in (record["first"], record["second"]):
                 parsed = VideoIntelligence._parse_json(raw)
                 validated = VideoIntelligence.validate_result(parsed, batch, lo, hi, [])
-                if any(not isinstance(row.get("semantic_verified"), bool)
-                       or not isinstance(row.get("verification_reason"), str)
-                       or not isinstance(row.get("source_evidence_ids"), list)
-                       for row in parsed["segments"]):
-                    return None
+                AutomaticTranslationReviewer._require_ocr_semantic_fields(parsed)
             return parsed, validated
         except (VideoIntelligenceError, KeyError, TypeError, ValueError):
             return None
@@ -919,7 +924,8 @@ class AutomaticTranslationReviewer:
                 logging.getLogger("ai").info("REVIEW_CHECKPOINT_HIT run_id=%s segment_ids=%s",
                     current_execution_context().run_id, [row["id"] for row in batch])
             else:
-                data, validated = self._validated_review_request(client, prompt, batch, lo, hi, check)
+                data, validated = self._validated_review_request(client, prompt, batch, lo, hi, check,
+                    self._require_ocr_semantic_fields)
                 first_data = deepcopy(data)
             audit_rows = {item["id"]: item for item in data["segments"]}
             # Run a separate semantic pass over the same measured evidence.
@@ -935,7 +941,7 @@ class AutomaticTranslationReviewer:
                     "sửa nếu cần theo nguồn/OCR và giữ needs_review=true nếu còn nghi ngờ. Trả đúng schema, đủ ID.\n"
                     + json.dumps(data["segments"], ensure_ascii=False))
                 checked_data, checked_validated = (cached_pair if cached_pair else self._validated_review_request(
-                    client, recheck_prompt, batch, lo, hi, check))
+                    client, recheck_prompt, batch, lo, hi, check, self._require_ocr_semantic_fields))
                 checked_rows = {item["id"]: item for item in checked_data["segments"]}
                 if all(isinstance(row.get("semantic_verified"), bool)
                        and isinstance(row.get("verification_reason"), str)
