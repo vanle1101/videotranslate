@@ -526,11 +526,13 @@ def test_completed_source_is_not_owned_for_deletion_when_index_write_fails(tmp_p
     assert result['reusable_source'] and result['owned_paths'] == []
 
 
-def test_real_worker_stop_and_fresh_downloader_resumes_http_range(tmp_path, owned_video, monkeypatch):
+@pytest.mark.parametrize('finish_before_stop', [False, True], ids=['partial-range-resume', 'completed-before-stop'])
+def test_real_worker_stop_and_fresh_downloader_resumes_http_range(tmp_path, owned_video, monkeypatch, finish_before_stop):
     """Exercise process termination, buffered writes and reload against real HTTP."""
     from core import downloader as module
     video_bytes = owned_video.read_bytes() + b'\0' * (3 * 1024 * 1024)
     requests = []
+    release_first_response = threading.Event()
 
     class Handler(http.server.BaseHTTPRequestHandler):
         def log_message(self, *_):
@@ -551,6 +553,11 @@ def test_real_worker_stop_and_fresh_downloader_resumes_http_range(tmp_path, owne
                 for start in range(offset, len(video_bytes), 65536):
                     self.wfile.write(video_bytes[start:start + 65536])
                     self.wfile.flush()
+                    if not range_header and not finish_before_stop and start >= 1024 * 1024:
+                        # Do not let a tiny fixture finish while taskkill starts
+                        # under ASR/system load. The test must actually stop an
+                        # incomplete response to establish Range-resume proof.
+                        release_first_response.wait(30)
                     time.sleep(.025)
             except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError):
                 pass
@@ -583,6 +590,20 @@ def test_real_worker_stop_and_fresh_downloader_resumes_http_range(tmp_path, owne
         return real_popen(arguments, **kwargs)
 
     monkeypatch.setattr(module.subprocess, 'Popen', local_worker)
+    if finish_before_stop:
+        real_stop = VideoDownloader._stop_worker
+
+        def delayed_stop(process):
+            # Reproduce the legitimate race seen in the full suite: the parent
+            # cancels while the real child finishes HTTP, validates and renames.
+            # A final MP4 must be retained, not required to leave a checkpoint.
+            deadline = time.monotonic() + 10
+            while process.poll() is None and time.monotonic() < deadline:
+                time.sleep(.025)
+            assert process.poll() is not None, 'real worker did not finish during stop race'
+            real_stop(process)
+
+        monkeypatch.setattr(VideoDownloader, '_stop_worker', staticmethod(delayed_stop))
     destination = tmp_path / 'downloads'
     cancel = threading.Event()
 
@@ -594,13 +615,27 @@ def test_real_worker_stop_and_fresh_downloader_resumes_http_range(tmp_path, owne
         with pytest.raises(VideoDownloadError, match='Đã hủy'):
             VideoDownloader(destination).download('https://www.douyin.com/video/7688978448627473651',
                                                   progress, cancel.is_set)
-        checkpoint = json.loads(next(destination.glob('*.resume.json')).read_text())
-        count = checkpoint['downloaded_bytes']
-        assert 0 < count < len(video_bytes)
+        if finish_before_stop:
+            assert not list(destination.glob('*.resume.json'))
+            assert not list(destination.glob('*.mp4.part'))
+            assert len(list(destination.glob('.source-*.json'))) == 1
+            count = None
+        else:
+            checkpoint = json.loads(next(destination.glob('*.resume.json')).read_text())
+            count = checkpoint['downloaded_bytes']
+            assert 0 < count < len(video_bytes)
+            partial = next(destination.glob('*.mp4.part'))
+            assert partial.stat().st_size == count
+            assert partial.read_bytes() == video_bytes[:count]
         result = VideoDownloader(destination).download('https://www.douyin.com/jingxuan?modal_id=7688978448627473651')
         assert Path(result['file_path']).read_bytes() == video_bytes
-        assert requests == [None, f'bytes={count}-']
+        if finish_before_stop:
+            assert result['reused_source']
+            assert requests == [None]
+        else:
+            assert requests == [None, f'bytes={count}-']
     finally:
+        release_first_response.set()
         server.shutdown()
         server.server_close()
         thread.join(timeout=2)

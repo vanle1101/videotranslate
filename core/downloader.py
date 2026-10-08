@@ -165,7 +165,11 @@ class VideoDownloader:
             logger.warning("[%s] Không nối tiếp: checkpoint_path_unsafe.", prefix.name[6:14])
             return False
         try:
-            saved, _ = _load_checkpoint(checkpoint, partial)
+            # The worker has already stopped before this retention check. A
+            # hard stop can leave bytes after its last atomic checkpoint; only
+            # the hashed prefix is durable/reusable. Trim the uncommitted tail
+            # now so retained byte diagnostics match the actual resume offset.
+            saved, _ = _load_checkpoint(checkpoint, partial, truncate_tail=True)
             if saved is None:
                 logger.warning("[%s] Không nối tiếp: checkpoint_validation_failed; partial_bytes=%s; checkpoint_bytes=%s.",
                                prefix.name[6:14], partial.stat().st_size if partial.is_file() else 0,
