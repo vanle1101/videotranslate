@@ -957,7 +957,7 @@ test('timeline uses current marker after init and replays READY colors', async (
 test('dubbed playback uses its allocated slot while original audition stays on source timestamps', async () => {
   const ui = studio(); await ui.start();
   ui.sockets.at(-1).receive({type:'init', duration:12, segments_count:1, segments:[
-    {id:0, start:0, end:10, dub_start:2, dub_end:4, duration:10, status:'READY',
+    {id:0, start:2.2, end:3.8, dub_start:2, dub_end:4, duration:1.6, status:'READY',
       audio_url:'/dub-slot.wav', final_vi:'Lời đã lồng'}]});
   const video = ui.el('video-player');
   video.currentTime = 1; await video.emit('timeupdate');
@@ -965,14 +965,53 @@ test('dubbed playback uses its allocated slot while original audition stays on s
   assert.equal(ui.el('subtitle-text').textContent, '', 'dub caption must not appear in the source-only gap');
   video.currentTime = 2.5; await video.emit('timeupdate');
   await ui.flush();
-  console.log('DEBUG CAP', video.paused, ui.el('subtitle-text').textContent, ui.el('subtitle-text').className);
+  const dub = ui.audio.find(audio => audio.src === '/dub-slot.wav');
+  assert.equal(dub.currentTime, .5, 'audio offset follows the dubbed slot');
   assert.equal(ui.el('subtitle-text').textContent, 'Lời đã lồng');
   const timestamp = ui.el('seg-row-0').querySelector('.transcript-time');
   await timestamp.click();
   assert.equal(video.currentTime, 2, 'transcript seek targets dubbed playback time');
   const listen = ui.el('seg-row-0').querySelector('.transcript-listen-original');
   await listen.click();
-  assert.equal(video.currentTime, 0, 'original audition remains on immutable source start');
+  assert.equal(video.currentTime, 2.2, 'original audition remains on immutable source start');
+});
+
+test('an allocated handover follows the dub boundary and does not cut off audio at source end', async () => {
+  const ui = studio(); await ui.start();
+  ui.sockets.at(-1).receive({type:'init', duration:12, segments_count:2, segments:[
+    {id:0,start:0,end:2,dub_start:0,dub_end:2.2,status:'READY',audio_url:'/one.wav',final_vi:'Câu một'},
+    {id:1,start:2,end:4,dub_start:2.2,dub_end:4.2,status:'READY',audio_url:'/two.wav',final_vi:'Câu hai'}]});
+  const video = ui.el('video-player'); await video.play();
+  video.currentTime = 2.1; await ui.tickFrames();
+  const first = ui.audio.find(audio => audio.src === '/one.wav');
+  assert.equal(first.paused, false);
+  assert.equal(first.currentTime, 2.1);
+  assert.equal(ui.el('subtitle-text').textContent, 'Câu một');
+  video.currentTime = 2.3; await ui.tickFrames();
+  const second = ui.audio.find(audio => audio.src === '/two.wav');
+  assert.equal(first.paused, true);
+  assert.equal(second.paused, false);
+  assert.ok(Math.abs(second.currentTime - .1) < 1e-9);
+  assert.equal(ui.el('subtitle-text').textContent, 'Câu hai');
+});
+
+test('invalid or partial dub timing cannot silently play at the original source timestamps', async () => {
+  for (const bounds of [
+    {dub_start:1}, {dub_end:2}, {dub_start:1,dub_end:1},
+    {dub_start:.64,dub_end:2}, {dub_start:1,dub_end:2.36},
+    {dub_start:'1',dub_end:2}, {dub_start:true,dub_end:2}, {dub_start:null,dub_end:2},
+  ]) {
+    const ui = studio(); await ui.start();
+    ui.sockets.at(-1).receive({type:'init',duration:10,segments_count:1,segments:[
+      {id:0,start:1,end:2,status:'READY',audio_url:'/invalid.wav',final_vi:'Sai mốc',...bounds}]});
+    const video = ui.el('video-player');
+    video.currentTime = 1.5; await video.emit('timeupdate');
+    assert.equal(ui.audio.some(audio => audio.src === '/invalid.wav'), false, JSON.stringify(bounds));
+    assert.equal(ui.el('subtitle-text').textContent, '');
+    await ui.el('seg-row-0').querySelector('.transcript-time').click();
+    assert.equal(video.currentTime, 1.5);
+    assert.match(ui.el('buffering-text').textContent, /Mốc thời gian lồng tiếng không hợp lệ/);
+  }
 });
 
 test('playback waits for an untranslated segment and resumes when its audio is ready', async () => {

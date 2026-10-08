@@ -8,9 +8,33 @@ import pytest
 
 from config import settings
 from core.subtitle import SubtitleGenerator
-from core.subtitle_cues import build_subtitle_cues, fit_title_text, normalize_screen_texts, uncovered_intervals
+from core.subtitle_cues import build_subtitle_cues, fit_title_text, normalize_screen_texts, uncovered_intervals, speech_caption_cues
 from core.streaming.export import HQExporter
 from core.video_composer import _escape_filter_filename
+
+
+def test_measured_speech_cues_keep_the_allocated_dub_tail_without_mutating_source():
+    segment = {"start": 1, "end": 1.62, "dub_start": .9, "dub_end": 1.8,
+               "speech_start": .94, "speech_end": 1.77,
+               "subtitle_cues": [{"start": .9, "end": 1.8, "text": "Mười chín."}]}
+    assert speech_caption_cues(segment) == [{"start": .94, "end": 1.77, "text": "Mười chín."}]
+    assert (segment["start"], segment["end"]) == (1, 1.62)
+
+
+def test_generated_legacy_pages_follow_allocated_dub_bounds():
+    cues = speech_caption_cues({"start": 1, "end": 2, "dub_start": .8,
+                               "dub_end": 2.2, "final_vi": "Mười chín."})
+    assert cues == [{"start": .8, "end": 2.2, "text": "Mười chín."}]
+
+
+@pytest.mark.parametrize("bounds", [
+    {"dub_start": .8}, {"dub_end": 2.2},
+    {"dub_start": .64, "dub_end": 2.2}, {"dub_start": .8, "dub_end": 2.36},
+    {"dub_start": "1", "dub_end": 2}, {"dub_start": True, "dub_end": 2},
+    {"dub_start": 1, "dub_end": float("inf")},
+])
+def test_invalid_dub_caption_bounds_fail_closed(bounds):
+    assert speech_caption_cues({"start": 1, "end": 2, "final_vi": "Mười chín.", **bounds}) == []
 
 
 def test_long_translation_paginates_without_losing_words_or_time():

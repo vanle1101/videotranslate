@@ -1386,6 +1386,11 @@ document.addEventListener("DOMContentLoaded", () => {
     return bounds && time >= bounds.start && time < bounds.end;
   }
 
+  function sameDubTiming(left, right) {
+    const a = resolveDubTiming(left), b = resolveDubTiming(right);
+    return a && b && a.start === b.start && a.end === b.end;
+  }
+
   function subtitleAtTime(segment, time) {
     const bounds = resolveDubTiming(segment);
     if (!bounds) return "";
@@ -2157,7 +2162,8 @@ document.addEventListener("DOMContentLoaded", () => {
     const incomingSegments = Array.isArray(msg.segments) ? msg.segments : [];
     const activeSnapshot = incomingSegments.find(s => s.id === activePlayingSegId);
     if (activeAudio && (!activeSnapshot ||
-        activeSnapshot.audio_url !== segments[activePlayingSegId]?.audio_url)) {
+        activeSnapshot.audio_url !== segments[activePlayingSegId]?.audio_url ||
+        !sameDubTiming(activeSnapshot, segments[activePlayingSegId]))) {
       activeAudio.pause();
       activeAudio = null;
       activePlayingSegId = null;
@@ -2418,6 +2424,7 @@ document.addEventListener("DOMContentLoaded", () => {
     return dubPlaybackWait === wait && currentTaskId === wait.taskId && !sourceAudition && !resultPreviewActive &&
       activePlayingSegId === wait.segmentId && activeAudio === wait.audio &&
       segments[wait.segmentId]?.audio_url === wait.url &&
+      sameDubTiming(segments[wait.segmentId], wait.bounds) &&
       Math.abs(videoPlayer.currentTime - wait.time) < 0.05;
   }
 
@@ -2475,7 +2482,7 @@ document.addEventListener("DOMContentLoaded", () => {
     if (dubPlaybackWait && !currentDubWait(dubPlaybackWait)) cancelDubPlaybackWait();
     if (!dubPlaybackWait) {
       const wait = {taskId: currentTaskId, segmentId: segment.id, url: segment.audio_url,
-        audio, time: videoPlayer.currentTime, starting: false};
+        bounds: resolveDubTiming(segment), audio, time: videoPlayer.currentTime, starting: false};
       dubPlaybackWait = wait;
       wait.timer = setTimeout(() => failDubPlayback(wait), 15000);
       // Pause the master clock before asking the browser to decode/play audio.
@@ -2504,7 +2511,8 @@ document.addEventListener("DOMContentLoaded", () => {
     const wanted = new Map(upcoming.map(segment => [segment.id, segment]));
     for (const [id, entry] of dubAudioCache) {
       const segment = wanted.get(id);
-      if (segment && entry.url === segment.audio_url && entry.revision === (segment.revision || 0)) continue;
+      if (segment && entry.url === segment.audio_url && entry.revision === (segment.revision || 0) &&
+          sameDubTiming(segment, entry.bounds)) continue;
       dubAudioCache.delete(id);
       entry.audio.pause();
       entry.audio.removeAttribute("src");
@@ -2513,7 +2521,8 @@ document.addEventListener("DOMContentLoaded", () => {
     for (const segment of upcoming) {
       if (dubAudioCache.has(segment.id)) continue;
       const audio = new Audio(segment.audio_url);
-      const entry = { audio, url: segment.audio_url, revision: segment.revision || 0 };
+      const entry = { audio, url: segment.audio_url, revision: segment.revision || 0,
+        bounds: resolveDubTiming(segment) };
       dubAudioCache.set(segment.id, entry);
       audio.preload = "auto";
       audio.addEventListener("error", () => {
@@ -2817,7 +2826,8 @@ document.addEventListener("DOMContentLoaded", () => {
     const previous = segments[segment.id];
     if (previous?.revision > (segment.revision || 0)) return;
     if (Array.isArray(segment.screen_texts)) setScreenTexts(segment.screen_texts);
-    if (activePlayingSegId === segment.id && previous?.audio_url !== segment.audio_url) {
+    if (activePlayingSegId === segment.id && (previous?.audio_url !== segment.audio_url ||
+        !sameDubTiming(previous, segment))) {
       activeAudio?.pause();
       activeAudio = null;
       activePlayingSegId = null;
