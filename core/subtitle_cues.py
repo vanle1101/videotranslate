@@ -207,10 +207,12 @@ def speech_caption_cues(segment):
     # preview may opt in; unreviewed export/legacy inputs remain excluded.
     if segment.get("needs_review") and not segment.get("preview_is_draft"):
         return []
+    # Speech cues follow the allocated narration slot; source timestamps remain
+    # untouched for OCR evidence and original-audio audition. Import lazily to
+    # keep the caption module independent of streaming initialization.
+    from core.streaming.audio_cache import resolve_dub_timing
     try:
-        start, end = float(segment["start"]), float(segment["end"])
-        if not math.isfinite(start) or not math.isfinite(end) or end <= max(0, start):
-            return []
+        start, end = resolve_dub_timing(segment)
     except (KeyError, TypeError, ValueError):
         return []
     if "subtitle_cues" in segment:

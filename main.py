@@ -483,6 +483,7 @@ def persist_session(session):
 def export_revision_signature(session):
     content = {"segments": [{"id": s.id, "revision": getattr(s, "revision", 0),
                              "start": s.start, "end": s.end, "final_vi": s.final_vi,
+                             "dub_start": getattr(s, "dub_start", None), "dub_end": getattr(s, "dub_end", None),
                              "verification": getattr(s, "verification", None)}
                             for s in session.segments.values()],
                "screen_texts": getattr(session, "screen_texts", []),

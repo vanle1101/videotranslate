@@ -57,6 +57,7 @@ def session(tmp_path, monkeypatch):
                                    apply_atempo=Mock(side_effect=align))
     # This transaction fixture uses text bytes as audio. Actual PCM activity and
     # service word boundaries are exercised in test_speech_timing.py.
+    monkeypatch.setattr(sess, "_dub_audio_duration", lambda path: 3.0)
     monkeypatch.setattr("core.engines.alignment.speech_timing.audio_activity_span", lambda path, **kwargs: (0, 3))
     monkeypatch.setattr("core.engines.alignment.speech_timing._audio_activity_intervals", lambda path, **kwargs: [(0, 3)])
     registry[sess.task_id] = sess

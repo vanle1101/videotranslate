@@ -18,7 +18,8 @@ from core.engines.alignment.speech_cache import (
 
 
 def synthesize_natural_speech(*, text, source, duration, output_path, engine, aligner,
-                              translator=None, voice=None, ref_audio=None, context=None, on_stage=None):
+                              translator=None, voice=None, ref_audio=None, context=None, on_stage=None,
+                              max_duration=None):
     """Never publish chopped or excessively accelerated speech.
 
     A rewrite is allowed only for automatic translation, with independent
@@ -27,6 +28,10 @@ def synthesize_natural_speech(*, text, source, duration, output_path, engine, al
     """
     if not math.isfinite(duration) or duration <= 0 or not str(text).strip():
         raise ValueError("Lời đọc hoặc thời lượng không hợp lệ.")
+    if max_duration is None:
+        max_duration = duration
+    if not math.isfinite(max_duration) or not duration <= max_duration <= duration + .350001:
+        raise ValueError("Khoảng căn lời thoại không hợp lệ.")
     current = str(text).strip()
     output_path = Path(output_path)
     output_path.parent.mkdir(parents=True, exist_ok=True)
@@ -36,9 +41,12 @@ def synthesize_natural_speech(*, text, source, duration, output_path, engine, al
     execution = current_execution_context()
     cache_identity = None
     try:
-        cache_identity = synthesis_cache_identity(
-            source=source, text=current, duration=duration, voice=voice, engine=engine,
-            aligner=aligner, translator=translator, context=context, ref_audio=ref_audio)
+        # Adaptive timing depends on neighboring audio. Its final checkpoint is
+        # persisted by the session; never reuse a fixed-slot speech cache hit.
+        if max_duration == duration:
+            cache_identity = synthesis_cache_identity(
+                source=source, text=current, duration=duration, voice=voice, engine=engine,
+                aligner=aligner, translator=translator, context=context, ref_audio=ref_audio)
     except (OSError, ValueError, TypeError, KeyError):
         logger.warning("PACING_CACHE_UNAVAILABLE run_id=%s speech_id=%s", execution.run_id, speech_id)
     if cache_identity is not None:
@@ -50,9 +58,12 @@ def synthesize_natural_speech(*, text, source, duration, output_path, engine, al
     request_budget = raw_budget * .98
     measurements = []
     seen_candidates = set()
+    original_duration = duration
     with tempfile.TemporaryDirectory(prefix="speech-fit-", dir=output_path.parent) as temporary:
         raw, fitted = Path(temporary) / "raw.wav", Path(temporary) / "fitted.wav"
         for attempt in range(3):
+            duration = original_duration
+            raw_budget = duration * aligner.max_speed
             execution = current_execution_context()
             if execution.cancel_check and execution.cancel_check():
                 import asyncio
@@ -76,7 +87,7 @@ def synthesize_natural_speech(*, text, source, duration, output_path, engine, al
             try:
                 if on_stage:
                     on_stage("ALIGNING")
-                for fit_attempt in range(2):
+                for fit_attempt in range(3):
                     try:
                         # Subtracting source timestamps can put an exact
                         # ceiling ratio a few floating-point ulps over it.
@@ -89,6 +100,17 @@ def synthesize_natural_speech(*, text, source, duration, output_path, engine, al
                         ratio = aligner.apply_atempo(raw, fitted, ratio, fit_duration=duration)
                         break
                     except SpeechBudgetError:
+                        if fit_attempt == 1 and max_duration > duration + .0001:
+                            # The caller has proved this extra space exists in
+                            # the dialogue timeline. Request only what the full
+                            # waveform needs, keeping the same speed ceiling.
+                            duration = min(max_duration, measured / aligner.max_speed + .012)
+                            raw_budget = duration * aligner.max_speed
+                            request_budget = raw_budget * .98
+                            ratio = max(1.0, measured / duration)
+                            logger.info("PACING_BUDGET_EXTENDED run_id=%s speech_id=%s slot_seconds=%.4f",
+                                        execution.run_id, speech_id, duration)
+                            continue
                         if fit_attempt:
                             raise
                         # First preserve the exact wording and every spoken
@@ -96,14 +118,14 @@ def synthesize_natural_speech(*, text, source, duration, output_path, engine, al
                         # an actual fit failure activates this path; normal
                         # speech stays unchanged. Leave 2% for atempo rounding.
                         cuts = compact_tts_pauses(raw, raw_budget * .98)
-                        edge_cuts = compact_tts_edge_padding(raw, raw_budget * .98)
-                        # Both cut lists use the original waveform coordinate
-                        # system; map provider boundaries once after all safe
-                        # reclamation so edge and internal offsets cannot be
-                        # applied twice or in mixed timelines.
                         boundaries = retime_tts_word_boundaries(
-                            boundaries, removed_intervals=cuts + edge_cuts)
-                        if not cuts and not edge_cuts:
+                            boundaries, removed_intervals=cuts)
+                        edge_cuts = compact_tts_edge_padding(raw, raw_budget * .98)
+                        # Edge cuts refer to the already compacted waveform.
+                        # Apply each map in order, in its own coordinate space.
+                        boundaries = retime_tts_word_boundaries(
+                            boundaries, removed_intervals=edge_cuts)
+                        if not cuts and not edge_cuts and max_duration <= duration:
                             raise
                         before = measured
                         measured = aligner.get_audio_duration(raw)

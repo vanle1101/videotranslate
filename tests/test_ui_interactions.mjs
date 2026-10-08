@@ -618,6 +618,7 @@ test('custom player buttons play and pause the selected preview and control its 
   const ui = studio(); await ui.flush();
   ui.window.loadDroppedLocalVideo('D:/preview.mp4');
   const video = ui.el('video-player');
+  await video.play();
   await ui.el('player-play-toggle').click();
   assert.equal(video.paused, false);
   assert.match(ui.el('player-play-toggle').getAttribute('aria-label'), /Tạm dừng/);
@@ -952,6 +953,30 @@ test('timeline uses current marker after init and replays READY colors', async (
   assert.match(ui.el('slice-seg-0').className, /emerald/);
   assert.equal(ui.el('seg-vi-0').textContent, '<b>Xin chào</b>');
   assert.equal(ui.el('seg-vi-0').innerHTML, '');
+});
+
+test('dubbed playback uses its allocated slot while original audition stays on source timestamps', async () => {
+  const ui = studio(); await ui.start();
+  ui.sockets.at(-1).receive({type:'init', duration:12, segments_count:1, segments:[
+    {id:0, start:0, end:10, dub_start:2, dub_end:4, duration:10, status:'READY',
+      audio_url:'/dub-slot.wav', final_vi:'Lời đã lồng'}]});
+  const video = ui.el('video-player');
+  await video.play();
+  video.currentTime = 1; await video.emit('timeupdate');
+  await ui.flush();
+  assert.equal(ui.el('subtitle-text').textContent, '', 'dub caption must not appear in the source-only gap');
+  video.currentTime = 2.5; await video.emit('timeupdate');
+  await ui.flush();
+  const dub = ui.audio.find(audio => audio.src === '/dub-slot.wav');
+  console.log('DEBUG DUB', ui.audio.map(audio => audio.src), ui.el('seg-vi-0')?.textContent);
+  assert.equal(dub.currentTime, .5, 'audio offset follows the dubbed slot');
+  assert.equal(ui.el('subtitle-text').textContent, 'Lời đã lồng');
+  const timestamp = ui.el('seg-row-0').querySelector('.transcript-time');
+  await timestamp.click();
+  assert.equal(video.currentTime, 2, 'transcript seek targets dubbed playback time');
+  const listen = ui.el('seg-row-0').querySelector('.transcript-listen-original');
+  await listen.click();
+  assert.equal(video.currentTime, 0, 'original audition remains on immutable source start');
 });
 
 test('playback waits for an untranslated segment and resumes when its audio is ready', async () => {

@@ -8,6 +8,7 @@ import math
 import uuid
 import os
 import threading
+import wave
 from copy import deepcopy
 from pathlib import Path
 from typing import Dict, Any, Optional, List, Callable
@@ -22,10 +23,12 @@ from core.engines.translation.semantic_translator import SemanticTranslator
 from core.engines.tts.vieneu_engine import VieNeuEngine
 from core.engines.tts.edge_fallback import EdgeTTSFallbackEngine
 from core.voice_catalog import resolve_voice
-from core.engines.alignment.timing_aligner import TimingBudgetAligner
+from core.engines.alignment.timing_aligner import TimingBudgetAligner, SpeechBudgetError
 from core.engines.alignment.natural_speech import synthesize_natural_speech
 from core.engines.separator.realtime_suppressor import RealtimeVocalSuppressor
 from core.engines.alignment.speech_timing import build_speech_timing, take_tts_word_boundaries, trim_tts_padding
+from core.streaming.audio_cache import resolve_dub_timing
+from core.engines.alignment.dub_timing import available_dub_duration, plan_backshift
 
 class SegmentEditConflict(RuntimeError):
     """Editing would conflict with the current session state."""
@@ -44,6 +47,8 @@ class SegmentItem:
         self.start = start
         self.end = end
         self.duration = duration
+        self.dub_start = None
+        self.dub_end = None
         self.status = "WAITING" # WAITING, ASR, TRANSLATING, TTS, ALIGNING, READY, PLAYED, FAILED
         self.text_zh = ""
         self.emotion = ""
@@ -77,6 +82,8 @@ class SegmentItem:
             "start": self.start,
             "end": self.end,
             "duration": self.duration,
+            "dub_start": self.dub_start,
+            "dub_end": self.dub_end,
             "status": self.status,
             "text_zh": self.text_zh,
             "emotion": self.emotion,
@@ -455,6 +462,7 @@ class StreamingPipelineSession:
         stem = f"edit_{seg.id}_{uuid.uuid4().hex}"
         raw_path = self.cache_dir / f"{stem}_raw.wav"
         fitted_path = self.segments_dir / f"{stem}.wav"
+        dub_plan = {}
         try:
             if without_audio:
                 tts_duration, ratio = 0.0, 1.0
@@ -477,10 +485,9 @@ class StreamingPipelineSession:
                         asyncio.run_coroutine_threadsafe(publish_stage(stage), loop).result()
                     await publish_stage("TTS")
                 async with self._tts_lock:
-                    spoken = await self._run_blocking(synthesize_natural_speech,
+                    spoken, timing, dub_plan = await self._fit_dub(seg,
                         text=text, source=review_result.get("text_zh", old_source) if review_result is not None else old_source,
-                        duration=seg.duration, output_path=fitted_path,
-                        engine=self.tts_engine, aligner=self.aligner, voice=self.voice, ref_audio=self.ref_audio,
+                        output_path=fitted_path,
                         translator=self.translator if review_result is not None else None,
                         on_stage=speech_stage,
                         context=(self._dialogue_context_before(
@@ -505,8 +512,6 @@ class StreamingPipelineSession:
                 if review_result is not None:
                     review_result["final_vi"] = text
                 tts_duration, ratio, boundaries = spoken["tts_duration"], spoken["speed_ratio"], spoken["boundaries"]
-                timing = await self._run_blocking(build_speech_timing, text, seg.start, seg.end,
-                                                  fitted_path, ratio, boundaries)
             if self.is_stopped:
                 raise asyncio.CancelledError
             final_path = self.segments_dir / f"seg_{seg.id}.wav"
@@ -517,6 +522,7 @@ class StreamingPipelineSession:
                 final_path.unlink(missing_ok=True)
             else:
                 fitted_path.replace(final_path)
+            self._publish_dub_plan(dub_plan, seg.id)
             old_text = seg.final_vi
             seg.final_vi = text
             seg.confirmed_silence = confirm_silence
@@ -578,6 +584,9 @@ class StreamingPipelineSession:
             try:
                 await self.emit("result_invalidated", {"reason": "transcript_changed",
                     "output_video_url": "", "output_filename": "", "review_summary": dict(self.review_summary)})
+                for identity in dub_plan:
+                    if identity != seg.id:
+                        await self.emit("segment_update", self.segments[identity].to_dict())
                 await self.emit("segment_update", {**snapshot, "screen_texts": self.screen_texts})
             except Exception:
                 logging.getLogger("errors").warning("[%s] Không gửi được cập nhật câu %s", self.task_id, seg.id)
@@ -1418,9 +1427,82 @@ class StreamingPipelineSession:
         finally:
             slice_wav.unlink(missing_ok=True)
 
+    @staticmethod
+    def _dub_audio_duration(path):
+        with wave.open(str(path), "rb") as audio:
+            duration = audio.getnframes() / audio.getframerate()
+            if duration <= 0:
+                raise ValueError("Âm thanh lồng tiếng trống.")
+            return duration
+
+    def _dub_rows(self):
+        rows = []
+        for item in sorted(self.segments.values(), key=lambda row: row.start):
+            row = item.to_dict()
+            if item.audio_path and item.status in ("READY", "PLAYED"):
+                try:
+                    row["audio_duration"] = self._dub_audio_duration(item.audio_path)
+                except (OSError, EOFError, wave.Error, ZeroDivisionError):
+                    pass  # Unknown audio remains an occupied, immovable slot.
+            rows.append(row)
+        return rows
+
+    async def _fit_dub(self, seg, *, text, source, output_path, translator=None, context=None, on_stage=None):
+        rows = self._dub_rows()
+        start, end = resolve_dub_timing(seg.to_dict())
+        duration = end - start
+        capacity = max(duration, available_dub_duration(rows, seg.id))
+        spoken = await self._run_blocking(synthesize_natural_speech,
+            text=text, source=source, duration=duration, max_duration=capacity,
+            output_path=output_path, engine=self.tts_engine, aligner=self.aligner,
+            translator=translator, voice=self.voice, ref_audio=self.ref_audio,
+            context=context, on_stage=on_stage)
+        try:
+            measured = self._dub_audio_duration(output_path)
+        except (OSError, EOFError, wave.Error, ZeroDivisionError):
+            # Offline adapters/tests may return a validated duration without a
+            # WAV container; real production TTS always passes the WAV check.
+            measured = float(self.aligner.get_audio_duration(output_path))
+            if not math.isfinite(measured) or measured <= 0:
+                raise ValueError("Không đo được thời lượng giọng đọc.")
+        plan = {}
+        if measured > duration + .0001:
+            plan = plan_backshift(rows, seg.id, measured)
+            if plan is None:
+                raise SpeechBudgetError("Không còn khoảng nghỉ phù hợp để căn đủ lời thoại.")
+            for identity, bounds in plan.items():
+                resolve_dub_timing({**self.segments[identity].to_dict(), **bounds})
+            start, end = plan[seg.id]["dub_start"], plan[seg.id]["dub_end"]
+        timing = await self._run_blocking(build_speech_timing, spoken.get("text", text), start, end,
+            output_path, spoken["speed_ratio"], spoken["boundaries"])
+        return spoken, timing, plan
+
+    def _publish_dub_plan(self, plan, focus_id):
+        # No await: the whole block must become visible in one runtime snapshot.
+        for identity, bounds in plan.items():
+            item = self.segments[identity]
+            old_start, _ = resolve_dub_timing(item.to_dict())
+            delta = bounds["dub_start"] - old_start
+            item.dub_start, item.dub_end = bounds["dub_start"], bounds["dub_end"]
+            if identity == focus_id:
+                continue
+            item.subtitle_cues = [{**cue, "start": cue["start"] + delta,
+                                   "end": min(item.dub_end, cue["end"] + delta),
+                                   **({"words": [{**word, "start": word["start"] + delta,
+                                                  "end": min(item.dub_end, word["end"] + delta)}
+                                                 for word in cue["words"]]} if "words" in cue else {})}
+                                  for cue in item.subtitle_cues]
+            for key in ("speech_start", "speech_end"):
+                value = getattr(item, key)
+                if value is not None:
+                    setattr(item, key, min(item.dub_end, value + delta))
+            item.revision += 1
+            item.audio_url = f"/api/streaming/audio/{self.task_id}/{item.id}?rev={item.revision}"
+
     async def _synthesize_segment(self, seg):
         """Generate playable audio without approving an uncertain translation."""
         raw_tts_wav = self.cache_dir / f"tts_{seg.id}_raw.wav"
+        pending_path = self.segments_dir / f"pending_{seg.id}_{uuid.uuid4().hex}.wav"
         try:
             if not seg.final_vi.strip():
                 if seg.text_zh.strip() and not seg.needs_review:
@@ -1451,15 +1533,18 @@ class StreamingPipelineSession:
                 asyncio.run_coroutine_threadsafe(publish_stage(stage), loop).result()
             async with self._tts_lock:
                 final_path = self.segments_dir / f"seg_{seg.id}.wav"
-                spoken = await self._run_blocking(synthesize_natural_speech,
-                    text=seg.final_vi, source=seg.text_zh, duration=seg.duration, output_path=final_path,
-                    engine=self.tts_engine, aligner=self.aligner, translator=self.translator,
-                    voice=self.voice, ref_audio=self.ref_audio, on_stage=speech_stage,
+                spoken, timing, dub_plan = await self._fit_dub(seg,
+                    text=seg.final_vi, source=seg.text_zh, output_path=pending_path,
+                    translator=self.translator, on_stage=speech_stage,
                     context=self._dialogue_context_before(seg))
             seg.status = "ALIGNING"
             await self._segment_progress("align", f"Đang khớp thời lượng câu {seg.id + 1}")
             await self.emit("segment_update", seg.to_dict())
             tts_dur, ratio, boundaries = spoken["tts_duration"], spoken["speed_ratio"], spoken["boundaries"]
+            if self.is_stopped:
+                raise asyncio.CancelledError
+            pending_path.replace(final_path)
+            self._publish_dub_plan(dub_plan, seg.id)
             if spoken["text"] != seg.final_vi:
                 previous = seg.final_vi
                 seg.final_vi = spoken["text"]
@@ -1475,8 +1560,6 @@ class StreamingPipelineSession:
             seg.tts_duration = tts_dur
             seg.speed_ratio = round(ratio, 2)
             seg.audio_path = str(final_path.resolve())
-            timing = await self._run_blocking(build_speech_timing, seg.final_vi, seg.start, seg.end,
-                                              final_path, ratio, boundaries)
             for key, value in timing.items():
                 setattr(seg, key, value)
             seg.audio_url = f"/api/streaming/audio/{self.task_id}/{seg.id}"
@@ -1484,10 +1567,14 @@ class StreamingPipelineSession:
             seg.failed_stage = None
             seg._retry_synthesis = False
             self.total_processed_duration += seg.duration
+            for identity in dub_plan:
+                if identity != seg.id:
+                    await self.emit("segment_update", self.segments[identity].to_dict())
             await self.emit("segment_update", seg.to_dict())
             await self._update_ready()
         finally:
             raw_tts_wav.unlink(missing_ok=True)
+            pending_path.unlink(missing_ok=True)
 
     def _review_message(self):
         count = sum(s.needs_review for s in self.segments.values())

@@ -1370,14 +1370,35 @@ document.addEventListener("DOMContentLoaded", () => {
     });
   }
 
+  function resolveDubTiming(segment) {
+    if (!segment) return null;
+    const valid = value => typeof value === "number" && Number.isFinite(value) && value >= 0;
+    const { start, end, dub_start: dubStart, dub_end: dubEnd } = segment;
+    if (!valid(start) || !valid(end) || end <= start) return null;
+    if (dubStart == null && dubEnd == null) return { start, end };
+    if (!valid(dubStart) || !valid(dubEnd) || dubEnd <= dubStart ||
+        Math.abs(dubStart - start) > .35 + 1e-9 || Math.abs(dubEnd - end) > .35 + 1e-9) return null;
+    return { start: dubStart, end: dubEnd };
+  }
+
+  function dubContainsTime(segment, time) {
+    const bounds = resolveDubTiming(segment);
+    return bounds && time >= bounds.start && time < bounds.end;
+  }
+
   function subtitleAtTime(segment, time) {
+    const bounds = resolveDubTiming(segment);
+    if (!bounds) return "";
     const text = segmentTranslation(segment);
-    if (!segment._displayCues || segment._displayText !== text) {
+    const timingKey = `${bounds.start}:${bounds.end}`;
+    if (!segment._displayCues || segment._displayText !== text || segment._displayTiming !== timingKey) {
       segment._displayText = text;
+      segment._displayTiming = timingKey;
       segment._displayCues = Array.isArray(segment.subtitle_cues)
         ? segment.subtitle_cues
-        : makeSubtitleCues(text, segment.start, segment.end);
+        : makeSubtitleCues(text, bounds.start, bounds.end);
     }
+    if (!dubContainsTime(segment, time)) return "";
     return segment._displayCues.find(cue => time >= cue.start && time < cue.end)?.text || "";
   }
 
@@ -1517,7 +1538,7 @@ document.addEventListener("DOMContentLoaded", () => {
       renderScreenTexts(videoPlayer.currentTime);
     }
     chineseSubMask.style.display = "none";
-    const current = Object.values(segments).find(s => videoPlayer.currentTime >= s.start && videoPlayer.currentTime < s.end);
+    const current = Object.values(segments).find(s => dubContainsTime(s, videoPlayer.currentTime));
     renderSpeechCaption(current, videoPlayer.currentTime);
   }
   if (typeof ResizeObserver !== "undefined") new ResizeObserver(positionVideoOverlays).observe(playerContainer);
@@ -2247,7 +2268,7 @@ document.addEventListener("DOMContentLoaded", () => {
       else if (msg.type === "segment_update") {
         applySegmentUpdate(msg);
         if (isBufferingUnderrun && ["READY", "PLAYED"].includes(msg.status) &&
-            videoPlayer.currentTime >= msg.start && videoPlayer.currentTime < msg.end) {
+            dubContainsTime(msg, videoPlayer.currentTime)) {
           isBufferingUnderrun = false;
           bufferingAlert.classList.add("hidden");
           videoPlayer.play().catch(reportPlayFailure);
@@ -2445,8 +2466,9 @@ document.addEventListener("DOMContentLoaded", () => {
   }
 
   function dubSpeechFinished(segment, audio, time) {
-    return segment && audio.readyState >= 1 && Number.isFinite(audio.duration) && audio.duration > 0 &&
-      time - segment.start >= audio.duration;
+    const bounds = resolveDubTiming(segment);
+    return bounds && audio.readyState >= 1 && Number.isFinite(audio.duration) && audio.duration > 0 &&
+      time - bounds.start >= audio.duration;
   }
 
   function waitForDubPlayback(segment, audio) {
@@ -2470,12 +2492,16 @@ document.addEventListener("DOMContentLoaded", () => {
   }
 
   function prepareDubAudio(curTime) {
+    console.log('DEBUG PREP', curTime, Object.values(segments).map(s => ({u:s.audio_url, st:s.status, start:s.start, end:s.end, ds:s.dub_start, de:s.dub_end})));
     // Only the current and next two ready utterances are retained. Never
     // preload an entire long transcript or hold old revisions after an edit.
     const upcoming = Object.values(segments)
-      .filter(segment => segment.end > curTime && segment.start < curTime + 12 &&
-        ["READY", "PLAYED"].includes(segment.status) && segment.audio_url)
-      .sort((a, b) => a.start - b.start).slice(0, 3);
+      .filter(segment => {
+        const bounds = resolveDubTiming(segment);
+        return bounds && bounds.end > curTime && bounds.start < curTime + 12 &&
+          ["READY", "PLAYED"].includes(segment.status) && segment.audio_url;
+      })
+      .sort((a, b) => resolveDubTiming(a).start - resolveDubTiming(b).start).slice(0, 3);
     const wanted = new Map(upcoming.map(segment => [segment.id, segment]));
     for (const [id, entry] of dubAudioCache) {
       const segment = wanted.get(id);
@@ -2583,7 +2609,7 @@ document.addEventListener("DOMContentLoaded", () => {
     let matchedSeg = null;
     for (const id in segments) {
       const s = segments[id];
-      if (curTime >= s.start && curTime < s.end) {
+      if (dubContainsTime(s, curTime)) {
         matchedSeg = s;
         break;
       }
@@ -2592,6 +2618,7 @@ document.addEventListener("DOMContentLoaded", () => {
     highlightTranscript(matchedSeg?.id ?? null);
 
     if (matchedSeg) {
+      const dubBounds = resolveDubTiming(matchedSeg);
       if (!["READY", "PLAYED"].includes(matchedSeg.status) && !videoPlayer.paused) {
         isBufferingUnderrun = true;
         videoPlayer.pause();
@@ -2611,11 +2638,11 @@ document.addEventListener("DOMContentLoaded", () => {
           activePlayingSegId = matchedSeg.id;
           activeAudio = preparedAudio;
           activeAudio.volume = parseFloat(volDubSlider.value) * playbackVolume();
-          const offset = Math.max(0, curTime - matchedSeg.start);
+          const offset = Math.max(0, curTime - dubBounds.start);
           activeAudio.currentTime = offset;
         }
         activeAudio.playbackRate = videoPlayer.playbackRate;
-        const offset = Math.max(0, curTime - matchedSeg.start);
+        const offset = Math.max(0, curTime - dubBounds.start);
         if (Math.abs(activeAudio.currentTime - offset) > 0.25) activeAudio.currentTime = offset;
         const entry = dubAudioCache.get(matchedSeg.id);
         if (!videoPlayer.paused && !audioPermissionNeeded && !activeAudio.ended &&
@@ -2665,11 +2692,13 @@ document.addEventListener("DOMContentLoaded", () => {
     if (!totalVideoDuration) return;
     for (const id in segments) {
       const s = segments[id];
+      const bounds = resolveDubTiming(s);
+      if (!bounds) continue;
       const slice = document.createElement("div");
       slice.id = `slice-seg-${s.id}`;
       slice.className = "absolute top-0 bottom-0 transition-colors duration-200 bg-gray-800";
-      slice.style.left = `${(s.start / totalVideoDuration) * 100}%`;
-      slice.style.width = `${Math.max(0.5, (s.duration / totalVideoDuration) * 100)}%`;
+      slice.style.left = `${(bounds.start / totalVideoDuration) * 100}%`;
+      slice.style.width = `${Math.max(0.5, ((bounds.end - bounds.start) / totalVideoDuration) * 100)}%`;
       timelineTrack.appendChild(slice);
       updateSegmentSlice(s);
     }
@@ -2679,6 +2708,12 @@ document.addEventListener("DOMContentLoaded", () => {
   function updateSegmentSlice(seg) {
     const el = document.getElementById(`slice-seg-${seg.id}`);
     if (!el) return;
+    const bounds = resolveDubTiming(seg);
+    el.hidden = !bounds;
+    if (bounds && totalVideoDuration > 0) {
+      el.style.left = `${(bounds.start / totalVideoDuration) * 100}%`;
+      el.style.width = `${Math.max(0.5, ((bounds.end - bounds.start) / totalVideoDuration) * 100)}%`;
+    }
     if (seg.status === "READY" || seg.status === "PLAYED") {
       el.className = "absolute top-0 bottom-0 transition-colors duration-200 bg-emerald-500/80";
     } else if (seg.status === "ASR" || seg.status === "TRANSLATING" || seg.status === "TTS") {
@@ -2698,8 +2733,10 @@ document.addEventListener("DOMContentLoaded", () => {
 
   function seekTranscript(segment) {
     if (!segment || !currentTaskId) return;
+    const bounds = resolveDubTiming(segment);
+    if (!bounds) { showMediaError("Mốc thời gian lồng tiếng không hợp lệ. Hãy xử lý lại câu này."); return; }
     stopSourceAudition();
-    videoPlayer.currentTime = Math.max(0, Math.min(totalVideoDuration || segment.end, segment.start));
+    videoPlayer.currentTime = Math.max(0, Math.min(totalVideoDuration || bounds.end, bounds.start));
     if (bgmAudio) bgmAudio.currentTime = videoPlayer.currentTime;
     syncPlayback();
   }
@@ -2716,7 +2753,7 @@ document.addEventListener("DOMContentLoaded", () => {
     chineseSubMask.style.display = "none";
     screenTextSignature = "";
     renderScreenTexts(videoPlayer.currentTime);
-    const currentSegment = Object.values(segments).find(segment => videoPlayer.currentTime >= segment.start && videoPlayer.currentTime < segment.end);
+    const currentSegment = Object.values(segments).find(segment => dubContainsTime(segment, videoPlayer.currentTime));
     renderSpeechCaption(currentSegment, videoPlayer.currentTime);
     const button = transcriptRows.get(audition.id)?.listen;
     if (button) {

@@ -15,7 +15,7 @@ from core.video_composer import VideoComposer
 from core.media_process import run_media
 from core.subtitle_cues import build_caption_layout, normalize_caption_style
 from core.streaming.audio_cache import (build_audio_cache_identity, load_audio_cache,
-                                       prepare_audio_cache, commit_audio_cache)
+                                       prepare_audio_cache, commit_audio_cache, resolve_dub_timing)
 
 class HQExporter:
     """
@@ -257,27 +257,42 @@ class HQExporter:
                     output.writeframesraw(silence[:frames * frame_bytes])
                     position += frames
 
-            for item in sorted(segments, key=lambda row: float(row["start"])):
+            for item in sorted(segments, key=lambda row: resolve_dub_timing(row)[0]):
                 check_cancel()
+                dub_start, dub_end = resolve_dub_timing(item)
                 if not item.get("audio_path"):
                     if item.get("final_vi") or item.get("text_vi"):
                         raise ValueError("Đoạn có bản dịch nhưng thiếu âm thanh lồng tiếng.")
                     continue
                 if not Path(item["audio_path"]).is_file():
                     raise FileNotFoundError("Không tìm thấy âm thanh lồng tiếng. Hãy dịch lại video.")
-                start = max(0, round(float(item["start"]) * rate))
-                end = min(total_frames, round(float(item["end"]) * rate))
+                start = round(dub_start * rate)
+                end = round(dub_end * rate)
+                if end > total_frames + 1:
+                    raise ValueError("Timeline lồng tiếng vượt quá thời lượng video.")
+                end = min(total_frames, end)
                 if start < position or end <= start:
                     raise ValueError("Timeline lồng tiếng bị chồng lấn hoặc có thời gian không hợp lệ.")
                 pad_to(start)
-                # Each normal streaming segment is at most eight seconds. This
-                # bounds decode memory and keeps the command short on Windows.
+                # Decode beyond the slot so oversize audio fails instead of
+                # silently losing its final words. The extra bounded window
+                # detects overflow even for malformed, hours-long inputs.
+                slot_frames = end - start
                 decoded = run_media([
                     "ffmpeg", "-v", "error", "-nostdin", "-i", str(item["audio_path"]),
-                    "-t", str((end - start) / rate), "-f", "s16le", "-acodec", "pcm_s16le",
+                    "-t", str(slot_frames / rate + .1), "-f", "s16le", "-acodec", "pcm_s16le",
                     "-ar", str(rate), "-ac", "2", "pipe:1",
                 ], cancel_check, capture_output=True)
-                decoded = decoded[:(end - start) * frame_bytes]
+                if not decoded or len(decoded) % frame_bytes:
+                    raise ValueError("Không giải mã được âm thanh lồng tiếng hợp lệ.")
+                decoded_frames = len(decoded) // frame_bytes
+                if decoded_frames > slot_frames + 1:
+                    raise ValueError(
+                        f"Âm thanh câu {item.get('id', '?')} dài {decoded_frames / rate:.4f}s, "
+                        f"vượt khung lồng tiếng {slot_frames / rate:.4f}s; cần căn lại trước khi xuất.")
+                # One sample of resampler/float rounding may sit at the edge;
+                # no speech-length truncation is permitted.
+                decoded = decoded[:slot_frames * frame_bytes]
                 output.writeframesraw(decoded)
                 position += len(decoded) // frame_bytes
             pad_to(total_frames)

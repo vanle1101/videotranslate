@@ -15,6 +15,7 @@ from pathlib import Path
 from urllib.parse import quote, urlsplit, urlunsplit, parse_qsl, urlencode
 
 from config import settings
+from core.streaming.audio_cache import resolve_dub_timing
 
 VERSION = 1
 MAX_BYTES = 16 * 1024 * 1024
@@ -23,7 +24,7 @@ SEGMENT_FIELDS = frozenset((
     "id start end duration status text_zh emotion literal_vi natural_vi final_vi tts_duration speed_ratio "
     "audio_path failed_stage revision source_method translation_provider translation_model evidence_mode "
     "needs_review review_reason asr_text verification confirmed_silence subtitle_cues subtitle_timing_source "
-    "speech_start speech_end asr_pretranscribed"
+    "speech_start speech_end asr_pretranscribed dub_start dub_end"
 ).split())
 SESSION_FIELDS = frozenset((
     "initial_buffer_seconds voice tts_engine_name asr_engine_name visual_translation total_duration video_size "
@@ -340,6 +341,9 @@ def _validate(data, task_id):
                 or not row["start"] < row["end"] <= duration + .1
                 or abs(row["end"] - row["start"] - row["duration"]) > .02):
             raise ValueError("Thời gian câu thoại không hợp lệ.")
+        dub_start, dub_end = resolve_dub_timing(row)
+        if row.get("dub_end") is not None and dub_end > duration + 1e-9:
+            raise ValueError("Mốc lồng tiếng vượt quá thời lượng video.")
         if row.get("status") not in {"WAITING", "ASR", "TRANSLATING", "TTS", "ALIGNING", "READY", "PLAYED", "FAILED", "NEEDS_REVIEW"}:
             raise ValueError("Trạng thái câu thoại không hợp lệ.")
         for key in ("text_zh", "final_vi", "literal_vi", "natural_vi", "emotion", "asr_text", "subtitle_timing_source"):
@@ -358,7 +362,7 @@ def _validate(data, task_id):
         for cue in row.get("subtitle_cues", []):
             if (not isinstance(cue, dict) or not isinstance(cue.get("text"), str)
                     or not _finite(cue.get("start")) or not _finite(cue.get("end"))
-                    or not row["start"] - .05 <= cue["start"] < cue["end"] <= row["end"] + .05):
+                    or not dub_start - .05 <= cue["start"] < cue["end"] <= dub_end + .05):
                 raise ValueError("Mốc phụ đề không khớp câu thoại.")
             if not isinstance(cue.get("words", []), list):
                 raise ValueError("Mốc từ trong phụ đề không hợp lệ.")

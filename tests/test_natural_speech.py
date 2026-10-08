@@ -5,6 +5,7 @@ import logging
 import math
 import shutil
 import wave
+from pathlib import Path
 from array import array
 from unittest.mock import Mock
 
@@ -188,6 +189,77 @@ def test_internal_pause_compaction_also_preserves_manual_text(tmp_path, aligner)
     assert result["text"] == text and engine.calls == [text]
     assert result["pacing_verification"] is None and result["speed_ratio"] <= 1.15
     assert aligner.get_audio_duration(output) <= 2.4401
+
+
+def test_internal_then_edge_compaction_maps_boundaries_in_successive_timelines(tmp_path, monkeypatch):
+    from core.engines.alignment import natural_speech as speech
+
+    engine = RecordedSynthesizer(2)
+    engine.take_word_boundaries = lambda path: [{"text": "cuối", "start": 1.6, "end": 1.9}]
+    monkeypatch.setattr(speech, "trim_tts_padding", lambda path: 0)
+    monkeypatch.setattr(speech, "audio_activity_span", lambda path: None)
+    # First remove .4s internally, then .1s from the *new* outer end.
+    # Concatenating these maps would wrongly cut the word twice.
+    monkeypatch.setattr(speech, "compact_tts_pauses", lambda *args: [(.5, .9)])
+    monkeypatch.setattr(speech, "compact_tts_edge_padding", lambda *args: [(1.5, 1.6)])
+    aligner = Mock(max_speed=1.15)
+    aligner.get_audio_duration.side_effect = [2, 1.5]
+    def fit(raw, fitted, ratio, **kwargs):
+        shutil.copyfile(raw, fitted)
+        return ratio
+    aligner.apply_atempo.side_effect = fit
+    result = synthesize_natural_speech(text="cuối", source="", duration=1.4,
+        output_path=tmp_path / "voice.wav", engine=engine, aligner=aligner)
+    assert result["boundaries"][0]["start"] == pytest.approx(1.2)
+    assert result["boundaries"][0]["end"] == pytest.approx(1.5)
+
+
+def test_available_dialogue_gap_fits_complete_number_without_rewrite(tmp_path, aligner):
+    engine, translator = RecordedSynthesizer(.8563), Mock()
+    output = tmp_path / "voice.wav"
+    result = synthesize_natural_speech(text="Mười chín.", source="十九", duration=.62,
+        max_duration=.97, output_path=output, engine=engine, aligner=aligner, translator=translator)
+    assert result["text"] == "Mười chín." and result["speed_ratio"] <= 1.15
+    assert .62 < aligner.get_audio_duration(output) <= .97
+    assert engine.calls == ["Mười chín."]
+    translator.rewrite_for_pacing.assert_not_called()
+
+
+def test_adaptive_slot_does_not_change_already_fitting_speech(tmp_path, aligner):
+    result = synthesize_natural_speech(text="Vâng.", source="", duration=.62, max_duration=.97,
+        output_path=tmp_path / "voice.wav", engine=RecordedSynthesizer(.4), aligner=aligner)
+    assert result["speed_ratio"] == 1
+    assert result["tts_duration"] == pytest.approx(.4)
+
+
+def test_pipeline_reflows_prior_audio_and_captions_atomically(tmp_path, aligner, monkeypatch):
+    from core.streaming.pipeline import SegmentItem, StreamingPipelineSession
+    monkeypatch.setattr(settings, "BASE_DIR", tmp_path)
+    session = StreamingPipelineSession("reflow", None, tts_engine_name="edge-tts")
+    previous = SegmentItem(5, 6.84, 7.72, .88)
+    previous.status, previous.final_vi = "READY", "Đang đỉnh cao."
+    previous.audio_path = str(session.segments_dir / "seg_5.wav")
+    RecordedSynthesizer(.878).synthesize(text=previous.final_vi, output_path=Path(previous.audio_path))
+    previous.subtitle_cues = [{"text": previous.final_vi, "start": 6.87, "end": 7.65,
+                              "words": [{"text": "cao.", "start": 7.4, "end": 7.65}]}]
+    previous.speech_start, previous.speech_end = 6.87, 7.65
+    focus = SegmentItem(6, 7.72, 8.34, .62)
+    focus.text_zh, focus.final_vi = "十九", "Mười chín."
+    session.segments = {5: previous, 6: focus}
+    session.total_duration = 10
+    session.aligner, session.tts_engine = aligner, RecordedSynthesizer(.8563)
+    session.translator = Mock()
+    before = Path(previous.audio_path).read_bytes()
+    asyncio.run(session._synthesize_segment(focus))
+    assert focus.status == "READY" and focus.dub_start < focus.start
+    assert (focus.start, focus.end, previous.start, previous.end) == (7.72, 8.34, 6.84, 7.72)
+    assert previous.dub_end <= focus.dub_start
+    assert Path(previous.audio_path).read_bytes() == before
+    assert previous.subtitle_cues[0]["start"] < 6.87
+    assert previous.subtitle_cues[0]["words"][0]["end"] == previous.subtitle_cues[0]["end"]
+    assert focus.speech_end <= focus.dub_end
+    assert focus.dub_end - focus.dub_start == pytest.approx(session._dub_audio_duration(focus.audio_path))
+    session.translator.rewrite_for_pacing.assert_not_called()
 
 
 def test_near_fit_238ms_pause_preserves_natural_floor_with_real_atempo(tmp_path, aligner):

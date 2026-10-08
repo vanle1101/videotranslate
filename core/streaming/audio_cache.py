@@ -28,6 +28,24 @@ _OWNED_NAME = re.compile(r"[0-9a-f]{64}\.mix\Z")
 _LOCK = threading.RLock()
 
 
+def resolve_dub_timing(segment):
+    """Resolve validated narration bounds without changing the source timeline."""
+    def valid(value):
+        return type(value) in (int, float) and math.isfinite(value) and value >= 0
+
+    start, end = segment.get("start"), segment.get("end")
+    if not valid(start) or not valid(end) or end <= start:
+        raise ValueError("Mốc thời gian nguồn của câu thoại không hợp lệ.")
+    dub_start, dub_end = segment.get("dub_start"), segment.get("dub_end")
+    if dub_start is None and dub_end is None:
+        return float(start), float(end)
+    if (not valid(dub_start) or not valid(dub_end) or dub_end <= dub_start
+            or abs(dub_start - start) > .35 + 1e-9
+            or abs(dub_end - end) > .35 + 1e-9):
+        raise ValueError("Mốc lồng tiếng không hợp lệ hoặc lệch quá 0,35 giây so với nguồn.")
+    return float(dub_start), float(dub_end)
+
+
 @dataclass(frozen=True)
 class AudioCacheIdentity:
     key: str
@@ -91,7 +109,9 @@ def build_audio_cache_identity(video_path, segments, duration, mixer, suppressor
             return None
         rows = []
         for segment in segments:
+            dub_start, dub_end = resolve_dub_timing(segment)
             rows.append({"start": segment["start"], "end": segment["end"],
+                         "dub_start": dub_start, "dub_end": dub_end,
                          "revision": segment.get("revision", 0),
                          "audio": _file_identity(segment["audio_path"], cancel_check)
                          if segment.get("audio_path") else None,
