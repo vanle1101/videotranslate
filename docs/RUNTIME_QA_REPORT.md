@@ -1,8 +1,12 @@
 # Runtime QA report
 
-Date: 2026-10-08, Asia/Saigon. **Overall verdict: FAIL / broader audit remains incomplete.** Historical sections below retain their original evidence; the latest retests in this section supersede their pending statuses only for the listed scenarios.
+Date: 2026-10-08, Asia/Saigon. **Overall verdict: FAIL / real production run still has one unresolved Muse pacing rejection; no final MP4 has been validated.** Historical sections below retain their original evidence; the latest retests in this section supersede their pending statuses only for the listed scenarios.
 
 ## Headless production retest — October 8
+
+### Latest headless retry, task `38680e43`
+
+The new measured narration timing is active in the clean backend. Real Edge-TTS/Muse execution passed the previously blocking `十九` row by reflowing the complete WAV: the preceding and focus rows were moved together while source ASR timestamps stayed unchanged. The same bounded planner also moved a later block when backward space was unavailable. The retry then reached 10/14 rows (71.4%) and failed at row 10 (`跟我走` / `Đi theo tôi.`) because Muse returned three pacing candidates without a verified semantic candidate in the 0.52-second source slot. No MP4 was published. This is an honest runtime **FAIL**, not a completed flow.
 
 The user explicitly requested background operation without opening Studio or Chrome. These tests use the production service manager and real HTTP endpoints, OpenCode Muse and Edge TTS. They are not native UI acceptance. The previous Studio processes are no longer running; the earlier stop/relaunch policy blocker is historical.
 
