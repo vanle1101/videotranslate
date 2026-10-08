@@ -462,14 +462,32 @@ async def validate_live_output(session):
         return
     signature = (name, getattr(session, "output_video_url", ""),
                  getattr(session, "caption_style_revision", 0))
+    path = settings.OUTPUT_DIR / name if isinstance(name, str) and Path(name).name == name else None
+    def file_revision():
+        try:
+            info = path.stat() if path is not None else None
+            return (info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns, info.st_ctime_ns) if info else None
+        except OSError:
+            return None
+    prior_file = file_revision()
     from core.streaming.session_store import _valid_output
-    valid = (isinstance(name, str) and Path(name).name == name
-             and await asyncio.to_thread(_valid_output, settings.OUTPUT_DIR / name, session.total_duration))
+    valid = path is not None and await asyncio.to_thread(_valid_output, path, session.total_duration)
+    current_file = file_revision()
     if valid or signature != (getattr(session, "output_filename", ""),
                              getattr(session, "output_video_url", ""),
-                             getattr(session, "caption_style_revision", 0)):
+                             getattr(session, "caption_style_revision", 0)) or (current_file is not None and current_file != prior_file):
         return
-    session._invalidate_output()
+    invalidate = getattr(session, "_invalidate_output", None)
+    if callable(invalidate):
+        invalidate()
+    else:
+        # Keep the live-output contract safe for restored/legacy session
+        # objects that predate the helper method.  Never leave a stale URL
+        # visible merely because the compatibility object lacks a method.
+        session.output_video_url = ""
+        session.output_filename = ""
+        session.output_review_url = ""
+        session.auto_export_signature = None
     session.caption_output_outdated = True
     message = "Tệp video kết quả bị thiếu hoặc hỏng. Bản dịch và giọng đọc được giữ; hãy xuất video lại."
     if message not in session.warnings:

@@ -13,6 +13,7 @@ from fastapi.testclient import TestClient
 import main
 from config import settings
 from core.streaming.pipeline import SegmentItem, StreamingPipelineSession
+from core.media_process import run_media
 
 
 class LocalAPITests(unittest.TestCase):
@@ -233,15 +234,24 @@ class LocalAPITests(unittest.TestCase):
         self.assertNotIn("audio_path", session.segments[0].to_dict())
         main.active_streaming_sessions[session.task_id] = session
         exporter = Mock()
+        # The live export status verifies the media rather than trusting the
+        # mock response. Keep this contract fixture valid and wholly temporary.
+        final = self.root / "translated.mp4"
+        run_media(["ffmpeg", "-v", "error", "-nostdin", "-y", "-f", "lavfi", "-i",
+            "color=c=black:s=64x96:r=10:d=1", "-f", "lavfi", "-i",
+            "sine=frequency=440:duration=1", "-c:v", "libx264", "-pix_fmt", "yuv420p",
+            "-c:a", "aac", "-shortest", str(final)])
+        self.assertTrue(final.is_file() and final.stat().st_size > 0)
         exporter.export.return_value = {"output_filename": "translated.mp4", "elapsed_seconds": 1.2}
-        with patch.object(main, "HQExporter", return_value=exporter):
+        with patch.object(main, "HQExporter", return_value=exporter), \
+                patch.object(settings, "OUTPUT_DIR", self.root):
             response = self.client.post("/api/streaming/export-hq", json={"task_id": session.task_id, "mask_chinese": False})
+            status = self.client.get(f"/api/streaming/export-hq/status/{session.task_id}").json()
         self.assertEqual(response.status_code, 200)
         exported = exporter.export.call_args.kwargs
         self.assertEqual(exported["segments"][0]["audio_path"], session.segments[0].audio_path)
         self.assertEqual(exported["segments"][0]["final_vi"], "Xin chào")
         self.assertFalse(exported["mask_chinese"])
-        status = self.client.get(f"/api/streaming/export-hq/status/{session.task_id}").json()
         self.assertEqual(status["status"], "COMPLETED")
         self.assertEqual(response.json()["video_url"], "/api/outputs/translated.mp4")
 

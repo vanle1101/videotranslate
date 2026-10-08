@@ -13,6 +13,7 @@ from fastapi import HTTPException, UploadFile
 
 import main
 from core.streaming.pipeline import SegmentItem
+from core.media_process import run_media
 
 
 def test_preview_cannot_export_full_source_or_auto_export(session):
@@ -313,7 +314,16 @@ def test_automatic_export_is_tracked_cancellable_and_rejects_manual_duplicate(se
 
 
 def test_final_output_and_audit_report_survive_snapshot_and_task_poll(session):
-    item, _ = session
+    item, exporter = session
+    # Polling now revalidates the live file. A mocked exporter response alone
+    # cannot establish a usable output; supply a real, tiny synthetic MP4.
+    final = main.settings.OUTPUT_DIR / "reviewed.mp4"
+    run_media(["ffmpeg", "-v", "error", "-nostdin", "-y", "-f", "lavfi", "-i",
+        "color=c=black:s=64x96:r=10:d=2", "-f", "lavfi", "-i",
+        "sine=frequency=440:duration=2", "-c:v", "libx264", "-pix_fmt", "yuv420p",
+        "-c:a", "aac", "-shortest", str(final)])
+    assert final.is_file() and final.stat().st_size > 0
+    exporter.export.return_value = {"output_filename": final.name, "elapsed_seconds": 1}
 
     async def run():
         await main.export_hq(main.ExportHQRequest(task_id=item.task_id))

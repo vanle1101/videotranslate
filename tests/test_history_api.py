@@ -158,3 +158,45 @@ def test_live_output_probe_is_off_loop_and_cannot_invalidate_newer_render(saved_
             release.set()
             await checking
     asyncio.run(run())
+
+
+def test_stale_probe_cannot_clear_replacement_at_same_output_name(saved_project, monkeypatch):
+    import core.streaming.session_store as store
+    entered, release = threading.Event(), threading.Event()
+
+    def probe(*args):
+        entered.set()
+        release.wait(3)
+        return False
+
+    monkeypatch.setattr(store, "_valid_output", probe)
+    session = saved_project
+    session.output_filename = "result.mp4"
+    session.output_video_url = "/api/outputs/result.mp4"
+    output = settings.OUTPUT_DIR / session.output_filename
+    output.write_bytes(b"old invalid result")
+
+    async def run():
+        checking = asyncio.create_task(main.validate_live_output(session))
+        try:
+            for _ in range(100):
+                if entered.is_set():
+                    break
+                await asyncio.sleep(.005)
+            assert entered.is_set()
+            # Export publishes a replacement without changing its public URL
+            # or caption revision while the old file's failed probe finishes.
+            replacement = output.with_suffix(".publishing")
+            replacement.write_bytes(b"new replacement media" * 30)
+            replacement.replace(output)
+            release.set()
+            await checking
+            assert session.output_filename == "result.mp4"
+            assert session.output_video_url == "/api/outputs/result.mp4"
+            assert not session.warnings
+            assert output.read_bytes().startswith(b"new replacement media")
+        finally:
+            release.set()
+            await checking
+
+    asyncio.run(run())
