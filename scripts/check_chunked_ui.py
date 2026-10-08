@@ -47,7 +47,8 @@ def wait_for_idle(page, base, task_id, timeout=1800):
 def edit_through_ui(page, base, task_id, row):
     sid, old_revision = row["id"], row.get("revision", 0)
     # Punctuation-only change keeps the original sentence's meaning.
-    text = row["final_vi"].rstrip(".!?") + "!"
+    punctuation = "." if row["final_vi"].endswith("!") else "!"
+    text = row["final_vi"].rstrip(".!?") + punctuation
     assert text != row["final_vi"]
     assert click(page, f"seg-vi-{sid}")
     until(page, f"document.getElementById('seg-row-{sid}').dataset.editing==='true'")
@@ -115,8 +116,13 @@ def main():
                 event("FINAL_REOPEN_PASS", {"task_id": task_id, "output": snapshot["output_filename"]})
                 return
             if args.mode == "full":
-                assert snapshot["progress"]["status"] == "PREVIEW_READY" and snapshot["progress"]["can_translate_full"]
-                assert click(page, "btn-translate-full")
+                if snapshot["progress"]["can_translate_full"]:
+                    assert click(page, "btn-translate-full")
+                else:
+                    # A previous acceptance run may have stopped after the
+                    # real promotion. Resume its saved full session unchanged.
+                    assert snapshot["progress"]["translation_mode"] == "full" and snapshot["progress"]["can_retry"]
+                    assert click(page, "btn-retry-worker")
                 until(page, "document.getElementById('task-progress').dataset.status==='RUNNING'")
                 # A completed early sentence remains editable while later Muse
                 # requests execute; do not wait for the full result to test this.
