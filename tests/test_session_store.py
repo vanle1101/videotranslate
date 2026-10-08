@@ -80,6 +80,46 @@ def test_intentional_preview_reopens_without_interrupted_error_and_retains_futur
     assert restored.segments[0].final_vi == persisted.segments[0].final_vi
 
 
+def test_partial_preview_reopens_as_failed_but_keeps_explicit_full_action(persisted):
+    persisted.translation_mode = "preview"
+    persisted.total_duration = 100
+    persisted._chunked_source_started = True
+    persisted._source_prepared_seconds = 32
+    persisted._visual_completed_seconds = 24
+    persisted._preview_ready = True
+    missing = SegmentItem(1, 4, 6, 2)
+    missing.text_zh, missing.final_vi, missing.status, missing.failed_stage = "你好", "Xin chào.", "FAILED", "TTS"
+    persisted.segments[1] = missing
+    future = SegmentItem(2, 26, 28, 2)
+    future.text_zh = "再见"
+    persisted.segments[2] = future
+    persisted.error = "One speech request failed"
+    persisted.persist()
+    row = list_saved_sessions()[0]
+    assert row["status"] == "FAILED" and row["can_translate_full"]
+    restored = restore_saved_session(persisted.task_id)
+    assert restored.error and restored.get_progress()["status"] == "FAILED"
+    assert restored.can_translate_full and restored.can_retry
+    assert restored.segments[1].status == "FAILED"
+    assert restored.segments[2].status == "WAITING"
+    assert restored._startup_failed is False
+
+
+def test_stop_during_private_chunk_review_remains_stopped_on_reopen(persisted):
+    persisted.translation_mode = "preview"
+    persisted._chunked_source_started = True
+    persisted._source_prepared_seconds = 32
+    persisted._visual_completed_seconds = 16
+    persisted.total_duration = 100
+    persisted.review_summary = {"status": "incomplete"}
+    persisted.is_running = True
+    persisted.stop()
+    assert list_saved_sessions()[0]["status"] == "STOPPED"
+    restored = restore_saved_session(persisted.task_id)
+    assert restored.get_progress()["status"] == "STOPPED"
+    assert restored.can_retry and not restored.can_translate_full
+
+
 @pytest.mark.parametrize("style", [
     {"position": "diagonal"}, {"text_color": "red"}, {"background_color": "#zzzzzz"},
     {"blur_original": "false"}, {"position": []},

@@ -582,7 +582,9 @@ def _availability(data):
     valid_output = bool(current_output and _valid_output(settings.OUTPUT_DIR / output, fields.get("total_duration", 0)))
     output_warning = OUTPUT_FAILURE_WARNING if current_output and not valid_output else ""
     review_incomplete = fields.get("review_summary", {}).get("status") in {"failed", "incomplete", "running"}
-    status = "FAILED" if output_warning else "PREVIEW_READY" if preview_ready else "COMPLETED" if ready else "FAILED" if missing or data["state"] == "FAILED" or review_incomplete else "STOPPED"
+    status = ("FAILED" if output_warning else "PREVIEW_READY" if preview_ready else "COMPLETED" if ready else
+              "STOPPED" if data["state"] == "STOPPED" and not missing else
+              "FAILED" if missing or data["state"] == "FAILED" or review_incomplete else "STOPPED")
     message = " ".join(missing)
     if pending_download:
         message = "Tải video chưa xong; mở dự án và bấm Tiếp tục để khôi phục phần đã tải."

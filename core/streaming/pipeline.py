@@ -1408,7 +1408,7 @@ class StreamingPipelineSession:
             if self.is_stopped:
                 raise asyncio.CancelledError
             cursor = self._visual_completed_seconds
-            nominal_end = min(self.total_duration, cursor + self.preview_seconds)
+            nominal_end = min(target, cursor + self.preview_seconds)
             while self._source_prepared_seconds < nominal_end - .001:
                 record = await prepare_interval(self, self._source_prepared_seconds,
                     min(self.total_duration, self._source_prepared_seconds + self.preview_seconds))
@@ -1959,7 +1959,8 @@ class StreamingPipelineSession:
             text=text, source=source, duration=duration, max_duration=capacity,
             output_path=output_path, engine=self.tts_engine, aligner=self.aligner,
             translator=translator, voice=self.voice, ref_audio=self.ref_audio,
-            context=context, on_stage=on_stage, allow_bidirectional_reflow=True)
+            context=context, on_stage=on_stage,
+            allow_bidirectional_reflow=self._chunked_source_started)
         measured = self._dub_audio_duration(output_path)
         plan = {}
         if measured > duration + 1e-9:

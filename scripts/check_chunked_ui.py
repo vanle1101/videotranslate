@@ -161,7 +161,7 @@ def main():
             event("FULL_PASS", {"task_id": task_id, "output": snapshot["output_filename"], "state": ui_state(page)})
         assert not ui_state(page)["errors"], ui_state(page)
     finally:
-        service_manager.stop_backend()
+        service_manager.shutdown_all()
         if window is not None:
             window.web_view.stop()
             window.web_view.setUrl(QUrl("about:blank"))

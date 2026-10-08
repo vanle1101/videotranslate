@@ -1191,7 +1191,7 @@ document.addEventListener("DOMContentLoaded", () => {
     btnResumeWorker.classList.toggle("hidden", !currentProgress.can_resume || terminal);
     btnRetryWorker?.classList.toggle("hidden", !currentProgress.can_retry);
     btnReviewWorker?.classList.toggle("hidden", !currentProgress.can_review || reviewInProgress());
-    btnStopWorker.classList.toggle("hidden", terminal || currentProgress.can_stop === false);
+    btnStopWorker.classList.toggle("hidden", (terminal && !isPreviewReady(status)) || currentProgress.can_stop === false);
     btnStopWorker.disabled = status === "CANCELLING";
     if (!terminal && !translationReady && !previewPending) {
       bufferingText.textContent = taskProgressStage.textContent;

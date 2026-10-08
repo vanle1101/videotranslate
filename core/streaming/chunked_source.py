@@ -196,7 +196,11 @@ async def publish_background_prefix(session, new_record):
     pending = root / "background_pending.ogg"
     target = root / f"background_{round(cursor * 1000):012d}.ogg"
     try:
-        listing.write_text("\n".join("file '" + Path(row["bgm"]["path"]).name + "'" for row in records), encoding="utf-8")
+        # Opus containers include ~6.5 ms encoder pre-skip. Letting concat
+        # derive each duration from the container accumulates that offset over
+        # hundreds of intervals. Place packets at measured SOURCE offsets.
+        listing.write_text("\n".join("file '" + Path(row["bgm"]["path"]).name + "'\n"
+                            + f"duration {row['end'] - row['start']:.6f}" for row in records), encoding="utf-8")
         await session._run_ffmpeg(["ffmpeg", "-v", "error", "-nostdin", "-y", "-f", "concat", "-safe", "1",
                                   "-i", str(listing), "-c:a", "copy", str(pending)])
         if not pending.is_file() or not pending.stat().st_size:

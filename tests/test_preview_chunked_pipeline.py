@@ -5,6 +5,8 @@ separately by the real UI harness, never inferred from these tests.
 """
 import asyncio
 import threading
+import subprocess
+import json
 import wave
 from copy import deepcopy
 from pathlib import Path
@@ -12,7 +14,7 @@ from pathlib import Path
 import pytest
 
 from config import settings
-from core.streaming.chunked_source import owned_boundary, prepare_interval
+from core.streaming.chunked_source import owned_boundary, prepare_interval, publish_background_prefix as real_background_prefix
 from core.streaming.pipeline import SegmentEditConflict, SegmentItem, StreamingPipelineSession
 
 
@@ -155,6 +157,49 @@ def test_preview_promotion_is_rejected_while_edit_owns_audio(preview):
             await session.translate_full()
         session.edit_tasks.clear()
         assert session.can_translate_full
+    asyncio.run(run())
+
+
+def test_failed_preview_sentence_does_not_block_explicit_remaining_video(preview, monkeypatch):
+    session, prepared, analyzed, speech, events = preview
+    original = session._synthesize_segment
+    async def fail_one(row):
+        if row.id == 1:
+            row.status = "ALIGNING"
+            raise ValueError("isolated unfit speech")
+        await original(row)
+    monkeypatch.setattr(session, "_synthesize_segment", fail_one)
+    async def run():
+        await session.start()
+        await session.worker_task
+        assert session.get_progress()["status"] == "FAILED"
+        assert session.can_translate_full and session.can_retry
+        assert session.segments[0].status == session.segments[2].status == "READY"
+        await session.translate_full()
+        await session.start_task
+        await session.worker_task
+        assert session.get_progress()["status"] == "FAILED", "A gap cannot become full success"
+        assert session.segments[1].status == "FAILED"
+        assert session._visual_prepass_complete
+        assert all(row.status == "READY" for sid, row in session.segments.items() if sid != 1)
+    asyncio.run(run())
+    assert prepared == [(0, 24), (32, 56)]
+    assert speech == [0, 2, 3, 4, 5, 6, 7]
+
+
+def test_interrupted_preview_does_not_prepare_translate_rest_before_full_click(preview):
+    session, prepared, analyzed, speech, events = preview
+    async def run():
+        await session.start()
+        await session.worker_task
+        session._preview_ready = False
+        session._visual_completed_seconds = 23
+        await session.start()
+        await session.worker_task
+        assert session.get_progress()["status"] == "PREVIEW_READY"
+        assert prepared == [(0, 24)], "Resume cannot silently prepare the next full interval"
+        assert analyzed[-1][0:2] == (23, 24)
+        assert session.segments[3].status == "WAITING"
     asyncio.run(run())
 
 
@@ -302,3 +347,28 @@ def test_short_sentence_uses_both_bounded_reflow_sides_before_semantic_shortenin
         assert plan[0]["dub_end"] <= plan[1]["dub_start"]
     asyncio.run(run())
     assert budgets == pytest.approx([2.0])
+
+
+def test_opus_prefix_uses_source_offsets_without_per_chunk_encoder_delay(preview, monkeypatch):
+    session, *_ = preview
+    root = session.cache_dir / "source_preparation"
+    root.mkdir()
+    records = []
+    duration = .317
+    # Real FFmpeg/Opus packets expose the ~6.5 ms container pre-skip that a
+    # mocked subprocess cannot detect. Twenty intervals must not add 130 ms.
+    for index in range(20):
+        audio = root / f"packet_{index}.ogg"
+        subprocess.run(["ffmpeg", "-v", "error", "-nostdin", "-y", "-f", "lavfi", "-i", "sine=frequency=440:sample_rate=48000",
+                        "-t", str(duration), "-c:a", "libopus", str(audio)], check=True,
+                       creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+        records.append({"start": round(index * duration, 6), "end": round((index + 1) * duration, 6),
+                        "bgm": {"path": str(audio)}})
+    by_start = {record["start"]: record for record in records}
+    monkeypatch.setattr("core.streaming.chunked_source._load", lambda current, start: by_start[round(start, 6)])
+    path = asyncio.run(real_background_prefix(session, records[-1]))
+    data = json.loads(subprocess.check_output(["ffprobe", "-v", "error", "-show_entries", "format=duration", "-of", "json", str(path)],
+                                             creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0)))
+    assert float(data["format"]["duration"]) == pytest.approx(20 * duration, abs=.02)
+    subprocess.run(["ffmpeg", "-v", "error", "-xerror", "-nostdin", "-i", str(path), "-f", "null", "-"], check=True,
+                   creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
