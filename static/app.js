@@ -2492,7 +2492,6 @@ document.addEventListener("DOMContentLoaded", () => {
   }
 
   function prepareDubAudio(curTime) {
-    console.log('DEBUG PREP', curTime, Object.values(segments).map(s => ({u:s.audio_url, st:s.status, start:s.start, end:s.end, ds:s.dub_start, de:s.dub_end})));
     // Only the current and next two ready utterances are retained. Never
     // preload an entire long transcript or hold old revisions after an edit.
     const upcoming = Object.values(segments)

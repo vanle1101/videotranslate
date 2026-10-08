@@ -28,7 +28,7 @@ from core.engines.alignment.natural_speech import synthesize_natural_speech
 from core.engines.separator.realtime_suppressor import RealtimeVocalSuppressor
 from core.engines.alignment.speech_timing import build_speech_timing, take_tts_word_boundaries, trim_tts_padding
 from core.streaming.audio_cache import resolve_dub_timing
-from core.engines.alignment.dub_timing import available_dub_duration, plan_backshift
+from core.engines.alignment.dub_timing import available_reflow_duration, plan_reflow
 
 class SegmentEditConflict(RuntimeError):
     """Editing would conflict with the current session state."""
@@ -1451,23 +1451,17 @@ class StreamingPipelineSession:
         rows = self._dub_rows()
         start, end = resolve_dub_timing(seg.to_dict())
         duration = end - start
-        capacity = max(duration, available_dub_duration(rows, seg.id))
+        capacity = max(duration, available_reflow_duration(rows, seg.id, total_duration=self.total_duration))
+        capacity = min(capacity, duration + .35)
         spoken = await self._run_blocking(synthesize_natural_speech,
             text=text, source=source, duration=duration, max_duration=capacity,
             output_path=output_path, engine=self.tts_engine, aligner=self.aligner,
             translator=translator, voice=self.voice, ref_audio=self.ref_audio,
             context=context, on_stage=on_stage)
-        try:
-            measured = self._dub_audio_duration(output_path)
-        except (OSError, EOFError, wave.Error, ZeroDivisionError):
-            # Offline adapters/tests may return a validated duration without a
-            # WAV container; real production TTS always passes the WAV check.
-            measured = float(self.aligner.get_audio_duration(output_path))
-            if not math.isfinite(measured) or measured <= 0:
-                raise ValueError("Không đo được thời lượng giọng đọc.")
+        measured = self._dub_audio_duration(output_path)
         plan = {}
         if measured > duration + .0001:
-            plan = plan_backshift(rows, seg.id, measured)
+            plan = plan_reflow(rows, seg.id, measured, total_duration=self.total_duration)
             if plan is None:
                 raise SpeechBudgetError("Không còn khoảng nghỉ phù hợp để căn đủ lời thoại.")
             for identity, bounds in plan.items():

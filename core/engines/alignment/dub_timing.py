@@ -27,7 +27,7 @@ def _number(value):
     return float(value) if math.isfinite(value) else None
 
 
-def _prepare(rows, focus_id, max_shift):
+def _prepare(rows, focus_id, max_shift, *, allow_forward=False):
     max_shift = _number(max_shift)
     if max_shift is None or max_shift < 0 or isinstance(focus_id, bool):
         return None
@@ -58,12 +58,13 @@ def _prepare(rows, focus_id, max_shift):
         dub_end = _number(record["dub_end"]) if has_end else end
         if (dub_start is None or dub_end is None or dub_start < 0
                 or dub_start < start - max_shift - _EPSILON
-                or dub_start > start + _EPSILON or dub_end <= dub_start
-                or dub_end > end + _EPSILON or dub_end < end - max_shift - _EPSILON):
+                or dub_start > start + (max_shift if allow_forward else 0) + _EPSILON
+                or dub_end <= dub_start
+                or dub_end > end + (max_shift if allow_forward else 0) + _EPSILON
+                or dub_end < end - max_shift - _EPSILON):
             return None
         duration = _number(record.get("audio_duration"))
         if (record.get("status") not in ("READY", "PLAYED")
-                or record.get("needs_review", False) is not False
                 or duration is None or duration <= 0):
             duration = None
         if duration is not None and duration > dub_end - dub_start + _EPSILON:
@@ -90,8 +91,9 @@ def plan_backshift(rows, focus_id, required_duration, max_shift=0.35):
 
     Rows are in source order and contain immutable ``id/start/end``. Optional
     ``dub_start/dub_end`` default to the source slot. Movable predecessors must
-    be READY/PLAYED, not need review, and provide their complete measured WAV
-    length as ``audio_duration``. Other predecessors keep occupying their source
+    be READY/PLAYED and provide their complete measured WAV length as
+    ``audio_duration``. Semantic uncertainty does not invalidate measured audio.
+    Other predecessors keep occupying their source
     slots. Every moved WAV retains its exact duration and starts no more than
     ``max_shift`` seconds before its ORIGINAL source start.
 
@@ -110,14 +112,14 @@ def plan_backshift(rows, focus_id, required_duration, max_shift=0.35):
     if start < max(0.0, focus.start - max_shift) - _EPSILON:
         return None
     start = max(0.0, focus.start - max_shift, start)
-    end = start + required_duration
+    end = max(start + required_duration, focus.end - max_shift)
     if end > _end_limit(records, focus_index) + _EPSILON:
         return None
     plan = {focus.id: {"dub_start": start, "dub_end": end}}
     cursor = start
     for row in reversed(records[:focus_index]):
         if row.audio_duration is None:
-            # Missing or uncertain audio cannot justify borrowing any portion
+            # Missing audio cannot justify borrowing any portion
             # of this source slot, even if a previous dub timing was shorter.
             if row.end > cursor + _EPSILON:
                 return None
@@ -129,7 +131,7 @@ def plan_backshift(rows, focus_id, required_duration, max_shift=0.35):
         new_end = max(new_start + row.audio_duration, row.end - max_shift)
         if new_end > min(row.end, cursor) + _EPSILON:
             return None
-        if row.dub_end <= cursor + _EPSILON and new_start == row.dub_start and new_end == row.dub_end:
+        if row.dub_end <= cursor + _EPSILON and new_start == row.dub_start:
             break
         # Shrinking only unused slot padding is sometimes enough; that change
         # still belongs in the plan so the preview selects the next row on time.
@@ -165,3 +167,96 @@ def available_dub_duration(rows, focus_id, max_shift=0.35):
     if capacity <= 0 or earliest > focus.dub_start + _EPSILON:
         return 0.0
     return capacity
+
+
+def _prepare_reflow(rows, focus_id, max_shift, total_duration):
+    total_duration = _number(total_duration)
+    prepared = _prepare(rows, focus_id, max_shift, allow_forward=True)
+    if prepared is None or total_duration is None or total_duration <= 0:
+        return None
+    records, _, _ = prepared
+    cursor = 0.0
+    for row in records:
+        if (row.end > total_duration + _EPSILON or row.dub_end > total_duration + _EPSILON
+                or row.dub_start < cursor - _EPSILON):
+            return None
+        cursor = row.dub_end
+    return prepared
+
+
+def _plan_forward(prepared, required_duration, total_duration):
+    records, focus_index, max_shift = prepared
+    focus = records[focus_index]
+    start = focus.dub_start
+    end = max(start + required_duration, focus.end - max_shift)
+    if end > min(total_duration, focus.end + max_shift) + _EPSILON:
+        return None
+    plan = {focus.id: {"dub_start": start, "dub_end": end}}
+    cursor = end
+    for row in records[focus_index + 1:]:
+        if cursor <= row.dub_start + _EPSILON:
+            break
+        new_start = cursor
+        if row.audio_duration is None:
+            # An unprocessed sentence reserves all of its existing time. No
+            # guess at future synthesis length can create extra capacity.
+            new_end = new_start + row.dub_end - row.dub_start
+        else:
+            # Complete measured audio permits consuming unused trailing slot
+            # padding. Preserve the existing end if it already leaves room.
+            new_end = max(row.dub_end, new_start + row.audio_duration,
+                          row.end - max_shift)
+        if (new_start > row.start + max_shift + _EPSILON
+                or new_end > min(total_duration, row.end + max_shift) + _EPSILON):
+            return None
+        plan[row.id] = {"dub_start": new_start, "dub_end": new_end}
+        cursor = new_end
+    return plan
+
+
+def plan_reflow(rows, focus_id, required_duration, max_shift=0.35, *, total_duration):
+    """Prefer backward borrowing, then shift only the necessary future block.
+
+    Start AND end stay within ``max_shift`` of their original source timestamps.
+    The fallback keeps the focus start and moves following rows later only when
+    needed. Unknown audio keeps its complete reserved duration; measured READY
+    or PLAYED audio always retains every sample regardless of semantic flags.
+    The source timeline and all input rows remain unchanged.
+    """
+    required_duration = _number(required_duration)
+    try:
+        rows = list(rows)
+    except TypeError:
+        return None
+    prepared = _prepare_reflow(rows, focus_id, max_shift, total_duration)
+    if prepared is None or required_duration is None or required_duration <= 0:
+        return None
+    backward = plan_backshift(rows, focus_id, required_duration, max_shift)
+    if backward is not None:
+        return backward
+    return _plan_forward(prepared, required_duration, total_duration)
+
+
+def available_reflow_duration(rows, focus_id, max_shift=0.35, *, total_duration):
+    """Maximum budget usable by ``plan_reflow`` without publishing any shifts."""
+    try:
+        rows = list(rows)
+    except TypeError:
+        return 0.0
+    prepared = _prepare_reflow(rows, focus_id, max_shift, total_duration)
+    if prepared is None:
+        return 0.0
+    records, focus_index, max_shift = prepared
+    focus = records[focus_index]
+    backward = available_dub_duration(rows, focus_id, max_shift)
+    low = 0.0
+    high = min(total_duration, focus.end + max_shift) - focus.dub_start
+    # Feasibility is monotonic for forward reflow. The search is pure and
+    # bounded; actual publication always checks the final measured WAV again.
+    for _ in range(48):
+        mid = (low + high) / 2
+        if _plan_forward(prepared, mid, total_duration) is not None:
+            low = mid
+        else:
+            high = mid
+    return max(backward, low)
