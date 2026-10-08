@@ -1005,27 +1005,28 @@ document.addEventListener("DOMContentLoaded", () => {
     if (exportStatusText && stage) exportStatusText.textContent = stage;
   }
 
-  function clearStoppedSession(progress = currentProgress) {
-    stopPreviewAudio();
-    segments = {};
-    resetScreenTexts();
-    translationReady = false;
+  function pauseStoppedSession(progress = currentProgress, pausePlayback = true) {
+    // Stopping execution must not detach the saved project: Retry needs its ID
+    // and users still need the transcript and already generated audio. In
+    // particular, history restore receives STOPPED again over the live socket.
+    if (pausePlayback) {
+      cancelDubPlaybackWait();
+      stopPlaybackFrames();
+      stopSourceAudition();
+      videoPlayer.pause();
+      activeAudio?.pause();
+      bgmAudio?.pause();
+      activeAudio = null;
+      activePlayingSegId = null;
+      releaseDubAudio();
+    }
+    autoPlayTaskId = null;
+    isBufferingUnderrun = false;
     playWhenPreviewReady = false;
-    previewGeneration++;
-    previewPending = false;
-    previewResumeTime = null;
-    subtitleText.textContent = "";
-    subtitleOverlay.classList.add("opacity-0");
     const socket = currentWs;
     currentWs = null;
-    currentTaskId = null;
     if (socket) socket.close();
     streamDisconnected = false;
-    renderTimelineSlices();
-    renderSegmentsDrawer();
-    telBuffer.textContent = "+0.0s";
-    telBuffer.className = "px-2 py-0.5 rounded text-[11px] font-bold bg-gray-800 text-gray-300";
-    barBufferInfo.textContent = "Buffer: 0.0s";
     bufferingText.textContent = "";
     bufferingAlert.classList.add("hidden");
     bufferingAlert.dataset.state = "stopped";
@@ -1083,6 +1084,7 @@ document.addEventListener("DOMContentLoaded", () => {
   function showTaskProgress(progress) {
     progressRevision++;
     taskPollWarning = false;
+    const previousStatus = currentProgress?.status;
     currentProgress = { ...currentProgress, ...progress };
     const incompleteReview = ["failed", "incomplete"].includes(currentProgress.review_summary?.status);
     if (incompleteReview && (currentProgress.status === "COMPLETED" || (currentProgress.status === "FAILED" && currentProgress.phase === "review"))) {
@@ -1138,7 +1140,7 @@ document.addEventListener("DOMContentLoaded", () => {
     if (reviewText) transcriptStatus.textContent = reviewText;
     if (terminal) {
       resetWorkerBadges();
-      if (["STOPPED", "CANCELLED"].includes(status)) clearStoppedSession();
+      if (["STOPPED", "CANCELLED"].includes(status)) pauseStoppedSession(currentProgress, previousStatus !== status);
       else if (status === "FAILED" && currentProgress.phase === "review" && Object.values(segments).some(s => ["READY", "PLAYED"].includes(s.status))) {
         // A review failure is independent of draft playback. Repeated status
         // polls must not pause a draft the user explicitly chose to listen to.
@@ -2735,6 +2737,8 @@ document.addEventListener("DOMContentLoaded", () => {
   }
 
   function segmentStatusLabel(status) {
+    if (["STOPPED", "CANCELLED"].includes(currentProgress?.status) &&
+        ["WAITING", "ASR", "TRANSLATING", "TTS", "ALIGNING", "FAILED"].includes(status)) return "Chưa xong · Đã dừng";
     return { WAITING: "Đang chờ", ASR: "Nhận dạng", TRANSLATING: "Đang dịch", TTS: "Tạo giọng",
       READY: "Sẵn sàng", PLAYED: "Sẵn sàng", FAILED: "Có lỗi", NEEDS_REVIEW: "Cần kiểm tra" }[status] || "Đang xử lý";
   }
@@ -3277,7 +3281,7 @@ document.addEventListener("DOMContentLoaded", () => {
       }
       if (activeTask) {
         const statusChanged = activeTask.status !== currentProgress?.status;
-        const progressChanged = ["phase", "stage", "progress_pct", "downloaded_bytes", "total_bytes", "speed", "eta", "can_review", "review_count", "output_video_url", "output_filename"]
+        const progressChanged = ["phase", "stage", "progress_pct", "downloaded_bytes", "total_bytes", "speed", "eta", "can_retry", "can_pause", "can_resume", "can_stop", "can_review", "review_count", "output_video_url", "output_filename"]
           .some(key => activeTask[key] !== undefined && activeTask[key] !== currentProgress?.[key]) ||
           (activeTask.review_summary !== undefined && JSON.stringify(activeTask.review_summary) !== JSON.stringify(currentProgress?.review_summary));
         if (taskPollWarning || streamDisconnected || statusChanged || progressChanged) {

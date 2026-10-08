@@ -1054,7 +1054,7 @@ test('reopening export cannot create a duplicate export', async () => {
   await exporting;
 });
 
-test('stop clears deleted dubbing media before playback can resume', async () => {
+test('stop releases decoded media but saved speech and transcript remain playable', async () => {
   const ui = studio(); await ui.start();
   const video = ui.el('video-player');
   video.currentTime = 2; await video.play();
@@ -1062,10 +1062,11 @@ test('stop clears deleted dubbing media before playback can resume', async () =>
   ui.replies.set('/api/tasks/fixture/stop', { status: 'ok' });
   await ui.window.studioStop();
   assert.equal(video.paused, true);
-  assert.equal(ui.el('subtitle-text').textContent, '');
+  assert.equal(ui.el('seg-vi-0').textContent, '<b>Xin chào</b>');
   await video.play(); await video.emit('timeupdate');
-  assert.equal(ui.audio.length, previousAudioCount);
-  assert.equal(ui.el('segments-count-badge').textContent, '0 câu');
+  assert.ok(ui.audio.length > previousAudioCount);
+  assert.equal(ui.el('segments-count-badge').textContent, '1 câu');
+  assert.equal(video.muted,true,'the original Chinese track remains muted while replaying the saved dub');
 });
 
 async function startUrl(ui) {
@@ -1762,7 +1763,7 @@ test('server stop clears predownload spinner, controls and stale events without 
   }
 });
 
-test('Tasks terminal snapshot cleans an externally stopped session even while websocket still appears connected', async () => {
+test('Tasks stop pauses playback but retains transcript and task identity for retry', async () => {
   const ui = studio(); await ui.start();
   const socket = ui.sockets.at(-1);
   socket.receive({ type: 'segment_update', id: 1, start: 5, end: 10, status: 'TTS' });
@@ -1774,9 +1775,42 @@ test('Tasks terminal snapshot cleans an externally stopped session even while we
   assert.equal(ui.el('worker-tts-badge').textContent, 'TTS: Idle');
   assert.equal(ui.el('worker-tts-badge').classList.contains('animate-pulse'), false);
   assert.equal(ui.el('video-player').paused, true);
-  assert.equal(ui.el('segments-count-badge').textContent, '0 câu');
-  assert.equal(ui.el('subtitle-text').textContent, '');
-  assert.equal(ui.el('bar-buffer-info').textContent, 'Buffer: 0.0s');
+  assert.equal(ui.el('segments-count-badge').textContent, '1 câu');
+  assert.equal(ui.el('seg-vi-0').textContent, '<b>Xin chào</b>');
+  assert.match(ui.el('seg-badge-1').textContent,/Chưa xong · Đã dừng/);
+  ui.replies.set('/api/tasks', {tasks:[{task_id:'fixture',status:'STOPPED',phase:'stopped',stage:'Đã dừng tác vụ',can_retry:true}]});
+  await ui.el('btn-refresh-tasks').click();
+  assert.equal(ui.el('btn-retry-worker').classList.contains('hidden'),false);
+  ui.replies.set('/api/streaming/fixture/retry',{progress:{status:'RUNNING',phase:'tts',can_retry:false}});
+  await ui.el('btn-retry-worker').click();
+  assert.equal(ui.requests.filter(r=>r.url==='/api/streaming/fixture/retry').length,1);
+  assert.equal(ui.el('task-progress').dataset.status,'RUNNING');
+  assert.equal(ui.el('seg-vi-1').textContent,'Bản dịch sẽ xuất hiện sau khi xử lý.');
+});
+
+test('stopped history remains attached after repeated socket state and resumes the same project', async () => {
+  const ui = studio(); await ui.flush();
+  const snapshot = {initialized:true,duration:10,segments_count:1,video_url:'/saved.mp4',
+    progress:{status:'STOPPED',phase:'restored',can_retry:true,stage:'Phần tạo giọng chưa xong'},
+    telemetry:{ready_to_play:true},bgm_url:'/kept-bgm.m4a',
+    segments:[{id:0,start:0,end:5,duration:5,status:'READY',audio_url:'/kept.wav',final_vi:'Câu đã lưu.'}]};
+  ui.replies.set('/api/streaming/saved-stop',snapshot);
+  assert.equal(await ui.window.studioAttachTask('saved-stop'),true);
+  ui.sockets.at(-1).receive({type:'progress',...snapshot.progress});
+  assert.equal(ui.el('segments-count-badge').textContent,'1 câu');
+  assert.equal(ui.el('seg-vi-0').textContent,'Câu đã lưu.');
+  assert.equal(ui.el('video-player').muted,true);
+  assert.equal(ui.el('btn-retry-worker').classList.contains('hidden'),false);
+  await ui.el('video-player').play();
+  ui.replies.set('/api/tasks',{tasks:[{task_id:'saved-stop',...snapshot.progress,can_pause:false}]});
+  await ui.el('btn-refresh-tasks').click();
+  assert.equal(ui.el('video-player').paused,false,'repeated stopped polls must not interrupt explicitly played saved speech');
+  ui.replies.set('/api/streaming/saved-stop/retry',{progress:{status:'RUNNING',phase:'tts',can_retry:false}});
+  await ui.el('btn-retry-worker').click();
+  assert.equal(ui.requests.filter(r=>r.url==='/api/streaming/saved-stop/retry').length,1);
+  assert.equal(ui.el('task-progress').dataset.status,'RUNNING');
+  assert.equal(ui.el('seg-vi-0').textContent,'Câu đã lưu.');
+  assert.equal(ui.requests.filter(r=>r.url.includes('/start-')).length,0);
 });
 
 test('finished completion hides old loading overlay and clears worker activity; failures remain visible', async () => {
