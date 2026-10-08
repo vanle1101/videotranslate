@@ -67,7 +67,7 @@ def edit_through_ui(page, base, task_id, row):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("mode", choices=["preview", "full", "resume", "inspect"])
+    parser.add_argument("mode", choices=["preview", "full", "resume", "resume-stop", "inspect"])
     args = parser.parse_args()
     assert SOURCE.is_file() and SOURCE.stat().st_size < 100_000_000
     assert settings.LLM_PROVIDER == "opencode"
@@ -137,6 +137,24 @@ def main():
                 assert snapshot["progress"]["can_retry"]
                 assert click(page, "btn-retry-worker")
                 until(page, "document.getElementById('task-progress').dataset.status==='RUNNING'", timeout=30)
+                if args.mode == "resume-stop":
+                    partial_playback(page, snapshot)
+                    assert ui_state(page)["status"] == "RUNNING", ui_state(page)
+                    assert click(page, "btn-stop-worker")
+                    until(page, "document.getElementById('task-progress').dataset.status==='STOPPED'", timeout=30)
+                    stopped = backend(base, f"/api/streaming/{task_id}")
+                    saved = hashes(task_id, stopped["segments"])
+                    assert all(saved.get(sid) == digest for sid, digest in retained.items())
+                    state = [(row["id"], row["status"], row.get("revision"), row.get("final_vi"))
+                             for row in stopped["segments"]]
+                    wait(5000)
+                    late = backend(base, f"/api/streaming/{task_id}")
+                    assert [(row["id"], row["status"], row.get("revision"), row.get("final_vi"))
+                            for row in late["segments"]] == state, "Late reply changed a stopped task"
+                    assert not stopped["output_filename"] and not ui_state(page)["errors"], ui_state(page)
+                    event("CHUNKED_STOP_PASS", {"task_id": task_id, "retained_wavs": len(saved),
+                          "edited_revision": record.get("edited", {}).get("revision"), "state": ui_state(page)})
+                    return
         event("TASK", task_id)
         snapshot = wait_for_idle(page, base, task_id)
         if snapshot["progress"]["status"] == "FAILED":
