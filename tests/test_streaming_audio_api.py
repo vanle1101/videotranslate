@@ -158,3 +158,14 @@ def test_history_restore_then_audio_range_uses_persisted_wav(persisted_audio):
                           headers={"Range": "bytes=0-43"})
         assert part.status_code == 206
         assert part.content == full.content[:44]
+
+
+
+def test_current_versioned_audio_is_served_only_for_its_own_segment(audio_api):
+    client, path, segment, sessions = audio_api
+    versioned = path.with_name("seg_0_" + "a" * 32 + ".wav")
+    path.rename(versioned)
+    segment.audio_path = str(versioned)
+    response = client.get("/api/streaming/audio/audio-test/0")
+    assert response.status_code == 200 and response.content == versioned.read_bytes()
+    assert client.get("/api/streaming/audio/audio-test/1").status_code == 404

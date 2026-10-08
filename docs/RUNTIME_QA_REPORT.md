@@ -4,6 +4,23 @@
 
 **PARTIAL: runtime recovery and media checks passed; complete semantic and long-video acceptance remain pending.** Target: Douyin2TikTok AI Studio using the configured OpenCode Muse model. Seedream/Seedance graph tests do not apply to this application. Tests honor background-only operation through the actual production Qt/WebEngine page offscreen and muted. HTTP, Muse, Edge-TTS and exported media are real. Physical desktop clicks/native file-picker and tray interaction are not claimed.
 
+### Continued runtime audit — 02:50–03:15
+
+**FAILED baseline / fixes under real retest.** Original Douyin `7692745161054506290`, task `76f5aa6b`, 320.040635s, configured real OpenCode Muse and Edge-TTS. Fresh production Qt Start reached 15 READY speech rows in the 24.48s preview, but IDs 7 and 13 failed pacing. Fresh History → Retry reproduced both failures and retained all 15 prior WAVs. No complete 320s export is claimed.
+
+Actual provider rejection instrumentation in the opt-in QA harness captured why: `Bạn mạng anh Dã` was rejected as unnatural keyword-like grammar; `Quen mạng anh Dã` was rejected for loss of the online-friend relationship. For `Sinh năm 1982`, Muse correctly declined to shorten to `82` or omit the year. Semantic validation was not relaxed.
+
+Measured neighboring audio explains avoidable starvation. Row 6’s 1.372458s age statement leaves row 7 only 1.255458s; its unchanged compacted speech needs approximately 1.465s at 1.15×. The previous successful 48s run independently produced a faithful shorter age statement in 1.0515s. Row 13 needs approximately 1.797s while current capacity is 1.773917s; neighboring automatic audio still has speed headroom. The planner is correct for the fixed durations it receives, but the old fit path reconsidered only the failing focus.
+
+Correction under test: after a measured pacing failure, stage repairs to at most two source neighbors on either side, preserving full PCM and the combined 1.15× ceiling. If needed, independently verify and synthesize at most one shortened automatic predecessor. Manual rows are excluded. Recalculate bounded timing with actual measured replacement WAVs; publish focus/neighbor text, WAV references and captions together only after success and revision/Stop/source-collision checks. Unsafe/failed/late repairs retain previous files and metadata. Versioned owned WAVs retain strict task/segment/path checks and reopen validation. No hard-coded translation or expanded timing/speed limit was added.
+
+Controlled contract failures also reproduced:
+
+- A slow real upload handler blocked an independent 50ms timer by 356ms because file copying ran synchronously in the async endpoint. Copies now run off the event loop in 1MiB blocks; cancellation joins the worker before partial-file removal; disk failure returns actionable HTTP 507.
+- A live session returned a download URL for a nonexistent MP4 while saved-history validation rejected it. Live snapshot/task/export-status reads now check the real output off the event loop, invalidate bad links, retain transcript/WAVs and expose re-export. A stale probe cannot invalidate a newer render.
+
+Offline validation: focused speech/store/local HTTP run **237 passed, 1 skipped, 15 subtests**; new dense-timeline, versioned audio, upload health/cancel/disk-failure and live-result invalidation run **65 passed**. These are regression/contract results, not substitutes for real provider acceptance. Fresh production UI Retry with the new neighbor repair is in progress from 03:13.
+
 ### Reproduced root causes and corrections
 
 | Root cause | Files / correction | Retest |

@@ -151,10 +151,12 @@ def synthesize_natural_speech(*, text, source, duration, output_path, engine, al
                 if translator is None or attempt == 2:
                     logger.warning("PACING_FAILED run_id=%s speech_id=%s attempt=%d reason=%s",
                                    execution.run_id, speech_id, attempt + 1, "rewrite_disabled" if translator is None else "budget_exhausted")
-                    raise SpeechBudgetError(
+                    failure = SpeechBudgetError(
                         "Lời Việt vẫn quá dài để đọc tự nhiên trong câu này. "
                         "Hãy rút gọn lời hoặc chọn giọng khác; âm thanh chưa bị cắt hay ép tốc độ."
-                    ) from None
+                    )
+                    failure.required_dub_duration = measurements[0]["measured_seconds"] / aligner.max_speed + .012
+                    raise failure from None
                 # Leave a little room for encoder/atempo block rounding.
                 if on_stage:
                     on_stage("REWRITING")
@@ -199,6 +201,7 @@ def synthesize_natural_speech(*, text, source, duration, output_path, engine, al
                                        execution.run_id, speech_id, attempt + 1, review_attempt + 1, error.code)
                         seen_candidates.add(pacing_candidate_key(error.feedback["rejected_candidate"]))
                         if review_attempt == 2:
+                            error.required_dub_duration = measurements[0]["measured_seconds"] / aligner.max_speed + .012
                             raise
                         review_feedback = {**timing_feedback, **error.feedback}
                 current, verification = candidate.strip(), proof

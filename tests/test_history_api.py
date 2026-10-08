@@ -107,3 +107,54 @@ def test_history_media_probe_runs_off_event_loop(saved_project, monkeypatch):
         assert isinstance((await listing)["tasks"], list)
 
     asyncio.run(run())
+
+
+@pytest.mark.parametrize("damage", ["missing", "corrupt", "foreign"])
+def test_live_result_links_are_invalidated_and_reexport_remains_available(saved_project, damage):
+    session = saved_project
+    active_streaming_sessions[session.task_id] = session
+    name = "live-result.mp4" if damage != "foreign" else "../foreign.mp4"
+    if damage == "corrupt":
+        (settings.OUTPUT_DIR / name).write_bytes(b"not a valid MP4" * 30)
+    session.output_filename = name
+    session.output_video_url = f"/api/outputs/{name}"
+    session.caption_output_outdated = False
+    main.active_export_tasks[f"export_{session.task_id}"] = {"status":"COMPLETED", "video_url":session.output_video_url, "output_filename":name}
+    async def run():
+        snapshot = await main.streaming_snapshot(session.task_id)
+        assert snapshot["output_video_url"] == snapshot["output_filename"] == ""
+        assert snapshot["output_outdated"] is True
+        assert session.segments[0].final_vi == "Lời đã sửa."
+        assert any("hãy xuất video lại" in text for text in session.warnings)
+        job = await main.get_export_hq_status(session.task_id)
+        assert job["status"] == "FAILED" and not job["video_url"]
+    asyncio.run(run())
+
+
+def test_live_output_probe_is_off_loop_and_cannot_invalidate_newer_render(saved_project, monkeypatch):
+    import core.streaming.session_store as store
+    entered, release = threading.Event(), threading.Event()
+    def probe(*args):
+        entered.set()
+        release.wait(3)
+        return False
+    monkeypatch.setattr(store, "_valid_output", probe)
+    session = saved_project
+    session.output_filename, session.output_video_url = "old.mp4", "/api/outputs/old.mp4"
+    async def run():
+        checking = asyncio.create_task(main.validate_live_output(session))
+        try:
+            for _ in range(100):
+                if entered.is_set():
+                    break
+                await asyncio.sleep(.005)
+            assert entered.is_set()
+            assert (await asyncio.wait_for(main.health(), .25))["status"] == "ok"
+            session.output_filename, session.output_video_url = "new.mp4", "/api/outputs/new.mp4"
+            release.set()
+            await checking
+            assert session.output_filename == "new.mp4" and not session.warnings
+        finally:
+            release.set()
+            await checking
+    asyncio.run(run())

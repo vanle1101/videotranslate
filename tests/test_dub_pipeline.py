@@ -422,3 +422,114 @@ def test_automatic_tail_synthesis_aborted_after_fitting_keeps_old_media(session,
             assert getattr(row, field) == original[field]
         assert Path(row.audio_path).read_bytes() == before["audio"][row.audio_path]
     assert not list(session.segments_dir.glob("pending_*.wav"))
+
+
+def prepare_dense_rescue(session, focus_id=7):
+    # Measured timings from the real 320 s failure; PCM is an offline fixture.
+    specs = [
+        (4, 7.66, 8.68, 7.6040416667, 9.03, 1.4259583333, 1.639875, 1.15),
+        (5, 8.68, 9.4, 9.03, 9.761625, .731625, .841375, 1.15),
+        (6, 10.17, 11.01, 9.8754583333, 11.2479166667, 1.3724583333, 1.567458, 1.15),
+        (7, 11.01, 12.21, 11.2479166667, 12.4479166667, None, 0, 1),
+        (8, 12.21, 13.45, 12.4479166667, 13.6706666667, 1.22275, 1.23, 1),
+        (9, 13.45, 14.19, 13.6706666667, 14.7734166667, 1.10275, 1.255542, 1.15),
+        (10, 15, 15.48, 14.7734166667, 15.83, 1.0565833333, 1.215083, 1.15),
+        (11, 15.48, 16.96, 15.83, 17.31, 1.3333333333, 1.34, 1),
+    ]
+    rows = {}
+    for sid, start, end, left, right, audio, raw, speed in specs:
+        row = SegmentItem(sid, start, end, end - start)
+        row.status = "READY" if audio else "FAILED"
+        row.dub_start, row.dub_end = left, right
+        if sid == 5:
+            row.dub_tail_limit = 10.17
+        elif sid == 9:
+            row.dub_tail_limit = 15.
+        row.text_zh = "今年19。" if sid == 6 else "野哥网友" if sid == 7 else "来源"
+        row.final_vi = "Năm nay mười chín tuổi." if sid == 6 else "Bạn trên mạng của anh Dã." if sid == 7 else "Câu thoại."
+        row.verification = {"status": "verified", "semantic_verified": True}
+        row.tts_duration, row.speed_ratio = raw, speed
+        if audio:
+            row.audio_path = str(session.segments_dir / f"seg_{sid}.wav")
+            write_pcm(row.audio_path, audio)
+        rows[sid] = row
+    session.segments = rows
+    session.total_duration = session._source_prepared_seconds = 31.
+    session._chunked_source_started = True
+    from unittest.mock import Mock
+    session.translator = Mock()
+    return rows[focus_id]
+
+
+def test_dense_failure_can_stage_verified_neighbor_without_exceeding_bounds(session, monkeypatch):
+    focus = prepare_dense_rescue(session)
+    before = snapshot(session)
+    shorter = "Năm nay mười chín."
+    proof = {"status": "verified", "text": shorter, "provider": "opencode", "address_preserved": True,
+             "reason": "Giữ năm nay và tuổi mười chín, câu trung tính đủ nghĩa."}
+    session.translator.rewrite_for_pacing.return_value = {"final_vi": shorter, "pacing_verification": proof}
+    calls = []
+    def synthesize(**kwargs):
+        calls.append(kwargs)
+        if len(calls) == 1:
+            error = pipeline.PacingReviewRejected("Focus cannot shorten safely")
+            error.required_dub_duration = 1.48
+            raise error
+        measured = 1.0515 if kwargs["text"] == shorter else 1.465
+        write_pcm(kwargs["output_path"], measured)
+        return {"text": kwargs["text"], "tts_duration": measured * 1.15,
+                "speed_ratio": 1.15, "boundaries": [], "pacing_verification": None}
+    monkeypatch.setattr(pipeline, "synthesize_natural_speech", synthesize)
+    asyncio.run(session._synthesize_segment(focus))
+    assert focus.status == "READY" and session.segments[6].final_vi == shorter
+    assert session.segments[6].verification["pacing"] == proof
+    assert session.translator.rewrite_for_pacing.call_count == 1
+    previous_end = 0
+    for row in session.segments.values():
+        start, end = pipeline.resolve_dub_timing(row.to_dict())
+        assert start >= previous_end - 1e-8
+        assert session._dub_audio_duration(row.audio_path) <= end - start + 1e-8
+        assert row.speed_ratio <= 1.15
+        assert (row.start, row.end) == (before["segments"][row.id]["start"], before["segments"][row.id]["end"])
+        previous_end = end
+    session.persist()
+    restored = restore_saved_session(session.task_id)
+    assert restored.segments[6].audio_path == session.segments[6].audio_path
+    assert restored.segments[6].final_vi == shorter
+    assert restored.segments[7].status == "READY"
+    assert not list(session.segments_dir.glob("pending_*.wav"))
+
+
+@pytest.mark.parametrize("failure", ["manual", "rejected", "cancelled", "stale"])
+def test_uncommitted_dense_rescue_preserves_neighbors(session, monkeypatch, failure):
+    focus = prepare_dense_rescue(session)
+    if failure == "manual":
+        session.segments[6].verification["status"] = "manual"
+    before = snapshot(session)
+    shorter = "Năm nay mười chín."
+    session.translator.rewrite_for_pacing.side_effect = pipeline.PacingReviewRejected("Unsafe neighbor") if failure == "rejected" else None
+    session.translator.rewrite_for_pacing.return_value = {"final_vi": shorter, "pacing_verification": {"status":"verified", "text":shorter}}
+    calls = []
+    def synthesize(**kwargs):
+        calls.append(kwargs)
+        if len(calls) == 1:
+            error = pipeline.PacingReviewRejected("Cannot shorten")
+            error.required_dub_duration = 1.48
+            raise error
+        measured = 1.0515 if kwargs["text"] == shorter else 1.465
+        write_pcm(kwargs["output_path"], measured)
+        if failure == "cancelled":
+            session.is_stopped = True
+        if failure == "stale":
+            focus.revision += 1
+        return {"text": kwargs["text"], "tts_duration": measured * 1.15,
+                "speed_ratio":1.15, "boundaries":[], "pacing_verification":None}
+    monkeypatch.setattr(pipeline, "synthesize_natural_speech", synthesize)
+    expected = asyncio.CancelledError if failure == "cancelled" else pipeline.SegmentEditConflict if failure == "stale" else pipeline.PacingReviewRejected
+    with pytest.raises(expected):
+        asyncio.run(session._synthesize_segment(focus))
+    for sid, old in before["segments"].items():
+        if sid != focus.id:
+            assert vars(session.segments[sid]) == old
+            assert Path(session.segments[sid].audio_path).read_bytes() == before["audio"][session.segments[sid].audio_path]
+    assert sorted(path.name for path in session.segments_dir.glob("*.wav")) == sorted(Path(path).name for path in before["audio"])

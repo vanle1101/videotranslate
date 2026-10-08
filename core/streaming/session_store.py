@@ -504,8 +504,11 @@ def _validate(data, task_id):
                         or not cue["start"] - .05 <= word["start"] <= word["end"] <= cue["end"] + .05):
                     raise ValueError("Mốc từ không khớp phụ đề.")
         row["audio_path"] = _local_path(row.get("audio_path"), generated=True)
-        if row["audio_path"] and Path(row["audio_path"]) != (settings.BASE_DIR / "workspace" / "cache" / task_id / "segments" / f"seg_{row['id']}.wav").resolve():
-            raise ValueError("Âm thanh câu thoại không thuộc dự án này.")
+        if row["audio_path"]:
+            audio = Path(row["audio_path"])
+            owner = (settings.BASE_DIR / "workspace" / "cache" / task_id / "segments").resolve()
+            if audio.parent != owner or not re.fullmatch(rf"seg_{row['id']}(?:_[0-9a-f]{{32}})?\.wav", audio.name):
+                raise ValueError("Âm thanh câu thoại không thuộc dự án này.")
     ordered = sorted(rows, key=lambda item: item["start"])
     for index, row in enumerate(ordered):
         if row.get("dub_tail_limit") is None:

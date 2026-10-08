@@ -9,6 +9,7 @@ import time
 import logging
 import traceback
 import re
+import threading
 from pathlib import Path
 from urllib.parse import quote
 from typing import Dict, Any, Optional, List, Literal
@@ -454,6 +455,31 @@ def session_output_details(session):
             **review_result_details(session)}
 
 
+async def validate_live_output(session):
+    """A still-open project must not keep a deleted/corrupt download link."""
+    name = getattr(session, "output_filename", "")
+    if not name:
+        return
+    signature = (name, getattr(session, "output_video_url", ""),
+                 getattr(session, "caption_style_revision", 0))
+    from core.streaming.session_store import _valid_output
+    valid = (isinstance(name, str) and Path(name).name == name
+             and await asyncio.to_thread(_valid_output, settings.OUTPUT_DIR / name, session.total_duration))
+    if valid or signature != (getattr(session, "output_filename", ""),
+                             getattr(session, "output_video_url", ""),
+                             getattr(session, "caption_style_revision", 0)):
+        return
+    session._invalidate_output()
+    session.caption_output_outdated = True
+    message = "Tệp video kết quả bị thiếu hoặc hỏng. Bản dịch và giọng đọc được giữ; hãy xuất video lại."
+    if message not in session.warnings:
+        session.warnings.append(message)
+    task = active_export_tasks.get(f"export_{session.task_id}")
+    if task and task.get("status") == "COMPLETED":
+        task.update(status="FAILED", stage=message, progress=None, video_url="", output_filename="")
+    persist_session(session)
+
+
 async def editable_session(task_id):
     session = get_streaming_session(task_id)
     if session is None:
@@ -467,6 +493,8 @@ async def editable_session(task_id):
             return None
         except (ValueError, OSError, TypeError, KeyError):
             raise HTTPException(status_code=409, detail="Không mở được phiên đã lưu. Kiểm tra video nguồn và dữ liệu trong Lịch sử.") from None
+    if session is not None:
+        await validate_live_output(session)
     return session
 
 
@@ -542,6 +570,7 @@ async def list_tasks():
 
     # 1. Streaming Realtime Sessions
     for task_id, sess in list(active_streaming_sessions.items()):
+        await validate_live_output(sess)
         ready_cnt = sum(1 for s in sess.segments.values() if s.status in ["READY", "PLAYED"])
         tot_cnt = max(1, len(sess.segments))
         pct = int((ready_cnt / tot_cnt) * 100) if tot_cnt > 0 else 0
@@ -791,6 +820,36 @@ async def start_streaming_url(req: StreamUrlRequest):
         "status": "started",
     }
 
+async def save_uploaded_inputs(uploads, task_id):
+    """Copy in bounded blocks off the ASGI loop; join before removing drafts."""
+    cancelled = threading.Event()
+    def copy():
+        for source, target in uploads:
+            with target.open("wb") as destination:
+                while not cancelled.is_set():
+                    block = source.read(1024 * 1024)
+                    if not block:
+                        break
+                    destination.write(block)
+                if cancelled.is_set():
+                    return
+    work = asyncio.create_task(asyncio.to_thread(copy))
+    try:
+        await asyncio.shield(work)
+    except BaseException as error:
+        cancelled.set()
+        try:
+            await asyncio.shield(work)
+        except (OSError, ValueError):
+            pass
+        for _, target in uploads:
+            target.unlink(missing_ok=True)
+        if isinstance(error, (OSError, ValueError)):
+            logging.getLogger("errors").error("UPLOAD_SAVE_FAILED run_id=%s error_type=%s", task_id, type(error).__name__)
+            raise HTTPException(status_code=507, detail="Không lưu được video/mẫu giọng. Kiểm tra dung lượng và quyền ghi thư mục inputs.") from None
+        raise
+
+
 @app.post("/api/streaming/start-upload")
 async def start_streaming_upload(
     file: UploadFile = File(...),
@@ -808,19 +867,17 @@ async def start_streaming_upload(
     if ref_audio and ref_audio.filename and tts_engine != "vieneu-tts":
         raise HTTPException(status_code=422, detail="Mẫu giọng riêng chỉ được hỗ trợ khi chọn VieNeu.")
     task_id = str(uuid.uuid4())[:8]
-    ext = Path(file.filename).suffix or ".mp4"
+    ext = Path(file.filename or "").suffix or ".mp4"
     saved_path = settings.INPUT_DIR / f"upload_{task_id}{ext}"
 
-    with open(saved_path, "wb") as buffer:
-        shutil.copyfileobj(file.file, buffer)
-
     ref_audio_path = None
+    uploads = [(file.file, saved_path)]
     if ref_audio and ref_audio.filename:
         ref_ext = Path(ref_audio.filename).suffix or ".wav"
         ref_path = settings.INPUT_DIR / f"ref_{task_id}{ref_ext}"
-        with open(ref_path, "wb") as buffer:
-            shutil.copyfileobj(ref_audio.file, buffer)
+        uploads.append((ref_audio.file, ref_path))
         ref_audio_path = ref_path
+    await save_uploaded_inputs(uploads, task_id)
 
     # Create session
     session = create_streaming_session(
@@ -868,7 +925,7 @@ async def get_segment_audio(task_id: str, seg_id: int):
         raise HTTPException(status_code=404, detail="Segment audio not found or not yet synthesized")
 
     cache_root = (settings.BASE_DIR / "workspace" / "cache").absolute()
-    expected = cache_root / task_id / "segments" / f"seg_{seg_id}.wav"
+    expected = cache_root / task_id / "segments" / Path(recorded).name
     try:
         path = Path(recorded)
         # Session manifests record absolute paths.  Refuse relative values so
@@ -876,7 +933,8 @@ async def get_segment_audio(task_id: str, seg_id: int):
         lexical = path if path.is_absolute() else None
         # Do not resolve before checking: resolve() hides a lexical symlink or
         # Windows junction and would make an escape look like an in-cache file.
-        if lexical is None or os.path.normcase(str(lexical)) != os.path.normcase(str(expected)):
+        if (lexical is None or not re.fullmatch(rf"seg_{seg_id}(?:_[0-9a-f]{{32}})?\.wav", path.name)
+                or os.path.normcase(str(lexical)) != os.path.normcase(str(expected))):
             raise ValueError("audio path is not the current session segment")
 
         # Walk the original lexical path all the way to the filesystem root.
@@ -1276,6 +1334,9 @@ async def export_hq(req: ExportHQRequest):
 @app.get("/api/streaming/export-hq/status/{task_id}")
 async def get_export_hq_status(task_id: str):
     export_id = task_id if task_id.startswith("export_") else f"export_{task_id}"
+    session = get_streaming_session(export_id.removeprefix("export_"))
+    if session is not None:
+        await validate_live_output(session)
     if export_id in active_export_tasks:
         return active_export_tasks[export_id]
     raise HTTPException(status_code=404, detail="Không tìm thấy tác vụ export")

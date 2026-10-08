@@ -27,6 +27,40 @@ SOURCE = ROOT / "workspace/temp/partial-qa.mp4"
 RECORD = ROOT / "workspace/temp/preview-qa.json"
 
 
+def trace_real_rejections():
+    """Inspect rejected real replies without changing provider or verdicts.
+
+    This opt-in QA program prints bounded dialogue evidence only. Production
+    logging continues to omit transcript/provider response content.
+    """
+    import core.translation_review as review
+    from core.engines.translation.semantic_translator import PacingReviewRejected
+
+    original_parse = review.VideoIntelligence._parse_json
+    def parse(raw):
+        try:
+            return original_parse(raw)
+        except Exception:
+            event("QA_JSON_REJECTED", {"response": str(raw)[:6000]})
+            raise
+    review.VideoIntelligence._parse_json = staticmethod(parse)
+
+    original_validate = review.validate_address_reading
+    def validate(data, *args, **kwargs):
+        try:
+            return original_validate(data, *args, **kwargs)
+        except Exception:
+            event("QA_ADDRESS_SCHEMA_REJECTED", {"response": str(data)[:6000]})
+            raise
+    review.validate_address_reading = validate
+
+    original_init = PacingReviewRejected.__init__
+    def rejected(self, *args, **kwargs):
+        original_init(self, *args, **kwargs)
+        event("QA_PACING_REJECTED", {"code": self.code, **self.feedback})
+    PacingReviewRejected.__init__ = rejected
+
+
 def wait_for_idle(page, base, task_id, timeout=3600):
     deadline, previous = time.monotonic() + timeout, None
     while time.monotonic() < deadline:
@@ -108,6 +142,7 @@ def main():
     assert RECORD.parent == (ROOT / "workspace/temp").resolve() and RECORD.suffix == ".json"
     assert 60 <= args.timeout <= 10800
     assert settings.LLM_PROVIDER == "opencode"
+    trace_real_rejections()
     app = QApplication.instance() or QApplication([])
     app.setQuitOnLastWindowClosed(False)
     window = None

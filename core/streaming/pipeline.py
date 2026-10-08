@@ -20,7 +20,7 @@ from core.runtime_errors import redacted_detail
 from core.streaming.segmenter import AudioSegmenter
 from core.engines.asr.sensevoice_engine import SenseVoiceEngine
 from core.engines.asr.faster_whisper_engine import FasterWhisperFallbackEngine
-from core.engines.translation.semantic_translator import SemanticTranslator
+from core.engines.translation.semantic_translator import SemanticTranslator, PacingReviewRejected
 from core.engines.tts.vieneu_engine import VieNeuEngine
 from core.engines.tts.edge_fallback import EdgeTTSFallbackEngine
 from core.voice_catalog import resolve_voice
@@ -2152,7 +2152,123 @@ class StreamingPipelineSession:
             cache.pop(next(iter(cache)))
         return duration
 
-    async def _fit_dub(self, seg, *, text, source, output_path, translator=None, context=None, on_stage=None):
+    async def _prepare_dub_rescue(self, rows, focus, required_duration):
+        """Stage bounded automatic neighbor repairs; publish nothing here."""
+        shadow = deepcopy(rows)
+        staged = {}
+        known = self._source_prepared_seconds
+        ordered = [row["id"] for row in shadow]
+        index = ordered.index(focus.id)
+        nearby = [ordered[pos] for distance in (1, 2)
+                  for pos in (index - distance, index + distance) if 0 <= pos < len(ordered)]
+        def capacity():
+            return available_reflow_duration(shadow, focus.id, total_duration=known)
+        def eligible(item):
+            return (item.status in {"READY", "PLAYED"} and item.audio_path
+                    and item.final_vi.strip() and (item.verification or {}).get("status") != "manual")
+        async def stage(item, path, spoken):
+            measured = self._dub_audio_duration(path)
+            original = next(row for row in shadow if row["id"] == item.id)
+            if measured >= original["audio_duration"] - .001:
+                path.unlink(missing_ok=True)
+                return False
+            original["audio_duration"] = measured
+            staged[item.id] = {"audio_path": str(path.resolve()), "spoken": spoken}
+            logging.getLogger("pipeline").info(
+                "PACING_NEIGHBOR_STAGED run_id=%s focus_id=%s neighbor_id=%s measured_seconds=%.6f rewritten=%s",
+                self.task_id, focus.id, item.id, measured, spoken["text"] != item.final_vi)
+            return True
+        try:
+            # Reuse every spoken sample; the remaining speed allowance applies
+            # to the combined rate, not another independent 1.15x pass.
+            for sid in nearby:
+                item = self.segments[sid]
+                if not eligible(item):
+                    continue
+                row = next(row for row in shadow if row["id"] == sid)
+                measured = row.get("audio_duration")
+                if not measured or item.tts_duration <= 0:
+                    continue
+                prior_speed = max(float(item.speed_ratio), item.tts_duration / measured, 1.)
+                relative_cap = self.aligner.max_speed / prior_speed
+                if relative_cap <= 1.01:
+                    continue
+                path = self.segments_dir / f"seg_{sid}_{uuid.uuid4().hex}.wav"
+                staged[sid] = {"audio_path": str(path.resolve())}
+                local = TimingBudgetAligner((.9, relative_cap))
+                try:
+                    relative = await self._run_blocking(local.apply_atempo,
+                        Path(item.audio_path), path, relative_cap,
+                        fit_duration=measured / relative_cap + .012)
+                except SpeechBudgetError:
+                    path.unlink(missing_ok=True)
+                    staged.pop(sid, None)
+                    continue
+                start, _ = resolve_dub_timing(item.to_dict())
+                boundaries = [{"text": word["text"], "start": word["start"] - start,
+                               "end": word["end"] - start}
+                              for cue in item.subtitle_cues for word in cue.get("words", [])]
+                spoken = {"text": item.final_vi, "tts_duration": item.tts_duration,
+                    "speed_ratio": min(self.aligner.max_speed, prior_speed * relative),
+                    "boundaries": boundaries, "timing_ratio": relative, "pacing_verification": None}
+                if not await stage(item, path, spoken):
+                    staged.pop(sid, None)
+                if capacity() >= required_duration:
+                    return shadow, staged
+            # At most one nearby translation changes, only after the same
+            # independent source/meaning/address check used for focus rewrites.
+            for sid in [ordered[pos] for pos in (index - 1, index - 2) if pos >= 0]:
+                item = self.segments[sid]
+                if (sid in staged or not eligible(item)
+                        or (item.verification or {}).get("status") not in {"verified", "corrected"}):
+                    continue
+                row = next(row for row in shadow if row["id"] == sid)
+                measured = row.get("audio_duration")
+                if not measured:
+                    continue
+                budget = measured - max(.05, required_duration - capacity()) - .012
+                if budget <= .1:
+                    continue
+                context = self._dialogue_context_before(item)
+                feedback = {"raw_budget_seconds": budget * self.aligner.max_speed,
+                            "measured_candidates": [{"text": item.final_vi, "measured_seconds": item.tts_duration}]}
+                proposal = None
+                for _ in range(3):
+                    try:
+                        proposal = await self._run_blocking(self.translator.rewrite_for_pacing,
+                            item.text_zh, item.final_vi, budget * self.aligner.max_speed * .98,
+                            context, measured_duration=item.tts_duration, feedback=feedback)
+                        break
+                    except PacingReviewRejected as exc:
+                        feedback.update(exc.feedback)
+                if proposal is None:
+                    continue
+                proof = proposal.get("pacing_verification")
+                if (not isinstance(proof, dict) or proof.get("status") != "verified"
+                        or proof.get("text") != proposal.get("final_vi")):
+                    raise RuntimeError("Thiếu xác minh cho lời đọc liền kề đã rút gọn.")
+                path = self.segments_dir / f"seg_{sid}_{uuid.uuid4().hex}.wav"
+                staged[sid] = {"audio_path": str(path.resolve())}
+                try:
+                    spoken = await self._run_blocking(synthesize_natural_speech,
+                        text=proposal["final_vi"], source=item.text_zh, duration=budget,
+                        output_path=path, engine=self.tts_engine, aligner=self.aligner,
+                        voice=self.voice, ref_audio=self.ref_audio, context=context)
+                except SpeechBudgetError:
+                    path.unlink(missing_ok=True)
+                    staged.pop(sid, None)
+                    continue
+                spoken["pacing_verification"] = proposal["pacing_verification"]
+                if not await stage(item, path, spoken):
+                    staged.pop(sid, None)
+                break
+            return shadow, staged
+        except BaseException:
+            for update in staged.values():
+                Path(update["audio_path"]).unlink(missing_ok=True)
+            raise
+
+    async def _fit_dub(self, seg, *, text, source, output_path, translator=None, context=None, on_stage=None, neighbor_rescue=False):
         rows = self._dub_rows()
         revision = {row["id"]: (row["revision"], row["dub_start"], row["dub_end"]) for row in rows}
         start, end = resolve_dub_timing(seg.to_dict())
@@ -2181,39 +2297,82 @@ class StreamingPipelineSession:
         # on both sides. Capping the *duration* to +350 ms discarded a valid
         # additional 350 ms at the other endpoint (the real 1.3 s row could
         # safely fit 2.0 s, yet pacing was told its limit was only 1.65 s).
-        spoken = await self._run_blocking(synthesize_natural_speech,
-            text=text, source=source, duration=duration, max_duration=capacity,
-            output_path=output_path, engine=self.tts_engine, aligner=self.aligner,
-            translator=translator, voice=self.voice, ref_audio=self.ref_audio,
-            context=context, on_stage=on_stage,
-            allow_bidirectional_reflow=self._chunked_source_started,
-            **({"max_duration_limit": capacity} if tail_limit is not None else {}))
-        measured = self._dub_audio_duration(output_path)
-        plan = {}
-        if measured > duration + 1e-9:
-            plan = plan_reflow(rows, seg.id, measured, total_duration=known_duration)
-            if plan is None:
-                raise SpeechBudgetError("Không còn khoảng nghỉ phù hợp để căn đủ lời thoại.")
-            if tail_limit is not None:
-                plan[seg.id]["dub_tail_limit"] = tail_limit
-            for identity, bounds in plan.items():
-                resolve_dub_timing({**self.segments[identity].to_dict(), **bounds})
-            start, end = plan[seg.id]["dub_start"], plan[seg.id]["dub_end"]
-        timing = await self._run_blocking(build_speech_timing, spoken.get("text", text), start, end,
-            output_path, spoken["speed_ratio"], spoken["boundaries"])
-        if self.is_stopped:
-            raise asyncio.CancelledError
-        current = {item.id: (item.revision, item.dub_start, item.dub_end) for item in self.segments.values()}
-        if any(current.get(sid) != state for sid, state in revision.items()):
-            raise SegmentEditConflict("Timeline đã thay đổi trong khi tạo giọng; hãy thử lại câu này.")
-        # Appending a later source interval is independent of an earlier edit.
-        # A newly discovered row near the fitted plan is a genuine conflict.
-        affected_end = max([end, *[bounds["dub_end"] for bounds in plan.values()]])
-        affected_start = min([start, *[bounds["dub_start"] for bounds in plan.values()]])
-        if any(item.id not in revision and item.start < affected_end and item.end > affected_start
-               for item in self.segments.values()):
-            raise SegmentEditConflict("Một câu nguồn mới trùng thời gian giọng đang tạo; hãy thử lại câu này.")
-        return spoken, timing, plan
+        staged = {}
+        returned = False
+        try:
+            try:
+                spoken = await self._run_blocking(synthesize_natural_speech,
+                    text=text, source=source, duration=duration, max_duration=capacity,
+                    output_path=output_path, engine=self.tts_engine, aligner=self.aligner,
+                    translator=translator, voice=self.voice, ref_audio=self.ref_audio,
+                    context=context, on_stage=on_stage,
+                    allow_bidirectional_reflow=self._chunked_source_started,
+                    **({"max_duration_limit": capacity} if tail_limit is not None else {}))
+            except (SpeechBudgetError, PacingReviewRejected) as exc:
+                required = getattr(exc, "required_dub_duration", None)
+                if (not neighbor_rescue or not self._chunked_source_started or translator is None
+                        or not isinstance(required, (int, float)) or not math.isfinite(required)):
+                    raise
+                rows, staged = await self._prepare_dub_rescue(rows, seg, required)
+                capacity = available_reflow_duration(rows, seg.id, total_duration=known_duration)
+                if capacity < required or not staged:
+                    raise
+                spoken = await self._run_blocking(synthesize_natural_speech,
+                    text=text, source=source, duration=duration, max_duration=capacity,
+                    output_path=output_path, engine=self.tts_engine, aligner=self.aligner,
+                    translator=translator, voice=self.voice, ref_audio=self.ref_audio,
+                    context=context, on_stage=on_stage, allow_bidirectional_reflow=True,
+                    **({"max_duration_limit": capacity} if tail_limit is not None else {}))
+            measured = self._dub_audio_duration(output_path)
+            plan = {}
+            if measured > duration + 1e-9:
+                plan = plan_reflow(rows, seg.id, measured, total_duration=known_duration)
+                if plan is None:
+                    raise SpeechBudgetError("Không còn khoảng nghỉ phù hợp để căn đủ lời thoại.")
+                if tail_limit is not None:
+                    plan[seg.id]["dub_tail_limit"] = tail_limit
+                for identity, bounds in plan.items():
+                    resolve_dub_timing({**self.segments[identity].to_dict(), **bounds})
+                start, end = plan[seg.id]["dub_start"], plan[seg.id]["dub_end"]
+            timing = await self._run_blocking(build_speech_timing, spoken.get("text", text), start, end,
+                output_path, spoken["speed_ratio"], spoken["boundaries"])
+            if self.is_stopped:
+                raise asyncio.CancelledError
+            current = {item.id: (item.revision, item.dub_start, item.dub_end) for item in self.segments.values()}
+            if any(current.get(sid) != state for sid, state in revision.items()):
+                raise SegmentEditConflict("Timeline đã thay đổi trong khi tạo giọng; hãy thử lại câu này.")
+            # Appending a later source interval is independent of an earlier edit.
+            # A newly discovered row near the fitted plan is a genuine conflict.
+            affected_end = max([end, *[bounds["dub_end"] for bounds in plan.values()]])
+            affected_start = min([start, *[bounds["dub_start"] for bounds in plan.values()]])
+            if any(item.id not in revision and item.start < affected_end and item.end > affected_start
+                   for item in self.segments.values()):
+                raise SegmentEditConflict("Một câu nguồn mới trùng thời gian giọng đang tạo; hãy thử lại câu này.")
+            for sid, update in staged.items():
+                item = self.segments[sid]
+                bounds = plan.setdefault(sid, dict(zip(("dub_start", "dub_end"), resolve_dub_timing(item.to_dict()))))
+                data = update["spoken"]
+                update["timing"] = await self._run_blocking(build_speech_timing,
+                    data["text"], bounds["dub_start"], bounds["dub_end"], update["audio_path"],
+                    data.get("timing_ratio", data["speed_ratio"]), data["boundaries"])
+                update["old_audio_path"] = item.audio_path
+                bounds["_audio_update"] = update
+            if self.is_stopped:
+                raise asyncio.CancelledError
+            current = {item.id: (item.revision, item.dub_start, item.dub_end) for item in self.segments.values()}
+            if any(current.get(sid) != state for sid, state in revision.items()):
+                raise SegmentEditConflict("Timeline đã thay đổi trong khi căn các câu liền kề.")
+            affected_end = max([end, *[bounds["dub_end"] for bounds in plan.values()]])
+            affected_start = min([start, *[bounds["dub_start"] for bounds in plan.values()]])
+            if any(item.id not in revision and item.start < affected_end and item.end > affected_start
+                   for item in self.segments.values()):
+                raise SegmentEditConflict("Một câu nguồn mới trùng thời gian các câu đang căn.")
+            returned = True
+            return spoken, timing, plan
+        finally:
+            if not returned:
+                for update in staged.values():
+                    Path(update["audio_path"]).unlink(missing_ok=True)
 
     def _publish_dub_plan(self, plan, focus_id):
         # No await: the whole block must become visible in one runtime snapshot.
@@ -2222,6 +2381,23 @@ class StreamingPipelineSession:
             old_start, _ = resolve_dub_timing(item.to_dict())
             delta = bounds["dub_start"] - old_start
             item.dub_start, item.dub_end = bounds["dub_start"], bounds["dub_end"]
+            update = bounds.get("_audio_update")
+            if update is not None:
+                spoken = update["spoken"]
+                old_text = item.final_vi
+                item.final_vi = spoken["text"]
+                item.audio_path = update["audio_path"]
+                item.tts_duration, item.speed_ratio = spoken["tts_duration"], round(spoken["speed_ratio"], 2)
+                for key, value in update["timing"].items():
+                    setattr(item, key, value)
+                if spoken["text"] != old_text:
+                    item.verification = {**(item.verification or {}), "pacing": spoken["pacing_verification"],
+                        "before_pacing": old_text, "translation_changed": True}
+                    if item.verification.get("status") == "verified":
+                        item.verification["status"] = "corrected"
+                item.revision += 1
+                item.audio_url = f"/api/streaming/audio/{self.task_id}/{item.id}?rev={item.revision}"
+                continue
             if "dub_tail_limit" in bounds:
                 item.dub_tail_limit = bounds["dub_tail_limit"]
             if identity == focus_id:
@@ -2244,6 +2420,7 @@ class StreamingPipelineSession:
         """Generate playable audio without approving an uncertain translation."""
         raw_tts_wav = self.cache_dir / f"tts_{seg.id}_raw.wav"
         pending_path = self.segments_dir / f"pending_{seg.id}_{uuid.uuid4().hex}.wav"
+        dub_plan = {}
         try:
             if not seg.final_vi.strip():
                 if seg.text_zh.strip() and not seg.needs_review:
@@ -2277,7 +2454,7 @@ class StreamingPipelineSession:
                 spoken, timing, dub_plan = await self._fit_dub(seg,
                     text=seg.final_vi, source=seg.text_zh, output_path=pending_path,
                     translator=self.translator, on_stage=speech_stage,
-                    context=self._dialogue_context_before(seg))
+                    context=self._dialogue_context_before(seg), neighbor_rescue=True)
             seg.status = "ALIGNING"
             # Fitting already emitted ALIGNING. Publish the complete WAV and
             # every changed timing without yielding to a concurrent edit/Stop.
@@ -2313,7 +2490,21 @@ class StreamingPipelineSession:
                     await self.emit("segment_update", self.segments[identity].to_dict())
             await self.emit("segment_update", seg.to_dict())
             await self._update_ready()
+            if any("_audio_update" in bounds for bounds in dub_plan.values()):
+                self._refresh_review_counts()
+                self._persist_if_enabled()
+            for bounds in dub_plan.values():
+                old = bounds.get("_audio_update", {}).get("old_audio_path")
+                if old and Path(old).resolve().parent == self.segments_dir.resolve():
+                    try:
+                        Path(old).unlink(missing_ok=True)
+                    except OSError:
+                        pass  # A playing Windows audio handle can close later.
         finally:
+            for sid, bounds in dub_plan.items():
+                path = bounds.get("_audio_update", {}).get("audio_path")
+                if path and self.segments[sid].audio_path != path:
+                    Path(path).unlink(missing_ok=True)
             raw_tts_wav.unlink(missing_ok=True)
             pending_path.unlink(missing_ok=True)
 

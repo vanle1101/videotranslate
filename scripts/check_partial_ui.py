@@ -33,11 +33,13 @@ RECORD = ROOT / "workspace/temp/partial-qa.json"
 
 def hashes(task_id, rows):
     root = (ROOT / "workspace/cache" / task_id / "segments").resolve()
+    from core.streaming.session_store import _read
+    saved = {row["id"]: row for row in _read(task_id)["segments"]}
     result = {}
     for row in rows:
         if row["status"] not in ("READY", "PLAYED") or not row.get("audio_url"):
             continue
-        path = (root / f"seg_{row['id']}.wav").resolve()
+        path = Path(saved[row["id"]]["audio_path"]).resolve()
         assert path.parent == root and path.is_file() and path.stat().st_size > 44
         result[str(row["id"])] = hashlib.sha256(path.read_bytes()).hexdigest()
     return result
