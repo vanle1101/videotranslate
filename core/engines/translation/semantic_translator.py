@@ -610,7 +610,43 @@ Trả duy nhất JSON: {{"literal_vi":"...","natural_vi":"...","final_vi":"...",
                                       reason=verdict.get("reason", "Sai cấu trúc kiểm định") if isinstance(verdict, dict) else "Sai cấu trúc kiểm định",
                                       code=("semantic_mismatch" if isinstance(verdict, dict) and verdict.get("equivalent") is False else
                                             "unnatural" if isinstance(verdict, dict) and verdict.get("natural") is False else "invalid_review"))
+        # The source/meaning verifier above is intentionally informed by the
+        # Chinese line.  A separate blind Vietnamese pass prevents it from
+        # rationalizing keyword-like shorthand as natural grammar.  It receives
+        # only the exact candidate and bounded Vietnamese neighbors, never the
+        # source, old draft, timing budget, or first verdict.
+        nearby_vi = []
+        for row in (rolling_context or []):
+            if not isinstance(row, dict) or not isinstance(row.get("vi"), str):
+                continue
+            line = " ".join(row["vi"].split())
+            if line and line != candidate["final_vi"] and line not in nearby_vi:
+                nearby_vi.append(line[:500])
+        nearby_vi = nearby_vi[-6:]
+        fluency_system = (
+            "Bạn là biên tập viên tiếng Việt bản ngữ. Không biết và không được suy đoán "
+            "nguồn ngoại ngữ, người nói, quan hệ nhân vật, hay lý do câu được viết. "
+            "Chỉ đánh giá câu ứng viên tiếng Việt như lời thoại nói tự nhiên: ngữ pháp, "
+            "cụm từ kết hợp, nghĩa rõ ràng và nhịp khẩu ngữ. Câu tỉnh lược đại từ vẫn có "
+            "thể tự nhiên nếu tiếng Việt tự xác định được vai; từ khóa rời, cụm danh từ "
+            "ghép sai, hoặc câu khiến người nghe phải đoán quan hệ ngữ pháp là không tự nhiên. "
+            "Không sửa câu và không chấm theo độ dài. Trả duy nhất JSON "
+            '{"natural":true,"reason":"lý do cụ thể"}; natural=false nếu còn nghi ngờ.'
+        ) + "\n" + VIETNAMESE_ADDRESS_POLICY
+        fluency_input = json.dumps({"candidate": candidate["final_vi"],
+                                    "nearby_vietnamese_dialogue": nearby_vi}, ensure_ascii=False)
+        fluency = self._json_response(self._opencode_request(fluency_system, fluency_input))
+        if (not isinstance(fluency, dict) or fluency.get("natural") is not True
+                or not self._nonempty_string(fluency.get("reason"))):
+            raise PacingReviewRejected(
+                "Bản rút gọn chưa vượt qua kiểm tra văn nói tiếng Việt; giữ lời trước đó.",
+                candidate=candidate["final_vi"],
+                reason=fluency.get("reason", "Sai cấu trúc kiểm định văn nói") if isinstance(fluency, dict)
+                else "Sai cấu trúc kiểm định văn nói",
+                code="unnatural",
+            )
         candidate["pacing_verification"] = {"provider": self.provider, "status": "verified",
             "text": candidate["final_vi"], "reason": verdict["reason"][:500],
-            "address_preserved": verdict.get("address_preserved") is True}
+            "address_preserved": verdict.get("address_preserved") is True,
+            "fluency": {"natural": True, "reason": fluency["reason"][:500]}}
         return candidate

@@ -568,6 +568,7 @@ class StreamingPipelineSession:
             return seg.to_dict()
         review_result = deepcopy(_review_result) if _review_result is not None else None
         old_source = seg.text_zh
+        old_audio_path = seg.audio_path
         task = asyncio.current_task()
         self.edit_tasks.add(task)
         stem = f"edit_{seg.id}_{uuid.uuid4().hex}"
@@ -659,6 +660,17 @@ class StreamingPipelineSession:
                 self._apply_review_metadata(seg, review_result)
             else:
                 seg.verification = {"status": "manual", "reason": "Người dùng đã lưu lời thoại."}
+            # Neighbor rescue publishes versioned WAVs.  A later manual edit
+            # must retire the superseded version after the new metadata is
+            # durable, otherwise repeated edits accumulate orphan audio.
+            if old_audio_path and Path(old_audio_path).resolve().parent == self.segments_dir.resolve():
+                current_audio = Path(seg.audio_path).resolve() if seg.audio_path else None
+                old_audio = Path(old_audio_path).resolve()
+                if current_audio != old_audio:
+                    try:
+                        old_audio.unlink(missing_ok=True)
+                    except OSError:
+                        pass
             if self.review_summary.get("status") == "completed":
                 self._refresh_review_counts()
             # The file belongs to the old text/audio revision. Keep it on disk,
@@ -2421,6 +2433,7 @@ class StreamingPipelineSession:
         raw_tts_wav = self.cache_dir / f"tts_{seg.id}_raw.wav"
         pending_path = self.segments_dir / f"pending_{seg.id}_{uuid.uuid4().hex}.wav"
         dub_plan = {}
+        old_audio_path = seg.audio_path
         try:
             if not seg.final_vi.strip():
                 if seg.text_zh.strip() and not seg.needs_review:
@@ -2498,6 +2511,14 @@ class StreamingPipelineSession:
                 if old and Path(old).resolve().parent == self.segments_dir.resolve():
                     try:
                         Path(old).unlink(missing_ok=True)
+                    except OSError:
+                        pass  # A playing Windows audio handle can close later.
+            if old_audio_path and Path(old_audio_path).resolve().parent == self.segments_dir.resolve():
+                current_audio = Path(seg.audio_path).resolve() if seg.audio_path else None
+                old_audio = Path(old_audio_path).resolve()
+                if current_audio != old_audio:
+                    try:
+                        old_audio.unlink(missing_ok=True)
                     except OSError:
                         pass  # A playing Windows audio handle can close later.
         finally:

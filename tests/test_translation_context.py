@@ -70,15 +70,18 @@ def test_same_policy_reaches_initial_translation_and_both_pacing_requests(monkey
     candidate = {"literal_vi": "Câu này phải để em hỏi mới đúng chứ.",
                  "natural_vi": "Để em hỏi mới đúng.", "final_vi": "Để em hỏi mới đúng."}
     request = Mock(side_effect=[json.dumps(candidate), json.dumps({
-        "equivalent": True, "natural": True, "address_preserved": True, "reason": "Giữ lời đáp xưng em khi gọi chị."})])
+        "equivalent": True, "natural": True, "address_preserved": True, "reason": "Giữ lời đáp xưng em khi gọi chị."}),
+        json.dumps({"natural": True, "reason": "Câu thoại tự nhiên."})])
     monkeypatch.setattr(translator, "_opencode_request", request)
     context = [{"zh": "拜托姐", "vi": "Thôi mà chị."}] + [
         {"zh": "这是普通的句子", "vi": "Lời thoại."} for _ in range(8)]
     result = translator.rewrite_for_pacing("这话应该我来问吧", candidate["literal_vi"], 2.0, context)
     assert result["final_vi"] == candidate["final_vi"]
-    for call in request.call_args_list:
+    for call in request.call_args_list[:2]:
         assert VIETNAMESE_ADDRESS_POLICY in call.args[0]
         assert "拜托姐" in call.args[1]
+    assert "拜托姐" not in request.call_args_list[2].args[1]
+    assert "Để em hỏi mới đúng." in request.call_args_list[2].args[1]
     request.reset_mock(side_effect=True)
     request.return_value = json.dumps(candidate)
     translator.translate_single_segment("这话应该我来问吧", 2.0, context)
@@ -232,7 +235,8 @@ def test_duplicate_source_turns_keep_explicit_target_identity_in_pacing(monkeypa
     translator = SemanticTranslator("opencode")
     candidate = {"literal_vi": "Con chưa làm xong.", "natural_vi": "Con chưa xong.", "final_vi": "Con chưa xong."}
     request = Mock(side_effect=[json.dumps(candidate), json.dumps({"equivalent": True, "natural": True,
-        "address_preserved": True, "reason": "Giữ con ở đúng lượt trả lời mẹ."})])
+        "address_preserved": True, "reason": "Giữ con ở đúng lượt trả lời mẹ."}),
+        json.dumps({"natural": True, "reason": "Câu thoại tự nhiên."})])
     monkeypatch.setattr(translator, "_opencode_request", request)
     context = [{**source(0, "我还没做完"), "is_focus": False},
                {**source(1, "我还没做完"), "is_focus": True}]

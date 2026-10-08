@@ -561,13 +561,14 @@ def test_rewrite_verifies_exact_candidate_in_a_separate_provider_request(monkeyp
     translator = SemanticTranslator(provider="opencode")
     request = Mock(side_effect=[candidate_response(), json.dumps({
         "equivalent": True, "natural": True, "address_preserved": True,
-        "reason": "Giữ chủ thể và ý chưa thực hiện."})])
+        "reason": "Giữ chủ thể và ý chưa thực hiện."}), json.dumps({
+        "natural": True, "reason": "Câu ngắn gọn, đúng ngữ pháp khẩu ngữ."})])
     monkeypatch.setattr(translator, "_opencode_request", request)
 
     result = translator.rewrite_for_pacing("我还没做。", "Tôi vẫn chưa làm việc đó.", 1.5,
                                          [{"zh": "做了吗？", "vi": "Làm chưa?"}])
 
-    assert request.call_count == 2
+    assert request.call_count == 3
     review_input = json.loads(request.call_args_list[1].args[1])
     assert review_input["source"] == "我还没做。"
     assert review_input["candidate"] == result["final_vi"] == "Tôi chưa làm."
@@ -575,6 +576,30 @@ def test_rewrite_verifies_exact_candidate_in_a_separate_provider_request(monkeyp
     assert "Làm chưa?" in review_input["context"]
     assert result["pacing_verification"]["text"] == review_input["candidate"]
     assert result["pacing_verification"]["status"] == "verified"
+
+
+def test_blind_vietnamese_fluency_gate_rejects_keyword_like_candidate(monkeypatch):
+    translator = SemanticTranslator(provider="opencode")
+    candidate = "Bạn mạng anh Dã."
+    request = Mock(side_effect=[
+        rewrite_response(candidate),
+        json.dumps({"equivalent": True, "natural": True, "address_preserved": True,
+                    "reason": "Giữ quan hệ bạn mạng."}, ensure_ascii=False),
+        json.dumps({"natural": False, "reason": "Cụm 'Bạn mạng' thiếu quan hệ ngữ pháp trong lời nói."}, ensure_ascii=False),
+    ])
+    monkeypatch.setattr(translator, "_opencode_request", request)
+
+    with pytest.raises(PacingReviewRejected) as rejected:
+        translator.rewrite_for_pacing("网聊的朋友阿达", "Bạn online của anh Dã.", 1.5,
+                                     [{"zh": "Lời trước", "vi": "Anh ấy là bạn mạng."}])
+
+    assert rejected.value.code == "unnatural"
+    assert request.call_count == 3
+    # The blind critic must not receive Chinese source or the old draft.
+    blind_payload = json.loads(request.call_args_list[2].args[1])
+    assert blind_payload["candidate"] == candidate
+    assert "网聊" not in request.call_args_list[2].args[1]
+    assert "Bạn online của anh Dã." not in request.call_args_list[2].args[1]
 
 
 def test_neutral_ellipsis_passes_only_after_independent_address_safe_verdict(monkeypatch):
@@ -589,6 +614,7 @@ def test_neutral_ellipsis_passes_only_after_independent_address_safe_verdict(mon
             "address_preserved": True,
             "reason": "Lược tôi/bạn theo khẩu ngữ; người hỏi và người bị hỏi vẫn rõ trong mạch câu.",
         }, ensure_ascii=False),
+        json.dumps({"natural": True, "reason": "Câu hỏi rút gọn vẫn tự nhiên trong lời nói."}, ensure_ascii=False),
     ])
     monkeypatch.setattr(translator, "_opencode_request", request)
 
@@ -599,7 +625,7 @@ def test_neutral_ellipsis_passes_only_after_independent_address_safe_verdict(mon
         [{"zh": "我问你几岁了快说", "vi": "Tôi hỏi bạn mấy tuổi rồi, nói mau!"}],
     )
 
-    assert request.call_count == 2
+    assert request.call_count == 3
     assert result["final_vi"] == candidate
     assert result["pacing_verification"]["address_preserved"] is True
     review_input = json.loads(request.call_args_list[1].args[1])
@@ -649,12 +675,13 @@ def test_successful_pacing_does_not_clear_existing_pipeline_uncertainty(
     session.translator = SemanticTranslator(provider="opencode")
     proof = {"equivalent": True, "natural": True, "address_preserved": True,
              "reason": "Giữ câu hỏi tuổi và thúc giục, không xác nhận quan hệ nhân vật."}
-    request = Mock(side_effect=[rewrite_response(shorter), json.dumps(proof)])
+    request = Mock(side_effect=[rewrite_response(shorter), json.dumps(proof),
+                                json.dumps({"natural": True, "reason": "Câu thoại tự nhiên."})])
     monkeypatch.setattr(session.translator, "_opencode_request", request)
 
     asyncio.run(session._synthesize_segment(segment))
 
-    assert request.call_count == 2
+    assert request.call_count == 3
     assert segment.final_vi == shorter and segment.audio_path
     assert segment.status == "READY"
     assert segment.needs_review is True
