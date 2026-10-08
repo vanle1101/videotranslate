@@ -14,6 +14,10 @@ Regression evidence: latest focused API/store/preview/edit/checkpoint run253pass
 
 Limits still under audit: the durable project has16MiB/10,000-row validation limits; long/dense video support is bounded. Existing user project17736b77 must remain unchanged. GPU offscreen fallback and Windows Proactor10054 transport teardown warnings have occurred; no assertion has established they break the user flow, and they are not claimed fixed.
 
+Additional recovery/performance fixes from the continued audit: a draft cursor was saved before its independent semantic review finished. Stop/reopen then resumed TTS behind that cursor without finishing the review. Pending/incomplete published rows now rerun only their own review in groups of at most4 before further source/TTS work; manual revisions win over late success and failure replies. Waiting rows accept corrected text before synthesis, while an existing playable draft regenerates audio if its reviewed text changes. Later completed groups cannot hide pending review in the summary. Semantic provider stages now use indeterminate progress; measured processed/source coverage remains available. Unchanged source/model content hashes and validated WAV durations reuse process-local stat identities, avoiding repeated full-media reads; replacement, truncation and cancellation checks still invalidate them. Focused recovery/store/review run179passed; final preview/checkpoint/edit run113passed. No provider acceptance is inferred from those counts.
+
+Runtime failure reproduced at21:25: three later rows17–19 failed with Edge `NoAudioReceived` after3 attempts each. Transcript and17earlier WAVs remained; row20 and following batches continued. At21:37,21/35rows were READY and Muse was handling the next group. Final MP4 is still unverified; provider errors are not converted into completion.
+
 ## Incremental translation and OCR progress — October 8
 
 The user requested that long clips expose completed translated portions immediately, and preserve them if a later request fails. The selected provider remains OpenCode Muse; no local translation LLM was added.

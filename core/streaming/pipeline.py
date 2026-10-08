@@ -443,6 +443,7 @@ class StreamingPipelineSession:
                 await self.emit("progress", self.get_progress())
                 for segment in retried:
                     await self.emit("segment_update", segment.to_dict())
+                await self._resume_pending_chunk_reviews()
             except asyncio.CancelledError:
                 self.is_stopped = True
                 self.is_running = False
@@ -684,9 +685,10 @@ class StreamingPipelineSession:
         self.review_summary = {**self.review_summary,
             "checked": sum(status in ("verified", "corrected", "unresolved", "incomplete") for status in statuses),
             **{status: statuses.count(status) for status in ("verified", "corrected", "unresolved", "manual")}}
-        if "incomplete" in self.review_summary or "incomplete" in statuses:
-            self.review_summary["incomplete"] = statuses.count("incomplete")
-        if "incomplete" in statuses:
+        incomplete = statuses.count("incomplete") + statuses.count("pending")
+        if "incomplete" in self.review_summary or incomplete:
+            self.review_summary["incomplete"] = incomplete
+        if incomplete:
             self.review_summary["status"] = "incomplete"
 
     def _invalidate_output(self):
@@ -711,15 +713,16 @@ class StreamingPipelineSession:
         from core.translation_review import AutomaticTranslationReviewer
         self._review_scope = "chunk" if segment_ids is not None else "all"
         self._reviewing_segment_ids = sorted(segment_ids) if segment_ids is not None else sorted(self.segments)
-        await self.report_progress("review", "AI đang kiểm tra lại từng câu với nguồn…", 0)
+        await self.report_progress("review", "AI đang kiểm tra lại từng câu với nguồn…", None)
         loop = asyncio.get_running_loop()
         semantic_active = True
         async def publish_review_progress(percent):
             if semantic_active and not self.is_stopped:
-                # This is the semantic stage only. 100% cannot represent the
-                # still-pending regeneration, pacing and timing publication.
+                # Reviewer percentages weight OCR/request stages, rather than
+                # measured provider completion. Keep this stage indeterminate;
+                # the snapshot still reports measured source coverage separately.
                 await self.report_progress("review", "AI đang đối chiếu nguồn và sửa bản dịch…",
-                                           percent if percent < 100 else None,
+                                           None,
                                            review_stage="semantic")
         def progress(percent):
             if semantic_active and not self.is_stopped:
@@ -747,7 +750,8 @@ class StreamingPipelineSession:
             if segment.revision != target_revisions[sid]:
                 # A newer user commit wins over an older review response.
                 continue
-            if regenerate_audio and row["final_vi"] != segment.final_vi:
+            if (regenerate_audio and segment.status in ("READY", "PLAYED", "NEEDS_REVIEW")
+                    and row["final_vi"] != segment.final_vi):
                 await self.edit_segment(sid, row["final_vi"], _review_result=row,
                                         _review_context=review_context)
             else:
@@ -766,6 +770,58 @@ class StreamingPipelineSession:
         if self.review_summary.get("status") == "completed":
             self.warnings[:] = [warning for warning in self.warnings if warning not in REVIEW_FAILURE_WARNINGS]
         await self.emit("review_complete", {"review_summary": self.review_summary, "warnings": list(self.warnings)})
+
+    async def _resume_pending_chunk_reviews(self):
+        """Finish interrupted review ownership before retrying its saved speech.
+
+        Source coverage is committed when a validated draft arrives. A Stop in
+        the later independent review therefore leaves translated rows behind
+        that cursor; resuming source preparation alone cannot revisit them.
+        Manual edits and verified WAVs remain outside this selection. A draft
+        synthesized by an older retry implementation still needs real review.
+        """
+        if not (self._chunked_source_started and self.visual_translation
+                and settings.LLM_PROVIDER == "opencode"):
+            return
+        pending = sorted((row for row in self.segments.values()
+            if row.end <= self._visual_completed_seconds + .001
+            and row.source_method == "text-ai" and row.translation_provider == "opencode"
+            and (row.verification or {}).get("status") in (None, "pending", "incomplete")),
+            key=lambda row: (row.start, row.id))
+        for offset in range(0, len(pending), self.VISUAL_REVIEW_GROUP_SIZE):
+            await self.pause_event.wait()
+            if self.is_stopped:
+                raise asyncio.CancelledError
+            group = pending[offset:offset + self.VISUAL_REVIEW_GROUP_SIZE]
+            revisions = {row.id: row.revision for row in group}
+            try:
+                await self._review_translations(regenerate_audio=True, segment_ids={row.id for row in group})
+            except asyncio.CancelledError:
+                raise
+            except Exception as error:
+                self.review_summary = {"status": "incomplete"}
+                warning = "AI kiểm tra lại chưa hoàn tất; giữ bản nháp và cho phép thử lại."
+                if warning not in self.warnings:
+                    self.warnings.append(warning)
+                logging.getLogger("errors").error(
+                    "[%s] RESUMED_REVIEW_FAILED error_type=%s", self.task_id, type(error).__name__)
+                for row in group:
+                    if row.revision != revisions[row.id]:
+                        continue
+                    row.needs_review = True
+                    row.review_reason = "AI kiểm tra nguồn chưa hoàn tất; đây là bản nháp cần kiểm tra."
+                    row.verification = {"status": "incomplete", "semantic_verified": False,
+                                        "reason": row.review_reason}
+            for row in group:
+                # Restore can identify an interrupted reviewed draft as missing
+                # TTS even when its defensible translation is empty. Keep that
+                # uncertainty; it must not remain permanently stranded FAILED.
+                if row.status == "FAILED" and row.failed_stage in {"TTS", "ALIGNING"}:
+                    row.status, row.error = "WAITING", None
+                    row._retry_synthesis = True
+                await self.emit("segment_update", row.to_dict())
+            self._refresh_review_counts()
+            self._persist_if_enabled()
 
     async def start_automatic_review(self):
         if (not self.initialized or self.is_running or self.is_stopped or self.is_editing or self.error
@@ -1411,6 +1467,7 @@ class StreamingPipelineSession:
             self.total_duration = float(info["duration"])
             self.video_size = await self._run_blocking(HQExporter._video_size, self.video_path, lambda: self.is_stopped)
             self._persist_if_enabled()
+        await self._resume_pending_chunk_reviews()
         target = min(self.total_duration, self.preview_seconds) if self.translation_mode == "preview" else self.total_duration
         while self._visual_completed_seconds < target - .001:
             await self.pause_event.wait()
@@ -1947,11 +2004,31 @@ class StreamingPipelineSession:
             row = item.to_dict()
             if item.audio_path and item.status in ("READY", "PLAYED"):
                 try:
-                    row["audio_duration"] = self._dub_audio_duration(item.audio_path)
+                    row["audio_duration"] = self._cached_dub_audio_duration(item.audio_path)
                 except (OSError, EOFError, wave.Error, ValueError, ZeroDivisionError):
                     pass  # Unknown audio remains an occupied, immovable slot.
             rows.append(row)
         return rows
+
+    def _cached_dub_audio_duration(self, path):
+        """Read PCM once per file revision, retaining full corruption checks."""
+        path = Path(path).resolve(strict=True)
+        stat = path.stat()
+        identity = (stat.st_dev, stat.st_ino, stat.st_size, stat.st_mtime_ns, stat.st_ctime_ns)
+        cache = getattr(self, "_dub_duration_cache", None)
+        if cache is None:
+            cache = self._dub_duration_cache = {}
+        saved = cache.get(str(path))
+        if saved and saved[0] == identity:
+            return saved[1]
+        duration = self._dub_audio_duration(path)
+        after = path.stat()
+        if identity != (after.st_dev, after.st_ino, after.st_size, after.st_mtime_ns, after.st_ctime_ns):
+            raise ValueError("Âm thanh đã thay đổi trong khi kiểm tra thời lượng.")
+        cache[str(path)] = (identity, duration)
+        while len(cache) > 10000:
+            cache.pop(next(iter(cache)))
+        return duration
 
     async def _fit_dub(self, seg, *, text, source, output_path, translator=None, context=None, on_stage=None):
         rows = self._dub_rows()

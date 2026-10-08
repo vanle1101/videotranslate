@@ -228,6 +228,122 @@ def test_startup_resume_retries_earlier_known_speech_without_discarding_ready_pr
     assert speech == [0, 1, 2, 1]
 
 
+@pytest.mark.parametrize("startup", [False, True])
+def test_retry_reviews_pending_owned_drafts_before_speech_without_replacing_ready_edits(preview, monkeypatch, startup):
+    session, prepared, analyzed, speech, events = preview
+    session.initialized = session._chunked_source_started = session._prepared = True
+    session._source_prepared_seconds = 32
+    session._visual_completed_seconds = 24
+    session._startup_failed = startup
+    session.error = "interrupted independent review"
+    saved = SegmentItem(0, 0, 1, 1)
+    saved.status, saved.source_method, saved.translation_provider = "READY", "text-ai", "opencode"
+    saved.final_vi, saved.revision, saved.verification = "Lời người dùng đã sửa.", 3, {"status": "manual"}
+    audio = session.segments_dir / "seg_0.wav"
+    wav(audio)
+    saved.audio_path, saved.audio_url = str(audio), "/audio/0?rev=3"
+    session.segments = {0: saved}
+    for sid in range(1, 8):
+        row = SegmentItem(sid, sid * 2, sid * 2 + 1, 1)
+        row.text_zh = row.asr_text = f"源{sid}"
+        row.final_vi = f"Lời {sid}."
+        row.status, row.failed_stage = "FAILED", "TTS"
+        row.source_method, row.translation_provider = "text-ai", "opencode"
+        row.verification = {"status": "verified" if sid == 7 else "incomplete" if sid == 6 else "pending",
+                            "semantic_verified": sid == 7}
+        row.needs_review = sid != 7
+        session.segments[sid] = row
+    future = SegmentItem(8, 25, 27, 2)
+    future.text_zh = future.asr_text = "还未翻译"
+    session.segments[8] = future
+    reviewed = []
+    original_speech = session._synthesize_segment
+    async def review(**options):
+        ids = sorted(options["segment_ids"])
+        reviewed.append(ids)
+        assert len(ids) <= session.VISUAL_REVIEW_GROUP_SIZE
+        assert not speech, "Owned pending review must finish before its saved speech is resumed"
+        for sid in ids:
+            row = session.segments[sid]
+            row.verification = {"status": "unresolved" if sid == 6 else "verified",
+                                "semantic_verified": sid != 6}
+            row.needs_review = sid == 6
+        session.review_summary = {"status": "completed"}
+    async def synthesize(row):
+        assert reviewed == [[1, 2, 3, 4], [5, 6]]
+        assert row.verification["status"] != "pending"
+        await original_speech(row)
+    monkeypatch.setattr(session, "_review_translations", review)
+    monkeypatch.setattr(session, "_synthesize_segment", synthesize)
+    before = deepcopy(saved.to_dict()), audio.read_bytes()
+    async def run():
+        await session.retry_failed_synthesis()
+        if startup:
+            await session.start_task
+        await session.worker_task
+        assert session.get_progress()["status"] == "PREVIEW_READY"
+        assert session.segments[6].needs_review
+        assert session.segments[6].verification == {"status": "unresolved", "semantic_verified": False}
+    asyncio.run(run())
+    assert saved.to_dict() == before[0] and audio.read_bytes() == before[1]
+    assert session.segments[8].status == "WAITING" and not session.segments[8].final_vi
+    assert prepared == analyzed == []
+    assert speech == list(range(1, 8))
+
+
+def test_retry_review_failure_keeps_incomplete_evidence_instead_of_forcing_verification(preview, monkeypatch):
+    session, prepared, analyzed, speech, events = preview
+    async def run():
+        await session.start()
+        await session.worker_task
+        row = session.segments[1]
+        row.status, row.failed_stage, row.verification = "FAILED", "TTS", {"status": "pending"}
+        row.needs_review = True
+        session.error = "review interrupted"
+        async def failure(**options):
+            assert options["segment_ids"] == {1}
+            raise TimeoutError("isolated review failure")
+        monkeypatch.setattr(session, "_review_translations", failure)
+        await session.retry_failed_synthesis()
+        await session.worker_task
+        assert row.status == "READY", "The saved draft remains playable"
+        assert row.needs_review and row.verification["status"] == "incomplete"
+        assert row.verification["semantic_verified"] is False
+        assert session.review_summary["status"] == "incomplete"
+    asyncio.run(run())
+
+
+def test_semantic_review_stage_uses_indeterminate_progress_with_real_source_coverage(preview, monkeypatch):
+    session, *_ , events = preview
+    session._visual_completed_seconds = 12
+    monkeypatch.setattr(session, "_review_translations", StreamingPipelineSession._review_translations.__get__(session))
+    row = SegmentItem(0, 0, 1, 1)
+    row.text_zh = "源"
+    session.segments = {0: row}
+    step_seen = threading.Event()
+    def event(kind, payload):
+        events.append((kind, deepcopy(payload)))
+        if kind == "progress" and payload.get("review_stage") == "semantic":
+            step_seen.set()
+    session.event_callback = event
+    def review(reviewer, path, rows, screens, **options):
+        options["progress_callback"](30)
+        assert step_seen.wait(2)
+        step_seen.clear()
+        options["progress_callback"](75)
+        assert step_seen.wait(2)
+        return {"segments": {0: {"id": 0, "verification": {"status": "verified"}}},
+                "summary": {"checked": 1, "verified": 1}}
+    monkeypatch.setattr("core.translation_review.AutomaticTranslationReviewer.review", review)
+    async def run():
+        await session._review_translations(segment_ids={0})
+        await asyncio.sleep(0)
+    asyncio.run(run())
+    snapshots = [payload for event, payload in events if event == "progress" and payload["phase"] == "review"]
+    assert sum(snapshot.get("review_stage") == "semantic" for snapshot in snapshots) == 2
+    assert all(snapshot["progress_pct"] is None and snapshot["processed_seconds"] == 12 for snapshot in snapshots)
+
+
 def test_turning_ocr_review_off_still_uses_bounded_preview_then_full(preview, monkeypatch):
     session, prepared, analyzed, speech, events = preview
     session.visual_translation = False
@@ -397,3 +513,118 @@ def test_opus_prefix_uses_source_offsets_without_per_chunk_encoder_delay(preview
     assert float(data["format"]["duration"]) == pytest.approx(20 * duration, abs=.02)
     subprocess.run(["ffmpeg", "-v", "error", "-xerror", "-nostdin", "-i", str(path), "-f", "null", "-"], check=True,
                    creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+
+
+def test_resume_rechecks_interrupted_review_before_advancing_source(preview, monkeypatch):
+    session, prepared, analyzed, *_ = preview
+    session._chunked_source_started = True
+    session._visual_completed_seconds = 24
+    session._source_prepared_seconds = 32
+    calls = []
+    # Include an early draft already synthesized by the older retry path,
+    # an interrupted sentence without audio, and a future untouched row.
+    for sid, status, review in [(0, "READY", "pending"), (1, "WAITING", "incomplete"),
+                                 (2, "READY", "manual"), (3, "READY", "verified")]:
+        row = SegmentItem(sid, sid * 4, sid * 4 + 2, 2)
+        row.status, row.final_vi = status, f"Lời {sid}."
+        row.source_method, row.translation_provider = "text-ai", "opencode"
+        row.verification = {"status": review}
+        row.needs_review = review in {"pending", "incomplete"}
+        session.segments[sid] = row
+    future = SegmentItem(4, 26, 28, 2)
+    future.final_vi, future.needs_review = "Bản nháp tương lai.", True
+    future.verification = {"status": "pending"}
+    session.segments[4] = future
+    async def review(**options):
+        calls.append((options, len(prepared), len(analyzed)))
+        for sid in options["segment_ids"]:
+            session.segments[sid].verification = {"status": "verified"}
+            session.segments[sid].needs_review = False
+    monkeypatch.setattr(session, "_review_translations", review)
+    async def run():
+        session._ensure_tts_engine()
+        await session._start_chunked_visual()
+        await session.worker_task
+    asyncio.run(run())
+    assert calls == [({"regenerate_audio": True, "segment_ids": {0, 1}}, 0, 0)]
+    assert session.segments[2].verification["status"] == "manual"
+    assert session.segments[3].verification["status"] == "verified"
+    assert session.segments[4].verification["status"] == "pending"
+
+
+def test_pending_review_cannot_be_hidden_by_a_later_completed_group(preview):
+    session, *_ = preview
+    early = SegmentItem(0, 0, 1, 1)
+    early.verification = {"status": "pending"}
+    later = SegmentItem(1, 2, 3, 1)
+    later.verification = {"status": "verified"}
+    session.segments = {0: early, 1: later}
+    session.review_summary = {"status": "completed"}
+    session._refresh_review_counts()
+    assert session.review_summary["status"] == "incomplete"
+    assert session.review_summary["incomplete"] == 1
+    assert session.review_summary["checked"] == 1
+
+
+def test_recovered_review_updates_waiting_text_without_editing_missing_audio(preview, monkeypatch):
+    session, *_ = preview
+    # Exercise the actual review publication path, with provider isolation.
+    monkeypatch.undo()
+    row = SegmentItem(0, 0, 2, 2)
+    row.final_vi, row.status = "Bản nháp.", "WAITING"
+    row.verification = {"status": "pending"}
+    session.segments = {0: row}
+    result = {"segments": {0: {**row.to_dict(), "final_vi": "Lời đã sửa.", "needs_review": False,
+                                   "verification": {"status": "corrected", "semantic_verified": True}}},
+              "summary": {"checked": 1, "corrected": 1}, "translation_sources": []}
+    monkeypatch.setattr("core.translation_review.AutomaticTranslationReviewer.review", lambda *args, **kwargs: result)
+    async def no_missing_audio_edit(*args, **kwargs):
+        raise AssertionError("Missing audio must be synthesized by the resumed worker, not the transcript editor")
+    monkeypatch.setattr(session, "edit_segment", no_missing_audio_edit)
+    asyncio.run(session._review_translations(regenerate_audio=True, segment_ids={0}))
+    assert row.final_vi == "Lời đã sửa." and row.status == "WAITING"
+    assert row.verification["semantic_verified"] is True
+
+
+def test_failed_recovery_response_cannot_overwrite_newer_manual_edit(preview, monkeypatch):
+    session, *_ = preview
+    session._chunked_source_started = True
+    session._visual_completed_seconds = 24
+    row = SegmentItem(0, 0, 1, 1)
+    row.source_method, row.translation_provider = "text-ai", "opencode"
+    row.final_vi, row.status = "Bản nháp.", "READY"
+    row.verification = {"status": "pending"}
+    session.segments = {0: row}
+    async def concurrent_edit(**options):
+        row.revision += 1
+        row.final_vi = "Lời người dùng sửa."
+        row.verification, row.needs_review = {"status": "manual"}, False
+        raise TimeoutError("Old review failed after user saved")
+    monkeypatch.setattr(session, "_review_translations", concurrent_edit)
+    asyncio.run(session._resume_pending_chunk_reviews())
+    assert row.final_vi == "Lời người dùng sửa." and row.revision == 1
+    assert row.verification == {"status": "manual"} and not row.needs_review
+
+
+def test_dub_duration_cache_rechecks_replacement_and_rejects_truncated_pcm(preview, monkeypatch):
+    session, *_ = preview
+    path = session.segments_dir / "saved.wav"
+    wav(path, .5)
+    reads = []
+    real = session._dub_audio_duration
+    def counted(path):
+        reads.append(str(path))
+        return real(path)
+    monkeypatch.setattr(session, "_dub_audio_duration", counted)
+    assert session._cached_dub_audio_duration(path) == .5
+    assert session._cached_dub_audio_duration(path) == .5
+    assert len(reads) == 1
+    replacement = session.segments_dir / "replacement.wav"
+    wav(replacement, .8)
+    replacement.replace(path)
+    assert session._cached_dub_audio_duration(path) == .8
+    assert len(reads) == 2
+    data = path.read_bytes()
+    path.write_bytes(data[:-10])
+    with pytest.raises(ValueError, match="thiếu dữ liệu"):
+        session._cached_dub_audio_duration(path)

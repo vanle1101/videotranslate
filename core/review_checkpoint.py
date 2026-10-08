@@ -11,6 +11,7 @@ from pathlib import Path
 import re
 import tempfile
 import threading
+from collections import OrderedDict
 
 from config import settings
 
@@ -19,6 +20,8 @@ MAX_RECORD_BYTES = 2 * 1024 * 1024
 MAX_CACHE_BYTES = 16 * 1024 * 1024
 _NAME = re.compile(r"[0-9a-f]{64}\.review\Z")
 _LOCK = threading.RLock()
+_DIGEST_LOCK = threading.RLock()
+_FILE_DIGESTS = OrderedDict()
 _SECRETS = {"api_key", "api-key", "apikey", "authorization", "password", "secret", "token",
             "access_token", "refresh_token", "credentials"}
 
@@ -43,7 +46,18 @@ def digest(value):
 
 
 def file_digest(path, check=lambda: None):
+    path = Path(path).resolve(strict=True)
+    check()
     before = path.stat()
+    identity = (str(path), before.st_dev, before.st_ino, before.st_size,
+                before.st_mtime_ns, before.st_ctime_ns)
+    with _DIGEST_LOCK:
+        cached = _FILE_DIGESTS.get(identity)
+        if cached is not None:
+            _FILE_DIGESTS.move_to_end(identity)
+    if cached is not None:
+        check()
+        return cached
     result = hashlib.sha256()
     with path.open("rb") as stream:
         for block in iter(lambda: stream.read(1024 * 1024), b""):
@@ -53,7 +67,14 @@ def file_digest(path, check=lambda: None):
     if (before.st_size, before.st_mtime_ns, before.st_ctime_ns) != (
             after.st_size, after.st_mtime_ns, after.st_ctime_ns):
         raise OSError("Source changed while hashing review inputs.")
-    return result.hexdigest()
+    value = result.hexdigest()
+    check()
+    with _DIGEST_LOCK:
+        _FILE_DIGESTS[identity] = value
+        _FILE_DIGESTS.move_to_end(identity)
+        while len(_FILE_DIGESTS) > 256:
+            _FILE_DIGESTS.popitem(last=False)
+    return value
 
 
 def implementation_revision():

@@ -64,6 +64,38 @@ def test_missing_loaded_revision_disables_optional_checkpoint(tmp_path, monkeypa
         cache.ReviewCheckpoint(video, "offline-model", runtime_revision={})
 
 
+def test_content_digest_reuses_unchanged_reads_but_invalidates_replaced_source(tmp_path, monkeypatch):
+    source = tmp_path / "source.bin"
+    source.write_bytes(b"first-real-content")
+    opens = []
+    original = Path.open
+    def counted(path, *args, **kwargs):
+        if path == source and args == ("rb",):
+            opens.append(str(path))
+        return original(path, *args, **kwargs)
+    monkeypatch.setattr(Path, "open", counted)
+    first = cache.file_digest(source)
+    assert cache.file_digest(source) == first
+    assert opens == [str(source)]
+    replacement = tmp_path / "replacement.bin"
+    replacement.write_bytes(b"other-real-content")
+    replacement.replace(source)
+    assert cache.file_digest(source) != first
+    assert opens == [str(source), str(source)]
+
+
+def test_cached_digest_still_honors_stop(tmp_path):
+    import asyncio
+    import pytest
+    source = tmp_path / "source.bin"
+    source.write_bytes(b"real-content")
+    cache.file_digest(source)
+    def stopped():
+        raise asyncio.CancelledError
+    with pytest.raises(asyncio.CancelledError):
+        cache.file_digest(source, stopped)
+
+
 def test_visual_checkpoint_uses_loaded_code_until_process_restart(tmp_path, monkeypatch):
     from types import SimpleNamespace
     from core import video_intelligence as visual
