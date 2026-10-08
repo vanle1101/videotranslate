@@ -18,6 +18,15 @@ services = importlib.import_module("core.services.service_manager")
 
 
 class HardwareTests(unittest.TestCase):
+    def test_windows_identity_does_not_enter_native_wmi(self):
+        with patch.object(hardware.sys, "platform", "win32"), \
+                patch.object(hardware.sys, "getwindowsversion", create=True,
+                             return_value=SimpleNamespace(major=10, minor=0, build=19045)), \
+                patch.dict(hardware.os.environ, {"PROCESSOR_IDENTIFIER": "AMD64 CPU"}), \
+                patch.object(hardware.platform, "platform", side_effect=AssertionError("native WMI")), \
+                patch.object(hardware.platform, "processor", side_effect=AssertionError("native WMI")):
+            self.assertEqual(hardware._system_identity(), ("Windows-10.0.19045", "AMD64 CPU"))
+
     def test_ctranslate2_cuda_and_ram_without_torch(self):
         modules = {
             "torch": None,
@@ -178,6 +187,13 @@ class ServiceStartupTests(unittest.TestCase):
         with patch.dict(sys.modules, {"core.streaming.pipeline": SimpleNamespace(active_streaming_sessions={"test": session})}):
             self.manager.shutdown_all()
         session.stop.assert_called_once_with()
+
+    def test_shutdown_uses_outcome_preserving_session_lifecycle(self):
+        session = SimpleNamespace(worker_task=None, stop=Mock(), shutdown=Mock())
+        with patch.dict(sys.modules, {"core.streaming.pipeline": SimpleNamespace(active_streaming_sessions={"test": session})}):
+            self.manager.shutdown_all()
+        session.shutdown.assert_called_once_with()
+        session.stop.assert_not_called()
 
     def test_shutdown_cancels_active_exports_without_changing_completed_outputs(self):
         active = {"status": "RUNNING", "cancelled": False}

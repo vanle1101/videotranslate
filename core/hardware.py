@@ -1,13 +1,28 @@
 import platform
 import subprocess
 import os
+import sys
 from typing import Dict, Any
+
+
+def _system_identity():
+    if sys.platform == "win32":
+        # Python 3.12 platform.processor()/platform.platform() query native WMI.
+        # WMI raised 0x8007000e inside the live backend on this machine. Display
+        # metadata must not enter that native probe or hold up the API loop.
+        version = sys.getwindowsversion()
+        label = f"Windows-{version.major}.{version.minor}.{version.build}"
+        processor = os.environ.get("PROCESSOR_IDENTIFIER", "")
+        return label, processor
+    return platform.platform(), platform.processor()
+
 
 def detect_hardware() -> Dict[str, Any]:
     """Detects system hardware: CPU, RAM, GPU, VRAM, CUDA, and ONNX providers."""
+    system, processor = _system_identity()
     info = {
-        "platform": platform.platform(),
-        "processor": platform.processor(),
+        "platform": system,
+        "processor": processor,
         "cpu_count": None,
         "ram_gb": None,
         "ram_available_gb": None,

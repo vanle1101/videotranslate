@@ -12,6 +12,7 @@ import os
 from pathlib import Path
 import sys
 import time
+import urllib.error
 import urllib.request
 
 os.environ["QT_QPA_PLATFORM"] = "offscreen"
@@ -192,6 +193,7 @@ def main():
     parser.add_argument("--style", action="store_true", help="Save/reload a temporary QA caption style and restore the prior style. Marks its old render outdated.")
     parser.add_argument("--skip-playback", action="store_true")
     parser.add_argument("--retry-stop", action="store_true", help="Retry and stop real work through UI (e978c201 only).")
+    parser.add_argument("--review", action="store_true", help="Run real Muse review and automatic export through the UI before playback.")
     args = parser.parse_args()
     app = QApplication.instance() or QApplication([])
     assert app.platformName() == "offscreen"
@@ -219,6 +221,46 @@ def main():
         assert state["status"] == snapshot["progress"]["status"], (state,snapshot["progress"])
         assert state["transcriptCount"] == len(snapshot["segments"]), state
         assert state["bridge"] and not state["errors"], state
+        if args.review:
+            output_root = (ROOT / "workspace/outputs").resolve()
+            prior_name = snapshot.get("output_filename")
+            prior_file = output_root / prior_name if prior_name else None
+            prior_stamp = prior_file.stat().st_mtime_ns if prior_file and prior_file.is_file() else None
+            assert click(page, "btn-review-worker")
+            until(page, "document.getElementById('task-progress').dataset.status==='RUNNING'")
+            deadline = time.monotonic() + 1800
+            previous = None
+            while time.monotonic() < deadline:
+                snapshot = backend(base, f"/api/streaming/{args.task_id}")
+                progress = snapshot["progress"]
+                current = (progress.get("status"), progress.get("stage"))
+                if current != previous:
+                    event("REVIEW_PROGRESS", progress)
+                    previous = current
+                if progress.get("status") in {"FAILED", "STOPPED", "CANCELLED"}:
+                    raise AssertionError(f"Real review failed: {progress}")
+                try:
+                    export = backend(base, f"/api/streaming/export-hq/status/{args.task_id}")
+                except urllib.error.HTTPError as error:
+                    if error.code != 404:
+                        raise
+                    export = {}  # Review has not scheduled the real export yet.
+                if export.get("status") in {"FAILED", "CANCELLED"}:
+                    raise AssertionError(f"Real export failed: {export}")
+                if snapshot.get("output_filename") and progress.get("review_summary", {}).get("status") == "completed":
+                    output = (output_root / snapshot["output_filename"]).resolve()
+                    assert output.parent == output_root and output.is_file(), snapshot["output_filename"]
+                    assert not snapshot.get("output_outdated"), "Review returned an outdated render"
+                    assert output.stat().st_size > 0 and export.get("status") == "COMPLETED", export
+                    if prior_file == output:
+                        assert output.stat().st_mtime_ns != prior_stamp, "Review reused the old exported file"
+                    until(page, "!document.getElementById('task-result-link').classList.contains('hidden')")
+                    event("REVIEW_EXPORTED", {"file":snapshot["output_filename"], "review":progress["review_summary"]})
+                    break
+                wait(1000)
+            else:
+                raise AssertionError("Real review/export exceeded 30 minutes")
+            state = ui_state(page)
         if not args.skip_playback:
             assert state["resultVisible"], state
             check_playback(page)

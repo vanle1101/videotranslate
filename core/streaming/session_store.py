@@ -58,6 +58,10 @@ _OUTPUT_CHECKS = OrderedDict()
 _OUTPUT_CHECK_LOCK = threading.Lock()
 OUTPUT_FAILURE_WARNING = ("Chưa xác minh được video đã xuất (có thể thiếu, hỏng hoặc kiểm tra hết thời gian); "
                           "bản dịch và giọng đọc vẫn được giữ. Hãy xuất MP4 lại.")
+PERSISTENCE_FAILURE_WARNINGS = frozenset((
+    "Không lưu được dự án xuống đĩa; giữ cửa sổ mở và kiểm tra dung lượng/quyền ghi.",
+    "Không lưu được phiên xuống ổ đĩa; giữ ứng dụng mở và kiểm tra dung lượng/quyền ghi.",
+))
 
 
 def _project_path(task_id):
@@ -230,7 +234,8 @@ def save_session(session):
     # Output validation is transient: a history scan must never write its
     # current probe warning back into the project manifest.
     if "warnings" in fields:
-        fields["warnings"] = [warning for warning in fields["warnings"] if warning != OUTPUT_FAILURE_WARNING]
+        fields["warnings"] = [warning for warning in fields["warnings"]
+                              if warning != OUTPUT_FAILURE_WARNING and warning not in PERSISTENCE_FAILURE_WARNINGS]
     fields["output_filename"] = _filename(getattr(session, "output_filename", ""))
     review_url = getattr(session, "output_review_url", "")
     fields["review_filename"] = _filename(review_url.rsplit("/", 1)[-1]) if review_url else ""
@@ -261,6 +266,10 @@ def save_session(session):
             handle.flush()
             os.fsync(handle.fileno())
         temporary.replace(target)
+        # Only a committed atomic save clears the live disk-failure warning.
+        # A failed write must retain it; unrelated review/media warnings stay.
+        session.warnings[:] = [warning for warning in session.warnings
+                               if warning not in PERSISTENCE_FAILURE_WARNINGS]
     finally:
         if temporary:
             temporary.unlink(missing_ok=True)

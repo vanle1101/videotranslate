@@ -40,6 +40,8 @@ REVIEW_FAILURE_WARNINGS = frozenset((
     "AI kiểm tra lại chưa hoàn tất; mở dự án và bấm AI kiểm tra lại để tiếp tục.",
 ))
 
+PROJECT_SAVE_FAILURE_WARNING = "Không lưu được dự án xuống đĩa; giữ cửa sổ mở và kiểm tra dung lượng/quyền ghi."
+
 
 class SegmentItem:
     def __init__(self, seg_id: int, start: float, end: float, duration: float):
@@ -249,7 +251,7 @@ class StreamingPipelineSession:
         try:
             self.persist()
         except (OSError, ValueError, TypeError) as exc:
-            message = "Không lưu được dự án xuống đĩa; giữ cửa sổ mở và kiểm tra dung lượng/quyền ghi."
+            message = PROJECT_SAVE_FAILURE_WARNING
             if message not in self.warnings:
                 self.warnings.append(message)
             logging.getLogger("errors").error("[%s] PROJECT_SAVE_FAILED error_type=%s", self.task_id, type(exc).__name__)
@@ -1661,6 +1663,23 @@ class StreamingPipelineSession:
         self.is_paused = False
         self.pause_event.set()
         self._persist_if_enabled()
+
+    def shutdown(self):
+        """Close idle projects without changing their completed/failed outcome.
+
+        Explicit Stop remains a cancellation. Application shutdown only cancels
+        work still owned by a running task; merely closing a completed project
+        must not rewrite its durable outcome to STOPPED.
+        """
+        owners = [self.start_task, self.worker_task, self.review_task,
+                  getattr(self, "export_task", None), getattr(self, "auto_export_task", None),
+                  *self.edit_tasks]
+        if self.is_running or self.is_editing or any(owner is not None and not owner.done() for owner in owners):
+            self.stop()
+            return
+        self._persist_if_enabled()
+        self._release_runtime()
+        active_streaming_sessions.pop(self.task_id, None)
 
     def stop(self):
         # Desktop shutdown may call from another thread after normal processing

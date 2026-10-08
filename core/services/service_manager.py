@@ -285,7 +285,7 @@ class ServiceManager:
                 owner.cancel()
             if owners:
                 await asyncio.gather(*owners, return_exceptions=True)
-            session.stop()
+            getattr(session, "shutdown", session.stop)()
 
         try:
             pipeline = sys.modules.get("core.streaming.pipeline")
@@ -300,7 +300,7 @@ class ServiceManager:
                     if loop is not None and loop.is_running():
                         pending_stops.append(asyncio.run_coroutine_threadsafe(stop_after_export(session), loop))
                     else:
-                        session.stop()
+                        getattr(session, "shutdown", session.stop)()
                 except Exception as exc:
                     logger.warning(f"Could not stop streaming session {task_id}: {exc}")
         except Exception as e:

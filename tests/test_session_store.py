@@ -361,6 +361,45 @@ def test_stop_keeps_saved_work_and_completed_rows_reopen_editably(persisted):
     assert restored.segments[0].final_vi == persisted.segments[0].final_vi
 
 
+def test_successful_atomic_save_clears_old_disk_warning_only(persisted, monkeypatch):
+    from core.streaming.session_store import PERSISTENCE_FAILURE_WARNINGS
+    path = _project_path(persisted.task_id)
+    preserved = path.read_bytes()
+    persisted.warnings = sorted(PERSISTENCE_FAILURE_WARNINGS) + ["Câu thoại cần xác minh."]
+    prior_warnings = list(persisted.warnings)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(Path, "replace", Mock(side_effect=OSError("disk full")))
+        persisted._persist_if_enabled()
+    assert persisted.warnings == prior_warnings
+    assert path.read_bytes() == preserved
+
+    persisted.persist()
+    assert persisted.warnings == ["Câu thoại cần xác minh."]
+    assert json.loads(path.read_text(encoding="utf-8"))["session"]["warnings"] == persisted.warnings
+    restored = restore_saved_session(persisted.task_id)
+    assert restored.warnings == persisted.warnings
+
+
+def test_shutdown_preserves_idle_outcome_and_saved_media(persisted):
+    audio = Path(persisted.segments[0].audio_path)
+    before = audio.read_bytes()
+    active_streaming_sessions[persisted.task_id] = persisted
+    persisted.shutdown()
+    assert not persisted.is_stopped
+    assert persisted.task_id not in active_streaming_sessions
+    assert json.loads(_project_path(persisted.task_id).read_text(encoding="utf-8"))["state"] == "READY"
+    assert audio.read_bytes() == before
+    assert restore_saved_session(persisted.task_id).get_progress()["status"] == "COMPLETED"
+
+
+def test_shutdown_cancels_unfinished_work(persisted):
+    persisted.is_running = True
+    persisted.shutdown()
+    assert persisted.is_stopped and not persisted.is_running
+    assert json.loads(_project_path(persisted.task_id).read_text(encoding="utf-8"))["state"] == "STOPPED"
+
+
 def test_stop_mid_synthesis_preserves_ready_rows_and_retries_only_missing(persisted, monkeypatch):
     first_audio = Path(persisted.segments[0].audio_path).read_bytes()
     later = SegmentItem(1, 2, 3, 1)
