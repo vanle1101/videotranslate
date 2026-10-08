@@ -243,7 +243,7 @@ def save_session(session):
     if not fields.get("total_duration") and inferred_duration:
         fields["total_duration"] = inferred_duration
     payload = {"version": VERSION, "task_id": session.task_id, "updated_at": time.time(),
-               "state": "STOPPED" if session.is_stopped else "FAILED" if session.error else
+               "state": "STOPPED" if session.is_stopped or getattr(session, "_restored_interrupted", False) else "FAILED" if session.error else
                "RUNNING" if session.is_running or session.is_editing else "READY",
                "session": fields, "segments": rows}
     _validate(payload, session.task_id)
@@ -684,6 +684,10 @@ def restore_saved_session(task_id, event_callback=None):
             session._source_downloader = _SavedSourceDownloader()
     session._persistence_enabled = True
     session._restored_project = True
+    # Interrupted work uses error internally to enable the existing retry path;
+    # that recovery marker is not a provider/runtime failure. Preserve the saved
+    # stop state across snapshots and subsequent reopen cycles until retry starts.
+    session._restored_interrupted = available["status"] == "STOPPED"
     active_streaming_sessions[task_id] = session
     return session
 

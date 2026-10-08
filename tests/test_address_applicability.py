@@ -226,3 +226,29 @@ def test_real_review_path_requests_reading_for_existing_pronoun_and_records_new_
     assert result["verification"]["address_applicable"] is True
     assert result["verification"]["address_verified"] is expected_reading
     assert result["needs_review"] is (not expected_reading)
+
+
+def test_uncertain_first_person_warning_does_not_claim_a_sibling_relationship(monkeypatch):
+    monkeypatch.setattr(settings, "LLM_PROVIDER", "opencode")
+    source = {"id": 0, "start": 0., "end": 2., "text_zh": "跟我走",
+              "literal_vi": "Đi theo tôi.", "natural_vi": "Đi theo tôi.",
+              "final_vi": "Đi theo tôi.", "needs_review": False, "review_reason": ""}
+    def respond(prompt, **kwargs):
+        if "ID cần kiểm định: " in prompt:
+            return {"address_context": [{"id": 0, "self_address": "", "listener_address": "",
+                "uncertain": True, "reason": "Chưa có căn cứ xác định quan hệ giữa hai người.",
+                "evidence": [{"id": 0, "quote": "跟我走"}]}]}
+        return {"segments": [{**source, "semantic_verified": True,
+            "verification_reason": "Giữ hành động đi theo người nói.",
+            "source_evidence_ids": ["review0"], "address_applicable": True,
+            "address_verified": False, "address_reason": "Tôi chưa được xác nhận theo quan hệ."}],
+            "screen_texts": [], "summary": ""}
+    client = Mock(has_credentials=True, model="offline-warning", translate=Mock(side_effect=respond))
+    scanner = Mock(extract=Mock(return_value=[{"start": 0., "end": 2., "text_zh": "跟我走",
+        "confidence": .99, "bbox": [.2, .7, .5, .1]}]))
+    row = AutomaticTranslationReviewer(client, scanner, audio_evidence=False).review("unused", [source], [])["segments"][0]
+    assert row["needs_review"] and row["verification"]["source_supported"]
+    assert not row["verification"]["address_verified"]
+    assert "Chưa đủ bằng chứng" in row["review_reason"]
+    assert "chị/em" not in row["review_reason"]
+    assert row["verification"]["reason"] == row["review_reason"]

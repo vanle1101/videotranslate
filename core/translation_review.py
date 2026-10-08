@@ -849,8 +849,8 @@ class AutomaticTranslationReviewer:
                 if address_uncertain:
                     verified = False
                     reason = (
-                        "Bản dịch đã gán quan hệ chị/em hoặc cách xưng hô tương tự nhưng "
-                        "nguồn chưa có bằng chứng xác định người nói và người nghe; giữ để kiểm tra lại."
+                        "Chưa đủ bằng chứng về người nói/người nghe để xác nhận cách xưng hô "
+                        "và vai trong câu dịch; giữ để kiểm tra lại."
                     )
                 if not second_pass_complete:
                     reason = self._diagnostic_message(second_failure) if second_failure else "Lượt kiểm tra ngữ nghĩa thứ hai chưa hoàn tất; giữ bản nháp và thử AI kiểm tra lại."

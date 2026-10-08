@@ -362,6 +362,7 @@ class StreamingPipelineSession:
                 or (self.start_task and not self.start_task.done())):
             raise SegmentEditConflict("Chỉ tiếp tục khi tác vụ đã dừng do lỗi và không có thao tác khác đang chạy.")
         if self._startup_failed and not self.initialized:
+            self._restored_interrupted = False
             self.is_running = True
             self.error = None
             self._startup_failed = False
@@ -385,6 +386,7 @@ class StreamingPipelineSession:
             self.asr_engine = self.faster_whisper
             if self.asr_engine_name == "sensevoice" and self.sensevoice.is_available:
                 self.asr_engine = self.sensevoice
+        self._restored_interrupted = False
         self.is_running = True
         self.is_paused = False
         self.pause_event.set()
@@ -757,7 +759,10 @@ class StreamingPipelineSession:
         if self.is_stopped:
             snapshot.update(status="STOPPED", phase="stopped", stage="Đã dừng bởi người dùng")
         elif self.error:
-            snapshot.update(status="FAILED", phase="failed", stage=self.error)
+            if getattr(self, "_restored_interrupted", False):
+                snapshot.update(status="STOPPED", phase="restored", stage=self.error)
+            else:
+                snapshot.update(status="FAILED", phase="failed", stage=self.error)
         elif self.is_paused and self.is_running:
             snapshot["status"] = "PAUSED"
         elif not self.is_running and self.review_summary.get("status") in {"failed", "incomplete"}:

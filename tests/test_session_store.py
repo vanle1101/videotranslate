@@ -372,6 +372,12 @@ def test_stop_mid_synthesis_preserves_ready_rows_and_retries_only_missing(persis
     restored = restore_saved_session(persisted.task_id)
     assert restored.can_retry and restored.segments[0].status == "READY"
     assert restored.segments[1].status == "FAILED"
+    assert restored.get_progress()["status"] == "STOPPED"
+    assert list_saved_sessions()[0]["status"] == "STOPPED"
+    restored.persist()
+    active_streaming_sessions.pop(persisted.task_id)
+    restored = restore_saved_session(persisted.task_id)
+    assert restored.can_retry and restored.get_progress()["status"] == "STOPPED"
     calls = []
 
     async def synthesize(segment):
@@ -382,6 +388,8 @@ def test_stop_mid_synthesis_preserves_ready_rows_and_retries_only_missing(persis
 
     async def resume():
         await restored.retry_failed_synthesis()
+        assert not restored._restored_interrupted
+        assert restored.get_progress()["status"] == "RUNNING"
         await restored.worker_task
 
     asyncio.run(resume())
