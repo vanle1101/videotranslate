@@ -30,7 +30,7 @@ The original user project `17736b77` is unchanged: SHA256 `b36f5dc1202ae6d8a71c5
 | Fresh process → reopen stopped project | STOPPED,14rows retained, Retry available | **PASS.** Status matches backend, transcript/media preserved. |
 | Caption controls → white text/#334455/bottom → save → page reload → reopen | Durable editable style | **PASS.** Backend/layout/UI match. Old render correctly hidden as outdated. Blur on produced24validated source masks. Original black/automatic style and blur-off restored before the final export. |
 | Actual0.4s source slot → real Hoài My → alignment/export | Complete speech at bounded speed | **PASS.** Earlier real0.460s “Hả?” fit0.400000s with Rubber Band at1.15x. Latest rerender independently checked complete WAV payloads and bounded reflow for all14rows; no truncation/overlap. |
-| Saved result → shutdown → fresh production UI history/playback | Same editable rows, valid media, no rerun required | Latest fresh-process check recorded below. Earlier HTTP restore returned14byte-identical WAVs, preserved all cue/revision data, valid MP4Range206. |
+| Saved result → shutdown → fresh production UI history/playback | Same editable rows, valid media, no rerun required | **PASS.** Fresh backend50145/PID31200 restored all14rows, correct Hoài My selection, enabled style controls and matching COMPLETED UI/backend status. Actual preview readyState4, playback advanced.452s,error=null. Closing left the durable manifest READY. Earlier HTTP restore returned14byte-identical WAVs, preserved all cue/revision data, valid MP4Range206. |
 | Independent source/semantic/address review | Meaning and supported role direction | **FAIL full acceptance:2unresolved.** Both semantic passes completed with full neighboring context. Source OCR is clear; social address is not proven. No false verification. |
 
 ## Remaining issues and limits
@@ -45,7 +45,7 @@ The original user project `17736b77` is unchanged: SHA256 `b36f5dc1202ae6d8a71c5
 ## Validation, files, and cleanup
 
 - Real providers: OpenCode Muse `muse-spark-1.3-contributor-free`, Edge Hoài My; real OCR/ASR, FFmpeg mix/export and local WebM preview. Runtime dependency/model readiness passed; none reinstalled.
-- Final full suite: **1,671passed,1skipped,127subtests**. Focused final storage/lifecycle/hardware checks: **85passed**. JavaScript interactions: **172passed**. Final full-suite result recorded below.
+- Final clean sequential full suite: **1,671passed,1skipped,127subtests** in158.39s, two upstream WebSocket deprecation warnings. Focused final storage/lifecycle/hardware checks: **85passed**. JavaScript interactions: **172passed**. No native crash occurred in this final suite.
 - No TypeScript/npm production build or configured lint/typecheck pipeline exists in this Python/Qt/FastAPI/static-JS repository. JavaScript syntax and Git whitespace checks pass; production UI executes the real application directly.
 - Main fixes this continuation: `core/translation_review.py`, `core/review_checkpoint.py`, `core/video_intelligence.py`, `core/streaming/session_store.py`, `core/streaming/pipeline.py`, `core/services/service_manager.py`, `core/hardware.py`, `static/app.js`; regression tests and `scripts/check_production_ui.py`. Earlier timing/context files are listed in historical entries.
 - Pushed code checkpoints: `8668cfd`, `aecd849`, `289eb50`, `be5f655`. Final report/follow-up commits appear in Git history. Media, credentials and runtime caches are not committed.
