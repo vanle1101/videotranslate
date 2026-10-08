@@ -110,6 +110,7 @@ def main():
             assert snapshot["telemetry"]["playable_until"] < snapshot["duration"]
             event("FRESH_RESTORE", {"ui": ui_state(page), "preserved_wavs": len(record.get("prefix_hashes", {}))})
             assert click(page, "btn-retry-worker")
+            until(page, "document.getElementById('task-progress').dataset.status==='RUNNING'", timeout=30)
         event("TASK", task_id)
         deadline = time.monotonic() + 1800
         previous = None
@@ -178,6 +179,9 @@ def main():
             wait(500)
         raise AssertionError("Real partial QA exceeded 30 minutes")
     finally:
+        # Stop owned requests before destroying a page with active callbacks.
+        service_manager.shutdown_all()
+        event("BACKEND_STOPPED", True)
         if window is not None:
             window.web_view.stop()
             window.web_view.setUrl(QUrl("about:blank"))
@@ -186,8 +190,6 @@ def main():
             window.deleteLater()
             QCoreApplication.sendPostedEvents(None, QEvent.Type.DeferredDelete)
             app.processEvents()
-        service_manager.shutdown_all()
-        event("BACKEND_STOPPED", True)
 
 
 if __name__ == "__main__":
