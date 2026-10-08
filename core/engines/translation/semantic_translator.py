@@ -112,6 +112,7 @@ class SemanticTranslator(TranslationEngine):
                     api_key=self._opencode_key(),
                     model=getattr(settings, "OPENCODE_MODEL", "big-pickle"),
                     timeout=getattr(settings, "OPENCODE_TIMEOUT", 60),
+                    max_retries=1,
                 )
             else:
                 raise RuntimeError("Nhà cung cấp dịch không hỗ trợ chế độ JSON.")

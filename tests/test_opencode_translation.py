@@ -10,6 +10,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from core.engines.translation.semantic_translator import SemanticTranslator, PacingReviewRejected
 from core.translator import VideoTranslator
+from config import settings
 
 
 class OpenCodeTranslationTests(unittest.TestCase):
@@ -53,6 +54,8 @@ class OpenCodeTranslationTests(unittest.TestCase):
             result = self.translator.translate_single_segment("你好", 3.0)
         self.assertEqual(result["final_vi"], "Chào bạn")
         client.return_value.translate.assert_called_once()
+        self.assertEqual(client.call_args.kwargs["max_retries"], 1)
+        self.assertEqual(client.call_args.kwargs["timeout"], settings.OPENCODE_TIMEOUT)
 
     def test_client_failure_is_actionable_and_does_not_leak_details(self):
         with patch("core.engines.translation.opencode_client.OpenCodeZenClient") as client, \

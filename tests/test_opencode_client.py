@@ -207,6 +207,139 @@ def test_timeout_terminates_request_process_and_cleans_temporary_files(isolated,
     assert not Path(start.call_args.kwargs["cwd"]).exists()
 
 
+@pytest.mark.parametrize("windows_pipe", [False, True])
+def test_timeout_retries_after_owned_process_cleanup_and_logs_each_attempt(
+        isolated, monkeypatch, caplog, windows_pipe):
+    monkeypatch.setattr(oc, "_IS_WINDOWS", windows_pipe)
+    failed, completed = make_process(), make_process()
+    failed.communicate.side_effect = subprocess.TimeoutExpired("private-command", 1, output="private-output")
+    terminated = []
+    starts = []
+
+    def start(*args, **kwargs):
+        starts.append(kwargs)
+        if len(starts) == 1:
+            return failed
+        assert terminated == [failed]
+        assert not any(thread.name == f"opencode-io-{failed.pid}" for thread in threading.enumerate())
+        return completed
+
+    monkeypatch.setattr(oc.subprocess, "Popen", start)
+    monkeypatch.setattr(oc, "_terminate_process_tree", terminated.append)
+    monkeypatch.setattr(oc.time, "sleep", lambda seconds: None)
+    with caplog.at_level(logging.INFO, logger="ai"), execution_context("timeout-retry"):
+        assert oc.OpenCodeZenClient(api_key="private-key", timeout=1, max_retries=1).translate("private-prompt") == "Xin chào"
+    assert len(starts) == 2
+    assert all(not Path(options["cwd"]).exists() for options in starts)
+    lines = [record.getMessage() for record in caplog.records if record.name == "ai"]
+    assert [line.split()[0] for line in lines] == ["PROVIDER_REQUEST", "PROVIDER_FAILED", "PROVIDER_REQUEST", "PROVIDER_COMPLETED"]
+    assert [re.search(r"attempt=(\d)", line).group(1) for line in lines] == ["1", "1", "2", "2"]
+    assert len({re.search(r"request_id=([a-f0-9]{32})", line).group(1) for line in lines}) == 1
+    assert "private-" not in caplog.text
+
+
+@pytest.mark.parametrize("max_retries", [0, 1, 2])
+def test_timeout_exhaustion_is_typed_bounded_and_cleans_every_attempt(isolated, monkeypatch, caplog, max_retries):
+    monkeypatch.setattr(oc, "_IS_WINDOWS", False)
+    processes = [make_process() for _ in range(max_retries + 1)]
+    for process in processes:
+        process.communicate.side_effect = subprocess.TimeoutExpired("private-command", 1, stderr="private-key")
+    start, terminate = Mock(side_effect=processes), Mock()
+    monkeypatch.setattr(oc.subprocess, "Popen", start)
+    monkeypatch.setattr(oc, "_terminate_process_tree", terminate)
+    delays = []
+    monkeypatch.setattr(oc.time, "sleep", delays.append)
+    with caplog.at_level(logging.INFO, logger="ai"), execution_context("timeout-exhausted"):
+        with pytest.raises(oc.OpenCodeTimeoutError, match="quá lâu") as caught:
+            oc.OpenCodeZenClient(api_key="private-key", timeout=1, max_retries=max_retries).translate("private-prompt")
+    assert isinstance(caught.value, oc.OpenCodeRequestError)
+    assert start.call_count == max_retries + 1
+    assert [call.args[0] for call in terminate.call_args_list] == processes
+    assert delays == [1, 2][:max_retries]
+    assert all(not Path(call.kwargs["cwd"]).exists() for call in start.call_args_list)
+    lines = [record.getMessage() for record in caplog.records if record.name == "ai"]
+    assert [line.split()[0] for line in lines] == ["PROVIDER_REQUEST", "PROVIDER_FAILED"] * (max_retries + 1)
+    assert "PROVIDER_COMPLETED" not in caplog.text and "private-" not in caplog.text
+    assert "private-" not in str(caught.value)
+
+
+def test_cancellation_during_timeout_backoff_never_launches_another_cli(isolated, monkeypatch, caplog):
+    monkeypatch.setattr(oc, "_IS_WINDOWS", False)
+    clock = [0.0]
+    cancelled = threading.Event()
+    process = make_process()
+
+    def wait(request, timeout):
+        clock[0] += timeout
+        raise subprocess.TimeoutExpired("private-command", timeout)
+
+    process.communicate.side_effect = wait
+    start, terminate = Mock(return_value=process), Mock()
+    monkeypatch.setattr(oc.subprocess, "Popen", start)
+    monkeypatch.setattr(oc, "_terminate_process_tree", terminate)
+    monkeypatch.setattr(oc.time, "monotonic", lambda: clock[0])
+    monkeypatch.setattr(oc.time, "sleep", lambda seconds: cancelled.set())
+    with caplog.at_level(logging.INFO, logger="ai"), execution_context("timeout-stop", cancelled.is_set):
+        with pytest.raises(oc.OpenCodeCancelledError):
+            oc.OpenCodeZenClient(api_key="private-key", timeout=1, max_retries=2).translate("private-prompt")
+    assert clock[0] == 1
+    start.assert_called_once()
+    terminate.assert_called_once_with(process)
+    assert not Path(start.call_args.kwargs["cwd"]).exists()
+    assert "PROVIDER_CANCELLED" in caplog.text and "PROVIDER_COMPLETED" not in caplog.text
+    assert "private-" not in caplog.text
+
+
+@pytest.mark.parametrize("returncode", [0, 1])
+def test_tool_attempt_is_never_retried_even_after_cli_failure(isolated, monkeypatch, returncode):
+    process = make_process(json.dumps({"type": "tool_use", "part": {"state": {"status": "error"}}}), returncode=returncode)
+    start = Mock(return_value=process)
+    monkeypatch.setattr(oc.subprocess, "Popen", start)
+    with pytest.raises(oc.OpenCodeRequestError, match="công cụ"):
+        oc.OpenCodeZenClient(api_key="fixture-key", max_retries=2).translate("hello")
+    start.assert_called_once()
+    assert not Path(start.call_args.kwargs["cwd"]).exists()
+
+
+def test_cli_configuration_failure_is_not_eligible_for_timeout_retry(isolated, monkeypatch):
+    start = Mock(side_effect=OSError("private-path"))
+    monkeypatch.setattr(oc.subprocess, "Popen", start)
+    with pytest.raises(oc.OpenCodeConfigurationError):
+        oc.OpenCodeZenClient(api_key="fixture-key", max_retries=2).translate("hello")
+    start.assert_called_once()
+    assert not Path(start.call_args.kwargs["cwd"]).exists()
+
+
+def test_real_timeout_retry_reaps_first_child_before_starting_successful_child(isolated, monkeypatch):
+    real_popen = subprocess.Popen
+    children = []
+    roots = []
+
+    def start(argv, **kwargs):
+        roots.append(Path(kwargs["cwd"]))
+        if children:
+            assert children[0].poll() is not None
+            assert all(stream.closed for stream in (children[0].stdin, children[0].stdout, children[0].stderr))
+            assert not any(thread.name == f"opencode-io-{children[0].pid}" for thread in threading.enumerate())
+            child = "import sys; sys.stdin.read(); print('{\"type\":\"text\",\"part\":{\"text\":\"verified\"}}')"
+        else:
+            child = "import time; time.sleep(30)"
+        process = real_popen([sys.executable, "-u", "-c", child], **kwargs)
+        children.append(process)
+        return process
+
+    monkeypatch.setattr(oc.subprocess, "Popen", start)
+    monkeypatch.setattr(oc, "_retry_delay", lambda seconds, context: oc._check_cancelled(context))
+    try:
+        assert oc.OpenCodeZenClient(api_key="fixture-key", timeout=1, max_retries=1).translate("hello") == "verified"
+        assert len(children) == 2
+        assert all(child.poll() is not None for child in children)
+        assert all(not root.exists() for root in roots)
+    finally:
+        for child in children:
+            oc._terminate_process_tree(child)
+
+
 def test_errors_do_not_include_raw_cli_outputs(isolated, monkeypatch):
     process = make_process("", "token fixture-key private-prompt", returncode=1)
     monkeypatch.setattr(oc.subprocess, "Popen", Mock(return_value=process))

@@ -61,7 +61,7 @@ def partial_playback(page, snapshot):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("mode", choices=["start-stop", "resume-stop", "resume"])
+    parser.add_argument("mode", choices=["start-stop", "resume-stop", "resume", "inspect"])
     args = parser.parse_args()
     assert SOURCE.is_file() and SOURCE.stat().st_size < 100_000_000
     assert settings.LLM_PROVIDER == "opencode", "Keep the actual configured Muse provider"
@@ -104,6 +104,20 @@ def main():
             assert task_id.isalnum() and len(task_id) == 8
             open_history(page, task_id)
             snapshot = backend(base, f"/api/streaming/{task_id}")
+            if args.mode == "inspect":
+                assert snapshot["progress"]["status"] == "COMPLETED" and snapshot["output_filename"]
+                assert not snapshot.get("output_outdated")
+                current_hashes = hashes(task_id, snapshot["segments"])
+                assert all(row["status"] in ("READY", "PLAYED") for row in snapshot["segments"])
+                expected_hashes = record.get("final_hashes", record["prefix_hashes"])
+                assert all(current_hashes.get(sid) == digest for sid, digest in expected_hashes.items())
+                if "final_hashes" in record:
+                    assert current_hashes == record["final_hashes"]
+                check_playback(page)
+                record["final_hashes"] = current_hashes
+                RECORD.write_text(json.dumps(record), encoding="utf-8")
+                event("FINAL_REOPEN_PASS", {"task_id": task_id, "output": snapshot["output_filename"], "state": ui_state(page)})
+                return
             assert snapshot["progress"]["can_retry"] and snapshot["initialized"]
             restored_hashes = hashes(task_id, snapshot["segments"])
             assert all(restored_hashes.get(sid) == digest for sid, digest in record.get("prefix_hashes", {}).items())
@@ -174,6 +188,8 @@ def main():
                     assert snapshot.get("output_filename") and not snapshot.get("output_outdated")
                     until(page, "!document.getElementById('task-result-link').classList.contains('hidden')")
                     check_playback(page)
+                    record["final_hashes"] = now
+                    RECORD.write_text(json.dumps(record), encoding="utf-8")
                     event("RESUME_EXPORT_PASS", {"task_id": task_id, "ready": ready, "prefix_unchanged": True, "output": snapshot["output_filename"], "state": ui_state(page)})
                     return
             wait(500)

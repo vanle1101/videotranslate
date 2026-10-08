@@ -54,6 +54,10 @@ class OpenCodeRequestError(OpenCodeClientError):
     pass
 
 
+class OpenCodeTimeoutError(OpenCodeRequestError):
+    """The owned CLI exchange exceeded its deadline and was terminated."""
+
+
 class OpenCodeCancelledError(OpenCodeRequestError):
     pass
 
@@ -124,7 +128,7 @@ def _communicate(process, request, timeout, context):
         raise
     except subprocess.TimeoutExpired:
         _terminate_process_tree(process)
-        raise OpenCodeRequestError("OpenCode phản hồi quá lâu. Hãy thử lại hoặc chọn model khác.") from None
+        raise OpenCodeTimeoutError("OpenCode phản hồi quá lâu. Hãy thử lại hoặc chọn model khác.") from None
     except BaseException:
         # Pipe errors and caller interruptions must also reap the CLI before
         # TemporaryDirectory removes the files still owned by that process.
@@ -468,8 +472,29 @@ class OpenCodeZenClient:
                         creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
                     )
                     stdout, stderr = _communicate(process, request, self.timeout, context)
+                except OpenCodeTimeoutError:
+                    # _communicate terminates/reaps this attempt before raising;
+                    # only its typed deadline failure is eligible for a retry.
+                    # Cancellation, configuration and parsing errors propagate.
+                    if attempt >= self.max_retries:
+                        raise
+                    _retry_delay(min(2 ** attempt, 2), context)
+                    retry(attempt + 2)
+                    continue
                 except OSError:
                     raise OpenCodeConfigurationError("Không khởi chạy được OpenCode CLI.") from None
+                events = []
+                for line in stdout.splitlines():
+                    try:
+                        event = json.loads(line)
+                    except (ValueError, TypeError):
+                        continue
+                    if isinstance(event, dict):
+                        events.append(event)
+                if any(event.get("type") == "tool_use" for event in events):
+                    # A failed CLI may still have attempted a tool. Reject that
+                    # attempt before considering a nonzero-exit retry.
+                    raise OpenCodeRequestError("OpenCode đã gọi công cụ ngoài tác vụ dịch; Studio không chấp nhận kết quả lượt này.")
                 if process.returncode:
                     if attempt < self.max_retries:
                         _retry_delay(min(2 ** attempt, 2), context)
@@ -477,19 +502,9 @@ class OpenCodeZenClient:
                         continue
                     raise OpenCodeRequestError(_safe_failure(stdout + "\n" + stderr))
                 parts: list[str] = []
-                for line in stdout.splitlines():
-                    try:
-                        event = json.loads(line)
-                    except (ValueError, TypeError):
-                        continue
-                    if not isinstance(event, dict):
-                        continue
+                for event in events:
                     if event.get("type") == "error":
                         raise OpenCodeRequestError(_safe_failure(json.dumps(event)))
-                    if event.get("type") == "tool_use":
-                        # OpenCode emits this event after completion/error. It
-                        # proves a tool was attempted, not that it was blocked.
-                        raise OpenCodeRequestError("OpenCode đã gọi công cụ ngoài tác vụ dịch; Studio không chấp nhận kết quả lượt này.")
                     part = event.get("part", {})
                     if event.get("type") == "text" and isinstance(part, dict):
                         content = part.get("text")
