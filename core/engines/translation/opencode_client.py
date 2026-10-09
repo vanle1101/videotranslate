@@ -534,6 +534,7 @@ class OpenCodeZenClient:
                 wait_retry=lambda delay: _retry_delay(delay, context), on_retry=retry,
                 validate=validate if response_validator is not None else None, use_cache=use_cache,
                 on_cache_hit=lambda: cache_hit.__setitem__(0, True),
+                cache_allowed=lambda raw: not self._api_key or self._api_key not in raw,
             )
             _check_cancelled(context)
             if cache_hit[0]:

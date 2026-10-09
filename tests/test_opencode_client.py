@@ -871,6 +871,15 @@ def test_malformed_response_not_cached_and_schema_error_retains_safe_cause(isola
     assert start.call_count == 2 and not list((isolated / "cache").glob("*.json"))
 
 
+def test_credentials_echo_is_never_written_to_success_cache(isolated, monkeypatch):
+    start = Mock(return_value=make_process(json.dumps({"type": "text", "part": {"text": '{"text":"private-api-key"}'}})))
+    monkeypatch.setattr(oc.subprocess, "Popen", start)
+    client = oc.OpenCodeZenClient(api_key="private-api-key")
+    for _ in range(2):
+        client.translate("hello", response_validator=json.loads, schema_id="text-v1")
+    assert start.call_count == 2 and not list((isolated / "cache").glob("*.json"))
+
+
 @pytest.mark.parametrize("failure, attempts, code", [
     ("HTTP 429 rate limit", 2, "provider_rate_limited"),
     ("HTTP 503 service unavailable", 2, "provider_server"),

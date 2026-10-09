@@ -266,14 +266,15 @@ class AIExecutionLayer:
                 on_retry: Optional[Callable[[int, Exception], None]] = None,
                 validate: Optional[Callable[[str], Any]] = None,
                 use_cache: bool = True,
-                on_cache_hit: Optional[Callable[[], None]] = None) -> str:
+                on_cache_hit: Optional[Callable[[], None]] = None,
+                cache_allowed: Optional[Callable[[str], bool]] = None) -> str:
         self._cancel(cancel_check)
         max_retries = max(0, min(int(max_retries), 2))
         key = response_cache_key(identity)
         cache_enabled = use_cache and validate is not None
         if cache_enabled:
             cached = self.cache.get(key, validate)
-            if cached is not None:
+            if cached is not None and (cache_allowed is None or cache_allowed(cached)):
                 self._cancel(cancel_check)
                 with self._condition:
                     self._cache_hits += 1
@@ -286,7 +287,7 @@ class AIExecutionLayer:
             # validated result rather than starting another provider request.
             if cache_enabled:
                 cached = self.cache.get(key, validate)
-                if cached is not None:
+                if cached is not None and (cache_allowed is None or cache_allowed(cached)):
                     self._cancel(cancel_check)
                     with self._condition:
                         self._cache_hits += 1
@@ -326,7 +327,7 @@ class AIExecutionLayer:
                         on_retry(attempt + 2, error)
                     continue
                 self._success()
-                if cache_enabled:
+                if cache_enabled and (cache_allowed is None or cache_allowed(result)):
                     self.cache.put(key, result, validate)
                 self._cancel(cancel_check)
                 return result
