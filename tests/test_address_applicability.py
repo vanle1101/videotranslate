@@ -186,7 +186,8 @@ def test_selector_and_verifier_use_the_same_pronoun_detection(candidate):
     assert AutomaticTranslationReviewer._address_applicable({}, "我在工作", candidate)
 
 
-@pytest.mark.parametrize("candidate", ["Ba phút.", "Đi một mình.", "Con vật chạy qua."])
+@pytest.mark.parametrize("candidate", ["Ba phút.", "Đi một mình.", "Con vật chạy qua.",
+    "Thuốc dạ dày vẫn để ở ngăn thứ ba.", "Đến vào thứ Ba."])
 def test_unambiguous_non_address_spans_do_not_trigger_pronoun_audit(candidate):
     assert not contains_address_expression(candidate)
     assert not needs_address_audit([{"text_zh": "三分钟", "final_vi": candidate}])
@@ -196,6 +197,7 @@ def test_unambiguous_non_address_spans_do_not_trigger_pronoun_audit(candidate):
 def test_excluded_numeric_span_does_not_remove_a_real_parent_address():
     assert contains_address_expression("Ba chờ ba phút.")
     assert contains_address_expression("Mày đi một mình.")
+    assert address_expressions("Ba để thuốc ở ngăn thứ ba.") == ["Ba"]
 
 
 @pytest.mark.parametrize("initial,candidate,expected_reading", [

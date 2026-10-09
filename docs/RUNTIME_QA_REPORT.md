@@ -16,6 +16,16 @@ Latest broad validation before this correction: **1910 Python tests passed, 1 sk
 
 The following dated sections are historical evidence. Their in-progress statements and old test counts do not supersede this current verdict.
 
+### Additional reproduced source/address defects
+
+The current real production task exposed another cross-chunk source import. Row 118's immutable ASR is `你们两个以后` (177.78–178.86s); row 119's is `都会过得更好` (178.86–179.70s). Fresh review accepted the complete OCR line in row 118 because its scan and currently published screen track both ended exactly at the chunk boundary. The next OCR piece was not published yet, so strict temporal overlap excluded row 119 from ownership lookup. Row 118 consequently repeated row 119's words and could not fit its own speech slot. A direct replay of the actual fields reproduced the defect before editing.
+
+`translation_review.py` now uses a touching source neighbor as a lexical boundary only when the exact immutable ASR concatenation matches the full OCR line and the OCR is clipped at the same focus boundary. It preserves actual OCR times/confidence and refuses gapped or unmatched ownership. Regression coverage includes both directions, rejection of the duplicated complete source, and acceptance of the correct isolated fragment.
+
+Row 85 also remained unresolved because the local address selector interpreted the numeric `ba` in “Thuốc dạ dày vẫn để ở ngăn thứ ba.” as a father address, overriding the real semantic review's neutral applicability. `translation_context.py` now excludes the unambiguous phrase `thứ ba`, while preserving a real `Ba` elsewhere in the same sentence. This changes address selection only; it does not choose a speaker or grant semantic approval.
+
+Focused source-scope/address/reviewer validation: **141 passed**. These changes were made after the active process loaded its code; the real-source retry with freshly loaded code remains pending.
+
 ### Continued runtime audit — 02:50–03:15
 
 **FAILED baseline / fixes under real retest.** Original Douyin `7692745161054506290`, task `76f5aa6b`, 320.040635s, configured real OpenCode Muse and Edge-TTS. Fresh production Qt Start reached 15 READY speech rows in the 24.48s preview, but IDs 7 and 13 failed pacing. Fresh History → Retry reproduced both failures and retained all 15 prior WAVs. No complete 320s export is claimed.

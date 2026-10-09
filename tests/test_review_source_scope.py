@@ -216,6 +216,48 @@ def test_immutable_asr_owns_scope_even_when_draft_was_already_expanded():
     assert scoped["text_zh"] == "明天去学校"
 
 
+def test_incremental_boundary_cannot_import_the_next_unpublished_source_fragment(monkeypatch):
+    source = row(118, 177.78, 178.86, "你们两个以后", "Hai người sau này…")
+    neighbor = row(119, 178.86, 179.70, "都会过得更好", "Đều sẽ sống tốt hơn.")
+    text = "你们两个以后都会过得更好"
+    result, _ = review_row(monkeypatch, source, [neighbor], text, text,
+        "Hai người sau này đều sẽ sống tốt hơn.",
+        ocr_window=(178.26, 178.86), screen_window=(178.26, 178.86))
+    assert result["text_zh"] == source["text_zh"]
+    assert result["final_vi"] == source["final_vi"]
+    assert result["verification"]["source_scope_conflict"]
+    proof = result["verification"]["evidence"][0]
+    assert proof["text_zh"] == "你们两个以后"
+    assert proof["source_scope_ids"] == [118, 119]
+    assert (proof["start"], proof["end"]) == (178.26, 178.86)
+
+
+def test_clipped_boundary_accepts_only_the_owned_fragment(monkeypatch):
+    source = row(118, 177.78, 178.86, "你们两个以后")
+    neighbor = row(119, 178.86, 179.70, "都会过得更好")
+    result, _ = review_row(monkeypatch, source, [neighbor], "你们两个以后都会过得更好",
+        source["text_zh"], "Hai người sau này…", ocr_window=(178.26, 178.86))
+    assert result["verification"]["source_supported"]
+    assert not result["needs_review"]
+
+
+def test_clipped_boundary_scopes_the_previous_unpublished_fragment():
+    previous = row(118, 177.78, 178.86, "你们两个以后")
+    source = row(119, 178.86, 179.70, "都会过得更好")
+    evidence = {"start": 178.86, "end": 179.70, "text_zh": "你们两个以后都会过得更好"}
+    result = AutomaticTranslationReviewer._scope_evidence(evidence, source, [previous, source])
+    assert result["text_zh"] == "都会过得更好"
+    assert result["source_scope_ids"] == [118, 119]
+
+
+@pytest.mark.parametrize("gap,extra", [(.01, ""), (0., "然后")])
+def test_clipped_boundary_requires_exact_touching_asr_ownership(gap, extra):
+    source = row(1, 1., 2., "明天去学校")
+    neighbor = row(2, 2. + gap, 3., "找老师")
+    evidence = {"start": 1.1, "end": 2., "text_zh": "明天去学校" + extra + "找老师"}
+    assert AutomaticTranslationReviewer._scope_evidence(evidence, source, [source, neighbor]) == evidence
+
+
 def test_audio_fallback_keeps_wider_context_from_bounded_review(monkeypatch):
     monkeypatch.setattr(settings, "LLM_PROVIDER", "opencode")
     source = row(4, 7., 8., "你好", "Xin chào.")

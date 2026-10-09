@@ -669,6 +669,7 @@ class AutomaticTranslationReviewer:
         A replacement crossing a boundary is ambiguous, never corroboration.
         """
         original = VideoIntelligence._compact_text(candidate.get("text_zh", ""))
+        context = list(context)
         ownership_window = {"start": candidate["start"], "end": candidate["end"]}
         # Editing a speech row splits the persisted OCR track at that row's
         # boundaries. The resulting mask-only pieces must still be treated as
@@ -721,6 +722,29 @@ class AutomaticTranslationReviewer:
         adjacent = [row for row in context if row.get("id") != source["id"]
             and cls._overlaps(row, ownership_window)
             and (row["end"] <= source["start"] or row["start"] >= source["end"])]
+        # At an incremental review boundary, the following OCR piece has not
+        # been published yet. A track clipped exactly at the focus endpoint
+        # can still contain both measured source fragments. Use a touching
+        # neighbour only when their exact immutable ASR concatenation matches
+        # the complete OCR text. This establishes lexical ownership without
+        # widening the measured OCR interval or borrowing unrelated dialogue.
+        measured_source = VideoIntelligence._compact_text(source.get("asr_text") or source.get("text_zh", ""))
+        adjacent_ids = {row["id"] for row in adjacent}
+        for row in context:
+            if row.get("id") == source["id"] or row.get("id") in adjacent_ids:
+                continue
+            measured_neighbor = VideoIntelligence._compact_text(row.get("asr_text") or row.get("text_zh", ""))
+            if not measured_source or len(measured_neighbor) < 2:
+                continue
+            follows = (abs(candidate["end"] - source["end"]) <= boundary_epsilon
+                and abs(row["start"] - source["end"]) <= boundary_epsilon
+                and measured_source + measured_neighbor == original)
+            precedes = (abs(candidate["start"] - source["start"]) <= boundary_epsilon
+                and abs(row["end"] - source["start"]) <= boundary_epsilon
+                and measured_neighbor + measured_source == original)
+            if follows or precedes:
+                adjacent.append(row)
+                adjacent_ids.add(row["id"])
         # Ignore parallel/overlapping speakers, and prefer the immutable ASR
         # transcript over an AI correction when locating a speech interval.
         rows = [{**row, "scope_text": VideoIntelligence._compact_text(

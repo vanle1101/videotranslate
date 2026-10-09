@@ -171,6 +171,7 @@ def address_expressions(candidate):
     # A small set of unambiguous numeric-unit spans is not an address. Keep
     # the rest of the sentence: 'Ba chờ ba phút' still contains the parent.
     text = re.sub(r"\bba\s+(?:phút|giây|giờ|ngày|tuần|tháng|năm|lần|chiếc|cái)\b", "", text, flags=re.I)
+    text = re.sub(r"\bthứ\s+ba\b", "", text, flags=re.I)
     return re.findall(
         r"(?<!\w)(?:tôi|tao|tớ|mình|bạn|mày|chị|em|anh|cô|chú|bác|con|bố|ba|mẹ|má|"
         r"thầy|cậu|ông|bà|ta|cháu|dì|cụ|cưng|ngươi|mi)(?!\w)", text, re.I)
