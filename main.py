@@ -56,6 +56,9 @@ templates = Jinja2Templates(directory=str(settings.BASE_DIR / "templates"))
 
 # Active WebSocket connections per session
 stream_sockets: Dict[str, List[WebSocket]] = {}
+_stream_send_states = {}
+STREAM_SEND_TIMEOUT_SECONDS = 2.0
+STREAM_CLOSE_TIMEOUT_SECONDS = 0.5
 downloader = VideoDownloader()
 
 @app.get("/api/health")
@@ -728,6 +731,7 @@ async def stop_task(task_id: str):
 # -------------------------------------------------------------
 
 def _remove_stream_socket(task_id, websocket):
+    _stream_send_states.pop((task_id, id(websocket)), None)
     connections = stream_sockets.get(task_id)
     if connections is None:
         return
@@ -737,17 +741,49 @@ def _remove_stream_socket(task_id, websocket):
         stream_sockets.pop(task_id, None)
 
 
-async def broadcast_session_event(task_id: str, event_type: str, data: Dict[str, Any]):
-    if task_id in stream_sockets:
-        dead_conns = []
-        payload = {"type": event_type, "task_id": task_id, **data}
-        for ws in list(stream_sockets.get(task_id, [])):
+async def _send_stream_payload(task_id, websocket, payload):
+    """Serialize one client's replay/live events without blocking its siblings."""
+    key = (task_id, id(websocket))
+    if not any(client is websocket for client in stream_sockets.get(task_id, ())):
+        return
+    state = _stream_send_states.get(key)
+    if state is None:
+        state = asyncio.Lock()
+        _stream_send_states[key] = state
+    async def send_locked():
+        async with state:
+            if (_stream_send_states.get(key) is not state
+                    or not any(client is websocket for client in stream_sockets.get(task_id, ()))):
+                return
+            await websocket.send_json(payload)
+    try:
+        # Include the lock wait in the bound: a stalled client must not retain
+        # an ever-growing queue of old progress or hold up provider callbacks.
+        await asyncio.wait_for(send_locked(), timeout=STREAM_SEND_TIMEOUT_SECONDS)
+    except BaseException:
+        # A cancelled/failed send can leave a partial transport write. Drop its
+        # ownership and close it; queued sends recheck ownership before writing.
+        _remove_stream_socket(task_id, websocket)
+        close = getattr(websocket, "close", None)
+        if callable(close):
             try:
-                await ws.send_json(payload)
+                await asyncio.wait_for(close(code=1011), timeout=STREAM_CLOSE_TIMEOUT_SECONDS)
             except Exception:
-                dead_conns.append(ws)
-        for ws in dead_conns:
-            _remove_stream_socket(task_id, ws)
+                pass
+        raise
+
+
+async def broadcast_session_event(task_id: str, event_type: str, data: Dict[str, Any]):
+    payload = {"type": event_type, "task_id": task_id, **data}
+    async def deliver(websocket):
+        try:
+            await _send_stream_payload(task_id, websocket, payload)
+        except Exception as error:
+            logging.getLogger("errors").warning(
+                "STREAM_SEND_FAILED run_id=%s error_type=%s", task_id, type(error).__name__)
+    # Each connection owns a FIFO lock. Different connections send in parallel,
+    # so an unresponsive UI cannot prevent healthy clients receiving this event.
+    await asyncio.gather(*(deliver(ws) for ws in list(stream_sockets.get(task_id, ()))))
     if event_type == "finished":
         schedule_reviewed_export(task_id)
 
@@ -1778,12 +1814,12 @@ async def websocket_stream(websocket: WebSocket, task_id: str):
         session = get_streaming_session(task_id)
         if session:
             if hasattr(session, "get_progress"):
-                await websocket.send_json({"type": "progress", "task_id": task_id, **session.get_progress()})
+                await _send_stream_payload(task_id, websocket, {"type": "progress", "task_id": task_id, **session.get_progress()})
             if getattr(session, "source_video_url", None):
-                await websocket.send_json({"type": "source_ready", "task_id": task_id, "video_url": session.source_video_url})
+                await _send_stream_payload(task_id, websocket, {"type": "source_ready", "task_id": task_id, "video_url": session.source_video_url})
         if session and getattr(session, "initialized", True):
             # Send current state immediately upon connection
-            await websocket.send_json({
+            await _send_stream_payload(task_id, websocket, {
                 "type": "init",
                 "task_id": task_id,
                 "duration": session.total_duration,
@@ -1801,15 +1837,15 @@ async def websocket_stream(websocket: WebSocket, task_id: str):
                 "suppression_level": f"{session.vocal_suppressor.suppression_level_db:.1f} dB",
                 "suppression_rtf": session.suppression_stats.get("throughput_rtf", "75.0x")
             })
-            await websocket.send_json({
+            await _send_stream_payload(task_id, websocket, {
                 "type": "telemetry",
                 "task_id": task_id,
                 **session.get_telemetry()
             })
             if not session.error and session.first_play_emitted:
-                await websocket.send_json({"type": "ready_to_play", "task_id": task_id})
+                await _send_stream_payload(task_id, websocket, {"type": "ready_to_play", "task_id": task_id})
         if session and session.error:
-            await websocket.send_json({"type": "error", "message": session.error, "task_id": task_id})
+            await _send_stream_payload(task_id, websocket, {"type": "error", "message": session.error, "task_id": task_id})
 
         while True:
             data = await websocket.receive_json()

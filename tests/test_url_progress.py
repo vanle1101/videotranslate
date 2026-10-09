@@ -21,6 +21,7 @@ def isolated(tmp_path, monkeypatch):
     monkeypatch.setattr(settings, "BASE_DIR", tmp_path)
     monkeypatch.setattr(main, "task_history", [])
     monkeypatch.setattr(main, "stream_sockets", {})
+    monkeypatch.setattr(main, "_stream_send_states", {})
     monkeypatch.setattr(main, "active_export_tasks", {})
     registry = {}
     monkeypatch.setattr(main, "active_streaming_sessions", registry)
@@ -65,10 +66,152 @@ def test_cancelled_websocket_reader_releases_owner_without_swallowing_cancel(iso
     assert "cancelled" not in main.stream_sockets
 
 
+def test_concurrent_broadcasts_preserve_each_clients_lifecycle_order(isolated, monkeypatch):
+    # Python 3.10 is supported and has no asyncio.timeout context manager.
+    monkeypatch.delattr(asyncio, "timeout", raising=False)
+    async def run():
+        entered, release = asyncio.Event(), asyncio.Event()
+        slow_events, healthy_events = [], []
+        async def slow_send(payload):
+            if payload["type"] == "export_progress":
+                entered.set()
+                await release.wait()
+            slow_events.append(payload["type"])
+        slow = SimpleNamespace(send_json=slow_send)
+        healthy = SimpleNamespace(send_json=AsyncMock(side_effect=lambda data: healthy_events.append(data["type"])))
+        main.stream_sockets["order"] = [slow, healthy]
+        old = asyncio.create_task(main.broadcast_session_event("order", "export_progress", {"progress": 50}))
+        await entered.wait()
+        final = asyncio.create_task(main.broadcast_session_event("order", "result_ready", {"output_video_url": "validated.mp4"}))
+        await wait_for(lambda: len(healthy_events) == 2)
+        assert healthy_events == ["export_progress", "result_ready"]
+        assert not slow_events and not final.done()
+        release.set()
+        await asyncio.gather(old, final)
+        assert slow_events == ["export_progress", "result_ready"]
+        for socket in (slow, healthy):
+            main._remove_stream_socket("order", socket)
+        assert not main._stream_send_states
+    asyncio.run(run())
+
+
+def test_stalled_client_is_bounded_and_does_not_block_healthy_or_export(isolated, monkeypatch):
+    monkeypatch.setattr(main, "STREAM_SEND_TIMEOUT_SECONDS", .05)
+    schedule = Mock()
+    monkeypatch.setattr(main, "schedule_reviewed_export", schedule)
+    async def run():
+        stalled, healthy_received = asyncio.Event(), asyncio.Event()
+        async def stalled_send(payload):
+            await stalled.wait()
+        slow = SimpleNamespace(send_json=AsyncMock(side_effect=stalled_send), close=AsyncMock())
+        healthy = SimpleNamespace(send_json=AsyncMock(side_effect=lambda payload: healthy_received.set()))
+        main.stream_sockets["stalled"] = [slow, healthy]
+        started = time.monotonic()
+        send = asyncio.create_task(main.broadcast_session_event("stalled", "finished", {}))
+        await asyncio.wait_for(healthy_received.wait(), .03)
+        await asyncio.wait_for(send, .2)
+        assert time.monotonic() - started < .2
+        assert main.stream_sockets["stalled"] == [healthy]
+        slow.close.assert_awaited_once_with(code=1011)
+        schedule.assert_called_once_with("stalled")
+        assert ("stalled", id(slow)) not in main._stream_send_states
+        main._remove_stream_socket("stalled", healthy)
+        assert not main._stream_send_states
+    asyncio.run(run())
+
+
+def test_broadcast_cancellation_drops_inflight_owner_and_propagates(isolated):
+    async def run():
+        entered = asyncio.Event()
+        async def send(payload):
+            entered.set()
+            await asyncio.Future()
+        socket = SimpleNamespace(send_json=send, close=AsyncMock())
+        main.stream_sockets["cancel-send"] = [socket]
+        broadcast = asyncio.create_task(main.broadcast_session_event("cancel-send", "progress", {}))
+        await entered.wait()
+        broadcast.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await broadcast
+        assert "cancel-send" not in main.stream_sockets
+        assert not main._stream_send_states
+        socket.close.assert_awaited_once_with(code=1011)
+    asyncio.run(run())
+
+
+def test_disconnected_client_does_not_receive_queued_late_result(isolated):
+    async def run():
+        entered, release = asyncio.Event(), asyncio.Event()
+        delivered = []
+        async def send(payload):
+            if payload["type"] == "export_progress":
+                entered.set()
+                await release.wait()
+            delivered.append(payload["type"])
+        socket = SimpleNamespace(send_json=send)
+        main.stream_sockets["gone"] = [socket]
+        old = asyncio.create_task(main.broadcast_session_event("gone", "export_progress", {}))
+        await entered.wait()
+        late = asyncio.create_task(main.broadcast_session_event("gone", "result_ready", {}))
+        await asyncio.sleep(0)
+        main._remove_stream_socket("gone", socket)
+        release.set()
+        await asyncio.gather(old, late)
+        assert delivered == ["export_progress"]
+        assert not main._stream_send_states
+    asyncio.run(run())
+
+
+def test_initial_replay_and_live_events_share_the_same_send_owner(isolated, monkeypatch):
+    session = SimpleNamespace(initialized=False, source_video_url=None, error=None,
+                              get_progress=lambda: {"status": "RUNNING"})
+    monkeypatch.setattr(main, "get_streaming_session", lambda task: session)
+    async def run():
+        entered, release, disconnect = asyncio.Event(), asyncio.Event(), asyncio.Event()
+        delivered = []
+        async def send(payload):
+            if payload["type"] == "progress":
+                entered.set()
+                await release.wait()
+            delivered.append(payload["type"])
+        async def receive():
+            await disconnect.wait()
+            raise WebSocketDisconnect()
+        socket = SimpleNamespace(accept=AsyncMock(), send_json=send, receive_json=receive)
+        reader = asyncio.create_task(main.websocket_stream(socket, "replay-order"))
+        await entered.wait()
+        final = asyncio.create_task(main.broadcast_session_event("replay-order", "result_ready", {}))
+        await asyncio.sleep(0)
+        assert not delivered and not final.done()
+        release.set()
+        await final
+        disconnect.set()
+        await reader
+        assert delivered == ["progress", "result_ready"]
+        assert "replay-order" not in main.stream_sockets and not main._stream_send_states
+    asyncio.run(run())
+
+
+def test_stalled_client_close_is_also_bounded(isolated, monkeypatch):
+    monkeypatch.setattr(main, "STREAM_SEND_TIMEOUT_SECONDS", .025)
+    monkeypatch.setattr(main, "STREAM_CLOSE_TIMEOUT_SECONDS", .025)
+    async def wait_forever(*args, **kwargs):
+        await asyncio.Future()
+    socket = SimpleNamespace(send_json=wait_forever, close=wait_forever)
+    main.stream_sockets["stalled-close"] = [socket]
+    async def run():
+        started = time.monotonic()
+        await asyncio.wait_for(main.broadcast_session_event("stalled-close", "progress", {}), .2)
+        assert time.monotonic() - started < .2
+        assert "stalled-close" not in main.stream_sockets and not main._stream_send_states
+    asyncio.run(run())
+
+
 async def wait_for(predicate):
-    async with asyncio.timeout(3):
+    async def poll():
         while not predicate():
             await asyncio.sleep(0.005)
+    await asyncio.wait_for(poll(), timeout=3)
 
 
 def test_failed_startup_retries_same_task_without_redownloading(isolated, monkeypatch):
