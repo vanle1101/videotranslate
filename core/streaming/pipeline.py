@@ -959,11 +959,11 @@ class StreamingPipelineSession:
     async def _resume_speech_rows(self, rows):
         """One recovery owner publishes ready speech without waiting on later reviews."""
         for row in sorted(rows, key=lambda item: (item.start, item.id)):
+            if row.status != "WAITING" or not self._published_row(row):
+                continue
             await self.pause_event.wait()
             if self.is_stopped or not self.is_running:
                 raise asyncio.CancelledError
-            if row.status != "WAITING" or not self._published_row(row):
-                continue
             revision = row.revision
             try:
                 await self._synthesize_segment(row)
@@ -2090,7 +2090,7 @@ class StreamingPipelineSession:
             await self._chunk_followup_task
         # Recover interrupted semantic review after all newly admitted source;
         # it must not keep a long video's untouched tail waiting behind it.
-        await self._resume_pending_chunk_reviews()
+        await self._resume_pending_chunk_reviews(synthesize_pending=True)
         self._visual_prepass_complete = self._visual_completed_seconds >= self.total_duration - .05
         # A later bounded chunk may correct source words cited by an earlier
         # address audit. Re-review that finite stale set once before speech

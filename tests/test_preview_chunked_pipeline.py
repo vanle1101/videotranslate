@@ -449,7 +449,7 @@ def test_retry_reviews_pending_owned_drafts_before_speech_without_replacing_read
     assert saved.to_dict() == before[0] and audio.read_bytes() == before[1]
     assert session.segments[8].status == "WAITING" and not session.segments[8].final_vi
     assert prepared == analyzed == []
-    assert speech == (list(range(1, 8)) if startup else [7, 1, 2, 3, 4, 5, 6])
+    assert speech == [7, 1, 2, 3, 4, 5, 6]
 
 
 def test_retry_review_failure_keeps_incomplete_evidence_instead_of_forcing_verification(preview, monkeypatch):
@@ -679,6 +679,7 @@ def test_opus_prefix_uses_source_offsets_without_per_chunk_encoder_delay(preview
 def test_resume_rechecks_interrupted_review_before_advancing_source(preview, monkeypatch):
     session, prepared, analyzed, *_ = preview
     session._chunked_source_started = True
+    session.is_running = True
     session._visual_completed_seconds = 24
     session._source_prepared_seconds = 32
     calls = []
@@ -939,7 +940,7 @@ def test_final_source_pass_reviews_newly_stale_ready_address_once_and_keeps_unce
     async def resume_then_simulate_last_source_correction(**options):
         stages.append(("resume", options))
         await resume(**options)
-        if not options:
+        if not options.get("stale_address_only"):
             # A later accepted source correction invalidates the earlier row
             # after startup's recovery selection, before the final speech queue.
             row.verification = {"status": "unresolved", "address_stale_source_ids": [1]}
@@ -958,7 +959,7 @@ def test_final_source_pass_reviews_newly_stale_ready_address_once_and_keeps_unce
         await session.worker_task
     asyncio.run(run())
     assert calls == [{"regenerate_audio": True, "segment_ids": {0}, "force_review": True}]
-    assert stages == [("resume", {}), ("resume", {"stale_address_only": True}),
+    assert stages == [("resume", {"synthesize_pending": True}), ("resume", {"stale_address_only": True}),
                       ("worker", "unresolved")]
     assert row.needs_review and row.verification["status"] == "unresolved"
     assert row.status == "READY" and row.final_vi == "Con về rồi."
