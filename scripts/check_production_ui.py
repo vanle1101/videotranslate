@@ -157,6 +157,56 @@ def set_style(page, style):
     assert evaluate(page, "document.getElementById('caption-style-status').dataset.error") == "false"
 
 
+def save_edit(page, base, task_id, sid, text):
+    """Save through the real editor and check its durable, readable WAV."""
+    assert click(page, f"seg-vi-{sid}")
+    until(page, f"document.getElementById('seg-row-{sid}').dataset.editing==='true'")
+    assert evaluate(page, "(() => {const e=document.getElementById(" + json.dumps(f"seg-input-{sid}") +
+        ");e.value=" + json.dumps(text) + ";e.dispatchEvent(new Event('input',{bubbles:true}));return true;})()")
+    selector = f"#seg-row-{sid} .transcript-editor-actions button"
+    assert evaluate(page, "(() => {const b=document.querySelector(" + json.dumps(selector) +
+        ");if(!b||b.disabled)return false;b.click();return true;})()")
+    until(page, f"document.getElementById('seg-row-{sid}').dataset.editing==='false'", timeout=180)
+    snapshot = backend(base, f"/api/streaming/{task_id}")
+    row = next(row for row in snapshot['segments'] if row['id'] == sid)
+    assert row['final_vi'] == text and row['status'] in {'READY', 'PLAYED'}
+    from core.streaming.session_store import _read, _valid_row_audio
+    durable = next(row for row in _read(task_id)['segments'] if row['id'] == sid)
+    assert durable['final_vi'] == text and durable['revision'] == row['revision']
+    assert _valid_row_audio(durable, durable['audio_path'])
+    return row
+
+
+def export_through_ui(page, base, task_id):
+    """Wait for actual fresh bytes, then verify the production result player."""
+    prior = ROOT / 'workspace/outputs' / f'douyin_translated_{task_id}_hq.mp4'
+    stamp = prior.stat().st_mtime_ns if prior.is_file() else None
+    assert click(page, 'btn-export-hq')
+    until(page, "!document.getElementById('export-modal').classList.contains('hidden')")
+    assert click(page, 'btn-confirm-export')
+    deadline = time.monotonic() + 300
+    while time.monotonic() < deadline:
+        try:
+            state = backend(base, f'/api/streaming/export-hq/status/{task_id}')
+        except urllib.error.HTTPError as error:
+            if error.code != 404:
+                raise
+            state = {}
+        assert state.get('status') not in {'FAILED', 'CANCELLED'}, state
+        if state.get('status') == 'COMPLETED':
+            snapshot = backend(base, f'/api/streaming/{task_id}')
+            output = (ROOT / 'workspace/outputs' / snapshot['output_filename']).resolve()
+            assert output.parent == (ROOT / 'workspace/outputs').resolve()
+            assert output.is_file() and output.stat().st_size > 0 and not snapshot['output_outdated']
+            assert output != prior.resolve() or output.stat().st_mtime_ns != stamp
+            until(page, "!document.getElementById('task-result-link').classList.contains('hidden')")
+            event('EDIT_STYLE_EXPORTED', {'file':str(output),'bytes':output.stat().st_size})
+            check_playback(page)
+            return
+        wait(200)
+    raise AssertionError('Real export after editing exceeded five minutes')
+
+
 def check_retry_stop(page, base, task_id):
     """Run actual worker requests through buttons, stop, and inspect durable audio."""
     assert task_id == "e978c201", "Only the existing stopped lifecycle QA task may retry"
@@ -194,12 +244,15 @@ def main():
     parser.add_argument("--skip-playback", action="store_true")
     parser.add_argument("--retry-stop", action="store_true", help="Retry and stop real work through UI (e978c201 only).")
     parser.add_argument("--review", action="store_true", help="Run real Muse review and automatic export through the UI before playback.")
+    parser.add_argument("--edit", action="store_true", help="Edit QA row 6 through UI, reopen it, and restore its original wording with real speech.")
+    parser.add_argument("--export", action="store_true", help="Export after requested edit/style checks and verify real playback.")
     args = parser.parse_args()
     app = QApplication.instance() or QApplication([])
     assert app.platformName() == "offscreen"
     app.setQuitOnLastWindowClosed(False)
     window = None
     original_style = None
+    original_edit = None
     try:
         port = service_manager.start_backend(timeout=30)
         base = f"http://127.0.0.1:{port}"
@@ -266,6 +319,21 @@ def main():
             check_playback(page)
         if args.retry_stop:
             check_retry_stop(page, base, args.task_id)
+        if args.edit:
+            assert args.task_id == '38680e43', 'Only the named completed media QA project may be edited'
+            row = next(row for row in snapshot['segments'] if row['id'] == 6)
+            original_edit = (row['id'], row['final_vi'])
+            changed = row['final_vi'].rstrip('.!?') + '!'
+            assert changed != row['final_vi']
+            edited = save_edit(page, base, args.task_id, row['id'], changed)
+            assert edited['revision'] > row['revision']
+            reload_page(page)
+            open_history(page, args.task_id)
+            reopened = backend(base, f'/api/streaming/{args.task_id}')
+            assert next(item for item in reopened['segments'] if item['id'] == row['id'])['final_vi'] == changed
+            event('EDIT_SAVE_REOPEN', {'id':row['id'],'text':changed,'revision':edited['revision']})
+            save_edit(page, base, args.task_id, row['id'], row['final_vi'])
+            original_edit = None
         if args.style:
             original_style = read_style(page)
             trial_style = {"text_color":"#ffffff", "background_color":"#334455", "position":"bottom", "blur_original":False}
@@ -290,11 +358,18 @@ def main():
             set_style(page, original_style)
             event("STYLE_RESTORED", read_style(page))
             original_style = None
+        if args.export:
+            export_through_ui(page, base, args.task_id)
         state = ui_state(page)
         assert not state["errors"], state
         event("PASS", {"task_id":args.task_id,"offscreen":True,"audio_muted":page.isAudioMuted(),"state":state})
     finally:
         if window is not None:
+            if original_edit is not None:
+                try:
+                    save_edit(window.web_view.page(), base, args.task_id, *original_edit)
+                except Exception as error:
+                    event('EDIT_RESTORE_FAILED', str(error))
             if original_style is not None:
                 try:
                     set_style(window.web_view.page(), original_style)
