@@ -182,11 +182,27 @@ def test_actual_hung_probe_times_out_and_child_is_reaped(tmp_path):
     pid_file = tmp_path / "child.pid"
     suppressor = dsp.RealtimeVocalSuppressor(analysis_timeout=.8)
     started = time.monotonic()
+    children = []
+
+    def observe_without_cancelling():
+        if pid_file.is_file() and not children:
+            pid = pid_file.read_text().strip()
+            if pid.isdigit():
+                # The timeout must reap this original process, not an instant
+                # numeric PID which Windows may retain or recycle afterward.
+                children.append(psutil.Process(int(pid)))
+        return False
+
     with pytest.raises(TimeoutError, match="quá hạn"):
-        suppressor._run_analysis_command(sleeping_child_command(pid_file))
+        suppressor._run_analysis_command(sleeping_child_command(pid_file),
+                                        cancel_check=observe_without_cancelling)
     assert time.monotonic() - started < 3
     assert pid_file.is_file(), "Real child must have started before timeout"
-    assert not psutil.pid_exists(int(pid_file.read_text()))
+    assert children and children[0].pid == int(pid_file.read_text())
+    deadline = time.monotonic() + 1
+    while children[0].is_running() and time.monotonic() < deadline:
+        time.sleep(.01)
+    assert not children[0].is_running()
 
 
 def test_actual_user_cancel_is_not_mislabeled_timeout_and_reaps_child(tmp_path):
