@@ -78,6 +78,7 @@ class PremiumAudioMixer:
             "-filter_complex", filter_complex,
             "-map", "[out]",
             "-ac", "2", "-ar", "44100",
+            *(["-c:a", "pcm_s16le", "-rf64", "auto"] if output_path.suffix.lower() == ".wav" else []),
             str(output_path)
         ]
 

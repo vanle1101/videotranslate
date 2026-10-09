@@ -3,6 +3,7 @@ import time
 import math
 import wave
 import json
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Dict, Any, List, Optional
 from config import settings
@@ -16,6 +17,65 @@ from core.media_process import run_media
 from core.subtitle_cues import build_caption_layout, normalize_caption_style
 from core.streaming.audio_cache import (build_audio_cache_identity, load_audio_cache,
                                        prepare_audio_cache, commit_audio_cache, resolve_dub_timing)
+
+
+# Standard RIFF stores the entire file-minus-eight size in an unsigned 32-bit
+# field. Stereo PCM16 at 44.1 kHz crosses that limit after roughly 6.76 hours.
+RIFF_MAX_DATA_BYTES = 0xFFFFFFFF - 36
+MAX_CAPTURE_PCM_SECONDS = 30.0
+
+
+def _voice_container(total_frames, frame_bytes=4):
+    return "RF64" if total_frames * frame_bytes > RIFF_MAX_DATA_BYTES else "WAV"
+
+
+@contextmanager
+def _voice_pcm_writer(output_path, total_frames, rate):
+    """Sequential writes, with 64-bit sizes when the measured timeline needs them."""
+    if _voice_container(total_frames) == "RF64":
+        import soundfile
+        with soundfile.SoundFile(str(output_path), mode="w", samplerate=rate,
+                                 channels=2, subtype="PCM_16", format="RF64") as output:
+            yield lambda data: output.buffer_write(data, dtype="int16")
+    else:
+        # Keep conventional WAV for short clips and existing wave-based tools.
+        with wave.open(str(output_path), "wb") as output:
+            output.setparams((2, 2, rate, total_frames, "NONE", "not compressed"))
+            yield output.writeframesraw
+
+
+@contextmanager
+def _decoded_voice_pcm(audio_path, slot_frames, rate, output_dir, cancel_check):
+    """Only short utterances enter RAM; longer clips decode to an owned scratch file."""
+    command = ["ffmpeg", "-v", "error", "-nostdin", "-i", str(audio_path),
+               "-t", str(slot_frames / rate + .1), "-f", "s16le", "-acodec", "pcm_s16le",
+               "-ar", str(rate), "-ac", "2"]
+    if slot_frames / rate <= MAX_CAPTURE_PCM_SECONDS:
+        decoded = run_media([*command, "pipe:1"], cancel_check, capture_output=True)
+        if not decoded or len(decoded) % 4:
+            raise ValueError("Không giải mã được âm thanh lồng tiếng hợp lệ.")
+        yield len(decoded) // 4, iter((decoded,))
+        return
+
+    temporary = None
+    try:
+        with tempfile.NamedTemporaryFile(prefix="voice-decode-", suffix=".s16le",
+                                         dir=output_dir, delete=False) as output:
+            temporary = Path(output.name)
+        run_media([*command, "-y", str(temporary)], cancel_check)
+        size = temporary.stat().st_size
+        if not size or size % 4:
+            raise ValueError("Không giải mã được âm thanh lồng tiếng hợp lệ.")
+        with temporary.open("rb") as source:
+            def chunks():
+                while data := source.read(rate * 4):
+                    if cancel_check and cancel_check():
+                        raise RuntimeError("Tác vụ đã bị hủy bởi người dùng.")
+                    yield data
+            yield size // 4, chunks()
+    finally:
+        if temporary is not None:
+            temporary.unlink(missing_ok=True)
 
 class HQExporter:
     """
@@ -153,7 +213,7 @@ class HQExporter:
         check_cancel()
         raw_audio = task_dir / "raw_audio.wav"
         run_media(["ffmpeg", "-v", "error", "-nostdin", "-y", "-i", str(video_path), "-vn",
-                   "-acodec", "pcm_s16le", "-ar", "44100", "-ac", "2", str(raw_audio)], cancel_check)
+                   "-acodec", "pcm_s16le", "-ar", "44100", "-ac", "2", "-rf64", "auto", str(raw_audio)], cancel_check)
 
         report(None, "2/6 Xử lý giọng gốc và âm thanh nền...")
         check_cancel()
@@ -202,7 +262,10 @@ class HQExporter:
             streams = metadata["streams"]
             video = next(item for item in streams if item.get("codec_type") == "video")
             valid = (math.isfinite(duration) and duration > 0
-                     and abs(duration - expected_duration) <= max(0.5, expected_duration * 0.01)
+                     # A percentage tolerance would permit minutes of missing
+                     # media on multi-hour output. Encoder/frame rounding does
+                     # not grow with video length, so use an absolute bound.
+                     and abs(duration - expected_duration) <= 0.5
                      and video.get("width", 0) > 0 and video.get("height", 0) > 0
                      and any(item.get("codec_type") == "audio" for item in streams))
         except (ValueError, TypeError, KeyError, StopIteration):
@@ -242,6 +305,8 @@ class HQExporter:
     @staticmethod
     def _assemble_voice_timeline(segments, total_duration, output_path, cancel_check=None):
         """Write PCM sequentially; never open hundreds of decoders or hold a video in RAM."""
+        if not math.isfinite(total_duration) or total_duration <= 0:
+            raise ValueError("Thời lượng timeline phải là số hữu hạn lớn hơn 0.")
         rate, frame_bytes = 44100, 4
         total_frames = round(total_duration * rate)
         position = 0
@@ -251,15 +316,14 @@ class HQExporter:
             if cancel_check and cancel_check():
                 raise RuntimeError("Tác vụ đã bị hủy bởi người dùng.")
 
-        with wave.open(str(output_path), "wb") as output:
-            output.setparams((2, 2, rate, 0, "NONE", "not compressed"))
+        with _voice_pcm_writer(output_path, total_frames, rate) as write_pcm:
 
             def pad_to(target):
                 nonlocal position
                 while position < target:
                     check_cancel()
                     frames = min(rate, target - position)
-                    output.writeframesraw(silence[:frames * frame_bytes])
+                    write_pcm(silence[:frames * frame_bytes])
                     position += frames
 
             for item in sorted(segments, key=lambda row: resolve_dub_timing(row)[0]):
@@ -283,21 +347,20 @@ class HQExporter:
                 # silently losing its final words. The extra bounded window
                 # detects overflow even for malformed, hours-long inputs.
                 slot_frames = end - start
-                decoded = run_media([
-                    "ffmpeg", "-v", "error", "-nostdin", "-i", str(item["audio_path"]),
-                    "-t", str(slot_frames / rate + .1), "-f", "s16le", "-acodec", "pcm_s16le",
-                    "-ar", str(rate), "-ac", "2", "pipe:1",
-                ], cancel_check, capture_output=True)
-                if not decoded or len(decoded) % frame_bytes:
-                    raise ValueError("Không giải mã được âm thanh lồng tiếng hợp lệ.")
-                decoded_frames = len(decoded) // frame_bytes
-                if decoded_frames > slot_frames + 1:
-                    raise ValueError(
-                        f"Âm thanh câu {item.get('id', '?')} dài {decoded_frames / rate:.4f}s, "
-                        f"vượt khung lồng tiếng {slot_frames / rate:.4f}s; cần căn lại trước khi xuất.")
-                # One sample of resampler/float rounding may sit at the edge;
-                # no speech-length truncation is permitted.
-                decoded = decoded[:slot_frames * frame_bytes]
-                output.writeframesraw(decoded)
-                position += len(decoded) // frame_bytes
+                with _decoded_voice_pcm(item["audio_path"], slot_frames, rate,
+                                        Path(output_path).parent, cancel_check) as (decoded_frames, chunks):
+                    if decoded_frames > slot_frames + 1:
+                        raise ValueError(
+                            f"Âm thanh câu {item.get('id', '?')} dài {decoded_frames / rate:.4f}s, "
+                            f"vượt khung lồng tiếng {slot_frames / rate:.4f}s; cần căn lại trước khi xuất.")
+                    # One resampler sample may sit at the edge. Stream all
+                    # actual speech; no speech-length truncation is permitted.
+                    remaining = slot_frames
+                    for decoded in chunks:
+                        check_cancel()
+                        decoded = decoded[:remaining * frame_bytes]
+                        write_pcm(decoded)
+                        frames = len(decoded) // frame_bytes
+                        position += frames
+                        remaining -= frames
             pad_to(total_frames)

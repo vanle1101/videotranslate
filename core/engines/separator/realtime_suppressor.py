@@ -1,5 +1,6 @@
 import time
-import subprocess
+import json
+import math
 from pathlib import Path
 from typing import Optional, List, Dict, Any
 import numpy as np
@@ -23,17 +24,43 @@ class RealtimeVocalSuppressor:
           * Speech Formants (250Hz-3600Hz): Deep formant notch filtering (-20dB).
        -> Never cancels mono backing music; keeps SFX & BGM intact.
     """
-    def __init__(self, suppression_level_db: float = -26.0):
+    def __init__(self, suppression_level_db: float = -26.0, analysis_timeout: float = 30.0):
+        if not math.isfinite(analysis_timeout) or analysis_timeout <= 0:
+            raise ValueError("analysis_timeout must be a positive, finite number")
         self.engine_name = "Realtime Auto Vocal Suppressor"
         self.suppression_level_db = suppression_level_db
         self.last_throughput_rtf = 0.0
         self.last_mode = "AUTO"
+        self.analysis_timeout = float(analysis_timeout)
 
     @property
     def name(self) -> str:
         return self.engine_name
 
-    def analyze_audio_properties(self, input_audio_path: Path) -> Dict[str, Any]:
+    def _run_analysis_command(self, command, cancel_check=None):
+        """Bound short probes/samples and actually kill the child on timeout."""
+        deadline = time.monotonic() + self.analysis_timeout
+        expired, user_cancelled = False, False
+
+        def cancelled():
+            nonlocal expired, user_cancelled
+            if cancel_check and cancel_check():
+                user_cancelled = True
+                return True
+            if time.monotonic() >= deadline:
+                expired = True
+                return True
+            return False
+
+        try:
+            return run_media(command, cancel_check=cancelled, capture_output=True)
+        except RuntimeError as exc:
+            if expired and not user_cancelled:
+                raise TimeoutError(
+                    f"Phân tích âm thanh quá hạn {self.analysis_timeout:g}s; có thể thử lại bước này.") from exc
+            raise
+
+    def analyze_audio_properties(self, input_audio_path: Path, cancel_check=None) -> Dict[str, Any]:
         """
         Analyzes channel correlation, side energy, and stereo width.
         Determines whether center cancellation is suitable or would destroy mono BGM.
@@ -43,18 +70,23 @@ class RealtimeVocalSuppressor:
             "-select_streams", "a:0", "-of", "json", str(input_audio_path)
         ]
         try:
-            import json
-            probe_res = subprocess.run(probe_cmd, capture_output=True, text=True,
-                                       encoding="utf-8", errors="replace", check=True,
-                                       creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
-            probe_data = json.loads(probe_res.stdout)
-            channels = int(probe_data["streams"][0].get("channels", 2))
-        except Exception:
-            channels = 2
+            probe_data = json.loads(self._run_analysis_command(probe_cmd, cancel_check))
+            stream = probe_data["streams"][0]
+            channels = stream["channels"]
+            raw_rate = stream["sample_rate"]
+            if (type(raw_rate) is not int
+                    and not (isinstance(raw_rate, str) and raw_rate.isascii() and raw_rate.isdecimal())):
+                raise ValueError("invalid audio sample rate type")
+            sample_rate = int(raw_rate)
+            if type(channels) is not int or not 1 <= channels <= 64 or sample_rate <= 0:
+                raise ValueError("invalid audio channels/sample rate")
+        except (ValueError, TypeError, KeyError, IndexError) as exc:
+            raise ValueError("Không đọc được số kênh/tần số âm thanh; không tự giả định nguồn stereo.") from exc
 
         if channels == 1:
             return {
                 "channels": 1,
+                "sample_rate": sample_rate,
                 "correlation": 1.0,
                 "side_ratio": 0.0,
                 "mode": "DSP_MONO_ADAPTIVE_FORMANT",
@@ -63,24 +95,21 @@ class RealtimeVocalSuppressor:
 
         # Sample 5 seconds of PCM data to compute L-R correlation
         pcm_cmd = [
-            "ffmpeg", "-y", "-ss", "0", "-t", "5", "-i", str(input_audio_path),
+            "ffmpeg", "-v", "error", "-nostdin", "-ss", "0", "-t", "5", "-i", str(input_audio_path),
             "-vn", "-f", "s16le", "-ac", "2", "-ar", "22050", "pipe:1"
         ]
-        try:
-            raw_bytes = subprocess.run(
-                pcm_cmd, capture_output=True, check=True,
-                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
-            ).stdout
-            data = np.frombuffer(raw_bytes, dtype=np.int16).reshape(-1, 2).astype(np.float32)
-            L, R = data[:, 0], data[:, 1]
-            denom = np.sqrt(np.sum(L**2) * np.sum(R**2))
-            corr = float(np.sum(L * R) / max(denom, 1e-6))
-            side_energy = float(np.mean((L - R)**2))
-            mid_energy = float(np.mean(((L + R) / 2.0)**2))
-            side_ratio = float(side_energy / max(mid_energy, 1e-6))
-        except Exception:
-            corr = 0.99
-            side_ratio = 0.01
+        raw_bytes = self._run_analysis_command(pcm_cmd, cancel_check)
+        if not raw_bytes or len(raw_bytes) % 4 or len(raw_bytes) > 5 * 22050 * 4:
+            raise ValueError("Không giải mã được mẫu PCM stereo hợp lệ để đo âm thanh.")
+        data = np.frombuffer(raw_bytes, dtype="<i2").reshape(-1, 2).astype(np.float32)
+        L, R = data[:, 0], data[:, 1]
+        denom = np.sqrt(np.sum(L**2) * np.sum(R**2))
+        corr = float(np.sum(L * R) / max(denom, 1e-6))
+        side_energy = float(np.mean((L - R)**2))
+        mid_energy = float(np.mean(((L + R) / 2.0)**2))
+        side_ratio = float(side_energy / max(mid_energy, 1e-6))
+        if not math.isfinite(corr) or not math.isfinite(side_ratio):
+            raise ValueError("Phép đo âm thanh không hữu hạn; không tự chọn chế độ giảm giọng.")
 
         # Decision threshold:
         # If correlation is >= 0.92 or side_ratio <= 0.04, it's effectively dual-mono.
@@ -93,6 +122,7 @@ class RealtimeVocalSuppressor:
 
         return {
             "channels": channels,
+            "sample_rate": sample_rate,
             "correlation": round(corr, 4),
             "side_ratio": round(side_ratio, 4),
             "mode": mode,
@@ -109,10 +139,10 @@ class RealtimeVocalSuppressor:
         """
         Processes audio file using auto-selected optimal strategy.
         """
-        t0 = time.time()
+        t0 = time.monotonic()
         output_audio_path.parent.mkdir(parents=True, exist_ok=True)
 
-        analysis = self.analyze_audio_properties(input_audio_path)
+        analysis = self.analyze_audio_properties(input_audio_path, cancel_check=cancel_check)
         selected_mode = forced_mode or analysis["mode"]
         if selected_mode not in ("DSP_STEREO_CENTER_CANCEL", "DSP_MONO_ADAPTIVE_FORMANT"):
             raise ValueError(f"Chế độ giảm giọng không hợp lệ: {selected_mode}")
@@ -148,7 +178,7 @@ class RealtimeVocalSuppressor:
 
         suffix = output_audio_path.suffix.lower()
         if suffix == ".wav":
-            codec_args = ["-c:a", "pcm_s16le"]
+            codec_args = ["-c:a", "pcm_s16le", "-rf64", "auto"]
         elif suffix in (".ogg", ".opus"):
             codec_args = ["-c:a", "libopus", "-b:a", "128k", "-ar", "48000"]
         else:
@@ -164,17 +194,18 @@ class RealtimeVocalSuppressor:
 
         run_media(cmd, cancel_check)
 
-        elapsed = max(0.001, time.time() - t0)
+        elapsed = max(0.001, time.monotonic() - t0)
 
         # Calculate duration of output
         dur_cmd = ["ffprobe", "-v", "error", "-show_entries", "format=duration", "-of", "default=noprint_wrappers=1:nokey=1", str(output_audio_path)]
+        if not output_audio_path.is_file() or output_audio_path.stat().st_size <= 0:
+            raise ValueError("Bộ giảm giọng không tạo được tệp âm thanh hợp lệ.")
         try:
-            dur_res = subprocess.run(dur_cmd, capture_output=True, text=True,
-                                     encoding="utf-8", errors="replace", check=True,
-                                     creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
-            duration = float(dur_res.stdout.strip())
-        except Exception:
-            duration = 1.0
+            duration = float(self._run_analysis_command(dur_cmd, cancel_check).strip())
+            if not math.isfinite(duration) or duration <= 0:
+                raise ValueError("invalid measured duration")
+        except (ValueError, TypeError) as exc:
+            raise ValueError("Không đo được thời lượng âm thanh kết quả; chưa thể báo xử lý thành công.") from exc
 
         self.last_throughput_rtf = round(duration / elapsed, 1)
         self.suppression_level_db = suppression_est_db
