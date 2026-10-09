@@ -260,3 +260,127 @@ def test_uncertain_first_person_warning_does_not_claim_a_sibling_relationship(mo
     assert "Chưa đủ bằng chứng" in row["review_reason"]
     assert "chị/em" not in row["review_reason"]
     assert row["verification"]["reason"] == row["review_reason"]
+
+
+@pytest.mark.parametrize("candidate,expected", [
+    ("Này, cô gái!", ["cô gái"]),
+    ("Cô gái ơi, nhờ cô gái đấy!", ["Cô gái", "cô gái"]),
+    ("Em nhờ chị gái hỏi anh trai.", ["Em", "chị gái", "anh trai"]),
+    ("Em trai và em gái đợi bố mẹ.", ["Em trai", "em gái", "bố mẹ"]),
+    ("Nếu bố mẹ không quen nhau…", ["bố mẹ"]),
+    ("Ba má gọi mẹ ba.", ["Ba má", "mẹ ba"]),
+    ("Bố và mẹ đợi con.", ["Bố", "mẹ", "con"]),
+    ("Mẹ mẹ đợi nhé.", ["Mẹ", "mẹ"]),
+    ("Ba ba chờ ba phút.", ["Ba", "ba"]),
+])
+def test_address_selector_preserves_complete_phrases_and_repeated_occurrences(candidate, expected):
+    assert address_expressions(candidate) == expected
+
+
+def phrase_reading(term, role, *, certain=True, source="姑娘"):
+    other = "self" if role == "listener" else "listener"
+    return {10: {"id": 10, f"{role}_address": term if certain else "",
+        f"{role}_uncertain": not certain, f"{other}_address": "", f"{other}_uncertain": True,
+        "uncertain": True, "reason": "Chỉ vai được dùng có dẫn chứng độc lập từ lời nguồn.",
+        "turn_check": {"ambiguous_roles": [other] if certain else ["self", "listener"],
+            "reason": "Vai chưa dùng còn chưa rõ; không suy sự chắc chắn sang vai này.",
+            "evidence": [{"id": 10, "quote": source}]},
+        "evidence": [{"id": 10, "quote": source}]}}
+
+
+def phrase_audit(uses):
+    return {"address_applicable": True, "address_verified": True, "semantic_verified": True,
+        "address_reason": "Đã đối chiếu đúng cụm được dùng với lời nguồn độc lập.",
+        "address_uses": uses}
+
+
+def test_actual_cogai_phrase_matches_grounded_listener_without_guessing_speaker():
+    reading = phrase_reading("cô gái", "listener")
+    audit = phrase_audit([{"term": "cô gái", "role": "listener"}])
+    assert not AutomaticTranslationReviewer._address_gate(reading, 10, audit, "姑娘", "Này, cô gái!")
+    assert reading[10]["self_uncertain"] is True
+    assert reading[10]["uncertain"] is True
+
+
+@pytest.mark.parametrize("term,source", [("bố mẹ", "我们要是不认识"), ("ba má", "我们要是不认识")])
+def test_collective_self_requires_explicit_certainty_about_the_whole_phrase(term, source):
+    candidate = f"Nếu {term} không quen nhau…"
+    audit = phrase_audit([{"term": term, "role": "self"}])
+    assert not AutomaticTranslationReviewer._address_gate(
+        phrase_reading(term, "self", source=source), 10, audit, source, candidate)
+    assert AutomaticTranslationReviewer._address_gate(
+        phrase_reading(term, "self", certain=False, source=source), 10, audit, source, candidate)
+
+
+@pytest.mark.parametrize("uses,candidate,reading_term", [
+    ([{"term": "cô", "role": "listener"}], "Này, cô gái!", "cô gái"),
+    ([{"term": "cô gái", "role": "listener"}], "Này, cô gái!", "cô"),
+    ([{"term": "cô gái", "role": "self"}], "Này, cô gái!", "cô gái"),
+    ([{"term": "cô gái", "role": "listener"}], "Cô gái ơi, cô gái!", "cô gái"),
+    ([{"term": "cô gái", "role": "listener"}, {"term": "cô gái", "role": "listener"}],
+        "Cô gái ơi!", "cô gái"),
+    ([{"term": "bố", "role": "listener"}, {"term": "mẹ", "role": "listener"}],
+        "Bố mẹ ơi!", "bố mẹ"),
+    ([{"term": "bố mẹ", "role": "listener"}], "Bố mẹ ơi!", "bố"),
+])
+def test_complete_phrase_gate_rejects_prefixes_wrong_roles_missing_and_invented_uses(uses, candidate, reading_term):
+    assert AutomaticTranslationReviewer._address_gate(
+        phrase_reading(reading_term, "listener"), 10, phrase_audit(uses), "姑娘", candidate)
+
+
+def test_repeated_complete_phrase_passes_only_with_every_grounded_use():
+    uses = [{"term": "Cô gái", "role": "listener"}, {"term": "cô gái", "role": "listener"}]
+    assert not AutomaticTranslationReviewer._address_gate(
+        phrase_reading("cô gái", "listener"), 10, phrase_audit(uses), "姑娘", "Cô gái ơi, cô gái!")
+
+
+def test_third_person_exclusion_preserves_other_real_addresses():
+    assert address_expressions("Cậu ấy bảo em nhờ chị.") == ["em", "chị"]
+    assert address_expressions("Mẹ thấy cậu ấy gọi mẹ.") == ["Mẹ", "mẹ"]
+    assert address_expressions("Cậu ấy bảo cậu đi trước.") == ["cậu"]
+    assert not contains_address_expression("Cậu ấy đi trước.")
+    audit = {"address_applicable": False, "address_neutral_faithful": True,
+        "semantic_verified": True, "address_reason": "Giữ lời kể người thứ ba, không gán vai người nghe."}
+    assert AutomaticTranslationReviewer._address_gate(
+        {10: {"uncertain": True}}, 10, audit, "他先走", "Cậu ấy đi trước.") is False
+    assert AutomaticTranslationReviewer._address_gate(
+        {10: {"uncertain": True}}, 10, audit, "他叫你先走", "Cậu ấy bảo em đi trước.") is True
+
+
+def test_kinship_references_cannot_bypass_source_grounded_role_schema():
+    # The schema currently only proves self/listener. Do not classify a kinship
+    # noun or named honorific as harmless by silently removing it from the gate.
+    reading = {10: {"uncertain": True}}
+    audit = {"address_applicable": False, "address_neutral_faithful": True,
+        "semantic_verified": True, "address_reason": "Provider gọi đây là lời kể."}
+    for candidate in ("Con gái cậu ấy.", "Mẹ của cô ấy.", "Anh Dã là bạn trên mạng."):
+        assert contains_address_expression(candidate)
+        assert AutomaticTranslationReviewer._address_gate(reading, 10, audit, "他女儿", candidate)
+
+
+def test_full_review_recovers_actual_grounded_cogai_phrase(monkeypatch):
+    monkeypatch.setattr(settings, "LLM_PROVIDER", "opencode")
+    candidate = "Này, cô gái!"
+    source = {"id": 10, "start": 14.99, "end": 15.47, "text_zh": "姑娘",
+        "asr_text": "姑娘", "literal_vi": candidate, "natural_vi": candidate, "final_vi": candidate,
+        "needs_review": True, "review_reason": "Lượt cũ chưa khớp cả cụm cách gọi."}
+    reading = phrase_reading("cô gái", "listener")
+    def respond(prompt, **kwargs):
+        if "ID cần kiểm định: " in prompt:
+            return {"address_context": list(reading.values())}
+        return {"segments": [{**source, "needs_review": False, "review_reason": "",
+            **phrase_audit([{"term": "cô gái", "role": "listener"}]),
+            "source_evidence_ids": ["review0"],
+            "verification_reason": "Giữ lời gọi trực tiếp người nghe trong 姑娘; không đoán người nói."}],
+            "screen_texts": [], "summary": ""}
+    client = Mock(has_credentials=True, model="offline-complete-phrase", translate=Mock(side_effect=respond))
+    scanner = Mock(extract=Mock(return_value=[{"start": 14.99, "end": 15.47, "text_zh": "姑娘",
+        "confidence": .99, "bbox": [.2, .7, .5, .1]}]))
+    row = AutomaticTranslationReviewer(client, scanner, audio_evidence=False).review(
+        "unused", [source], [])["segments"][10]
+    assert not row["needs_review"]
+    assert row["final_vi"] == candidate
+    assert row["verification"]["source_supported"] and row["verification"]["semantic_verified"]
+    assert row["verification"]["address_verified"]
+    assert row["verification"]["address_context"]["self_uncertain"]
+    assert client.translate.call_count == 3

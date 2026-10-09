@@ -10,7 +10,7 @@ import json
 import re
 
 
-ADDRESS_POLICY_REVISION = 5
+ADDRESS_POLICY_REVISION = 6
 
 VIETNAMESE_ADDRESS_POLICY = """
 QUY TẮC XƯNG HÔ THEO NGỮ CẢNH (áp dụng cả dịch, kiểm định và rút gọn lời đọc):
@@ -68,6 +68,15 @@ QUY TẮC XƯNG HÔ THEO NGỮ CẢNH (áp dụng cả dịch, kiểm định v�
 
 # Only chooses evidence to retain; it must never decide the Vietnamese pronoun.
 _ADDRESS_CUE = re.compile(r"[爸妈媽父母姐哥弟妹爷爺奶叔姨姑舅婶嬸伯嫂叔婆娘]|老师|老師|师傅|師傅|师父|師父|先生|女士|您")
+
+# Select complete role phrases without deciding their meaning or certainty.
+# The provider may ground ``cô gái`` or ``bố mẹ`` as one role. Splitting the
+# phrase makes its exact comparison with that independently read role fail.
+# Enumerate the phrases: repeated calls such as ``Mẹ, mẹ`` remain separate
+# occurrences, and this selector must never equate a phrase with its prefix.
+_ADDRESS_MULTIWORD = re.compile(
+    r"(?<!\w)(?:cô\s+gái|anh\s+trai|chị\s+gái|em\s+(?:gái|trai)|"
+    r"(?:bố|ba)\s+(?:mẹ|má)|(?:mẹ|má)\s+(?:bố|ba))(?!\w)", re.I)
 
 
 def dialogue_context(rows, focus=(), *, max_rows=64, max_chars=18000):
@@ -165,16 +174,27 @@ def address_expressions(candidate):
     Selection and verification must use the same vocabulary. Remove ordinary
     noun/third-person spans only, preserving any other pronoun in the sentence.
     """
-    text = re.sub(r"\b(?:cô ấy|anh ấy|chị ấy|ông ấy|bà ấy)\b", "", str(candidate or ""), flags=re.I)
+    text = re.sub(r"\b(?:cô ấy|anh ấy|chị ấy|ông ấy|bà ấy|cậu ấy)\b", "", str(candidate or ""), flags=re.I)
     text = re.sub(r"\bcon\s+(?:mèo|vật|số|đường|người)\b", "", text, flags=re.I)
     text = re.sub(r"\bmột\s+mình\b", "", text, flags=re.I)
     # A small set of unambiguous numeric-unit spans is not an address. Keep
     # the rest of the sentence: 'Ba chờ ba phút' still contains the parent.
     text = re.sub(r"\bba\s+(?:phút|giây|giờ|ngày|tuần|tháng|năm|lần|chiếc|cái)\b", "", text, flags=re.I)
     text = re.sub(r"\bthứ\s+ba\b", "", text, flags=re.I)
-    return re.findall(
+    # Extract multiword role terms first and mask their spans so the token
+    # pass cannot split them into unrelated address uses.  Return everything
+    # in source order; the provider's address_uses is ordered the same way.
+    spans = [(match.start(), match.end(), match.group(0))
+             for match in _ADDRESS_MULTIWORD.finditer(text)]
+    masked = list(text)
+    for start, end, _ in spans:
+        masked[start:end] = [" "] * (end - start)
+    token_re = re.compile(
         r"(?<!\w)(?:tôi|tao|tớ|mình|bạn|mày|chị|em|anh|cô|chú|bác|con|bố|ba|mẹ|má|"
-        r"thầy|cậu|ông|bà|ta|cháu|dì|cụ|cưng|ngươi|mi)(?!\w)", text, re.I)
+        r"thầy|cậu|ông|bà|ta|cháu|dì|cụ|cưng|ngươi|mi)(?!\w)", re.I)
+    spans.extend((match.start(), match.end(), match.group(0))
+                 for match in token_re.finditer("".join(masked)))
+    return [term for _, _, term in sorted(spans, key=lambda item: item[0])]
 
 
 def contains_address_expression(candidate):
@@ -222,6 +242,8 @@ def address_reading_prompt(rows, context):
         "uncertain=true. Không cần biết tên, giới tính, tuổi hay ruột thịt để giữ đúng lời gọi trực tiếp. "
         "Không suy sự chắc chắn này sang câu kế chỉ vì gần thời gian. uncertain là kết luận toàn bộ; "
         "true nếu còn vai chưa xác định. Mỗi *_address chỉ ghi cách xưng/gọi được đề xuất, không ghi giải thích. "
+        "Giữ nguyên cụm cách gọi đầy đủ, ví dụ 'cô gái' hay 'bố mẹ', không chỉ ghi từ đầu cụm. "
+        "Cụm tập thể chỉ được xác nhận khi nguồn chứng minh chính nhóm đó; không tự bỏ qua vai chưa rõ. "
         "Mỗi ID có turn_check. ambiguous_roles chỉ chứa self/listener: ghi vai mà các cách phân "
         "lượt còn hợp lý khiến xưng hô khác nhau; [] khi đã có căn cứ loại các cách còn lại hoặc "
         "câu không phụ thuộc phân lượt. Mọi vai trong ambiguous_roles phải *_uncertain=true. "
@@ -330,6 +352,11 @@ def address_review_instruction(reading):
           "mỗi mục {\"term\":\"chị\",\"role\":\"listener\"}; role chỉ self hoặc listener. "
           "Ghi đủ cả từ lặp, đúng từ đã dùng; 'Chị ơi, nhờ chị đấy!' có hai mục chị/listener. "
           "'Em nhờ chị' có em/self và chị/listener. Không đổi vai của từ để né kết luận chưa rõ. "
+          "Giữ nguyên cả cụm 'cô gái', 'anh trai', 'chị gái', 'em gái', 'em trai', 'bố mẹ', 'ba má' "
+          "và các cụm bố/ba với mẹ/má: mỗi lần xuất hiện cụm là một mục có term đầy đủ, "
+          "không tách 'bố mẹ' thành bố và mẹ, không đổi 'cô gái' thành cô. "
+          "Cụm được dùng phải khớp toàn bộ cách gọi của vai đã được đọc riêng từ nguồn; "
+          "không suy cụm đúng chỉ vì khớp một từ đầu, và không xác nhận tập thể khi thành viên còn chưa rõ. "
           "address_verified=true chỉ khi cách xưng hô của final_vi thực tế phù hợp nguồn/mạch thoại; "
           "Nếu address_applicable=false, thêm address_neutral_faithful=true chỉ khi đã kiểm tra "
           "câu nguồn và final_vi giữ đủ ý/người làm/người chịu tác động mà không cần phân vai; "
