@@ -687,6 +687,7 @@ def test_contextual_question_function_is_explained_without_dropping_emphasis_or_
     system = request.call_args_list[1].args[0]
     assert "chức năng hỏi–đáp" in system and "A不A không khẳng định phủ định" in system
     assert "nhấn mạnh bị bỏ" in system and "Không dùng previous" in system
+    assert "Đa nghĩa ngoài ngữ cảnh" in system and "đổi chức năng phải equivalent=false" in system
     payload = json.loads(request.call_args_list[1].args[1])
     assert payload["target"]["id"] == 136
     assert "今天晚上他哪都不能去" in payload["context"] and "因为他会犯错误" in payload["context"]

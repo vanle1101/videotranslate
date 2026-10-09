@@ -565,6 +565,11 @@ Xét câu như một lượt trong mạch hỏi–đáp nguồn, không như câ
 được xác định người/đối tượng và chức năng hội thoại: câu hỏi lý do, hỏi có–không,
 lời từ chối, lời đáp. Câu đáp Việt có thể tỉnh lược phần đã có trong câu hỏi khi
 vẫn giữ rõ đúng hành vi hội thoại, không đổi lời từ chối thành phủ định một sự việc.
+Không bác một câu chỉ vì nó có nhiều nghĩa khi đứng riêng: xác định nghĩa đang
+được dùng từ lượt nguồn ngay trước và sau. Nếu mạch nguồn làm rõ câu đang hỏi
+nguyên nhân, đánh giá bản Việt theo chức năng hỏi nguyên nhân trong mạch đó;
+không tự đổi nó thành ngạc nhiên/hỏi lại chỉ vì ngoài ngữ cảnh cũng có cách đọc ấy.
+Nếu mạch còn thực sự mơ hồ hoặc bản Việt đổi chức năng thì vẫn cần kiểm tra.
 Cấu trúc hỏi A不A của tiếng Trung là câu hỏi có–không, không phải một khẳng định
 phủ định; giữ chức năng hỏi và sắc thái, không bắt buộc một từ Việt cho từng chữ.
 Không dùng ngữ cảnh để bù mất một sự kiện, phủ định khẳng định, số, mức độ,
@@ -634,6 +639,10 @@ Trả duy nhất JSON: {{"literal_vi":"...","natural_vi":"...","final_vi":"...",
               'không để bù sự kiện, phủ định khẳng định, số, mức độ, đối lập hoặc nhấn mạnh bị bỏ. '
               'Đánh giá câu hỏi ngắn theo chức năng thực có trong cuộc thoại; không đòi một từ Việt '
               'cố định cho mỗi chữ Trung. Cấu trúc hỏi A不A không khẳng định phủ định. '
+              'Đa nghĩa ngoài ngữ cảnh không tự chứng minh sai nghĩa: xác định chức năng từ '
+              'lượt nguồn ngay trước và sau, rồi đối chiếu candidate trong chính mạch đó. '
+              'Không tự đổi câu đang hỏi nguyên nhân thành ngạc nhiên/hỏi lại nếu mạch nguồn '
+              'đã xác định rõ chức năng; nếu còn mơ hồ hoặc đổi chức năng phải equivalent=false. '
               'Một lời từ chối có thể lược động từ đã rõ trong câu hỏi nếu vẫn rõ hành vi từ chối, '
               'không biến thành câu phủ định sự việc hay mất một hành động riêng. '
               'Phải giải thích rõ vai nào được lược và vì sao không đổi nghĩa; không yêu cầu '
