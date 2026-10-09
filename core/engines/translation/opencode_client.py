@@ -477,7 +477,9 @@ class OpenCodeZenClient:
         selected = self.validate_model(model)
         context = current_execution_context()
         request_id = uuid.uuid4().hex
-        trace = {"attempt": 1, "started": time.monotonic()}
+        request_started = time.monotonic()
+        trace = {"attempt": 0, "started": None, "finished": None,
+                 "admission_wait": 0.0, "backoff": 0.0, "terminal": None}
 
         def record(event, output_chars=0, error=None):
             # Fixed categories only: exception/CLI text can contain credentials,
@@ -487,16 +489,23 @@ class OpenCodeZenClient:
                     else "provider_configuration" if isinstance(error, OpenCodeConfigurationError)
                     else "provider_model" if isinstance(error, OpenCodeModelError)
                     else getattr(error, "code", "provider_failed") if error is not None else "none")
+            now = time.monotonic()
+            attempt_elapsed = (0.0 if trace["started"] is None else
+                (trace["finished"] if trace["finished"] is not None else now) - trace["started"])
             logging.getLogger("ai").info(
-                "%s run_id=%s request_id=%s model=%s attempt=%s elapsed_ms=%s output_chars=%s code=%s",
+                "%s run_id=%s request_id=%s model=%s attempt=%s elapsed_ms=%s "
+                "total_elapsed_ms=%s admission_wait_ms=%s backoff_elapsed_ms=%s output_chars=%s code=%s",
                 event, context.run_id, request_id, selected, trace["attempt"],
-                round((time.monotonic() - trace["started"]) * 1000), output_chars, code,
+                round(attempt_elapsed * 1000), round((now - request_started) * 1000),
+                round(trace["admission_wait"] * 1000), round(trace["backoff"] * 1000), output_chars, code,
             )
 
-        def retry(attempt, error):
-            record("PROVIDER_FAILED", error=error)
-            trace.update(attempt=attempt, started=time.monotonic())
-            record("PROVIDER_REQUEST")
+        def wait_retry(delay):
+            started = time.monotonic()
+            try:
+                _retry_delay(delay, context)
+            finally:
+                trace["backoff"] += time.monotonic() - started
 
         try:
             _check_cancelled(context)
@@ -520,10 +529,23 @@ class OpenCodeZenClient:
                 return True
 
             def operation(attempt):
+                started = time.monotonic()
                 if attempt == 1:
-                    record("PROVIDER_REQUEST")
-                return self._translate(prompt, selected, system, max_tokens, context,
-                                       request_timeout)
+                    trace["admission_wait"] = started - request_started
+                trace.update(attempt=attempt, started=started, finished=None, terminal=None)
+                record("PROVIDER_REQUEST")
+                try:
+                    return self._translate(prompt, selected, system, max_tokens, context,
+                                           request_timeout)
+                except Exception as error:
+                    trace["finished"] = time.monotonic()
+                    event = "PROVIDER_CANCELLED" if isinstance(error, OpenCodeCancelledError) else "PROVIDER_FAILED"
+                    record(event, error=error)
+                    trace["terminal"] = event
+                    raise
+                finally:
+                    if trace["finished"] is None:
+                        trace["finished"] = time.monotonic()
 
             answer = self.execution_layer.execute(
                 operation,
@@ -534,18 +556,20 @@ class OpenCodeZenClient:
                 max_retries=self.max_retries, cancel_check=context.cancel_check,
                 retryable=lambda error: isinstance(error, OpenCodeTimeoutError)
                     or isinstance(error, OpenCodeRequestError) and error.retryable,
-                wait_retry=lambda delay: _retry_delay(delay, context), on_retry=retry,
+                wait_retry=wait_retry,
                 validate=validate if response_validator is not None else None, use_cache=use_cache,
                 on_cache_hit=lambda: cache_hit.__setitem__(0, True),
                 cache_allowed=lambda raw: not self._api_key or self._api_key not in raw,
             )
             _check_cancelled(context)
             if cache_hit[0]:
+                trace["admission_wait"] = time.monotonic() - request_started
                 record("AI_CACHE_HIT", len(answer))
                 return answer
         except AIExecutionCancelledError:
             error = OpenCodeCancelledError("Đã hủy yêu cầu dịch OpenCode.")
-            record("PROVIDER_CANCELLED", error=error)
+            if trace["terminal"] != "PROVIDER_CANCELLED":
+                record("PROVIDER_CANCELLED", error=error)
             raise error from None
         except AIExecutionError as failure:
             code = ("provider_circuit_open" if isinstance(failure, AICircuitOpenError)
@@ -555,16 +579,21 @@ class OpenCodeZenClient:
             error = OpenCodeRequestError(str(failure), retryable=True, code=code)
             if isinstance(failure, AICircuitOpenError):
                 error.retry_after = failure.retry_after
-            record("PROVIDER_FAILED", error=error)
+            if not trace["attempt"]:
+                trace["admission_wait"] = time.monotonic() - request_started
+            record("AI_EXECUTION_FAILED" if trace["attempt"] else "AI_ADMISSION_FAILED", error=error)
             raise error from None
         except OpenCodeCancelledError as error:
-            record("PROVIDER_CANCELLED", error=error)
+            if trace["terminal"] != "PROVIDER_CANCELLED":
+                record("PROVIDER_CANCELLED", error=error)
             raise
         except OpenCodeClientError as error:
-            record("PROVIDER_FAILED", error=error)
+            if trace["terminal"] != "PROVIDER_FAILED":
+                record("PROVIDER_FAILED", error=error)
             raise
         except Exception as error:
-            record("PROVIDER_FAILED", error=error)
+            if trace["terminal"] != "PROVIDER_FAILED":
+                record("PROVIDER_FAILED", error=error)
             raise OpenCodeRequestError("OpenCode chưa hoàn tất yêu cầu dịch. Hãy thử lại.") from None
         record("PROVIDER_COMPLETED", len(answer))
         return answer

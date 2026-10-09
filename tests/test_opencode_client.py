@@ -644,6 +644,136 @@ def test_retry_logs_each_attempt_with_same_request_id(isolated, monkeypatch, cap
     assert len({re.search(r"request_id=([a-f0-9]{32})", line).group(1) for line in lines}) == 1
 
 
+def lifecycle_fields(caplog):
+    return [dict(event=record.getMessage().split()[0],
+                 **dict(part.split("=", 1) for part in record.getMessage().split()[1:]))
+            for record in caplog.records if record.name == "ai"]
+
+
+def test_provider_attempt_timing_excludes_admission_wait(isolated, monkeypatch, caplog):
+    clock = [0.0]
+    monkeypatch.setattr(oc.time, "monotonic", lambda: clock[0])
+    client = oc.OpenCodeZenClient(api_key="private-key")
+    admit = client.execution_layer._admit
+    def queued(cancel_check, key):
+        admit(cancel_check, key)
+        clock[0] += 102.328
+    def provider(*args):
+        clock[0] += 69.750
+        return "private-output"
+    monkeypatch.setattr(client.execution_layer, "_admit", queued)
+    monkeypatch.setattr(client, "_translate", provider)
+    with caplog.at_level(logging.INFO, logger="ai"):
+        assert client.translate("private-prompt") == "private-output"
+    submitted, completed = lifecycle_fields(caplog)
+    assert submitted["event"] == "PROVIDER_REQUEST" and submitted["elapsed_ms"] == "0"
+    assert submitted["admission_wait_ms"] == submitted["total_elapsed_ms"] == "102328"
+    assert completed["event"] == "PROVIDER_COMPLETED" and completed["elapsed_ms"] == "69750"
+    assert completed["total_elapsed_ms"] == "172078" and completed["admission_wait_ms"] == "102328"
+    assert completed["backoff_elapsed_ms"] == "0"
+    assert "private-" not in caplog.text
+
+
+def test_failed_attempt_logged_before_backoff_and_retry_starts_after_wait(isolated, monkeypatch, caplog):
+    clock = [0.0]
+    monkeypatch.setattr(oc.time, "monotonic", lambda: clock[0])
+    client = oc.OpenCodeZenClient(api_key="private-key", max_retries=1)
+    calls = []
+    def provider(*args):
+        calls.append(clock[0])
+        clock[0] += 3.0 if len(calls) == 1 else 2.0
+        if len(calls) == 1:
+            raise oc.OpenCodeRequestError("private-failure", retryable=True, code="provider_server")
+        return "private-output"
+    def backoff(seconds, context):
+        records = lifecycle_fields(caplog)
+        assert [record["event"] for record in records] == ["PROVIDER_REQUEST", "PROVIDER_FAILED"]
+        assert records[-1]["elapsed_ms"] == records[-1]["total_elapsed_ms"] == "3000"
+        assert records[-1]["backoff_elapsed_ms"] == "0"
+        clock[0] += 1.25
+    monkeypatch.setattr(client, "_translate", provider)
+    monkeypatch.setattr(oc, "_retry_delay", backoff)
+    with caplog.at_level(logging.INFO, logger="ai"):
+        assert client.translate("private-prompt") == "private-output"
+    records = lifecycle_fields(caplog)
+    assert [record["event"] for record in records] == [
+        "PROVIDER_REQUEST", "PROVIDER_FAILED", "PROVIDER_REQUEST", "PROVIDER_COMPLETED"]
+    assert records[2]["attempt"] == "2" and records[2]["elapsed_ms"] == "0"
+    assert records[2]["total_elapsed_ms"] == "4250"
+    assert records[3]["elapsed_ms"] == "2000" and records[3]["total_elapsed_ms"] == "6250"
+    assert records[3]["backoff_elapsed_ms"] == "1250"
+    assert "private-" not in caplog.text
+
+
+def test_cancelled_backoff_never_announces_unstarted_retry(isolated, monkeypatch, caplog):
+    clock, stopped = [0.0], [False]
+    monkeypatch.setattr(oc.time, "monotonic", lambda: clock[0])
+    client = oc.OpenCodeZenClient(api_key="private-key", max_retries=1)
+    provider = Mock(side_effect=oc.OpenCodeRequestError("private-failure", retryable=True,
+                                                       code="provider_server"))
+    monkeypatch.setattr(client, "_translate", provider)
+    def backoff(seconds, context):
+        clock[0] += .4
+        stopped[0] = True
+        oc._check_cancelled(context)
+    monkeypatch.setattr(oc, "_retry_delay", backoff)
+    with caplog.at_level(logging.INFO, logger="ai"), execution_context("backoff-stop", lambda: stopped[0]):
+        with pytest.raises(oc.OpenCodeCancelledError):
+            client.translate("private-prompt")
+    records = lifecycle_fields(caplog)
+    assert [record["event"] for record in records] == [
+        "PROVIDER_REQUEST", "PROVIDER_FAILED", "PROVIDER_CANCELLED"]
+    assert all(record["attempt"] == "1" and record["elapsed_ms"] == "0" for record in records)
+    assert records[-1]["backoff_elapsed_ms"] == records[-1]["total_elapsed_ms"] == "400"
+    provider.assert_called_once()
+    assert "private-" not in caplog.text
+
+
+@pytest.mark.parametrize("queued", [False, True])
+def test_cached_result_never_logs_submitted_provider_attempt(isolated, monkeypatch, caplog, queued):
+    clock = [0.0]
+    monkeypatch.setattr(oc.time, "monotonic", lambda: clock[0])
+    client = oc.OpenCodeZenClient(api_key="private-key")
+    monkeypatch.setattr(client, "_translate", Mock(side_effect=AssertionError("must not submit")))
+    monkeypatch.setattr(client.execution_layer.cache, "get", Mock(
+        side_effect=[None, '{"text":"valid"}'] if queued else ['{"text":"valid"}']))
+    admit = client.execution_layer._admit
+    def admission(cancel_check, key):
+        admit(cancel_check, key)
+        clock[0] += 5.0
+    monkeypatch.setattr(client.execution_layer, "_admit", admission)
+    with caplog.at_level(logging.INFO, logger="ai"):
+        assert client.translate("private-prompt", response_validator=json.loads,
+                                schema_id="text-v1") == '{"text":"valid"}'
+    records = lifecycle_fields(caplog)
+    assert len(records) == 1 and records[0]["event"] == "AI_CACHE_HIT"
+    assert records[0]["attempt"] == records[0]["elapsed_ms"] == "0"
+    assert records[0]["admission_wait_ms"] == records[0]["total_elapsed_ms"] == ("5000" if queued else "0")
+    assert "PROVIDER_REQUEST" not in caplog.text
+
+
+@pytest.mark.parametrize("failure", [oc.AIQueueTimeoutError("private-queue"),
+                                      oc.AICircuitOpenError(5)])
+def test_admission_failure_reports_wait_without_a_provider_attempt(isolated, monkeypatch, caplog, failure):
+    clock = [0.0]
+    monkeypatch.setattr(oc.time, "monotonic", lambda: clock[0])
+    client = oc.OpenCodeZenClient(api_key="private-key")
+    provider = Mock(side_effect=AssertionError("must not submit"))
+    monkeypatch.setattr(client, "_translate", provider)
+    def rejected(*args):
+        clock[0] += 30.0
+        raise failure
+    monkeypatch.setattr(client.execution_layer, "_admit", rejected)
+    with caplog.at_level(logging.INFO, logger="ai"), pytest.raises(oc.OpenCodeRequestError):
+        client.translate("private-prompt")
+    record, = lifecycle_fields(caplog)
+    assert record["event"] == "AI_ADMISSION_FAILED"
+    assert record["attempt"] == record["elapsed_ms"] == "0"
+    assert record["admission_wait_ms"] == record["total_elapsed_ms"] == "30000"
+    provider.assert_not_called()
+    assert "PROVIDER_REQUEST" not in caplog.text and "private-" not in caplog.text
+
+
 def test_cancel_before_start_logs_cancellation_without_launching(isolated, monkeypatch, caplog):
     start = Mock()
     monkeypatch.setattr(oc.subprocess, "Popen", start)
