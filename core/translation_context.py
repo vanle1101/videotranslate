@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import re
+from copy import deepcopy
 
 
 ADDRESS_POLICY_REVISION = 7
@@ -97,6 +98,12 @@ def dialogue_context(rows, focus=(), *, max_rows=64, max_chars=18000):
             continue
         item = {key: row[key] for key in ("id", "start", "end", "speaker_id", "addressee_id")
                 if key in row and isinstance(row[key], (str, int, float))}
+        # Reformatting a prepared context must not drop the independently
+        # measured speaker/utterance proof or the ASR fragment's provenance.
+        for key in ("speaker_evidence", "utterance_id", "utterance_evidence", "source_asr_row_id",
+                "source_asr_start", "source_asr_end", "source_piece_index", "source_piece_count"):
+            if key in row:
+                item[key] = deepcopy(row[key])
         item["text_zh"] = source[:1500]
         if row.get("is_focus") is True:
             item["is_focus"] = True
