@@ -18,6 +18,10 @@ def visual_session(tmp_path, monkeypatch):
     monkeypatch.setattr(settings, "GEMINI_API_KEY", "offline-test-key")
     session = StreamingPipelineSession("grounded-source", tmp_path / "source.mp4",
                                        tts_engine_name="edge-tts", visual_translation=True)
+    # Exercise the retained whole-source checkpoint preparation contract.
+    # Fresh production jobs still route to bounded chunks; no test-only
+    # production flag or missing-source bypass is introduced.
+    monkeypatch.setattr(session, "_start_chunked_visual", session._start_legacy_source)
     session.total_duration = 32.601667
     return session
 

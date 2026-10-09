@@ -556,7 +556,14 @@ def test_validated_rows_bypass_asr_and_translation(config, monkeypatch):
 
 def test_silent_video_fails_explicitly_before_cloud_usage(config, monkeypatch):
     sess = StreamingPipelineSession("silent-visual", config / "video.mp4", visual_translation=True)
-    sess.video_intelligence.media_info = Mock(return_value={"duration": 10, "has_audio": False})
+    # Real silent media exercises the fresh chunked identity/probe guard.
+    import shutil
+    import subprocess
+    if not shutil.which("ffmpeg"):
+        pytest.skip("ffmpeg required for the real silent-media guard")
+    subprocess.run(["ffmpeg", "-hide_banner", "-loglevel", "error", "-y",
+        "-f", "lavfi", "-i", "color=c=black:s=32x32:d=0.2", "-an",
+        str(sess.video_path)], check=True, timeout=20, capture_output=True)
     title = {"start": 0, "end": 10, "text_zh": "你好", "text_vi": "Xin chào", "kind": "title",
              "bbox": [.1, .1, .6, .1], "needs_review": False}
     sess.video_intelligence.prepass = Mock(return_value={"segments": {}, "screen_texts": [title]})
