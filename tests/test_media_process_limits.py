@@ -11,6 +11,22 @@ def test_real_output_is_returned():
     assert run_media([sys.executable, "-c", "print('readable')"], capture_output=True).strip() == b"readable"
 
 
+def test_cancelled_process_closes_native_handle_even_when_traceback_retains_popen(monkeypatch):
+    import core.media_process as media
+    original = media.subprocess.Popen
+    children = []
+    def spawn(*args, **kwargs):
+        child = original(*args, **kwargs)
+        children.append(child)
+        return child
+    monkeypatch.setattr(media.subprocess, "Popen", spawn)
+    with pytest.raises(RuntimeError, match="hủy"):
+        run_media([sys.executable, "-c", "import time;time.sleep(30)"], cancel_check=lambda: bool(children))
+    assert len(children) == 1 and children[0].returncode is not None
+    if sys.platform == "win32":
+        assert children[0]._handle.closed
+
+
 def test_real_media_timeout_kills_and_reaps():
     started = time.monotonic()
     with pytest.raises(TimeoutError):

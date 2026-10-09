@@ -62,10 +62,28 @@ def trace_real_rejections():
 
 
 def wait_for_idle(page, base, task_id, timeout=3600):
-    deadline, previous, prepared_at = time.monotonic() + timeout, None, None
+    import psutil
+    started = time.monotonic()
+    deadline, previous, prepared_at = started + timeout, None, None
+    resource_at, peak_rss, resource_samples = 0.0, 0, 0
+    initial_queue, initial_ready = None, None
     while time.monotonic() < deadline:
         snapshot = backend(base, f"/api/streaming/{task_id}")
         progress = snapshot["progress"]
+        queue = progress.get("ai_queue", {})
+        ready = sum(row["status"] in {"READY", "PLAYED"} for row in snapshot["segments"])
+        if initial_queue is None:
+            initial_queue, initial_ready = dict(queue), ready
+        if time.monotonic() - resource_at >= 5:
+            resource_at = time.monotonic()
+            owner = psutil.Process(os.getpid())
+            rss = 0
+            for process in [owner, *owner.children(recursive=True)]:
+                try:
+                    rss += process.memory_info().rss
+                except (psutil.NoSuchProcess, psutil.AccessDenied):
+                    pass
+            peak_rss, resource_samples = max(peak_rss, rss), resource_samples + 1
         current = (progress["status"], progress.get("stage"), progress.get("processed_seconds"),
                    sum(row["status"] in {"READY", "PLAYED"} for row in snapshot["segments"]))
         if current != previous:
@@ -79,6 +97,13 @@ def wait_for_idle(page, base, task_id, timeout=3600):
             prepared_at = None
         if progress["status"] in {"FAILED", "STOPPED", "PREVIEW_READY", "COMPLETED"}:
             until(page, "document.getElementById('task-progress').dataset.status===" + json.dumps(progress["status"]), timeout=30)
+            elapsed = time.monotonic() - started
+            event("REAL_RECOVERY_BENCHMARK", {"task_id":task_id, "elapsed_seconds":round(elapsed, 3),
+                "source_seconds":snapshot["duration"], "status":progress["status"],
+                "ready_before":initial_ready, "ready_after":ready,
+                "sampled_peak_tree_rss_mib":round(peak_rss / 1024**2, 3), "resource_samples":resource_samples,
+                **{key: queue.get(key, 0) - initial_queue.get(key, 0)
+                   for key in ("requests", "cache_hits", "retry_requests")}})
             return snapshot
         wait(200)
     raise AssertionError("Real runtime did not reach a terminal state within the acceptance deadline")

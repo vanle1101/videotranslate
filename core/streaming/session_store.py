@@ -767,7 +767,7 @@ def _probe_saved_output(path, expected_duration):
     actual = float(data["format"]["duration"])
     streams = data["streams"]
     if (not math.isfinite(actual) or actual <= 0
-            or abs(actual - expected_duration) > max(.5, expected_duration * .01)
+            or abs(actual - expected_duration) > .5
             or "mp4" not in data["format"].get("format_name", "").split(",")
             or not any(item.get("codec_type") == "video" and item.get("width", 0) > 0
                        and item.get("height", 0) > 0 for item in streams)

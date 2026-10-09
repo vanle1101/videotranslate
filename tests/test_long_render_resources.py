@@ -192,11 +192,22 @@ def test_actual_hung_probe_times_out_and_child_is_reaped(tmp_path):
 def test_actual_user_cancel_is_not_mislabeled_timeout_and_reaps_child(tmp_path):
     pid_file = tmp_path / "child.pid"
     started = time.monotonic()
+    children = []
+    def cancel_check():
+        if pid_file.is_file() and not children:
+            # Compare process identity, not a PID that Windows can immediately
+            # recycle for another application's new process.
+            children.append(psutil.Process(int(pid_file.read_text())))
+        return time.monotonic() - started >= .8
     with pytest.raises(RuntimeError, match="hủy"):
         dsp.RealtimeVocalSuppressor(analysis_timeout=30)._run_analysis_command(
-            sleeping_child_command(pid_file), cancel_check=lambda: time.monotonic() - started >= .8)
+            sleeping_child_command(pid_file), cancel_check=cancel_check)
     assert pid_file.is_file()
-    assert not psutil.pid_exists(int(pid_file.read_text()))
+    assert children
+    deadline = time.monotonic() + 1
+    while children[0].is_running() and time.monotonic() < deadline:
+        time.sleep(.01)
+    assert not children[0].is_running()
 
 
 @has_media

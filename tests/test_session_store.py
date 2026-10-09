@@ -846,6 +846,19 @@ def test_shutdown_preserves_idle_outcome_and_saved_media(persisted):
     assert restore_saved_session(persisted.task_id).get_progress()["status"] == "COMPLETED"
 
 
+def test_saved_long_mp4_cannot_hide_drift_inside_a_percentage_tolerance(monkeypatch, tmp_path):
+    from core.streaming import session_store as store
+    from types import SimpleNamespace
+    monkeypatch.setattr(store, "_complete_mp4_container", lambda path: True)
+    probe = Mock(return_value=SimpleNamespace(returncode=0, stderr=b"", stdout=json.dumps({
+        "format":{"duration":"3620", "format_name":"mov,mp4"},
+        "streams":[{"codec_type":"video", "width":16, "height":16}, {"codec_type":"audio"}],
+    }).encode()))
+    monkeypatch.setattr(store.subprocess, "run", probe)
+    assert not store._probe_saved_output(tmp_path / "long.mp4", 3600)
+    assert probe.call_count == 1
+
+
 def test_shutdown_cancels_unfinished_work(persisted):
     persisted.is_running = True
     persisted.shutdown()

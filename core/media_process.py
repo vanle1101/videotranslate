@@ -56,3 +56,11 @@ def run_media(command, cancel_check=None, capture_output=False, *, timeout=21600
             if process.poll() is None:
                 process.kill()
             process.wait(timeout=10)
+            # Windows keeps an exited process object (and its PID/resources)
+            # until the native handle closes. An exception traceback can retain
+            # this Popen for the lifetime of a failed/retryable session, so do
+            # not depend on garbage collection to release that handle.
+            handle = getattr(process, "_handle", None)
+            close_handle = getattr(handle, "Close", None)
+            if callable(close_handle):
+                close_handle()
