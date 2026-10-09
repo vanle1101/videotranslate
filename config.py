@@ -100,7 +100,9 @@ class Settings(BaseSettings):
     # shorten, never extend, each adapter's existing request timeout.
     OPENCODE_CONCURRENCY: int = Field(default=1, ge=1, le=4)
     OPENCODE_QUEUE_LIMIT: int = Field(default=24, ge=1, le=256)
-    OPENCODE_QUEUE_TIMEOUT: float = Field(default=30.0, gt=0, le=300)
+    # Queue admission is separate from a provider request deadline. It must
+    # cover the longest bounded review request already ahead in the FIFO.
+    OPENCODE_QUEUE_TIMEOUT: float = Field(default=180.0, gt=0, le=600)
     OPENCODE_CIRCUIT_FAILURES: int = Field(default=4, ge=1, le=20)
     OPENCODE_CIRCUIT_COOLDOWN: float = Field(default=30.0, gt=0, le=300)
     OPENCODE_TASK_TIMEOUTS: dict[str, float] = Field(default_factory=lambda: {
