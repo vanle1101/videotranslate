@@ -52,6 +52,7 @@ class LocalAPITests(unittest.TestCase):
             start_wall_time=0, first_play_emitted=True, bgm_url=None,
             vocal_suppressor=SimpleNamespace(name="DSP"), suppression_stats={},
             start=AsyncMock(),
+            report_progress=AsyncMock(),
             get_telemetry=Mock(return_value={"status": "finished", "error": None}),
         )
         attrs["vocal_suppressor"].suppression_level_db = -20
