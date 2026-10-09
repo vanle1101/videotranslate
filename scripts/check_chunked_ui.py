@@ -275,7 +275,9 @@ def main():
                 "missing_speech_ids": snapshot["progress"]["missing_speech_ids"]})
             raise AssertionError("Full output correctly blocked by missing defensible speech; acceptance is incomplete")
         if snapshot["progress"]["status"] == "FAILED":
-            event("REAL_FAILURE", {"progress": snapshot["progress"], "rows": [row for row in snapshot["segments"] if row["status"] == "FAILED"]})
+            event("REAL_FAILURE", {"progress": snapshot["progress"], "rows": [
+                {key: row.get(key) for key in ("id", "start", "end", "status", "failed_stage", "revision", "error")}
+                for row in snapshot["segments"] if row["status"] == "FAILED"]})
             raise AssertionError(snapshot["progress"]["stage"])
         if args.mode == "preview":
             assert snapshot["progress"]["status"] == "PREVIEW_READY"
