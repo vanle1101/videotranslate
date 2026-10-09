@@ -570,3 +570,222 @@ def test_uncommitted_dense_rescue_preserves_neighbors(session, monkeypatch, fail
             assert vars(session.segments[sid]) == old
             assert Path(session.segments[sid].audio_path).read_bytes() == before["audio"][session.segments[sid].audio_path]
     assert sorted(path.name for path in session.segments_dir.glob("*.wav")) == sorted(Path(path).name for path in before["audio"])
+
+
+def prepare_final_pacing_recovery(session, monkeypatch):
+    """An unknown successor reserves time that its later real WAV releases."""
+    rows = {}
+    for sid, start, end, left, right, audio in [
+        (0, 0., 1., 0., 1.1, 1.1),
+        (1, 1., 1.6, 1.1, 1.7, None),
+        (2, 1.6, 2.6, 1.7, 2.7, None),
+        (3, 2.6, 3., 2.7, 3.1, .4),
+    ]:
+        row = SegmentItem(sid, start, end, end - start)
+        row.dub_start, row.dub_end = left, right
+        row.text_zh = "不告诉" if sid == 1 else "来源"
+        row.final_vi = "Không nói đâu." if sid == 1 else "Câu thoại."
+        row.verification = {"status": "verified", "semantic_verified": True}
+        if audio:
+            row.status = "READY"
+            row.audio_path = str(session.segments_dir / f"seg_{sid}.wav")
+            write_pcm(row.audio_path, audio)
+        rows[sid] = row
+    session.segments = rows
+    session.total_duration = session._source_prepared_seconds = session._visual_completed_seconds = 3.1
+    session._chunked_source_started = session._visual_prepass_complete = session.is_running = True
+    session.translator = None
+    proof = {"status": "verified", "text": "Không nói.", "provider": "opencode",
+             "address_preserved": True, "reason": "A separate source check approved this refusal."}
+    calls = []
+
+    def synthesis(**kwargs):
+        calls.append(kwargs)
+        if len(calls) == 1:
+            error = pipeline.SpeechBudgetError("Measured complete speech needs later capacity")
+            error.required_dub_duration = .812
+            error.candidate_text = proof["text"]
+            error.pacing_verification = deepcopy(proof)
+            raise error
+        write_pcm(kwargs["output_path"], .8)
+        return {"text": kwargs["text"], "tts_duration": .92, "speed_ratio": 1.15,
+                "boundaries": [], "pacing_verification": kwargs.get("pacing_verification")}
+
+    monkeypatch.setattr(pipeline, "synthesize_natural_speech", synthesis)
+    with pytest.raises(pipeline.SpeechBudgetError):
+        asyncio.run(session._synthesize_segment(rows[1]))
+    rows[1].status, rows[1].failed_stage, rows[1].error = "FAILED", "TTS", "Original measured failure"
+    assert session._pacing_failures[1]["capacity"] == pytest.approx(.6)
+    successor = rows[2]
+    successor.status = "READY"
+    successor.audio_path = str(session.segments_dir / "seg_2.wav")
+    write_pcm(successor.audio_path, .45)
+    return rows[1], successor, calls, proof
+
+
+def test_final_worker_retries_only_measured_candidate_when_later_wav_releases_capacity(session, monkeypatch):
+    focus, successor, calls, proof = prepare_final_pacing_recovery(session, monkeypatch)
+    session.warnings = [f"Câu {focus.id + 1} chưa tạo được giọng; giữ phần đã xong và tiếp tục các câu sau."]
+    before = snapshot(session)
+    asyncio.run(session._worker_loop())
+    assert len(calls) == 2
+    assert calls[-1]["text"] == proof["text"]
+    assert calls[-1]["translator"] is None
+    assert calls[-1]["pacing_verification"] == proof
+    assert calls[-1]["max_duration"] == pytest.approx(.85)
+    assert focus.status == "READY" and focus.error is None and focus.failed_stage is None
+    assert focus.final_vi == proof["text"] and focus.verification["pacing"] == proof
+    assert focus.revision == 1 and focus.speed_ratio <= 1.15
+    assert not session.error and not session.warnings and session.get_progress()["status"] == "COMPLETED"
+    assert not session._pacing_failures
+    previous_end = 0
+    for row in session.segments.values():
+        left, right = pipeline.resolve_dub_timing(row.to_dict())
+        assert left >= previous_end - 1e-8
+        assert session._dub_audio_duration(row.audio_path) <= right - left + 1e-8
+        previous_end = right
+        assert (row.start, row.end) == (before["segments"][row.id]["start"], before["segments"][row.id]["end"])
+        if row.id != focus.id:
+            assert Path(row.audio_path).read_bytes() == before["audio"][row.audio_path]
+    assert not list(session.segments_dir.glob("pending_*.wav"))
+
+
+@pytest.mark.parametrize("change", ["manual", "revision", "source", "audit", "neighbor_source", "voice", "engine", "max_speed", "ref_audio",
+                                  "healthy_audio", "wrong_stage", "not_full_source", "no_new_audio", "insufficient_capacity"])
+def test_final_pacing_recovery_keeps_ineligible_or_changed_rows(session, monkeypatch, change):
+    focus, successor, calls, _ = prepare_final_pacing_recovery(session, monkeypatch)
+    if change == "manual":
+        focus.verification = {"status": "manual"}
+    elif change == "revision":
+        focus.revision += 1
+    elif change == "source":
+        focus.text_zh = "换了来源"
+    elif change == "audit":
+        focus.verification["semantic_verified"] = False
+    elif change == "neighbor_source":
+        successor.text_zh = "换了来源"
+    elif change == "voice":
+        session.voice = "Changed-voice"
+    elif change == "engine":
+        session.tts_engine = object()
+    elif change == "max_speed":
+        session.aligner.max_speed = 1.1
+    elif change == "ref_audio":
+        session.ref_audio = session.video_path
+    elif change == "healthy_audio":
+        focus.audio_path = str(session.segments_dir / "existing_manual.wav")
+        write_pcm(focus.audio_path, .4)
+    elif change == "wrong_stage":
+        focus.failed_stage = "TRANSLATING"
+    elif change == "not_full_source":
+        session._visual_prepass_complete = False
+    elif change == "no_new_audio":
+        session._pacing_failures[1]["following_audio"] = {
+            (row["id"], row["revision"], row.get("audio_path"), row["audio_duration"])
+            for row in session._dub_rows() if row["start"] >= focus.end and row.get("audio_duration")}
+    else:
+        write_pcm(successor.audio_path, .98)
+    before = snapshot(session)
+    asyncio.run(session._recover_pacing_after_source())
+    assert len(calls) == 1
+    for sid, row in session.segments.items():
+        assert vars(row) == before["segments"][sid]
+        if row.audio_path:
+            assert Path(row.audio_path).read_bytes() == before["audio"][row.audio_path]
+
+
+def test_final_pacing_recovery_keeps_manual_successor_timing(session, monkeypatch):
+    focus, successor, calls, _ = prepare_final_pacing_recovery(session, monkeypatch)
+    successor.verification = {"status": "manual"}
+    before = snapshot(session)
+    asyncio.run(session._recover_pacing_after_source())
+    assert len(calls) == 1 and focus.status == "FAILED"
+    assert vars(successor) == before["segments"][successor.id]
+    assert Path(successor.audio_path).read_bytes() == before["audio"][successor.audio_path]
+
+
+def test_final_pacing_recovery_attempts_each_failure_only_once(session, monkeypatch):
+    focus, successor, calls, _ = prepare_final_pacing_recovery(session, monkeypatch)
+    failures = []
+    def fail(**kwargs):
+        failures.append(kwargs)
+        error = pipeline.SpeechBudgetError("Fresh measured waveform still does not fit")
+        error.required_dub_duration, error.candidate_text = 2., kwargs["text"]
+        raise error
+    monkeypatch.setattr(pipeline, "synthesize_natural_speech", fail)
+    asyncio.run(session._recover_pacing_after_source())
+    asyncio.run(session._recover_pacing_after_source())
+    assert len(failures) == 1 and focus.status == "FAILED" and focus.failed_stage == "TTS"
+    assert "still does not fit" in focus.error and not session._pacing_failures
+    assert focus.audio_path is None
+    assert not list(session.segments_dir.glob("pending_*.wav"))
+
+
+@pytest.mark.parametrize("malformed", ["missing_measurement", "zero", "nan", "boolean", "empty_candidate", "unverified_rewrite"])
+def test_final_pacing_recovery_requires_actual_measured_candidate_evidence(session, monkeypatch, malformed):
+    focus, successor, calls, proof = prepare_final_pacing_recovery(session, monkeypatch)
+    session._pacing_failures.clear()
+    error = pipeline.SpeechBudgetError("A budget error string is not measured evidence")
+    error.required_dub_duration = .812
+    error.candidate_text = proof["text"]
+    error.pacing_verification = proof
+    if malformed == "missing_measurement":
+        del error.required_dub_duration
+    elif malformed == "zero":
+        error.required_dub_duration = 0
+    elif malformed == "nan":
+        error.required_dub_duration = float("nan")
+    elif malformed == "boolean":
+        error.required_dub_duration = True
+    elif malformed == "empty_candidate":
+        error.candidate_text = ""
+    else:
+        error.pacing_verification = None
+    session._remember_pacing_failure(focus, error, session._dialogue_context_before(focus))
+    assert not session._pacing_failures
+    asyncio.run(session._recover_pacing_after_source())
+    assert len(calls) == 1 and focus.status == "FAILED"
+
+
+@pytest.mark.parametrize("interrupt", ["stop", "manual_edit"])
+def test_final_pacing_recovery_cannot_publish_after_stop_or_new_edit(session, monkeypatch, interrupt):
+    focus, successor, calls, _ = prepare_final_pacing_recovery(session, monkeypatch)
+    session.persist()  # Real application sessions preserve durable WAVs on Stop.
+    entered, release = threading.Event(), threading.Event()
+    before = snapshot(session)
+    def delayed(**kwargs):
+        write_pcm(kwargs["output_path"], .8)
+        entered.set()
+        if not release.wait(5):
+            raise TimeoutError("Regression synthesis was not released")
+        return {"text": kwargs["text"], "tts_duration": .92, "speed_ratio": 1.15,
+                "boundaries": [], "pacing_verification": kwargs.get("pacing_verification")}
+    monkeypatch.setattr(pipeline, "synthesize_natural_speech", delayed)
+    async def run():
+        task = asyncio.create_task(session._recover_pacing_after_source())
+        assert await asyncio.to_thread(entered.wait, 5)
+        if interrupt == "stop":
+            session.stop()
+        else:
+            focus.revision += 1
+            focus.final_vi, focus.verification, focus.status = "Lời người dùng.", {"status": "manual"}, "READY"
+            focus.audio_path = str(session.segments_dir / "manual.wav")
+            write_pcm(focus.audio_path, .4)
+        release.set()
+        if interrupt == "stop":
+            with pytest.raises(asyncio.CancelledError):
+                await task
+        else:
+            await task
+    asyncio.run(run())
+    if interrupt == "stop":
+        assert focus.audio_path is None and session.is_stopped
+    else:
+        assert focus.final_vi == "Lời người dùng." and focus.revision == 1
+        assert focus.status == "READY" and focus.verification == {"status": "manual"}
+        assert session._dub_audio_duration(focus.audio_path) == pytest.approx(.4)
+    for sid, row in session.segments.items():
+        if sid != focus.id:
+            assert vars(row) == before["segments"][sid]
+            assert Path(row.audio_path).read_bytes() == before["audio"][row.audio_path]
+    assert not list(session.segments_dir.glob("pending_*.wav"))

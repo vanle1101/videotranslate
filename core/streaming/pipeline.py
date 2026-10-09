@@ -177,6 +177,9 @@ class StreamingPipelineSession:
         self._visual_incremental_started = False
         self._visual_prepass_complete = False
         self._visual_reviewed_drafts = {}
+        # Measured failures belong to this process only. Restored projects use
+        # explicit Retry; never infer a speech budget from an error string.
+        self._pacing_failures = {}
         self.progress = {
             "phase": "prepare" if video_path else "resolve",
             "stage": "Đang chuẩn bị video..." if video_path else "Đang nhận diện link video...",
@@ -2175,6 +2178,7 @@ class StreamingPipelineSession:
             if item.audio_path and item.status in ("READY", "PLAYED"):
                 try:
                     row["audio_duration"] = self._cached_dub_audio_duration(item.audio_path)
+                    row["audio_path"] = item.audio_path
                 except (OSError, EOFError, wave.Error, ValueError, ZeroDivisionError):
                     pass  # Unknown audio remains an occupied, immovable slot.
             rows.append(row)
@@ -2316,9 +2320,8 @@ class StreamingPipelineSession:
                 Path(update["audio_path"]).unlink(missing_ok=True)
             raise
 
-    async def _fit_dub(self, seg, *, text, source, output_path, translator=None, context=None, on_stage=None, neighbor_rescue=False):
-        rows = self._dub_rows()
-        revision = {row["id"]: (row["revision"], row["dub_start"], row["dub_end"]) for row in rows}
+    def _dub_fit_window(self, seg, rows):
+        """Share the same proven timeline budget between fitting and recovery."""
         start, end = resolve_dub_timing(seg.to_dict())
         duration = end - start
         known_duration = self._source_prepared_seconds if self._chunked_source_started else self.total_duration
@@ -2341,6 +2344,12 @@ class StreamingPipelineSession:
             # Existing full-source projects retain their original fitting
             # contract; only the new bounded timeline opts into two-sided fit.
             capacity = min(capacity, duration + .35)
+        return rows, duration, capacity, known_duration, tail_limit
+
+    async def _fit_dub(self, seg, *, text, source, output_path, translator=None, context=None, on_stage=None, neighbor_rescue=False, pacing_verification=None, preserve_manual_timing=False):
+        rows, duration, capacity, known_duration, tail_limit = self._dub_fit_window(seg, self._dub_rows())
+        revision = {row["id"]: (row["revision"], row["dub_start"], row["dub_end"]) for row in rows}
+        start, end = resolve_dub_timing(seg.to_dict())
         # The planner bounds both source endpoints to +/-350 ms and can borrow
         # on both sides. Capping the *duration* to +350 ms discarded a valid
         # additional 350 ms at the other endpoint (the real 1.3 s row could
@@ -2356,7 +2365,8 @@ class StreamingPipelineSession:
                     translator=translator, voice=self.voice, ref_audio=self.ref_audio,
                     context=context, on_stage=on_stage,
                     allow_bidirectional_reflow=self._chunked_source_started,
-                    **({"max_duration_limit": capacity} if tail_limit is not None else {}))
+                    **({"max_duration_limit": capacity} if tail_limit is not None else {}),
+                    **({"pacing_verification": pacing_verification} if pacing_verification is not None else {}))
             except (SpeechBudgetError, PacingReviewRejected) as exc:
                 required = getattr(exc, "required_dub_duration", None)
                 if (not neighbor_rescue or not self._chunked_source_started or translator is None
@@ -2398,6 +2408,11 @@ class StreamingPipelineSession:
                 for identity, bounds in plan.items():
                     resolve_dub_timing({**self.segments[identity].to_dict(), **bounds})
                 start, end = plan[seg.id]["dub_start"], plan[seg.id]["dub_end"]
+            if preserve_manual_timing and any(
+                    (self.segments[sid].verification or {}).get("status") == "manual"
+                    and (bounds["dub_start"], bounds["dub_end"]) != resolve_dub_timing(self.segments[sid].to_dict())
+                    for sid, bounds in plan.items()):
+                raise SpeechBudgetError("Căn lại sẽ thay đổi thời gian câu đã sửa tay; giữ nguyên bản sửa.")
             timing = await self._run_blocking(build_speech_timing, spoken.get("text", text), start, end,
                 output_path, spoken["speed_ratio"], spoken["boundaries"])
             if self.is_stopped:
@@ -2480,12 +2495,105 @@ class StreamingPipelineSession:
             if item.status in ("READY", "PLAYED") and item.audio_path and Path(item.audio_path).is_file():
                 item.audio_url = f"/api/streaming/audio/{self.task_id}/{item.id}?rev={item.revision}"
 
-    async def _synthesize_segment(self, seg):
+    @staticmethod
+    def _pacing_source_context(context):
+        return [{key: row.get(key) for key in ("id", "start", "end", "text_zh", "asr_text",
+                                               "source_needs_review", "source_truncated")}
+                for row in (context or []) if isinstance(row, dict) and "id" in row]
+
+    def _remember_pacing_failure(self, seg, error, context):
+        """Keep measured, independently checked evidence for one later retry."""
+        required = getattr(error, "required_dub_duration", None)
+        candidate = getattr(error, "candidate_text", None)
+        proof = getattr(error, "pacing_verification", None)
+        if (not self._chunked_source_started or (seg.verification or {}).get("status") == "manual"
+                or isinstance(required, bool) or not isinstance(required, (int, float))
+                or not math.isfinite(required) or required <= 0
+                or not isinstance(candidate, str) or not candidate.strip()
+                or candidate != seg.final_vi and (not isinstance(proof, dict)
+                    or proof.get("status") != "verified" or proof.get("text") != candidate)):
+            return
+        rows, _, capacity, _, _ = self._dub_fit_window(seg, self._dub_rows())
+        self._pacing_failures[seg.id] = {
+            "required": float(required), "candidate": candidate, "proof": deepcopy(proof),
+            "revision": seg.revision, "owner": self._visual_review_state(seg), "capacity": capacity,
+            "context": self._pacing_source_context(context), "voice": self.voice,
+            "engine": self.tts_engine, "tts_engine_name": self.tts_engine_name,
+            "aligner": self.aligner, "max_speed": self.aligner.max_speed, "ref_audio": self.ref_audio,
+            "following_audio": {(row["id"], row["revision"], row.get("audio_path"), row["audio_duration"])
+                                for row in rows if row["start"] >= seg.end and row.get("audio_duration")},
+        }
+
+    def _pacing_failure_owned(self, seg, record):
+        if (self.segments.get(seg.id) is not seg or seg.revision != record["revision"]
+                or (seg.verification or {}).get("status") == "manual"
+                or self._visual_review_state(seg) != record["owner"]
+                or self.voice != record["voice"] or self.tts_engine is not record["engine"]
+                or self.tts_engine_name != record["tts_engine_name"]
+                or self.aligner is not record["aligner"] or self.aligner.max_speed != record["max_speed"]
+                or self.ref_audio != record["ref_audio"]):
+            return False
+        current = {row["id"]: row for row in self._pacing_source_context(self._dialogue_context_before(seg))}
+        return all(current.get(row["id"]) == row for row in record["context"])
+
+    async def _recover_pacing_after_source(self):
+        """One finite pass; retry only when later real WAVs prove enough room."""
+        if (not self._chunked_source_started or not self._visual_prepass_complete
+                or not self.is_running or self.is_stopped):
+            return
+        pending = sorted(tuple(self._pacing_failures), key=lambda sid: self.segments[sid].start
+                         if sid in self.segments else float("inf"))
+        for sid in pending:
+            await self.pause_event.wait()
+            if self.is_stopped or not self.is_running:
+                raise asyncio.CancelledError
+            record = self._pacing_failures.pop(sid, None)
+            seg = self.segments.get(sid)
+            if (record is None or seg is None or seg.status != "FAILED"
+                    or seg.failed_stage not in {"TTS", "ALIGNING"}
+                    or seg.audio_path or not self._pacing_failure_owned(seg, record)):
+                continue
+            rows, _, capacity, known, _ = self._dub_fit_window(seg, self._dub_rows())
+            following = {(row["id"], row["revision"], row.get("audio_path"), row["audio_duration"])
+                         for row in rows if row["start"] >= seg.end and row.get("audio_duration")}
+            plan = plan_reflow(rows, sid, record["required"], total_duration=known)
+            if (not following - record["following_audio"] or capacity <= record["capacity"] + .001
+                    or capacity + 1e-9 < record["required"] or plan is None
+                    or any((self.segments[identity].verification or {}).get("status") == "manual"
+                           and (bounds["dub_start"], bounds["dub_end"]) != resolve_dub_timing(self.segments[identity].to_dict())
+                           for identity, bounds in (plan or {}).items())):
+                continue
+            logging.getLogger("pipeline").info(
+                "PACING_FINAL_RECOVERY run_id=%s segment_id=%s required_seconds=%.6f capacity_seconds=%.6f",
+                self.task_id, sid, record["required"], capacity)
+            try:
+                seg.error = None
+                await self._synthesize_segment(seg, pacing_recovery=record)
+                warning = f"Câu {sid + 1} chưa tạo được giọng; giữ phần đã xong và tiếp tục các câu sau."
+                self.warnings = [value for value in self.warnings if value != warning]
+            except asyncio.CancelledError:
+                raise
+            except Exception as error:
+                if getattr(self, "_persistence_capacity_failed", False):
+                    raise
+                # An edit/review owns its new state. Never rewrite it with the
+                # outcome of this older automatic retry.
+                if self._pacing_failure_owned(seg, record):
+                    seg.failed_stage, seg.status, seg.error = seg.status, "FAILED", str(error)
+                    await self.emit("segment_update", seg.to_dict())
+                logging.getLogger("errors").error(
+                    "[%s] PACING_FINAL_RECOVERY_FAILED segment_id=%s error_type=%s",
+                    self.task_id, sid, type(error).__name__)
+
+    async def _synthesize_segment(self, seg, *, pacing_recovery=None):
         """Generate playable audio without approving an uncertain translation."""
         raw_tts_wav = self.cache_dir / f"tts_{seg.id}_raw.wav"
         pending_path = self.segments_dir / f"pending_{seg.id}_{uuid.uuid4().hex}.wav"
         dub_plan = {}
         old_audio_path = seg.audio_path
+        context = None
+        if pacing_recovery is None:
+            self._pacing_failures.pop(seg.id, None)
         try:
             if not seg.final_vi.strip():
                 if seg.text_zh.strip() and not seg.needs_review:
@@ -2500,6 +2608,8 @@ class StreamingPipelineSession:
                 await self._update_ready()
                 return
             self._ensure_tts_engine()
+            if pacing_recovery and not self._pacing_failure_owned(seg, pacing_recovery):
+                raise SegmentEditConflict("Lời thoại đã thay đổi trước khi căn lại; giữ bản sửa mới.")
             seg.status = "TTS"
             await self._segment_progress("tts", f"Đang tạo giọng đọc câu {seg.id + 1}")
             await self.emit("segment_update", seg.to_dict())
@@ -2507,6 +2617,8 @@ class StreamingPipelineSession:
             async def publish_stage(stage):
                 if self.is_stopped:
                     raise asyncio.CancelledError
+                if pacing_recovery and not self._pacing_failure_owned(seg, pacing_recovery):
+                    raise SegmentEditConflict("Lời thoại đã thay đổi trong khi căn lại; giữ bản sửa mới.")
                 seg.status = "ALIGNING" if stage == "ALIGNING" else "TTS"
                 label = {"TTS": "Đang tạo giọng đọc", "ALIGNING": "Đang căn nhịp đọc",
                          "REWRITING": "AI đang rút gọn và kiểm tra nghĩa lời đọc"}[stage]
@@ -2515,17 +2627,24 @@ class StreamingPipelineSession:
             def speech_stage(stage):
                 asyncio.run_coroutine_threadsafe(publish_stage(stage), loop).result()
             async with self._tts_lock:
+                context = self._dialogue_context_before(seg)
+                if pacing_recovery and not self._pacing_failure_owned(seg, pacing_recovery):
+                    raise SegmentEditConflict("Lời thoại đã thay đổi trước khi tạo giọng lại; giữ bản sửa mới.")
                 final_path = self.segments_dir / f"seg_{seg.id}.wav"
                 spoken, timing, dub_plan = await self._fit_dub(seg,
-                    text=seg.final_vi, source=seg.text_zh, output_path=pending_path,
-                    translator=self.translator, on_stage=speech_stage,
-                    context=self._dialogue_context_before(seg), neighbor_rescue=True)
-            seg.status = "ALIGNING"
+                    text=pacing_recovery["candidate"] if pacing_recovery else seg.final_vi,
+                    source=seg.text_zh, output_path=pending_path,
+                    translator=None if pacing_recovery else self.translator, on_stage=speech_stage,
+                    context=context, neighbor_rescue=pacing_recovery is None,
+                    **({"pacing_verification": pacing_recovery["proof"], "preserve_manual_timing": True} if pacing_recovery else {}))
             # Fitting already emitted ALIGNING. Publish the complete WAV and
             # every changed timing without yielding to a concurrent edit/Stop.
             tts_dur, ratio, boundaries = spoken["tts_duration"], spoken["speed_ratio"], spoken["boundaries"]
             if self.is_stopped:
                 raise asyncio.CancelledError
+            if pacing_recovery and not self._pacing_failure_owned(seg, pacing_recovery):
+                raise SegmentEditConflict("Lời thoại đã thay đổi trong khi thử căn lại; giữ bản sửa mới.")
+            seg.status = "ALIGNING"
             pending_path.replace(final_path)
             self._publish_dub_plan(dub_plan, seg.id)
             if spoken["text"] != seg.final_vi:
@@ -2573,6 +2692,10 @@ class StreamingPipelineSession:
                         old_audio.unlink(missing_ok=True)
                     except OSError:
                         pass  # A playing Windows audio handle can close later.
+        except (SpeechBudgetError, PacingReviewRejected) as error:
+            if pacing_recovery is None:
+                self._remember_pacing_failure(seg, error, context)
+            raise
         finally:
             for sid, bounds in dub_plan.items():
                 path = bounds.get("_audio_update", {}).get("audio_path")
@@ -2639,6 +2762,8 @@ class StreamingPipelineSession:
                     break
                 finally:
                     self.queue.task_done()
+            if self.is_running and not self.is_stopped and self.queue.empty():
+                await self._recover_pacing_after_source()
         except asyncio.CancelledError:
             self.is_stopped = True
             raise
