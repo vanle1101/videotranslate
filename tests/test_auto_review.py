@@ -412,10 +412,11 @@ def test_second_semantic_pass_failure_never_approves_first_pass(review, invalid,
 
 
 @pytest.mark.parametrize("failed", [False, True])
-def test_audio_models_run_sequentially_and_clean_task_pcm_even_on_failure(tmp_path, monkeypatch, failed):
+def test_evidence_workers_preserve_decoding_and_clean_pcm_even_on_failure(tmp_path, monkeypatch, failed):
     import sys
     from types import SimpleNamespace
-    import core.translation_review as module
+    import core.engines.asr.review_evidence_worker as module
+    import core.media_process as media
     from core.engines.asr.sensevoice_engine import SenseVoiceEngine
     monkeypatch.setattr(settings, "BASE_DIR", tmp_path)
     monkeypatch.setattr(settings, "TEMP_DIR", tmp_path)
@@ -435,30 +436,40 @@ def test_audio_models_run_sequentially_and_clean_task_pcm_even_on_failure(tmp_pa
         engine.recognizer = SimpleNamespace(create_stream=lambda: stream, decode_stream=Mock())
     monkeypatch.setattr(SenseVoiceEngine, "_ensure_loaded", sense_load)
     wav_paths = []
-    def ffmpeg(argv, cancel):
+    def ffmpeg(argv, cancel=None):
         from pathlib import Path
         path = Path(argv[-1])
         path.write_bytes(b"pcm")
         wav_paths.append(path)
-    monkeypatch.setattr(module, "run_media", ffmpeg)
+    monkeypatch.setattr(media, "run_media", ffmpeg)
     monkeypatch.setitem(sys.modules, "soundfile", SimpleNamespace(read=lambda *a, **kw: ([.1], 16000)))
     class Whisper:
         def __init__(self, path, **kwargs):
             assert engines[0].recognizer is None
             assert path == str(whisper)
-            assert kwargs["local_files_only"] is True
+            assert kwargs == {"device": "cpu", "compute_type": "int8", "cpu_threads": 4,
+                              "num_workers": 1, "local_files_only": True}
         def transcribe(self, path, **kwargs):
+            assert kwargs == {"language": "zh", "task": "transcribe", "beam_size": 5,
+                              "vad_filter": False, "condition_on_previous_text": False}
             if failed:
                 raise RuntimeError("test inference failure")
             return iter([SimpleNamespace(text="真的")]), None
     monkeypatch.setitem(sys.modules, "faster_whisper", SimpleNamespace(WhisperModel=Whisper))
+    request = {"video_path": "source.mp4", "work_directory": str(tmp_path),
+               "sensevoice_model_dir": str(sense), "whisper_model_path": str(whisper),
+               "rows": [{"id": 0, "start": segment()["start"], "end": segment()["end"]}]}
+    readings = []
+    module.collect_engine({**request, "engine": "sensevoice"}, readings.append)
     if failed:
         with pytest.raises(RuntimeError, match="inference failure"):
-            module._LocalAudioEvidence().collect("source.mp4", [segment()])
+            module.collect_engine({**request, "engine": "faster-whisper-small"}, readings.append)
     else:
-        assert module._LocalAudioEvidence().collect("source.mp4", [segment()]) == {
-            0: {"sensevoice": "真的。", "faster-whisper-small": "真的"}}
-    assert all(not path.exists() and not path.parent.exists() for path in wav_paths)
+        module.collect_engine({**request, "engine": "faster-whisper-small"}, readings.append)
+        assert [row for row in readings if row["event"] == "evidence"] == [
+            {"event": "evidence", "id": 0, "engine": "sensevoice", "text": "真的。"},
+            {"event": "evidence", "id": 0, "engine": "faster-whisper-small", "text": "真的"}]
+    assert all(not path.exists() for path in wav_paths)
     assert engines[0].recognizer is None
 
 

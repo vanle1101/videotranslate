@@ -89,13 +89,14 @@ def wait_for_idle(page, base, task_id, timeout=3600):
         if current != previous:
             event("PROGRESS", {"status": current[0], "stage": current[1], "processed": current[2], "ready": current[3]})
             previous = current
-        if progress["status"] == "PREPARED":
+        editorial_blocked = bool(progress["status"] == "PREPARED" and progress.get("final_output_blocked"))
+        if progress["status"] == "PREPARED" and not editorial_blocked:
             prepared_at = prepared_at or time.monotonic()
             if time.monotonic() - prepared_at > 30:
                 raise AssertionError("Speech is prepared but no validated MP4/export worker became available")
         else:
             prepared_at = None
-        if progress["status"] in {"FAILED", "STOPPED", "PREVIEW_READY", "COMPLETED"}:
+        if editorial_blocked or progress["status"] in {"FAILED", "STOPPED", "PREVIEW_READY", "COMPLETED"}:
             until(page, "document.getElementById('task-progress').dataset.status===" + json.dumps(progress["status"]), timeout=30)
             elapsed = time.monotonic() - started
             event("REAL_RECOVERY_BENCHMARK", {"task_id":task_id, "elapsed_seconds":round(elapsed, 3),
@@ -269,6 +270,10 @@ def main():
                     return
         event("TASK", task_id)
         snapshot = wait_for_idle(page, base, task_id, timeout=args.timeout)
+        if snapshot["progress"].get("final_output_blocked") and snapshot["progress"]["status"] == "PREPARED":
+            event("REAL_CONTENT_BLOCKER", {"progress": snapshot["progress"],
+                "missing_speech_ids": snapshot["progress"]["missing_speech_ids"]})
+            raise AssertionError("Full output correctly blocked by missing defensible speech; acceptance is incomplete")
         if snapshot["progress"]["status"] == "FAILED":
             event("REAL_FAILURE", {"progress": snapshot["progress"], "rows": [row for row in snapshot["segments"] if row["status"] == "FAILED"]})
             raise AssertionError(snapshot["progress"]["stage"])

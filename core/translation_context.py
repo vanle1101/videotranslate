@@ -175,7 +175,7 @@ def focus_identity(rows):
     return {key: focus[0][key] for key in ("id", "start", "end") if key in focus[0]}
 
 
-def address_expressions(candidate):
+def address_expressions(candidate, *, grounded_terms=()):
     """Select text needing a pronoun audit; never infer roles or translate it.
 
     Selection and verification must use the same vocabulary. Remove ordinary
@@ -214,6 +214,28 @@ def address_expressions(candidate):
         r"thầy|cậu|ông|bà|ta|cháu|dì|cụ|cưng|ngươi|mi)(?!\w)", re.I)
     spans.extend((match.start(), match.end(), match.group(0))
                  for match in token_re.finditer("".join(masked)))
+    # An independently read named address can be 'anh Dã', while lexical
+    # selection alone sees 'anh'. Retain the whole EXACT named form when it
+    # occurs at the selected position. This neither equates shorter forms nor
+    # approves the role: the caller must still match the separate source
+    # reading and semantic usage. Kinship phrases such as bố/mẹ are excluded.
+    named = []
+    for term in grounded_terms:
+        if not isinstance(term, str):
+            continue
+        words = term.strip().split()
+        if (not 2 <= len(words) <= 5 or words[0].casefold() not in {"anh", "chị", "cô", "chú", "bác", "ông", "bà"}
+                or any(not word.isalpha() or not word[0].isupper() for word in words[1:])):
+            continue
+        named.append(words)
+    for words in sorted(named, key=lambda value: len(" ".join(value)), reverse=True):
+        pattern = r"(?<!\w)" + r"\s+".join(re.escape(word) for word in words) + r"(?!\w)"
+        for match in re.finditer(pattern, text, re.I):
+            owned = [span for span in spans if span[0] < match.end() and span[1] > match.start()]
+            if (len(owned) == 1 and owned[0][0] == match.start()
+                    and owned[0][2].casefold() == words[0].casefold()):
+                spans.remove(owned[0])
+                spans.append((match.start(), match.end(), match.group(0)))
     return [term for _, _, term in sorted(spans, key=lambda item: item[0])]
 
 

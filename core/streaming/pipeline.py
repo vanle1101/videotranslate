@@ -31,6 +31,7 @@ from core.engines.alignment.natural_speech import synthesize_natural_speech
 from core.engines.separator.realtime_suppressor import RealtimeVocalSuppressor
 from core.engines.alignment.speech_timing import build_speech_timing, take_tts_word_boundaries, trim_tts_padding
 from core.streaming.audio_cache import resolve_dub_timing
+from core.streaming.output_gate import final_output_metadata, missing_spoken_output_ids, missing_speech_message
 from core.engines.alignment.dub_timing import available_reflow_duration, plan_reflow, MAX_TAIL_LIMIT_EXTENSION
 
 class SegmentEditConflict(RuntimeError):
@@ -127,7 +128,8 @@ class SegmentItem:
             "review_reason": self.review_reason,
             "asr_text": self.asr_text,
             "verification": self.verification,
-            "preview_is_draft": bool(self.needs_review and self.status in ("READY", "PLAYED")),
+            "preview_is_draft": bool((self.needs_review or missing_spoken_output_ids([self]))
+                                     and self.status in ("READY", "PLAYED")),
             "confirmed_silence": self.confirmed_silence,
             "subtitle_cues": self.subtitle_cues,
             "subtitle_timing_source": self.subtitle_timing_source,
@@ -1134,6 +1136,8 @@ class StreamingPipelineSession:
 
     def get_progress(self) -> Dict[str, Any]:
         snapshot = dict(self.progress)
+        output_gate = final_output_metadata(self.segments.values())
+        snapshot.update(output_gate)
         from core.streaming.recovery import segment_state
         counts = {state: 0 for state in ("PENDING", "RUNNING", "COMPLETED", "RETRY_PENDING", "REVIEW_REQUIRED", "FAILED")}
         for row in self.segments.values():
@@ -1184,11 +1188,17 @@ class StreamingPipelineSession:
             snapshot.update(status="PREVIEW_READY", phase="preview", stage="Bản xem trước đã sẵn sàng. Có thể sửa lời và dịch toàn bộ.")
         elif not self.is_running and self.review_summary.get("status") in {"failed", "incomplete"}:
             snapshot.update(status="FAILED", phase="review", stage=self._review_message())
+        elif not self.is_running and output_gate["final_output_blocked"]:
+            snapshot.update(status="PREPARED", phase="prepared", progress_pct=None,
+                            stage=missing_speech_message(output_gate["missing_speech_ids"]))
         snapshot["can_resume"] = bool(self.initialized and self.is_running and snapshot["status"] == "PAUSED")
         snapshot["can_stop"] = snapshot["status"] in {"RUNNING", "PAUSED"}
         return snapshot
 
     async def report_progress(self, phase: str, stage: str, progress_pct=None, **details):
+        missing_speech = missing_spoken_output_ids(self.segments.values())
+        if phase == "complete" and missing_speech:
+            phase, stage, progress_pct = "prepared", missing_speech_message(missing_speech), None
         if (phase == "complete" and getattr(self, "auto_export_result", False)
                 and (not getattr(self, "output_filename", "") or self.caption_output_outdated)):
             phase, stage = "prepared", "Lời dịch và giọng đã xử lý; đang chờ xuất và kiểm định MP4."
@@ -2240,6 +2250,7 @@ class StreamingPipelineSession:
             self.realtime_factor = round(self.total_processed_duration / elapsed, 2)
 
     def get_telemetry(self) -> Dict[str, Any]:
+        output_gate = final_output_metadata(self.segments.values())
         return {
             "current_playback_time": round(self.current_playback_time, 2),
             "playable_until": self.playable_until,
@@ -2247,7 +2258,8 @@ class StreamingPipelineSession:
             "realtime_factor": self.realtime_factor,
             "time_to_first_play": self.time_to_first_play,
             "ready_to_play": self.first_play_emitted,
-            "status": "cancelling" if getattr(self, "_stop_draining", False) else "cancelled" if self.is_stopped else ("failed" if self.error else ("running" if self.is_running else "prepared" if self.progress.get("phase") == "prepared" else "finished")),
+            "status": "cancelling" if getattr(self, "_stop_draining", False) else "cancelled" if self.is_stopped else ("failed" if self.error else ("running" if self.is_running else "prepared" if self.progress.get("phase") == "prepared" or output_gate["final_output_blocked"] else "finished")),
+            **output_gate,
             "error": self.error,
             "warnings": list(self.warnings),
             "review_summary": dict(self.review_summary),

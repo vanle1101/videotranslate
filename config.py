@@ -136,6 +136,9 @@ class Settings(BaseSettings):
     DEVICE: str = "cpu" # Switch to cuda only after verifying the CUDA runtime.
     WHISPER_COMPUTE_TYPE: str = "int8"
     ASR_CPU_THREADS: int = 6
+    ASR_PROCESS_TIMEOUT: float = Field(default=600.0, gt=0, le=21600)
+    ASR_PROCESS_QUEUE_TIMEOUT: float = Field(default=180.0, gt=0, le=21600)
+    ASR_REVIEW_PROCESS_TIMEOUT: float = Field(default=600.0, gt=0, le=21600)
 
     # Vietnamese Text-to-Speech (TTS)
     # Options: 'edge-tts', 'vieneu-tts', 'zerotts', 'custom-api'

@@ -19,6 +19,7 @@ from urllib.parse import quote, urlsplit, urlunsplit, parse_qsl, urlencode
 
 from config import settings
 from core.streaming.audio_cache import resolve_dub_timing
+from core.streaming.output_gate import final_output_metadata, missing_speech_message
 
 VERSION = 1
 MAX_BYTES = 16 * 1024 * 1024
@@ -818,6 +819,7 @@ def _valid_output(path, expected_duration):
 
 def _availability(data):
     fields, rows = data["session"], data["segments"]
+    output_gate = final_output_metadata(rows)
     missing = []
     pending_download = not fields.get("video_path") and bool(fields.get("source_url"))
     if not _exists(fields.get("video_path")) and not pending_download:
@@ -848,13 +850,16 @@ def _availability(data):
                                  if row["end"] <= fields.get("_visual_completed_seconds", 0) + .001)))
     if fields.get("review_summary", {}).get("status") in {"failed", "incomplete", "running"}:
         ready = False
+    unresolved_speech = bool(ready and output_gate["final_output_blocked"])
+    if output_gate["final_output_blocked"]:
+        ready = False
     output = fields.get("output_filename", "")
     current_output = bool(output and not fields.get("caption_output_outdated"))
     valid_output = bool(current_output and _valid_output(settings.OUTPUT_DIR / output, fields.get("total_duration", 0)))
     output_warning = OUTPUT_FAILURE_WARNING if current_output and not valid_output else ""
     review_incomplete = fields.get("review_summary", {}).get("status") in {"failed", "incomplete", "running"}
     waiting_export = bool(ready and fields.get("auto_export_result") and not valid_output)
-    status = ("FAILED" if output_warning else "PREVIEW_READY" if preview_ready else "PREPARED" if waiting_export else "COMPLETED" if ready else
+    status = ("FAILED" if output_warning else "PREVIEW_READY" if preview_ready else "PREPARED" if waiting_export or unresolved_speech else "COMPLETED" if ready else
               "STOPPED" if data["state"] == "STOPPED" and not missing else
               "FAILED" if missing or data["state"] == "FAILED" or review_incomplete else "STOPPED")
     message = " ".join(missing)
@@ -866,6 +871,8 @@ def _availability(data):
         message = "Dịch video chưa xong; phần đã dịch được giữ. Mở dự án và bấm Tiếp tục để xử lý phần còn lại."
     elif review_incomplete and not message:
         message = "AI kiểm tra lại chưa hoàn tất; mở dự án và bấm AI kiểm tra lại để tiếp tục."
+    elif output_gate["final_output_blocked"] and not message:
+        message = missing_speech_message(output_gate["missing_speech_ids"])
     elif not ready and not message and fields.get("initialized") and rows and all(
             row["status"] in {"READY", "PLAYED"} or row.get("final_vi", "").strip()
             or row.get("confirmed_silence") or row.get("needs_review") for row in rows):
@@ -877,6 +884,7 @@ def _availability(data):
     elif waiting_export:
         message = "Lời dịch và giọng đã lưu; chưa có MP4 được kiểm định. Mở dự án và xuất video."
     return {"status": status, "missing_media": message, "ready": ready, "preview_ready": preview_ready,
+            **output_gate,
             "preview_can_continue": preview_can_continue, "source_exists": _exists(fields.get("video_path")),
             "pending_download": pending_download, "output_warning": output_warning,
             "missing_audio_ids": absent_audio, "output_filename": output if valid_output and ready else ""}
@@ -898,6 +906,7 @@ def list_saved_sessions():
             result.append({"task_id": path.stem, "title": title, "updated_at": data["updated_at"],
                 "status": available["status"], "can_open": available["source_exists"] or available["pending_download"], "duration": fields.get("total_duration", 0),
                 "saved": True, "task_type": "Phiên đã lưu", "progress_pct": 100 if available["status"] == "COMPLETED" else None,
+                **{key: available[key] for key in ("missing_speech_ids", "final_output_blocked", "content_review_state")},
                 "missing_media": available["missing_media"], "stage": available["missing_media"] or "Dự án đã lưu",
                 "can_translate_full": available["preview_can_continue"], "translation_mode": fields.get("translation_mode", "full"),
                 "processed_seconds": fields.get("_visual_completed_seconds", 0),

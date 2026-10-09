@@ -124,6 +124,75 @@ def test_audio_failure_retains_safe_diagnostic_and_segment_ids(caplog):
     assert "secret-token-do-not-log" not in caplog.text + json.dumps(result)
 
 
+def test_audio_batch_failure_diagnoses_only_affected_rows_and_keeps_good_evidence():
+    client = Mock(has_credentials=True, model="offline-partial-evidence")
+    audio = Mock()
+    audio.collect.return_value = {0: {"sensevoice": "你好", "faster-whisper-small": "你好"},
+                                  1: {"faster-whisper-small": "你好"}}
+    error = RuntimeError("private-failed-worker")
+    audio.last_error = error
+    audio.last_errors = {1: {"sensevoice": error}}
+    reviewer = AutomaticTranslationReviewer(client, Mock(), audio)
+    reviewer._address_reading = Mock(return_value={})
+    reply = {"segments": [{**source(0), "literal_vi": "Xin chào", "natural_vi": "Xin chào",
+        "final_vi": "Xin chào", "semantic_verified": True, "verification_reason": "Giữ lời chào."}],
+        "screen_texts": [], "summary": ""}
+    client.translate.return_value = reply
+    data = {"segments": {i: {**source(i), "needs_review": True,
+        "verification": {"source_supported": False}} for i in range(2)},
+        "screen_texts": [], "translation_sources": []}
+    result = reviewer.resolve_audio_uncertainty("unused", data)
+    assert result["segments"][0]["verification"]["status"] == "corrected"
+    assert "diagnostic" not in result["segments"][0]["verification"]
+    assert result["segments"][1]["verification"]["diagnostic"]["segment_ids"] == [1]
+    assert result["segments"][1]["verification"]["audio_evidence"][1]["text_zh"] == "你好"
+    assert result["segments"][1]["needs_review"]
+    assert "private-failed-worker" not in json.dumps(result)
+    assert client.translate.call_count == 2
+
+    audio.collect.return_value[1]["sensevoice"] = "你好"
+    audio.last_error = None
+    audio.last_errors = {}
+    reply["segments"][0]["id"] = 1
+    reply["segments"][0]["start"], reply["segments"][0]["end"] = 1., 2.
+    recovered = reviewer.resolve_audio_uncertainty("unused", result)
+    assert recovered["segments"][1]["verification"]["status"] == "corrected"
+    assert "diagnostic" not in recovered["segments"][1]["verification"]
+    assert "audio_evidence_failures" not in recovered["segments"][1]["verification"]
+    assert recovered["segments"][0] == result["segments"][0]
+
+
+@pytest.mark.parametrize("cancelled", [False, True])
+def test_address_request_failure_isolated_to_audio_semantic_batch(cancelled):
+    import asyncio
+    client = Mock(has_credentials=True, model="offline-address-batches")
+    audio = Mock()
+    audio.collect.return_value = {i: {"sensevoice": "你好", "faster-whisper-small": "你好"}
+                                  for i in range(13)}
+    reviewer = AutomaticTranslationReviewer(client, Mock(), audio)
+    error = asyncio.CancelledError("cancelled") if cancelled else RuntimeError("private-address-failure")
+    reviewer._address_reading = Mock(side_effect=[error, {}])
+    reply = {"segments": [{**source(12), "literal_vi": "Xin chào", "natural_vi": "Xin chào",
+        "final_vi": "Xin chào", "semantic_verified": True, "verification_reason": "Giữ lời chào."}],
+        "screen_texts": [], "summary": ""}
+    client.translate.return_value = reply
+    data = {"segments": {i: {**source(i), "needs_review": True,
+        "verification": {"source_supported": False}} for i in range(13)},
+        "screen_texts": [], "translation_sources": []}
+    if cancelled:
+        with pytest.raises(asyncio.CancelledError):
+            reviewer.resolve_audio_uncertainty("unused", data)
+        assert reviewer._address_reading.call_count == 1
+        client.translate.assert_not_called()
+        return
+    result = reviewer.resolve_audio_uncertainty("unused", data)
+    assert all(result["segments"][i]["verification"]["status"] == "incomplete" for i in range(12))
+    assert result["segments"][12]["verification"]["status"] == "corrected"
+    assert result["segments"][12]["final_vi"] == "Xin chào"
+    assert reviewer._address_reading.call_count == 2 and client.translate.call_count == 2
+    assert "private-address-failure" not in json.dumps(result)
+
+
 def test_owned_cli_deadline_is_reported_as_timeout_without_guessing_network(caplog):
     from core.engines.translation.opencode_client import OpenCodeTimeoutError
 

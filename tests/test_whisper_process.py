@@ -26,7 +26,7 @@ def fake_worker(tmp_path, monkeypatch):
             calls.append({"command": command, "environment": kwargs["env"],
                           "request": json.loads(Path(command[-2]).read_text(encoding="utf-8"))})
             process = original([sys.executable, "-B", "-X", "utf8", "-c", program,
-                                command[-1]], **kwargs)
+                                command[-1], command[-2]], **kwargs)
             calls[-1]["process"] = process
             return process
         monkeypatch.setattr(module.subprocess, "Popen", launch)
@@ -130,3 +130,190 @@ def test_cancelled_queued_request_never_spawns_second_native_worker(fake_worker)
     finally:
         module._WORKER_SLOT.release()
     assert not calls
+
+
+@pytest.fixture
+def evidence_models(fake_worker, monkeypatch):
+    audio, install = fake_worker
+    monkeypatch.setattr(settings, "BASE_DIR", audio.parent)
+    models = audio.parent / "workspace" / "models"
+    for name, files in (("sensevoice_onnx", ("model.int8.onnx", "tokens.txt")),
+                        ("faster-whisper-small", ("config.json", "model.bin", "tokenizer.json"))):
+        folder = models / name
+        folder.mkdir(parents=True)
+        for filename in files:
+            (folder / filename).touch()
+    return audio, install
+
+
+def test_review_uses_two_disposable_workers_and_bounded_batches(evidence_models):
+    from core.translation_review import _LocalAudioEvidence
+    audio, install = evidence_models
+    calls = install('''
+import json, sys
+request=json.load(open(sys.argv[2],encoding='utf-8'))
+with open(sys.argv[1], 'w', encoding='utf-8') as out:
+    for row in request['rows']:
+        out.write(json.dumps({'event':'evidence','id':row['id'],'engine':request['engine'],'text':'你好'})+'\\n')
+    out.write(json.dumps({'event':'completed','rows':len(request['rows']),'engine':request['engine']})+'\\n')
+''')
+    progress = []
+    rows = [{"id": index, "start": index, "end": index + 1} for index in range(13)]
+    result = _LocalAudioEvidence().collect(audio, rows, progress_callback=progress.append)
+    assert result == {row["id"]: {"sensevoice": "你好", "faster-whisper-small": "你好"} for row in rows}
+    assert [call["request"]["engine"] for call in calls] == [
+        "sensevoice", "faster-whisper-small", "sensevoice", "faster-whisper-small"]
+    assert [len(call["request"]["rows"]) for call in calls] == [12, 12, 1, 1]
+    assert progress == sorted(progress) and progress[-1] == 100
+    assert all(call["process"].poll() == 0 for call in calls)
+    assert not list(settings.TEMP_DIR.glob("review-asr-worker-*"))
+
+
+@pytest.mark.parametrize("failure", ["missing", "duplicate", "wrong_id", "wrong_engine", "numeric_text", "no_end"])
+def test_invalid_review_batch_is_not_accepted(evidence_models, failure):
+    from core.translation_review import _LocalAudioEvidence
+    audio, install = evidence_models
+    calls = install('''
+import json, sys
+request=json.load(open(sys.argv[2],encoding='utf-8'))
+engine=request['engine']; failure=''' + repr(failure) + '''
+records=[{'event':'evidence','id':0,'engine':engine,'text':'你好'}]
+if failure=='missing': records=[]
+if failure=='duplicate': records*=2
+if failure=='wrong_id': records[0]['id']=7
+if failure=='wrong_engine': records[0]['engine']='other'
+if failure=='numeric_text': records[0]['text']=42
+if failure!='no_end': records.append({'event':'completed','rows':1,'engine':engine})
+with open(sys.argv[1], 'w',encoding='utf-8') as out:
+    for record in records: out.write(json.dumps(record)+'\\n')
+''')
+    evidence = _LocalAudioEvidence()
+    result = evidence.collect(audio, [{"id": 0, "start": 0, "end": 1}])
+    assert result == {0: {}}
+    assert isinstance(evidence.last_error, module.ASRProcessError)
+    assert set(evidence.last_errors[0]) == {"sensevoice", "faster-whisper-small"}
+    assert len(calls) == 2 and all(call["process"].poll() is not None for call in calls)
+    assert not list(settings.TEMP_DIR.glob("review-asr-worker-*"))
+
+
+def test_later_evidence_failure_retains_and_caches_only_complete_readings(evidence_models):
+    from core.translation_review import _LocalAudioEvidence
+    from core.review_checkpoint import ReviewCheckpoint
+    audio, install = evidence_models
+    program = '''
+import json, sys
+request=json.load(open(sys.argv[2],encoding='utf-8'))
+if request['engine']=='sensevoice' and request['rows'][0]['id']==12:
+    with open(sys.argv[1],'w',encoding='utf-8') as out:
+        out.write(json.dumps({'event':'evidence','id':12,'engine':'sensevoice','text':'wrong partial'})+'\\n')
+    sys.exit(7)
+with open(sys.argv[1],'w',encoding='utf-8') as out:
+    for row in request['rows']:
+        out.write(json.dumps({'event':'evidence','id':row['id'],'engine':request['engine'],'text':'你好'})+'\\n')
+    out.write(json.dumps({'event':'completed','rows':len(request['rows']),'engine':request['engine']})+'\\n')
+'''
+    calls = install(program)
+    directory = audio.parent / "checkpoints"
+    checkpoint = ReviewCheckpoint(audio, "offline-evidence", directory=directory,
+                                  runtime_revision={"test": True})
+    rows = [{"id": index, "start": index, "end": index + 1} for index in range(13)]
+    evidence = _LocalAudioEvidence()
+    result = evidence.collect(audio, rows, checkpoint=checkpoint)
+    assert all(result[index] == {"sensevoice": "你好", "faster-whisper-small": "你好"} for index in range(12))
+    assert result[12] == {"faster-whisper-small": "你好"}
+    assert set(evidence.last_errors) == {12}
+    assert set(evidence.last_errors[12]) == {"sensevoice"}
+    assert len(calls) == 4 and len(list(directory.glob("*.review"))) == 25
+    assert "wrong partial" not in "".join(path.read_text(encoding="utf-8") for path in directory.glob("*.review"))
+
+    # A terminal marker is still required: use a healthy worker rather than
+    # accepting the failed child's incomplete first attempt.
+    previous_calls = len(calls)
+    calls = install(program.replace(
+        "if request['engine']=='sensevoice' and request['rows'][0]['id']==12:", "if False:"))
+    recovered = _LocalAudioEvidence().collect(audio, rows, checkpoint=checkpoint)
+    assert recovered == {row["id"]: {"sensevoice": "你好", "faster-whisper-small": "你好"} for row in rows}
+    assert len(calls) == previous_calls + 1
+    assert calls[-1]["request"]["rows"] == [rows[12]] and calls[-1]["request"]["engine"] == "sensevoice"
+    assert len(list(directory.glob("*.review"))) == 26
+    assert calls[-1]["process"].poll() == 0
+    assert not list(settings.TEMP_DIR.glob("review-asr-worker-*"))
+
+
+def test_review_cancellation_kills_worker_and_uses_source_asr_slot(evidence_models):
+    from core.translation_review import _LocalAudioEvidence
+    audio, install = evidence_models
+    calls = install("import time; time.sleep(30)")
+    started = time.monotonic()
+    with pytest.raises(asyncio.CancelledError):
+        _LocalAudioEvidence().collect(audio, [{"id": 0, "start": 0, "end": 1}],
+                                     cancel_check=lambda: time.monotonic() - started > .25)
+    assert calls[0]["process"].poll() is not None
+    assert module._WORKER_SLOT.acquire(blocking=False)
+    started = time.monotonic()
+    try:
+        with pytest.raises(asyncio.CancelledError):
+            _LocalAudioEvidence().collect(audio, [{"id": 0, "start": 0, "end": 1}],
+                                         cancel_check=lambda: time.monotonic() - started > .15)
+    finally:
+        module._WORKER_SLOT.release()
+    assert len(calls) == 1
+
+
+@pytest.mark.parametrize("parent_exits", [False, True])
+def test_owned_descendant_is_stopped_even_if_worker_exits_first(fake_worker, parent_exits):
+    import psutil
+    audio, install = fake_worker
+    child_pid = audio.parent / "descendant.pid"
+    calls = install('''
+import subprocess, sys, json, time
+child=subprocess.Popen([sys.executable,'-c','import time; time.sleep(30)'])
+open(''' + repr(str(child_pid)) + ''','w').write(str(child.pid))
+with open(sys.argv[1],'w') as out:
+    out.write(json.dumps({'event':'segment','segment':{'start':0,'end':1,'text':'x','words':[]}})+'\\n')
+    out.flush()
+    if ''' + repr(parent_exits) + ''':
+        out.write(json.dumps({'event':'completed','segments':1})+'\\n')
+        out.flush()
+    else: time.sleep(30)
+''')
+    rows, _ = module.SubprocessWhisperModel("small").transcribe(audio)
+    assert next(rows).text == "x"
+    if parent_exits:
+        assert list(rows) == []
+    else:
+        rows.close()
+    assert calls[0]["process"].poll() is not None
+    pid = int(child_pid.read_text())
+    assert not psutil.pid_exists(pid)
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="Windows Job Object active-process drain")
+def test_exited_worker_job_drains_child_holding_pcm_before_directory_cleanup(fake_worker, monkeypatch):
+    import psutil
+    from core.engines.asr import native_process
+    audio, install = fake_worker
+    child_pid = audio.parent / "pcm-child.pid"
+    drains = []
+    original = native_process._WindowsJob.terminate_and_drain
+    def drain(owner, *args, **kwargs):
+        original(owner, *args, **kwargs)
+        drains.append(not psutil.pid_exists(int(child_pid.read_text())))
+    monkeypatch.setattr(native_process._WindowsJob, "terminate_and_drain", drain)
+    child_program = ("import os,time; "
+        "stream=open('held.wav','w'); "
+        f"open({str(child_pid)!r},'w').write(str(os.getpid())); "
+        "time.sleep(30)")
+    calls = install('''
+import subprocess,sys,json,time
+request=json.load(open(sys.argv[2],encoding='utf-8'))
+child=subprocess.Popen([sys.executable,'-c', ''' + repr(child_program) + '''],cwd=request['work_directory'])
+while not __import__('os').path.exists(''' + repr(str(child_pid)) + '''): time.sleep(.01)
+with open(sys.argv[1],'w') as out:
+    out.write(json.dumps({'event':'completed','segments':0})+'\\n')
+''')
+    rows, _ = module.SubprocessWhisperModel("small").transcribe(audio)
+    assert list(rows) == []
+    assert calls[0]["process"].poll() == 0
+    assert drains == [True]
+    assert not list(settings.TEMP_DIR.glob("whisper-worker-*"))

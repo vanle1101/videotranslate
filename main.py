@@ -41,6 +41,7 @@ from core.streaming.pipeline import (
 )
 from core.streaming.export import HQExporter
 from core.streaming.session_store import list_saved_sessions, restore_saved_session
+from core.streaming.output_gate import final_output_metadata, missing_spoken_output_ids, missing_speech_message
 from core.runtime_errors import export_failure
 from core.media_preview import preview_manager, DEFAULT_COMPATIBILITY_SECONDS
 from core.voice_catalog import list_voices, resolve_voice
@@ -452,10 +453,12 @@ def review_sidecar_payload(session):
 
 
 def session_output_details(session):
-    return {"output_video_url": getattr(session, "output_video_url", ""),
-            "output_filename": getattr(session, "output_filename", ""),
-            "review_url": getattr(session, "output_review_url", ""),
+    gate = final_output_metadata(session.segments.values())
+    return {"output_video_url": "" if gate["final_output_blocked"] else getattr(session, "output_video_url", ""),
+            "output_filename": "" if gate["final_output_blocked"] else getattr(session, "output_filename", ""),
+            "review_url": "" if gate["final_output_blocked"] else getattr(session, "output_review_url", ""),
             "output_outdated": getattr(session, "caption_output_outdated", False),
+            **gate,
             **review_result_details(session)}
 
 
@@ -535,6 +538,9 @@ def persist_session(session):
 def export_revision_signature(session):
     content = {"segments": [{"id": s.id, "revision": getattr(s, "revision", 0),
                              "start": s.start, "end": s.end, "final_vi": s.final_vi,
+                             "confirmed_silence": getattr(s, "confirmed_silence", False),
+                             "needs_review": getattr(s, "needs_review", False),
+                             "audio_path": getattr(s, "audio_path", None),
                              "dub_start": getattr(s, "dub_start", None), "dub_end": getattr(s, "dub_end", None),
                              "verification": getattr(s, "verification", None)}
                             for s in session.segments.values()],
@@ -551,6 +557,7 @@ def schedule_reviewed_export(task_id):
             or getattr(session, "is_editing", False) or not session.segments
             or (getattr(session, "translation_mode", "full") == "preview"
                 and not getattr(session, "_visual_prepass_complete", False))
+            or missing_spoken_output_ids(session.segments.values())
             or any(s.status not in ("READY", "PLAYED") for s in session.segments.values())):
         return
     if active_export_tasks.get(f"export_{task_id}", {}).get("status") in {"RUNNING", "CANCELLING"}:
@@ -611,7 +618,7 @@ async def list_tasks():
             **progress,
             "duration": sess.total_duration,
             "elapsed_seconds": round(time.time() - sess.start_wall_time, 1) if sess.start_wall_time else 0,
-            "video_url": getattr(sess, "output_video_url", ""),
+            "video_url": session_output_details(sess)["output_video_url"],
             **session_output_details(sess),
             "can_resume": status_str == "PAUSED",
             "can_stop": status_str in ["RUNNING", "PAUSED"]
@@ -1222,6 +1229,9 @@ async def export_hq(req: ExportHQRequest):
     if (getattr(session, "translation_mode", "full") == "preview"
             and not getattr(session, "_visual_prepass_complete", False)):
         raise HTTPException(status_code=409, detail="Đây là bản xem trước. Bấm Dịch toàn bộ trước khi xuất video đầy đủ.")
+    missing_speech = missing_spoken_output_ids(session.segments.values())
+    if missing_speech:
+        raise HTTPException(status_code=409, detail=missing_speech_message(missing_speech))
     review_status = getattr(session, "review_summary", {}).get("status")
     if review_status in {"failed", "running", "incomplete"}:
         raise HTTPException(status_code=409, detail="AI kiểm tra lại chưa hoàn tất. Bấm AI kiểm tra lại để tiếp tục trước khi xuất.")
@@ -1233,6 +1243,7 @@ async def export_hq(req: ExportHQRequest):
         s.status not in ("READY", "PLAYED") for s in session.segments.values()
     ):
         raise HTTPException(status_code=409, detail="Hãy chờ dịch xong toàn bộ video trước khi xuất.")
+    export_signature = export_revision_signature(session)
     segments_data = [dict(s.to_dict(), audio_path=s.audio_path)
                      for s in session.segments.values() if s.status in ["READY", "PLAYED"]]
     if not segments_data:
@@ -1275,6 +1286,11 @@ async def export_hq(req: ExportHQRequest):
         # atomic publication and commit flag. Late Stop cannot undo this file.
         if _cancel_chk() or getattr(session, "is_stopped", False):
             raise RuntimeError("Export cancelled before publishing")
+        missing_speech = missing_spoken_output_ids(session.segments.values())
+        if missing_speech:
+            raise RuntimeError(missing_speech_message(missing_speech))
+        if export_revision_signature(session) != export_signature:
+            raise RuntimeError("Lời thoại hoặc cấu hình đã thay đổi trong khi xuất; giữ video trước đó và xuất lại từ bản đang lưu.")
         rendered.replace(final)
         active_export_tasks[export_id]["published"] = True
 

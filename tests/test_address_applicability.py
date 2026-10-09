@@ -78,6 +78,38 @@ def test_known_direct_listener_does_not_require_an_unused_self_address():
         "拜托姐", "Chị ơi, nhờ chị đấy!") is False
 
 
+def test_exact_named_listener_retains_full_grounded_form_at_its_position():
+    reading = listener_reading()
+    reading[12]["listener_address"] = "anh Dã"
+    reading[12]["evidence"] = [{"id": 12, "quote": "野哥"}]
+    audit = {**listener_audit(), "address_uses": [{"term": "Anh Dã", "role": "listener"}]}
+    assert address_expressions("Anh Dã ơi!") == ["Anh"]
+    assert address_expressions("Anh Dã ơi!", grounded_terms=["anh Dã"]) == ["Anh Dã"]
+    assert AutomaticTranslationReviewer._address_gate(reading, 12, audit, "野哥", "Anh Dã ơi!") is False
+
+
+@pytest.mark.parametrize("candidate,uses", [
+    ("Anh ơi!", [{"term": "Anh", "role": "listener"}]),
+    ("Anh Dã ơi!", [{"term": "Anh", "role": "listener"}]),
+    ("Anh, Dã ơi!", [{"term": "Anh Dã", "role": "listener"}]),
+    ("Anh Dũng ơi!", [{"term": "Anh Dũng", "role": "listener"}]),
+    ("Anh hỏi anh Dã.", [{"term": "anh Dã", "role": "listener"}, {"term": "Anh", "role": "listener"}]),
+    ("Anh Dã ơi!", [{"term": "Anh Dã", "role": "self"}]),
+])
+def test_named_role_does_not_prove_abbreviations_other_names_order_or_unknown_self(candidate, uses):
+    reading = listener_reading()
+    reading[12]["listener_address"] = "anh Dã"
+    audit = {**listener_audit(), "address_uses": uses}
+    assert AutomaticTranslationReviewer._address_gate(reading, 12, audit, "野哥", candidate) is True
+
+
+def test_grounded_terms_never_shorten_compound_kinship_or_classify_new_roles():
+    assert address_expressions("Bố mẹ về rồi.", grounded_terms=["bố", "mẹ"]) == ["Bố mẹ"]
+    assert address_expressions("Con gái à.", grounded_terms=["con"]) == ["Con gái"]
+    assert address_expressions("Anh rất tức!", grounded_terms=["anh rất tức"]) == ["Anh"]
+    assert address_expressions("Anh Dã, chị Mai ơi!", grounded_terms=["anh Dã", "chị Mai"]) == ["Anh Dã", "chị Mai"]
+
+
 def test_known_self_does_not_require_an_unused_listener_address():
     reading = {0: {"id": 0, "self_address": "con", "listener_address": "",
         "self_uncertain": False, "listener_uncertain": True, "uncertain": True,

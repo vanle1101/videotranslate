@@ -308,7 +308,12 @@ def test_empty_uncertain_draft_keeps_review_without_freezing_playback_or_inventi
         assert session.error is None and session.first_play_emitted
         assert session.playable_until == session.total_duration
         assert session.get_progress()["review_count"] == 1
-        assert session.get_progress()["status"] == "COMPLETED"
+        # READY authorizes continuous draft playback, not a full result with a
+        # known source utterance silently omitted. Manual editing still works.
+        assert session.get_progress()["status"] == "PREPARED"
+        assert session.get_progress()["progress_pct"] is None
+        assert session.get_progress()["missing_speech_ids"] == [0]
+        assert session.get_telemetry()["status"] == "prepared"
         await session.edit_segment(0, "Bổ sung câu nghe được")
         assert not segment.needs_review and segment.audio_url
         assert session.total_processed_duration == segment.duration

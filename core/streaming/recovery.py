@@ -89,7 +89,8 @@ def recover_interrupted(records):
 def segment_state(row):
     """Content uncertainty is separate from validated media readiness."""
     if row.status in {"READY", "PLAYED"}:
-        return "REVIEW_REQUIRED" if row.needs_review else "COMPLETED"
+        from core.streaming.output_gate import missing_spoken_output_ids
+        return "REVIEW_REQUIRED" if row.needs_review or missing_spoken_output_ids([row]) else "COMPLETED"
     if row.status == "FAILED":
         if row.failed_stage == "TRANSLATING":
             return "RETRY_PENDING"
