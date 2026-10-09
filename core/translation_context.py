@@ -75,7 +75,7 @@ _ADDRESS_CUE = re.compile(r"[爸妈媽父母姐哥弟妹爷爺奶叔姨姑舅婶
 # Enumerate the phrases: repeated calls such as ``Mẹ, mẹ`` remain separate
 # occurrences, and this selector must never equate a phrase with its prefix.
 _ADDRESS_MULTIWORD = re.compile(
-    r"(?<!\w)(?:cô\s+gái|anh\s+trai|chị\s+gái|em\s+(?:gái|trai)|"
+    r"(?<!\w)(?:cô\s+gái|anh\s+trai|chị\s+gái|(?:em|con)\s+(?:gái|trai)|"
     r"(?:bố|ba)\s+(?:mẹ|má)|(?:mẹ|má)\s+(?:bố|ba))(?!\w)", re.I)
 
 
@@ -183,11 +183,11 @@ def address_expressions(candidate):
     # grammatical selection only: independent semantic review must still
     # verify the source relationship and the faithful neutral wording.
     kinship = r"(?:con\s+(?:gái|trai)|anh\s+trai|chị\s+gái|em\s+(?:gái|trai)|bố|ba|mẹ|má)"
-    third_person = r"(?:cô|anh|chị|ông|bà|cậu)\s+ấy"
+    third_person = r"(?:cô|anh|chị|ông|bà|cậu)\s+(?:ấy|ta)"
     text = re.sub(r"(?<!\w)" + kinship + r"\s+(?:của\s+)?" + third_person + r"(?!\w)",
                   "", text, flags=re.I)
     text = re.sub(r"(?<!\w)" + kinship + r"(?=\s+của\s)", "", text, flags=re.I)
-    text = re.sub(r"\b(?:cô ấy|anh ấy|chị ấy|ông ấy|bà ấy|cậu ấy)\b", "", text, flags=re.I)
+    text = re.sub(r"(?<!\w)" + third_person + r"(?!\w)", "", text, flags=re.I)
     text = re.sub(r"\bcon\s+(?:mèo|vật|số|đường|người)\b", "", text, flags=re.I)
     text = re.sub(r"\bmột\s+mình\b", "", text, flags=re.I)
     # A small set of unambiguous numeric-unit spans is not an address. Keep

@@ -264,6 +264,8 @@ def test_uncertain_first_person_warning_does_not_claim_a_sibling_relationship(mo
 
 @pytest.mark.parametrize("candidate,expected", [
     ("Này, cô gái!", ["cô gái"]),
+    ("Con gái à.", ["Con gái"]),
+    ("Con trai ơi, nhờ con trai đấy!", ["Con trai", "con trai"]),
     ("Cô gái ơi, nhờ cô gái đấy!", ["Cô gái", "cô gái"]),
     ("Em nhờ chị gái hỏi anh trai.", ["Em", "chị gái", "anh trai"]),
     ("Em trai và em gái đợi bố mẹ.", ["Em trai", "em gái", "bố mẹ"]),
@@ -300,6 +302,17 @@ def test_actual_cogai_phrase_matches_grounded_listener_without_guessing_speaker(
     assert not AutomaticTranslationReviewer._address_gate(reading, 10, audit, "姑娘", "Này, cô gái!")
     assert reading[10]["self_uncertain"] is True
     assert reading[10]["uncertain"] is True
+
+
+@pytest.mark.parametrize("term,source", [("Con gái", "女儿"), ("Con trai", "儿子")])
+def test_full_child_address_matches_only_independently_grounded_whole_phrase(term, source):
+    audit = phrase_audit([{"term": term, "role": "listener"}])
+    assert not AutomaticTranslationReviewer._address_gate(
+        phrase_reading(term, "listener", source=source), 10, audit, source, term + " à.")
+    assert AutomaticTranslationReviewer._address_gate(
+        phrase_reading("con", "listener", source=source), 10, audit, source, term + " à.")
+    assert AutomaticTranslationReviewer._address_gate(
+        phrase_reading(term, "listener", certain=False, source=source), 10, audit, source, term + " à.")
 
 
 @pytest.mark.parametrize("term,source", [("bố mẹ", "我们要是不认识"), ("ba má", "我们要是不认识")])
@@ -347,6 +360,25 @@ def test_third_person_exclusion_preserves_other_real_addresses():
         {10: {"uncertain": True}}, 10, audit, "他叫你先走", "Cậu ấy bảo em đi trước.") is True
 
 
+@pytest.mark.parametrize("term", ["anh ta", "cô ta", "chị ta", "ông ta", "bà ta", "cậu ta"])
+def test_explicit_third_person_ta_phrase_does_not_become_self_address(term):
+    assert address_expressions(f"Sau này {term} làm ăn thế nào?") == []
+    assert address_expressions(f"Mẹ của {term} gọi con.") == ["con"]
+    audit = {"address_applicable": False, "address_neutral_faithful": True,
+        "semantic_verified": True, "address_reason": "Nguồn 他 nói về người thứ ba."}
+    assert not AutomaticTranslationReviewer._address_gate(
+        {10: {"uncertain": True}}, 10, audit, "以后他混的怎么样", f"Sau này {term} làm ăn thế nào?")
+    audit["semantic_verified"] = False
+    assert AutomaticTranslationReviewer._address_gate(
+        {10: {"uncertain": True}}, 10, audit, "以后他混的怎么样", f"Sau này {term} làm ăn thế nào?")
+
+
+def test_third_person_ta_exclusion_preserves_standalone_and_separated_roles():
+    assert address_expressions("Ta về rồi.") == ["Ta"]
+    assert address_expressions("Anh, ta đi thôi!") == ["Anh", "ta"]
+    assert address_expressions("Cô ấy bảo anh ta gọi mẹ.") == ["mẹ"]
+
+
 def test_kinship_references_cannot_bypass_source_grounded_role_schema():
     # The schema currently only proves self/listener. Do not classify a kinship
     # noun or named honorific as harmless by silently removing it from the gate.
@@ -366,7 +398,7 @@ def test_kinship_references_cannot_bypass_source_grounded_role_schema():
     ("Con gái của tôi đến rồi.", ["tôi"]),
     ("Mẹ của em gọi chị.", ["em", "chị"]),
     ("Mẹ ơi, con gái cậu ấy về rồi.", ["Mẹ"]),
-    ("Con gái, cậu ấy gọi con.", ["Con", "con"]),
+    ("Con gái, cậu ấy gọi con.", ["Con gái", "con"]),
     ("Mẹ em đến rồi.", ["Mẹ", "em"]),
 ])
 def test_explicit_possessive_reference_does_not_invent_self_or_listener(candidate, terms):
