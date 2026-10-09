@@ -5,6 +5,8 @@ where a *measured* row can end: sentence punctuation, a real pause between
 words, or a speaker label transition supplied by an upstream diarizer.  It
 never creates proportional timestamps and never joins neighbouring ASR rows,
 because doing either can put a character's reply in the previous subtitle.
+Measured ASR parent/piece provenance is retained for semantic translation;
+that provenance alone must never be interpreted as same-speaker evidence.
 """
 
 from __future__ import annotations
@@ -61,7 +63,8 @@ def _join_words(words: Sequence[Dict[str, Any]]) -> str:
 
 
 def _copy_row_metadata(row: Dict[str, Any], words: Sequence[Dict[str, Any]], start: float,
-                       end: float, text: str, row_id: int) -> Dict[str, Any]:
+                       end: float, text: str, row_id: int, *, piece_index: int = 0,
+                       piece_count: int = 1) -> Dict[str, Any]:
     result = copy.deepcopy(row)
     result["id"] = row_id
     result["start"] = round(float(start), 3)
@@ -70,10 +73,25 @@ def _copy_row_metadata(row: Dict[str, Any], words: Sequence[Dict[str, Any]], sta
     result["text_zh"] = text
     result["text"] = text
     result["words"] = [copy.deepcopy(word) for word in words]
-    if result.get("speaker") in (None, "") and words:
+    result.setdefault("source_asr_row_id", row.get("id"))
+    result.setdefault("source_asr_start", float(row["start"]))
+    result.setdefault("source_asr_end", float(row["end"]))
+    result["source_piece_index"] = piece_index
+    result["source_piece_count"] = piece_count
+    if words:
         speaker = _word_speaker(words[0], {})
-        if speaker is not None:
+        if speaker is not None and all(_word_speaker(word, {}) == speaker for word in words):
+            inherited = [row.get(key) for key in _SPEAKER_KEYS if row.get(key) not in (None, "")]
+            if any(value != speaker for value in inherited):
+                # A row-wide speaker/evidence cannot be inherited by the new
+                # speaker's piece. Keep aliases consistent but leave proof to
+                # an actual upstream diarizer or recorded user confirmation.
+                for key in ("speaker_evidence", "speaker_verified", "diarization_verified", "speaker_confidence"):
+                    result.pop(key, None)
             result["speaker"] = speaker
+            for key in _SPEAKER_KEYS:
+                if key in result:
+                    result[key] = speaker
     return result
 
 
@@ -171,7 +189,8 @@ def split_dialogue_segments(rows: Iterable[Dict[str, Any]], pause_threshold: flo
             if not group_text:
                 continue
             result.append(_copy_row_metadata(row, group_words, group_start, group_end,
-                                             group_text, len(result)))
+                                             group_text, len(result), piece_index=group_index,
+                                             piece_count=len(groups)))
     return result
 
 
