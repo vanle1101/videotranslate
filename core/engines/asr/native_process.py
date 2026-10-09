@@ -102,6 +102,11 @@ class _WindowsJob:
         self.api.TerminateJobObject.argtypes = (wintypes.HANDLE, wintypes.UINT)
         self.api.TerminateJobObject.restype = wintypes.BOOL
         self.accounting_type = BASIC_ACCOUNTING
+        self.api.OpenProcess.argtypes = (wintypes.DWORD, wintypes.BOOL, wintypes.DWORD)
+        self.api.OpenProcess.restype = wintypes.HANDLE
+        self.api.IsProcessInJob.argtypes = (wintypes.HANDLE, wintypes.HANDLE,
+                                            ctypes.POINTER(wintypes.BOOL))
+        self.api.IsProcessInJob.restype = wintypes.BOOL
         self.api.OpenThread.argtypes = (wintypes.DWORD, wintypes.BOOL, wintypes.DWORD)
         self.api.OpenThread.restype = wintypes.HANDLE
         self.api.ResumeThread.argtypes = (wintypes.HANDLE,)
@@ -140,32 +145,95 @@ class _WindowsJob:
             self.api.CloseHandle(self.handle)
             self.handle = None
 
+    def _owned_processes(self):
+        """Capture identities from the job, including children of an exited parent.
+
+        Looking up a parent's descendants loses orphaned workers. A job's PID
+        list is the ownership boundary; a process handle additionally verifies
+        membership before capturing its creation-time identity for waiting.
+        """
+        import ctypes
+        from ctypes import wintypes
+        import psutil
+
+        capacity = 16
+        while True:
+            class PROCESS_IDS(ctypes.Structure):
+                _fields_ = [("assigned", wintypes.DWORD), ("listed", wintypes.DWORD),
+                            ("ids", ctypes.c_size_t * capacity)]
+
+            members = PROCESS_IDS()
+            if self.api.QueryInformationJobObject(self.handle, 3, ctypes.byref(members),
+                                                  ctypes.sizeof(members), None):
+                break
+            error = ctypes.get_last_error()
+            if error != 234:  # ERROR_MORE_DATA: descendants outgrew this buffer.
+                raise ctypes.WinError(error)
+            capacity = max(capacity * 2, int(members.assigned))
+
+        processes = []
+        for pid in members.ids[:members.listed]:
+            handle = self.api.OpenProcess(0x00100000 | 0x1000, False, pid)
+            if not handle:
+                error = ctypes.get_last_error()
+                if error == 87:  # ERROR_INVALID_PARAMETER: already exited.
+                    continue
+                raise ctypes.WinError(error)
+            try:
+                belongs = wintypes.BOOL()
+                if not self.api.IsProcessInJob(handle, self.handle, ctypes.byref(belongs)):
+                    raise ctypes.WinError(ctypes.get_last_error())
+                if not belongs.value:
+                    continue  # The PID was reused; this process is not ours.
+                try:
+                    process = psutil.Process(pid)
+                    process.create_time()  # Freeze identity before releasing the native handle.
+                except psutil.NoSuchProcess:
+                    continue
+                processes.append(process)
+            finally:
+                self.api.CloseHandle(handle)
+        return processes
+
     def terminate_and_drain(self, timeout=10):
         """Wait for every owned process, even after the initial parent exits.
 
-        Closing a kill-on-close job initiates termination but does not wait for
-        children to release PCM handles. Keep the job handle until its native
-        active-process count reaches zero, then remove the work directory.
+        ActiveProcesses reaches zero before Windows always finishes process
+        rundown. Capture job members before termination, wait for the zero
+        count, then wait for those identities to disappear before removing PCM.
         """
         import ctypes
         if not self.handle:
             return
+        deadline = time.monotonic() + timeout
+        members = set()
         try:
+            members.update(self._owned_processes())
             if not self.api.TerminateJobObject(self.handle, 1):
                 raise ctypes.WinError(ctypes.get_last_error())
-            deadline = time.monotonic() + timeout
             while True:
+                # Include any child spawned between the first snapshot and
+                # termination. No global PID/name search or process kill here.
+                members.update(self._owned_processes())
                 accounting = self.accounting_type()
                 if not self.api.QueryInformationJobObject(self.handle, 1, ctypes.byref(accounting),
                         ctypes.sizeof(accounting), None):
                     raise ctypes.WinError(ctypes.get_last_error())
                 if accounting.ActiveProcesses == 0:
-                    return
+                    break
                 if time.monotonic() >= deadline:
                     raise ASRProcessError("Worker nhận giọng chưa kết thúc hết tiến trình trong job.")
                 time.sleep(.01)
         finally:
             self.close()
+        # is_running compares creation-time identities. Reopening a bare PID
+        # for an OS wait could otherwise wait on an unrelated reused PID.
+        surviving = {process for process in members if process.is_running()}
+        while surviving:
+            if time.monotonic() >= deadline:
+                raise ASRProcessError("Worker nhận giọng chưa kết thúc hết tiến trình trong job.")
+            time.sleep(.01)
+            surviving = {process for process in surviving if process.is_running()}
 
 
 def stop_and_reap(process, owner=None):

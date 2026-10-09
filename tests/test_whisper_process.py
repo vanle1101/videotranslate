@@ -289,7 +289,9 @@ with open(sys.argv[1],'w') as out:
 
 
 @pytest.mark.skipif(sys.platform != "win32", reason="Windows Job Object active-process drain")
-def test_exited_worker_job_drains_child_holding_pcm_before_directory_cleanup(fake_worker, monkeypatch):
+@pytest.mark.parametrize("descendants", [1, 17])
+def test_exited_worker_job_drains_child_holding_pcm_before_directory_cleanup(fake_worker, monkeypatch,
+                                                                          descendants):
     import psutil
     from core.engines.asr import native_process
     audio, install = fake_worker
@@ -298,17 +300,22 @@ def test_exited_worker_job_drains_child_holding_pcm_before_directory_cleanup(fak
     original = native_process._WindowsJob.terminate_and_drain
     def drain(owner, *args, **kwargs):
         original(owner, *args, **kwargs)
-        drains.append(not psutil.pid_exists(int(child_pid.read_text())))
+        drains.append(all(not psutil.pid_exists(pid) for pid in json.loads(child_pid.read_text())))
     monkeypatch.setattr(native_process._WindowsJob, "terminate_and_drain", drain)
-    child_program = ("import os,time; "
-        "stream=open('held.wav','w'); "
-        f"open({str(child_pid)!r},'w').write(str(os.getpid())); "
+    child_program = ("import os,sys,time; "
+        "stream=open('held-'+str(os.getpid())+'.wav','w'); "
+        "open(sys.argv[1],'w').write(str(os.getpid())); "
         "time.sleep(30)")
     calls = install('''
 import subprocess,sys,json,time
 request=json.load(open(sys.argv[2],encoding='utf-8'))
-child=subprocess.Popen([sys.executable,'-c', ''' + repr(child_program) + '''],cwd=request['work_directory'])
-while not __import__('os').path.exists(''' + repr(str(child_pid)) + '''): time.sleep(.01)
+ready=[__import__('os').path.join(request['work_directory'],'ready-'+str(i))
+       for i in range(''' + repr(descendants) + ''')]
+children=[subprocess.Popen([sys.executable,'-c', ''' + repr(child_program) + ''',marker],
+                          cwd=request['work_directory']) for marker in ready]
+while not all(__import__('os').path.exists(marker) for marker in ready): time.sleep(.01)
+with open(''' + repr(str(child_pid)) + ''','w') as out:
+    json.dump([child.pid for child in children],out)
 with open(sys.argv[1],'w') as out:
     out.write(json.dumps({'event':'completed','segments':0})+'\\n')
 ''')
@@ -317,3 +324,29 @@ with open(sys.argv[1],'w') as out:
     assert calls[0]["process"].poll() == 0
     assert drains == [True]
     assert not list(settings.TEMP_DIR.glob("whisper-worker-*"))
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="Windows Job Object ownership")
+def test_job_member_drain_leaves_independent_process_running():
+    from core.engines.asr import native_process
+    independent = subprocess.Popen([sys.executable, "-B", "-c", "import time; time.sleep(30)"],
+                                   creationflags=subprocess.CREATE_NO_WINDOW)
+    owner, worker = None, None
+    try:
+        owner = native_process._WindowsJob()
+        worker = subprocess.Popen([sys.executable, "-B", "-c", "import time; time.sleep(30)"],
+                                  creationflags=subprocess.CREATE_NO_WINDOW | 0x00000004)
+        owner.attach_and_resume(worker)
+        assert {process.pid for process in owner._owned_processes()} == {worker.pid}
+        owner.terminate_and_drain()
+        assert worker.wait(timeout=2) != 0
+        assert independent.poll() is None
+    finally:
+        if owner is not None:
+            owner.close()
+        for process in (worker, independent):
+            if process is not None:
+                if process.poll() is None:
+                    process.kill()
+                process.wait(timeout=5)
+                process._handle.Close()
