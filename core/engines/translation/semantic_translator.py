@@ -40,7 +40,7 @@ _FIDELITY_SCHEMA = {"type": "object", "properties": {
     "required": ["equivalent", "natural", "reason"]}
 _FLUENCY_SCHEMA = {"type": "object", "properties": {"natural": _BOOL, "reason": _TEXT},
     "required": ["natural", "reason"]}
-_SOURCE_FIELDS = ("speaker_id", "addressee_id", "speaker", "diarization_speaker", "spk", "speaker_evidence",
+_SOURCE_FIELDS = ("speaker_id", "addressee_id", "speaker", "diarization_speaker", "spk", "speaker_evidence", "speaker_confirmation",
     "utterance_id", "utterance_evidence", "source_asr_row_id", "source_asr_start", "source_asr_end",
     "source_piece_index", "source_piece_count", "manual_edit", "revision", "verification",
     "source_needs_review", "source_truncated")

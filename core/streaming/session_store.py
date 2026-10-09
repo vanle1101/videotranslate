@@ -69,7 +69,7 @@ SEGMENT_FIELDS = frozenset((
     "audio_path failed_stage error revision source_method translation_provider translation_model evidence_mode "
     "needs_review review_reason asr_text verification confirmed_silence subtitle_cues subtitle_timing_source "
     "speech_start speech_end asr_pretranscribed dub_start dub_end dub_tail_limit timing_issue"
-    " speaker_id speaker_evidence speaker_diagnostics utterance_id utterance_evidence source_asr_row_id source_asr_start source_asr_end source_piece_index source_piece_count"
+    " speaker_id speaker_evidence speaker_diagnostics speaker_confirmation speaker_review_pending voice_id tts_voice_outdated utterance_id utterance_evidence source_asr_row_id source_asr_start source_asr_end source_piece_index source_piece_count"
 ).split())
 SESSION_FIELDS = frozenset((
     "initial_buffer_seconds voice tts_engine_name asr_engine_name visual_translation total_duration video_size "
@@ -98,7 +98,7 @@ META_FIELDS = frozenset((
     "diagnostic audio_evidence audio_consensus audio_audit_status review_gate_revision"
     " state attempts input_hash error_code updated_at"
     " scope_id confirmation_id code required_seconds available_seconds max_speed remedy"
-    " speaker_evidence utterance_id utterance_evidence source_asr_row_id source_asr_start source_asr_end source_piece_index source_piece_count"
+    " speaker_evidence speaker_confirmation utterance_id utterance_evidence source_asr_row_id source_asr_start source_asr_end source_piece_index source_piece_count"
 ).split())
 DIAGNOSTIC_STAGES = frozenset((
     "semantic_request semantic_schema semantic_second_pass ocr_evidence audio_evidence audio_semantic_review"
@@ -276,6 +276,21 @@ def _clean_timing_issue(value):
 
 
 def _clean_segment_field(key, value):
+    if key == "speaker_confirmation":
+        from core.streaming.speaker_confirmation import validate_confirmation
+        result = validate_confirmation(value)
+        return {name: _clean(item) if isinstance(item, str) else item for name, item in result.items()} if result else None
+    if key == "voice_id":
+        if value is not None:
+            from core.voice_catalog import resolve_voice
+            engine, native = resolve_voice(value, "edge-tts")
+            if value != "edge:" + native or engine != "edge-tts":
+                raise ValueError("Giọng riêng theo người nói không hợp lệ.")
+        return value
+    if key in {"tts_voice_outdated", "speaker_review_pending"}:
+        if type(value) is not bool:
+            raise ValueError("Trạng thái giọng theo người nói phải là boolean.")
+        return value
     if key == "timing_issue":
         return _clean_timing_issue(value)
     if key in {"speaker_evidence", "utterance_evidence"}:
@@ -386,6 +401,8 @@ def _clean(value, *, depth=0):
                 result[key] = _clean_source_scope_window(item)
             elif key in {"speaker_evidence", "utterance_evidence"}:
                 result[key] = _clean_identity_evidence(item, key.split("_", 1)[0])
+            elif key == "speaker_confirmation":
+                result[key] = _clean_segment_field(key, item)
             elif key == "full_text_zh":
                 if not isinstance(item, str) or len(item) > 100_000 or "\x00" in item:
                     raise ValueError("Văn bản nguồn đối chiếu không hợp lệ.")
@@ -636,6 +653,13 @@ def _validate(data, task_id):
             raise ValueError("Phiên bản câu thoại không hợp lệ.")
         _clean_timing_issue(row.get("timing_issue"))
         _validate_source_metadata(row)
+        confirmation = _clean_segment_field("speaker_confirmation", row.get("speaker_confirmation"))
+        if confirmation and row["id"] not in confirmation["affected_ids"]:
+            raise ValueError("Xác nhận người nói không thuộc câu thoại này.")
+        _clean_segment_field("voice_id", row.get("voice_id"))
+        for field in ("tts_voice_outdated", "speaker_review_pending"):
+            if field in row:
+                _clean_segment_field(field, row[field])
         if row.get("error") is not None and (not isinstance(row["error"], str) or len(row["error"]) > 2000):
             raise ValueError("Lỗi câu thoại đã lưu không hợp lệ.")
         for key in ("needs_review", "confirmed_silence", "asr_pretranscribed"):

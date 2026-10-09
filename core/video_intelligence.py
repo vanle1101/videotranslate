@@ -27,7 +27,7 @@ from core.chinese_text import comparable_chinese
 from core.media_process import run_media
 from core.screen_ocr import ScreenOCR
 from core.translation_context import VIETNAMESE_ADDRESS_POLICY, dialogue_context
-from core.semantic_segments import semantic_context, SEMANTIC_TRANSLATION_POLICY
+from core.semantic_segments import semantic_context, SEMANTIC_TRANSLATION_POLICY, source_speaker_confirmation
 from core.structured_response import (
     StructuredResponseError, parse_object, validate_schema, request_structured,
     TRANSLATION_SCHEMA, SOURCE_SCHEMA, schema_attempts,
@@ -126,7 +126,7 @@ class VideoIntelligence:
     OPENCODE_SPEECH_BATCH_SIZE = 4
     OPENCODE_SCREEN_BATCH_SIZE = 8
     OPENCODE_SOURCE_EVIDENCE_LIMIT = 32
-    SOURCE_CONTEXT_FIELDS = ("speaker_id", "speaker", "diarization_speaker", "spk", "speaker_evidence",
+    SOURCE_CONTEXT_FIELDS = ("speaker_id", "speaker", "diarization_speaker", "spk", "speaker_evidence", "speaker_confirmation",
         "utterance_id", "utterance_evidence", "source_asr_row_id", "source_asr_start", "source_asr_end",
         "source_piece_index", "source_piece_count", "source_needs_review", "source_truncated",
         "addressee_id", "source_method", "evidence_mode", "translation_provider", "translation_model")
@@ -141,6 +141,11 @@ class VideoIntelligence:
             value = cls._get(segment, name, None)
             if value is not None:
                 row[name] = deepcopy(value)
+        confirmation = source_speaker_confirmation(row)
+        if confirmation is None:
+            row.pop("speaker_confirmation", None)
+        else:
+            row["speaker_confirmation"] = confirmation
         verification = cls._get(segment, "verification", {})
         if isinstance(verification, dict) and verification.get("status") == "manual":
             row.update(manual_edit=True, revision=cls._get(segment, "revision", 0))

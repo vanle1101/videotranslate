@@ -16,7 +16,7 @@ import re
 from typing import Any, Iterable, Mapping, Sequence
 
 
-SEMANTIC_GROUPING_VERSION = 1
+SEMANTIC_GROUPING_VERSION = 2
 _SPEAKER_KEYS = ("speaker_id", "speaker", "diarization_speaker", "spk")
 _TERMINAL = frozenset("。！？!?；;.")
 _CLOSING = "\"'”’」』】）)]"
@@ -32,6 +32,10 @@ Các semantic_units là đơn vị đọc nghĩa, KHÔNG phải mốc phụ đ�
 - speaker_evidence.verified=false là nhãn giọng dự đoán. Silhouette/cosine
   chưa hiệu chuẩn không phải xác suất đúng và không xác nhận nhân vật hay
   người nghe; không dùng nhãn dự đoán để tự xác nhận xưng hô hoặc gộp giọng.
+- speaker_confirmation chỉ là hành động người dùng đã lưu cho affected_ids.
+  Chỉ cùng một confirmation_id với selection=scoped_voice mới xác nhận liên
+  tục giọng giữa các câu đã chọn; tên giống nhau hoặc xác nhận riêng một câu
+  không chứng minh nối lượt. Cách gọi người nghe không được lan ra câu khác.
 - Chỉ xuất đúng ID được yêu cầu. Giữ nghĩa toàn unit, không mất từ hoặc lặp
   nghĩa ở ranh giới; không chép cả câu đầy đủ vào từng ID. Nếu không thể phân
   chia lời Việt giữ nghĩa theo mốc riêng, báo needs_review=true với lý do
@@ -65,9 +69,44 @@ def _conflicting_speaker_labels(row: Mapping[str, Any]) -> bool:
     return bool(labels) and any(label != labels[0] for label in labels)
 
 
+def source_speaker_confirmation(row: Mapping[str, Any]):
+    """Project a recorded assertion only onto its explicitly selected row.
+
+    Provider response fields are never the source of this metadata. Durable
+    assertions can survive ASR revisions, so matching both the row and its
+    current voice/scope avoids reusing an old claim on a newly split turn.
+    The schema validates a recorded action, not the truth of its relationship.
+    """
+    value = row.get("speaker_confirmation")
+    if value is None:
+        return None
+    from core.streaming.speaker_confirmation import validate_confirmation
+    try:
+        proof = validate_confirmation(value)
+    except (ValueError, TypeError):
+        return None
+    if proof is None or row.get("id") not in proof["affected_ids"]:
+        return None
+    if _conflicting_speaker_labels(row) or proof["speaker_id"] != _speaker(row):
+        return None
+    if proof["selection"] == "scoped_voice":
+        evidence = row.get("speaker_evidence")
+        if not isinstance(evidence, Mapping) or proof["scope_id"] != evidence.get("scope_id"):
+            return None
+    return proof
+
+
 def _grounded_identity(row: Mapping[str, Any], field: str, minimum_confidence: float):
     """Accept actual audio/user evidence; a label/keyword/ASR parent is insufficient."""
     value = _speaker(row) if field == "speaker" else row.get("utterance_id")
+    if field == "speaker":
+        confirmation = source_speaker_confirmation(row)
+        if (confirmation is not None and confirmation["selection"] == "scoped_voice"
+                and isinstance(confirmation["scope_id"], str) and confirmation["scope_id"].strip()):
+            # Two independent anchor assertions do not grant continuity. One
+            # explicitly scoped selection records the same user action on each
+            # selected row while automatic audio evidence stays unverified.
+            return (value, "user_confirmation", confirmation["scope_id"], confirmation["confirmation_id"])
     evidence = row.get(field + "_evidence")
     if (isinstance(value, bool) or not isinstance(value, (str, int)) or value == ""
             or not isinstance(evidence, Mapping)):
@@ -90,7 +129,8 @@ def _grounded_identity(row: Mapping[str, Any], field: str, minimum_confidence: f
     # A user confirmation must be a recorded action, not an AI boolean.
     elif not isinstance(evidence.get("confirmation_id"), str) or not evidence["confirmation_id"].strip():
         return None
-    return (value, evidence["method"], scope)
+    return (value, evidence["method"], scope,
+            evidence.get("confirmation_id") if evidence["method"] == "user_confirmation" else None)
 
 
 def _manual(row: Mapping[str, Any]) -> bool:
@@ -116,6 +156,9 @@ def _source_part(row: Mapping[str, Any]) -> dict:
                 "source_truncated"):
         if key in row:
             part[key] = copy.deepcopy(row[key])
+    confirmation = source_speaker_confirmation(row)
+    if confirmation is not None:
+        part["speaker_confirmation"] = confirmation
     part["manual_edit"] = _manual(row)
     if part["manual_edit"]:
         part["manual_revision"] = row.get("revision", 0)
@@ -205,6 +248,8 @@ def build_semantic_units(rows: Iterable[Mapping[str, Any]], *, max_gap: float = 
                 if left_proof is not None and left_proof == right_proof:
                     proof = {"kind": field, "id": left_proof[0], "method": left_proof[1],
                              "scope_id": left_proof[2]}
+                    if left_proof[3] is not None:
+                        proof["confirmation_id"] = left_proof[3]
                     break
             boundaries.append({"left_id": left["id"], "right_id": right["id"],
                 "gap": round(float(right["start"]) - float(left["end"]), 6),
@@ -261,4 +306,4 @@ def semantic_context(rows: Iterable[Mapping[str, Any]], focus: Iterable[Mapping[
 
 
 __all__ = ["SEMANTIC_GROUPING_VERSION", "SEMANTIC_TRANSLATION_POLICY",
-           "build_semantic_units", "semantic_context"]
+           "build_semantic_units", "semantic_context", "source_speaker_confirmation"]

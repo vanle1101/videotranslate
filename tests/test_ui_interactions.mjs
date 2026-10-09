@@ -7,6 +7,85 @@ const source = readFileSync(new URL('../static/app.js', import.meta.url), 'utf8'
 const template = readFileSync(new URL('../templates/index.html', import.meta.url), 'utf8');
 const stylesheet = readFileSync(new URL('../static/style.css', import.meta.url), 'utf8');
 
+test('speaker confirmation stays idle-only, retains ambiguous fields and uses the exact row revision', async () => {
+  const ui = studio(); await ui.start();
+  const socket = ui.sockets.at(-1);
+  const row = {id:0,start:0,end:1,status:'READY',text_zh:'我',final_vi:'Bản nháp',revision:7,
+    speaker_id:'voice-1',speaker_evidence:{scope_id:'source-a',verified:false}};
+  socket.receive({type:'segment_update',...row});
+  socket.receive({type:'progress',status:'RUNNING',phase:'tts'});
+  assert.equal(ui.el('seg-speaker-0').disabled,true);
+  socket.receive({type:'progress',status:'STOPPED',phase:'stopped'});
+  assert.equal(ui.el('seg-speaker-0').disabled,false);
+  await ui.el('seg-speaker-0').click();
+  assert.equal(ui.el('seg-speaker-all-0').checked,false);
+  assert.equal(ui.el('seg-speaker-all-0').disabled,true);
+  ui.el('seg-speaker-name-0').value='Nhân vật A';
+  ui.el('seg-speaker-self-0').value='con';
+  ui.replies.set('/api/streaming/fixture/speaker-confirmation', {affected_ids:[0],segments:[{...row,revision:8,
+    speaker_confirmation:{label:'Nhân vật A',self_address:'con'},needs_review:true,verification:{status:'incomplete'}}]});
+  await ui.el('seg-speaker-save-0').click();
+  const request = ui.requests.findLast(item=>item.url.endsWith('/speaker-confirmation'));
+  assert.equal(request.options.method,'PATCH');
+  assert.deepEqual(JSON.parse(request.options.body), {anchor_segment_id:0,expected_revision:7,apply_same_voice:false,
+    label:'Nhân vật A',self_address:'con',listener_address:'',voice_id:null});
+  assert.equal(ui.el('seg-speaker-0').textContent,'Vai: Nhân vật A');
+  assert.match(ui.el('seg-badge-0').textContent,/nháp|kiểm tra/i);
+});
+
+test('speaker propagation requires a matching scoped voice and a failed save keeps the form', async () => {
+  const ui=studio(); await ui.start(); const socket=ui.sockets.at(-1);
+  for(const [id,scope] of [[0,'source-a'],[1,'source-a'],[2,'different-source']]) socket.receive({type:'segment_update',id,
+    start:id,end:id+1,status:'READY',text_zh:'我',final_vi:'Lời nháp',speaker_id:'voice-1',speaker_evidence:{scope_id:scope}});
+  socket.receive({type:'progress',status:'STOPPED'});
+  await ui.el('seg-speaker-0').click();
+  const editor=ui.el('seg-row-0').querySelector('.speaker-editor');
+  assert.equal(ui.el('seg-speaker-all-0').disabled,false);
+  assert.match(editor.querySelectorAll('p')[0].textContent,/2 câu/);
+  ui.el('seg-speaker-name-0').value='Bố';
+  ui.replies.set('/api/streaming/fixture/speaker-confirmation',{failure:true,detail:'Không lưu được xuống đĩa.'});
+  await ui.el('seg-speaker-save-0').click();
+  assert.equal(editor.hidden,false);
+  assert.equal(ui.el('seg-speaker-name-0').value,'Bố');
+  assert.equal(editor.querySelectorAll('p').at(-1).dataset.error,'true');
+});
+
+test('audio identity stage reports measured frames without making the full task 100 percent', async () => {
+  const ui=studio(); await ui.start();
+  ui.sockets.at(-1).receive({type:'progress',status:'RUNNING',phase:'prepare',progress_pct:null,
+    speaker_completed_frames:12,speaker_total_frames:24});
+  assert.match(ui.el('task-progress-detail').textContent,/12\/24.*50%/);
+  assert.notEqual(ui.el('task-progress-value').textContent,'100%');
+});
+
+test('speaker fields match backend limits and reject overlong addresses before submission', async () => {
+  const ui=studio(); await ui.start();
+  ui.sockets.at(-1).receive({type:'progress',status:'STOPPED'});
+  await ui.el('seg-speaker-0').click();
+  assert.equal(ui.el('seg-speaker-name-0').maxLength,100);
+  assert.equal(ui.el('seg-speaker-self-0').maxLength,80);
+  assert.equal(ui.el('seg-speaker-listener-0').maxLength,80);
+  ui.el('seg-speaker-name-0').value='A';
+  ui.el('seg-speaker-listener-0').value='x'.repeat(81);
+  await ui.el('seg-speaker-save-0').click();
+  assert.equal(ui.requests.some(r=>r.url.endsWith('/speaker-confirmation')),false);
+  assert.equal(ui.document.activeElement,ui.el('seg-speaker-listener-0'));
+});
+
+test('speaker confirmation broadcasts update the other client without approving meaning', async () => {
+  const ui=studio(); await ui.start(); const socket=ui.sockets.at(-1);
+  socket.receive({type:'result_ready',output_video_url:'/api/outputs/old.mp4'});
+  socket.receive({type:'speaker_confirmation',affected_ids:[0],segments:[{id:0,start:0,end:1,
+    status:'NEEDS_REVIEW',text_zh:'我',final_vi:'Bản nháp',revision:9,needs_review:true,
+    speaker_confirmation:{label:'A'},verification:{status:'incomplete'}}],
+    progress:{status:'PREPARED',phase:'prepared',can_review:true,final_output_blocked:true}});
+  assert.equal(ui.el('seg-speaker-0').textContent,'Vai: A');
+  assert.equal(ui.el('task-result-link').classList.contains('hidden'),true);
+  assert.equal(ui.el('task-progress').dataset.status,'PREPARED');
+  assert.equal(ui.el('btn-export-hq').disabled,true);
+  assert.doesNotMatch(ui.el('seg-badge-0').textContent,/AI đã kiểm tra/);
+});
+
 test('prepared speech remains idle without declaring a validated MP4 completed', async () => {
   const ui = studio(); await ui.start();
   const socket = ui.sockets.at(-1);
@@ -3134,7 +3213,7 @@ test('AI review receives corrected audio revision at the current playhead and re
   assert.match(ui.el('seg-row-0').querySelector('.transcript-review').textContent,/Tiếng bị nhạc che và chữ gốc bị cắt mất/);
   assert.doesNotMatch(ui.el('seg-row-0').querySelector('.transcript-review').textContent,/nghe thử rồi|nghe và sửa/);
   assert.match(ui.el('task-progress-detail').textContent,/Còn 1 câu nguồn chưa rõ/);
-  assert.match(ui.el('task-progress-detail').textContent,/Không cần xác nhận thủ công/);
+  assert.match(ui.el('task-progress-detail').textContent,/Câu chưa có lời Việt sẽ chặn xuất đầy đủ/);
   assert.equal(ui.el('btn-export-hq').disabled,false, 'An explicitly audited unresolved source may export with its uncertainty retained');
   assert.equal(ui.el('seg-row-0').dataset.needsReview,'true');
   socket.receive({type:'segment_update',...corrected,revision:4,needs_review:true,verification:null});

@@ -861,7 +861,7 @@ document.addEventListener("DOMContentLoaded", () => {
     if (summary.status !== "completed") return "";
     return `AI đã kiểm tra ${count("checked")} câu · Giữ nguyên ${count("verified")} · Đã sửa ${count("corrected")}.` +
       (count("manual") ? ` Có ${count("manual")} câu do bạn sửa sau kiểm tra.` : "") +
-      (count("unresolved") ? ` Còn ${count("unresolved")} câu nguồn chưa rõ; giữ bản dịch có căn cứ và ghi rõ lý do tại từng câu. Không cần xác nhận thủ công để xuất.` : count("manual") ? "Có thể xuất bản đã sửa hoặc bấm AI kiểm tra lại." : " Bản dịch đã qua kiểm tra tự động.");
+      (count("unresolved") ? ` Còn ${count("unresolved")} câu nguồn chưa rõ; có thể nghe gốc, xác nhận vai hoặc sửa lời. Câu chưa có lời Việt sẽ chặn xuất đầy đủ.` : count("manual") ? "Có thể xuất bản đã sửa hoặc bấm AI kiểm tra lại." : " Bản dịch đã qua kiểm tra tự động.");
   }
 
   function updateTranscriptReviewAvailability() {
@@ -1261,6 +1261,12 @@ document.addEventListener("DOMContentLoaded", () => {
       const eta = formatEta(currentProgress.eta_seconds);
       if (eta) counters.push(`ước tính còn ${eta}`);
       taskProgressDetail.textContent += ` ${counters.join(" · ")}.`;
+    }
+    const speakerFrames = currentProgress.speaker_completed_frames, speakerTotal = currentProgress.speaker_total_frames;
+    if (Number.isInteger(speakerFrames) && Number.isInteger(speakerTotal) && speakerTotal > 0 && speakerFrames >= 0 && speakerFrames <= speakerTotal) {
+      taskProgressDetail.textContent += ` Phân biệt giọng: ${speakerFrames}/${speakerTotal} khung âm thanh (${formatProgressPercent(speakerFrames * 100 / speakerTotal)} của đoạn).`;
+    } else if (measuredProgress(currentProgress.stage_progress_pct) !== null) {
+      taskProgressDetail.textContent += ` Công đoạn hiện tại: ${formatProgressPercent(currentProgress.stage_progress_pct)}.`;
     }
     btnPauseWorker.classList.toggle("hidden", !currentProgress.can_pause || terminal);
     btnResumeWorker.classList.toggle("hidden", !currentProgress.can_resume || terminal);
@@ -2719,6 +2725,11 @@ document.addEventListener("DOMContentLoaded", () => {
           positionVideoOverlays();
         }
       }
+      else if (msg.type === "speaker_confirmation") {
+        (msg.segments || []).forEach(applySegmentUpdate);
+        resetTaskResult();
+        if (msg.progress) showTaskProgress(msg.progress);
+      }
       else if (msg.type === "telemetry") {
         if (msg.review_summary) showTaskProgress({review_summary: msg.review_summary});
         showPipelineWarnings(msg);
@@ -3390,6 +3401,87 @@ document.addEventListener("DOMContentLoaded", () => {
     }
   }
 
+  function speakerConfirmationBusy() {
+    return ["RUNNING", "PAUSED", "CANCELLING"].includes(currentProgress?.status) ||
+      automaticExportActive || !!exportingTaskId || pendingTranscriptSaves > 0 || !!pendingTaskAction;
+  }
+
+  function openSpeakerConfirmation(id) {
+    const item = transcriptRows.get(id), segment = segments[id];
+    if (!item || !segment || speakerConfirmationBusy()) return;
+    const saved = segment.speaker_confirmation || {};
+    item.speakerName.value = saved.label || "";
+    item.speakerSelf.value = saved.self_address || "";
+    item.speakerListener.value = saved.listener_address || "";
+    const scope = segment.speaker_evidence?.scope_id;
+    const linked = segment.speaker_id && scope ? Object.values(segments).filter(row =>
+      row.speaker_id === segment.speaker_id && row.speaker_evidence?.scope_id === scope) : [];
+    item.speakerAll.checked = false;
+    item.speakerAll.disabled = linked.length < 2;
+    item.speakerScope.textContent = linked.length > 1
+      ? `Có ${linked.length} câu mang cùng nhãn giọng dự đoán. Chỉ áp dụng cả nhóm nếu đã nghe và xác nhận đúng người nói; người nghe có thể thay đổi giữa các lượt.`
+      : "Áp dụng riêng câu này. Chưa có đủ nhãn giọng để áp dụng cho các câu khác.";
+    const keepVoice = document.createElement("option");
+    keepVoice.value = ""; keepVoice.textContent = "Giữ giọng hiện tại";
+    item.speakerVoice.replaceChildren(keepVoice);
+    for (const voice of voiceCatalog.filter(voice => voice.available && voice.engine === "edge-tts")) {
+      const option = document.createElement("option"); option.value = voice.id; option.textContent = voice.name;
+      item.speakerVoice.appendChild(option);
+    }
+    item.speakerVoice.value = saved.voice_id || "";
+    item.speakerMessage.textContent = "Xác nhận vai chỉ bổ sung ngữ cảnh; AI vẫn phải rà lại nghĩa và tạo giọng cho các câu phụ thuộc.";
+    item.speakerMessage.dataset.error = "false";
+    item.speakerEditor.hidden = false;
+    item.speakerName.focus();
+  }
+
+  async function saveSpeakerConfirmation(id) {
+    const item = transcriptRows.get(id), segment = segments[id];
+    if (!item || !segment || item.speakerSaving || speakerConfirmationBusy() || !currentTaskId) return;
+    const label = item.speakerName.value.trim();
+    if (!label || label.length > 100) {
+      item.speakerMessage.textContent = "Nhập tên hoặc vai người nói, tối đa 100 ký tự.";
+      item.speakerMessage.dataset.error = "true"; item.speakerName.focus(); return;
+    }
+    for (const field of [item.speakerSelf, item.speakerListener]) {
+      if (field.value.trim().length > 80) {
+        item.speakerMessage.textContent = "Mỗi cách xưng hô tối đa 80 ký tự.";
+        item.speakerMessage.dataset.error = "true"; field.focus(); return;
+      }
+    }
+    const taskId = currentTaskId;
+    const body = {anchor_segment_id: id, expected_revision: segment.revision || 0,
+      apply_same_voice: item.speakerAll.checked, label, self_address: item.speakerSelf.value.trim(),
+      listener_address: item.speakerListener.value.trim(), voice_id: item.speakerVoice.value || null};
+    item.speakerSaving = true;
+    for (const control of item.speakerControls) control.disabled = true;
+    pendingTranscriptSaves++; updateExportAvailability();
+    item.speakerMessage.dataset.error = "false"; item.speakerMessage.textContent = "Đang lưu vai thoại…";
+    try {
+      const response = await fetch(`/api/streaming/${encodeURIComponent(taskId)}/speaker-confirmation`, {
+        method: "PATCH", headers: {"Content-Type": "application/json"}, body: JSON.stringify(body)});
+      const data = await response.json();
+      if (!response.ok) throw new Error(typeof data.detail === "string" ? data.detail : "Không lưu được vai thoại. Giữ nội dung và thử lại.");
+      if (!Array.isArray(data.segments) || !data.affected_ids?.includes(id)) throw new Error("Máy chủ chưa xác nhận vai thoại đã lưu.");
+      if (taskId !== currentTaskId || transcriptRows.get(id) !== item) return;
+      data.segments.forEach(applySegmentUpdate);
+      resetTaskResult();
+      if (data.progress) showTaskProgress(data.progress);
+      item.speakerEditor.hidden = true;
+      transcriptStatus.textContent = `Đã lưu vai cho ${data.affected_ids.length} câu. Dùng AI kiểm tra lại hoặc Tiếp tục tác vụ để rà các câu phụ thuộc; bản sửa thủ công được giữ.`;
+      item.speakerButton.focus();
+    } catch (error) {
+      if (taskId !== currentTaskId || transcriptRows.get(id) !== item) return;
+      item.speakerMessage.textContent = error.message || "Không lưu được vai thoại.";
+      item.speakerMessage.dataset.error = "true"; item.speakerMessage.focus();
+    } finally {
+      item.speakerSaving = false; pendingTranscriptSaves--;
+      for (const control of item.speakerControls) control.disabled = false;
+      updateExportAvailability();
+      updateSegmentDrawerItem(segments[id] || segment);
+    }
+  }
+
   function createTranscriptRow(segment) {
     const element = (tag, className, text) => {
       const node = document.createElement(tag); node.className = className;
@@ -3409,7 +3501,10 @@ document.addEventListener("DOMContentLoaded", () => {
     listen.setAttribute("aria-label", `Nghe âm thanh gốc câu ${segment.id + 1}`);
     listen.setAttribute("aria-pressed", "false");
     listen.addEventListener("click", () => auditionOriginal(segment.id));
-    heading.append(time, listen, badge);
+    const speakerButton = element("button", "transcript-time transcript-speaker", "Vai thoại");
+    speakerButton.type = "button"; speakerButton.id = `seg-speaker-${segment.id}`;
+    speakerButton.addEventListener("click", () => openSpeakerConfirmation(segment.id));
+    heading.append(time, listen, speakerButton, badge);
     const original = element("button", "transcript-original"); original.type = "button"; original.id = `seg-zh-${segment.id}`;
     original.title = "Tua đến câu này";
     original.addEventListener("click", () => seekTranscript(segments[segment.id]));
@@ -3446,8 +3541,35 @@ document.addEventListener("DOMContentLoaded", () => {
       startTranscriptEdit(segment.id);
       return saveTranscriptEdit(segment.id, true);
     });
-    row.append(heading, element("p", "transcript-label", "GỐC"), original, element("p", "transcript-label", "TIẾNG VIỆT · BẤM ĐỂ SỬA"), translation, review, silence, editor);
-    transcriptRows.set(segment.id, { row, badge, original, listen, translation, review, silence, editor, input, save, cancel, message, saving: false });
+    const speakerEditor = element("section", "transcript-editor speaker-editor"); speakerEditor.hidden = true;
+    const speakerControls = [];
+    const speakerField = (title, name, tag = "input") => {
+      const label = element("label", "", title), control = element(tag, "");
+      control.id = `seg-speaker-${name}-${segment.id}`; label.setAttribute("for", control.id);
+      if (tag === "input") { control.type = "text"; control.maxLength = name === "name" ? 100 : 80; }
+      speakerEditor.append(label, control); speakerControls.push(control); return control;
+    };
+    const speakerName = speakerField("Tên / vai người nói", "name");
+    const speakerSelf = speakerField("Cách tự xưng đã xác nhận (để trống nếu chưa rõ)", "self");
+    const speakerListener = speakerField("Cách gọi người nghe của các câu áp dụng (để trống nếu chưa rõ)", "listener");
+    const speakerVoice = speakerField("Giọng đọc", "voice", "select");
+    const allLabel = element("label", "speaker-scope-toggle");
+    const speakerAll = element("input", ""); speakerAll.type = "checkbox"; speakerAll.id = `seg-speaker-all-${segment.id}`;
+    allLabel.append(speakerAll, element("span", "", " Tôi xác nhận các câu cùng nhãn giọng thuộc người này và dùng cách xưng hô trên"));
+    const speakerScope = element("p", "transcript-edit-message");
+    const speakerActions = element("div", "transcript-editor-actions");
+    const speakerSave = element("button", "", "Lưu vai thoại"); speakerSave.type = "button"; speakerSave.id = `seg-speaker-save-${segment.id}`;
+    speakerSave.addEventListener("click", () => saveSpeakerConfirmation(segment.id));
+    const speakerCancel = element("button", "", "Đóng"); speakerCancel.type = "button";
+    speakerCancel.addEventListener("click", () => { if (!speakerSaving()) { speakerEditor.hidden = true; speakerButton.focus(); } });
+    function speakerSaving() { return transcriptRows.get(segment.id)?.speakerSaving; }
+    speakerActions.append(speakerSave, speakerCancel);
+    speakerControls.push(speakerAll, speakerSave, speakerCancel);
+    const speakerMessage = element("p", "transcript-edit-message"); speakerMessage.setAttribute("role", "status"); speakerMessage.tabIndex = -1;
+    speakerEditor.append(allLabel, speakerScope, speakerActions, speakerMessage);
+    row.append(heading, element("p", "transcript-label", "GỐC"), original, element("p", "transcript-label", "TIẾNG VIỆT · BẤM ĐỂ SỬA"), translation, review, silence, editor, speakerEditor);
+    transcriptRows.set(segment.id, { row, badge, original, listen, translation, review, silence, editor, input, save, cancel, message, saving: false,
+      speakerButton, speakerEditor, speakerName, speakerSelf, speakerListener, speakerVoice, speakerAll, speakerScope, speakerControls, speakerMessage, speakerSaving: false });
     segmentsList.appendChild(row);
     updateSegmentDrawerItem(segment);
   }
@@ -3493,6 +3615,9 @@ document.addEventListener("DOMContentLoaded", () => {
     }
     item.badge.dataset.ready = String(ready);
     item.row.dataset.needsReview = String(Boolean(segment.needs_review));
+    item.speakerButton.disabled = speakerConfirmationBusy() || item.speakerSaving || !segment.text_zh;
+    item.speakerButton.textContent = segment.speaker_confirmation?.label ? `Vai: ${segment.speaker_confirmation.label}` : "Vai thoại";
+    item.speakerButton.title = speakerConfirmationBusy() ? "Chờ tác vụ dừng trước khi xác nhận vai thoại" : "Xác nhận người nói và cách xưng hô";
     item.original.textContent = segment.text_zh || (segment.confirmed_silence ? "Không có lời thoại" : "Đang nhận dạng lời thoại…");
     item.translation.textContent = segment.confirmed_silence ? "Đã xác nhận không có lời thoại" : segmentTranslation(segment)
       || (ready && segment.needs_review ? "Chưa đủ căn cứ để dịch câu này." : "Bản dịch sẽ xuất hiện sau khi xử lý.");
@@ -3503,7 +3628,7 @@ document.addEventListener("DOMContentLoaded", () => {
       .replace(/;?\s*nghe lại trước khi tạo giọng\.?/gi, ".")
       .replace(/\s*Kiểm tra video rồi sửa bản dịch trước khi tạo giọng\.?/gi, "");
     const reviewHint = reviewInProgress() && transcriptReviewLocked(segment.id) ? "AI đang đối chiếu lại câu này." : segment.verification?.status === "unresolved"
-      ? "AI đã kiểm tra nhưng nguồn chưa đủ rõ, nên giữ bản dịch có căn cứ và ghi lại điểm chưa chắc. Không cần xác nhận thủ công."
+      ? "AI chưa đủ bằng chứng. Có thể nghe gốc, sửa lời hoặc xác nhận Vai thoại rồi tiếp tục rà lại."
       : "AI sẽ đối chiếu lại lời gốc và bản dịch. Có thể bấm AI kiểm tra lại sau khi xử lý xong.";
     const emptyHint = ready && !segment.audio_url && !segmentTranslation(segment) ? " Chưa có giọng Việt cho câu này; video vẫn phát tiếp." : "";
     item.review.textContent = segment.needs_review ? `${reviewReason} ${reviewHint}${emptyHint}` : "";

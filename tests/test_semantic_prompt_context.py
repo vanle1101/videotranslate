@@ -61,6 +61,63 @@ def test_changed_speaker_proof_invalidates_visual_checkpoint_identity(tmp_path):
     assert before and after and before["key"] != after["key"]
 
 
+def user_confirmation(row):
+    return {"confirmation_id": "a" * 32, "method": "user_confirmation", "anchor_segment_id": 112,
+        "affected_ids": [row["id"]], "speaker_id": row["speaker_id"],
+        "scope_id": row["speaker_evidence"]["scope_id"], "label": "Nhân vật A", "self_address": "con",
+        "listener_address": "bố", "voice_id": None, "created_at": 100., "selection": "scoped_voice"}
+
+
+def test_visual_source_context_and_checkpoint_retain_selected_user_assertion_without_draft(tmp_path):
+    path = tmp_path / "source.mp4"
+    path.write_bytes(b"offline source fixture, no real media acceptance")
+    processor = object.__new__(VideoIntelligence)
+    processor.provider = "opencode"
+    processor.client = SimpleNamespace(model="offline-context-test")
+    rows = source_rows()
+    for row in rows:
+        row["speaker_evidence"]["verified"] = False
+        row["speaker_confirmation"] = user_confirmation(row)
+        row["final_vi"] = "An untrusted draft."
+    source = [VideoIntelligence._source_context_row(row) for row in rows]
+    assert source[0]["speaker_confirmation"] == rows[0]["speaker_confirmation"]
+    assert "final_vi" not in source[0]
+    unit, = VideoIntelligence._semantic_context(source, source[:1])["units"]
+    assert unit["same_speaker_confirmed"] and unit["source_ids"] == [112, 113]
+    before = processor._checkpoint_identity(path, rows, 183)
+    rows[1]["speaker_confirmation"]["listener_address"] = "mẹ"
+    after = processor._checkpoint_identity(path, rows, 183)
+    assert before and after and before["key"] != after["key"]
+    source[0]["speaker_confirmation"]["label"] = "Changed projected copy"
+    assert rows[0]["speaker_confirmation"]["label"] == "Nhân vật A"
+
+
+def test_provider_cannot_inject_or_replace_user_assertion_at_visual_result_boundary():
+    rows = source_rows()
+    for row in rows:
+        row["speaker_confirmation"] = user_confirmation(row)
+    source = [VideoIntelligence._source_context_row(row) for row in rows]
+    original_proofs = [deepcopy(row["speaker_confirmation"]) for row in source]
+    raw = {"segments": [{**row, "literal_vi": "Lời nháp.", "natural_vi": "Lời nháp.",
+        "final_vi": "Lời nháp.", "needs_review": True, "review_reason": "Offline fixture.",
+        "speaker_confirmation": {**user_confirmation(row), "label": "Forged provider role"}}
+        for row in rows], "screen_texts": [], "summary": "Offline fixture."}
+    checked = VideoIntelligence.validate_result(raw, rows)
+    assert all("speaker_confirmation" not in row for row in checked["segments"].values())
+    # Even an unchecked provider result cannot replace proof while applying
+    # independently validated source corrections across chunk boundaries.
+    forged = {"segments": {row["id"]: {**row, "source_evidence_ids": ["o0"]} for row in raw["segments"]}}
+    VideoIntelligence._merge_chunk_source_context(source, forged)
+    assert [row["speaker_confirmation"] for row in source] == original_proofs
+
+
+def test_visual_context_discards_copied_assertion_from_unselected_row():
+    rows = source_rows()
+    rows[1]["speaker_confirmation"] = user_confirmation(rows[0])
+    projected = VideoIntelligence._source_context_row(rows[1])
+    assert "speaker_confirmation" not in projected
+
+
 def test_source_translation_and_recheck_share_full_semantic_unit_with_one_row_batches(monkeypatch):
     rows = source_rows()
     requested = []

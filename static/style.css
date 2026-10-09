@@ -224,6 +224,8 @@ html { scroll-padding-top: 106px; }
 .transcript-translation:hover:not(:disabled) { background: #ffffff06; color: #9ac1ff; }
 .transcript-editor { margin-top: 10px; }
 .transcript-editor[hidden] { display: none; }
+.speaker-editor input[type="text"], .speaker-editor select { width: 100%; padding: 7px 9px; margin-bottom: 8px; border: 1px solid #74628d; border-radius: 6px; background: #080d17; color: #f8eff7; font-size: 12px; }
+.speaker-editor .speaker-scope-toggle { display: flex; align-items: flex-start; gap: 7px; line-height: 1.5; }
 .transcript-editor label { display: block; margin-bottom: 6px; color: #d7c7f8; font-size: 11px; }
 .transcript-editor textarea { width: 100%; min-height: 90px; max-height: 260px; padding: 10px; resize: vertical; background: #080d17; border: 1px solid #74628d; border-radius: 8px; color: #f8eff7; font-size: 13px; line-height: 1.55; }
 .transcript-editor-actions { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 8px; }

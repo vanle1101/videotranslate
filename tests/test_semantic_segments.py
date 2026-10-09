@@ -23,6 +23,14 @@ def confirmation(speaker="voice-a", scope="video-17"):
         "confirmation_id": "recorded-user-action"}}
 
 
+def recorded_confirmation(row, *, action="a" * 32, selection="scoped_voice"):
+    return {"confirmation_id": action, "method": "user_confirmation", "anchor_segment_id": 112,
+        "affected_ids": [row["id"]], "speaker_id": row.get("speaker_id"),
+        "scope_id": row.get("speaker_evidence", {}).get("scope_id"), "label": "Nhân vật A",
+        "self_address": "con", "listener_address": "bố", "voice_id": None,
+        "created_at": 100., "selection": selection}
+
+
 def fragments(**metadata):
     return [source(112, "我真的不是回来", 10, 11.25, **metadata),
             source(113, "跟你开玩笑的", 11.3, 12.8, **metadata)]
@@ -51,6 +59,66 @@ def test_audio_grounded_same_voice_can_form_complete_translation_unit():
 def test_one_recorded_user_confirmation_can_link_same_speaker_rows():
     unit, = build_semantic_units(fragments(**confirmation()))
     assert unit["can_combine_dubbing"]
+
+
+def test_separate_scoped_confirmation_preserves_unverified_audio_and_links_only_selected_action():
+    rows = fragments(**audio_proof())
+    for row in rows:
+        row["speaker_evidence"]["verified"] = False
+        row["speaker_confirmation"] = recorded_confirmation(row)
+    before = copy.deepcopy(rows)
+    unit, = build_semantic_units(rows)
+    assert unit["kind"] == "utterance" and unit["same_speaker_confirmed"]
+    assert unit["boundaries"][0]["evidence"]["confirmation_id"] == "a" * 32
+    assert unit["source_parts"][0]["speaker_confirmation"]["affected_ids"] == [112]
+    assert unit["source_parts"][1]["speaker_confirmation"]["affected_ids"] == [113]
+    assert unit["source_parts"][0]["speaker_evidence"]["verified"] is False
+    assert rows == before
+    unit["source_parts"][0]["speaker_confirmation"]["label"] = "Changed copy"
+    assert rows[0]["speaker_confirmation"]["label"] == "Nhân vật A"
+
+
+@pytest.mark.parametrize("change", ["anchor", "different_action", "different_scope", "unselected", "forged_label", "stale_voice"])
+def test_labels_individual_claims_or_stale_scoped_claims_never_prove_continuity(change):
+    rows = fragments(**audio_proof())
+    for row in rows:
+        row["speaker_evidence"]["verified"] = False
+        row["speaker_confirmation"] = recorded_confirmation(row)
+    if change == "anchor":
+        for row in rows:
+            row["speaker_confirmation"]["selection"] = "anchor"
+    elif change == "different_action":
+        rows[1]["speaker_confirmation"]["confirmation_id"] = "b" * 32
+    elif change == "different_scope":
+        rows[1]["speaker_confirmation"]["scope_id"] = "another-source"
+    elif change == "unselected":
+        rows[1]["speaker_confirmation"]["affected_ids"] = [112]
+    elif change == "forged_label":
+        rows[1]["speaker_confirmation"] = {"label": "Nhân vật A", "verified": True}
+    else:
+        rows[1]["speaker_confirmation"]["speaker_id"] = "old-voice"
+    unit, = build_semantic_units(rows)
+    assert unit["kind"] == "contextual_exchange" and not unit["can_combine_dubbing"]
+    if change not in {"anchor", "different_action"}:
+        assert "speaker_confirmation" not in unit["source_parts"][1]
+
+
+def test_changed_recorded_address_invalidates_semantic_cache_without_changing_unit_id():
+    rows = fragments(**audio_proof())
+    for row in rows:
+        row["speaker_confirmation"] = recorded_confirmation(row)
+    first, = build_semantic_units(rows)
+    rows[1]["speaker_confirmation"]["listener_address"] = "mẹ"
+    second, = build_semantic_units(rows)
+    assert first["unit_id"] == second["unit_id"] and first["input_hash"] != second["input_hash"]
+
+
+def test_two_distinct_legacy_recorded_actions_do_not_prove_continuity():
+    rows = fragments(**confirmation())
+    rows[1]["speaker_evidence"] = copy.deepcopy(rows[1]["speaker_evidence"])
+    rows[1]["speaker_evidence"]["confirmation_id"] = "another-recorded-action"
+    unit, = build_semantic_units(rows)
+    assert not unit["can_combine_dubbing"]
 
 
 @pytest.mark.parametrize("metadata", [

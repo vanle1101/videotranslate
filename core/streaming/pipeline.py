@@ -1,6 +1,6 @@
 import asyncio
 import contextvars
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 import time
 import subprocess
 import functools
@@ -50,7 +50,7 @@ REVIEW_FAILURE_WARNINGS = frozenset((
 
 PROJECT_SAVE_FAILURE_WARNING = "Không lưu được dự án xuống đĩa; giữ cửa sổ mở và kiểm tra dung lượng/quyền ghi."
 
-SOURCE_METADATA_FIELDS = ("speaker_id", "speaker_evidence", "speaker_diagnostics", "utterance_id", "utterance_evidence",
+SOURCE_METADATA_FIELDS = ("speaker_id", "speaker_evidence", "speaker_diagnostics", "speaker_confirmation", "utterance_id", "utterance_evidence",
                           "source_asr_row_id", "source_asr_start", "source_asr_end",
                           "source_piece_index", "source_piece_count")
 
@@ -92,6 +92,10 @@ class SegmentItem:
         self.speech_start = None
         self.speech_end = None
         self.timing_issue = None
+        # Durable marker for a confirmation-dependent semantic review.
+        self.speaker_review_pending = False
+        self.voice_id = None
+        self.tts_voice_outdated = False
         for name in SOURCE_METADATA_FIELDS:
             setattr(self, name, None)
     def to_dict(self) -> Dict[str, Any]:
@@ -136,6 +140,9 @@ class SegmentItem:
             "speech_start": self.speech_start,
             "speech_end": self.speech_end,
             "timing_issue": deepcopy(self.timing_issue),
+            "speaker_review_pending": self.speaker_review_pending,
+            "voice_id": self.voice_id,
+            "tts_voice_outdated": self.tts_voice_outdated,
         }
 
 
@@ -295,6 +302,19 @@ class StreamingPipelineSession:
         self._persistence_enabled = True
         return path
 
+    def confirm_speaker(self, **selection):
+        from core.streaming.speaker_confirmation import confirm_speaker
+        return confirm_speaker(self, **selection)
+
+    def _segment_voice(self, segment):
+        """Use a catalog-validated override without mutating the shared engine."""
+        override = getattr(segment, "voice_id", None)
+        if override is None:
+            return self.voice
+        if self.tts_engine_name != "edge-tts":
+            raise ValueError("Giọng riêng theo người nói hiện hỗ trợ Microsoft Edge.")
+        return resolve_voice(override, "edge-tts")[1]
+
     def _persist_if_enabled(self):
         if not self._persistence_enabled or getattr(self, "_persistence_capacity_failed", False):
             return
@@ -433,7 +453,8 @@ class StreamingPipelineSession:
                         or (self.source_url and self._source_downloader))
         failed = [segment for segment in self.segments.values() if segment.status == "FAILED"]
         restored_stages = {"TTS", "ALIGNING", "ASR", "TRANSLATING", "WAITING"} if getattr(self, "_restored_can_resume", False) else {"TTS", "ALIGNING"}
-        return bool(self.initialized and not self.is_stopped and not self.is_running
+        voice_retry = any(getattr(row, "tts_voice_outdated", False) for row in failed)
+        return bool(self.initialized and (not self.is_stopped or voice_retry) and not self.is_running
                     and not self.is_editing and self.error and failed
                     and all(segment.failed_stage in restored_stages for segment in failed)
                     and all(segment.status in ("READY", "PLAYED", "FAILED", "WAITING")
@@ -455,6 +476,7 @@ class StreamingPipelineSession:
                     segment.error = None
                     segment._retry_synthesis = True
             self._restored_interrupted = False
+            self.is_stopped = False
             self.is_running = True
             self.error = None
             self._startup_failed = False
@@ -479,6 +501,7 @@ class StreamingPipelineSession:
             if self.asr_engine_name == "sensevoice" and self.sensevoice.is_available:
                 self.asr_engine = self.sensevoice
         self._restored_interrupted = False
+        self.is_stopped = False
         self.is_running = True
         self.is_paused = False
         self.pause_event.set()
@@ -602,7 +625,7 @@ class StreamingPipelineSession:
             if seg.confirmed_silence:
                 return seg.to_dict()
             raise SegmentEditConflict("Chỉ xác nhận im lặng cho câu đang cần kiểm tra.")
-        if text == seg.final_vi and not was_review and _review_result is None:
+        if text == seg.final_vi and not was_review and _review_result is None and not seg.tts_voice_outdated:
             return seg.to_dict()
         review_result = deepcopy(_review_result) if _review_result is not None else None
         old_source = seg.text_zh
@@ -685,6 +708,7 @@ class StreamingPipelineSession:
                 seg.tts_duration = tts_duration
                 seg.speed_ratio = round(ratio, 2)
                 seg.audio_path = None if without_audio else str(final_path.resolve())
+                seg.tts_voice_outdated = False
                 for key, value in timing.items():
                     setattr(seg, key, value)
                 seg.revision += 1
@@ -816,6 +840,27 @@ class StreamingPipelineSession:
         for field in ("text_zh", "literal_vi", "natural_vi", "final_vi", "needs_review", "review_reason", "verification"):
             if field in row:
                 setattr(segment, field, row[field])
+        audit = row.get("verification") or {}
+        if isinstance(audit, dict) and audit.get("status") in {"verified", "corrected", "unresolved"}:
+            segment.speaker_review_pending = False
+
+    @contextmanager
+    def _durable_speaker_review_publication(self, segment):
+        """Clear user-confirmation review ownership only with a durable verdict."""
+        pending = segment.speaker_review_pending
+        before = deepcopy(vars(segment)) if pending else None
+        try:
+            yield
+            if pending and not segment.speaker_review_pending:
+                self.persist()
+        except BaseException as error:
+            if before is not None:
+                segment.__dict__.clear()
+                segment.__dict__.update(before)
+            if isinstance(error, (OSError, ValueError, TypeError)):
+                raise ProjectEditSaveError("Chưa lưu được kết quả rà người nói xuống ổ đĩa; "
+                    "giữ bằng chứng và trạng thái chờ để thử lại.") from None
+            raise
 
     def _refresh_review_counts(self):
         statuses = [(segment.verification or {}).get("status") for segment in self.segments.values()]
@@ -893,11 +938,12 @@ class StreamingPipelineSession:
         review_context = deepcopy(result["segments"])
         for sid, row in sorted(result["segments"].items(), key=lambda item: (self.segments[item[0]].start, item[0])):
             segment = self.segments[sid]
-            if segment.revision != target_revisions[sid]:
+            if (sid not in target_revisions or segment.revision != target_revisions[sid]
+                    or (segment.verification or {}).get("status") == "manual"):
                 # A newer user commit wins over an older review response.
                 continue
             if (regenerate_audio and segment.status in ("READY", "PLAYED", "NEEDS_REVIEW")
-                    and row["final_vi"] != segment.final_vi):
+                    and (row["final_vi"] != segment.final_vi or segment.tts_voice_outdated)):
                 try:
                     await self.edit_segment(sid, row["final_vi"], _review_result=row,
                                             _review_context=review_context)
@@ -912,17 +958,18 @@ class StreamingPipelineSession:
                     # rebuilding speech fails; an old WAV must not be served as
                     # audio for the corrected text. The old file stays on disk
                     # until the resumed worker atomically replaces it.
-                    self._apply_review_metadata(segment, row)
-                    segment.revision += 1
-                    segment.status, segment.failed_stage = "FAILED", "TTS"
-                    segment.error = str(error)
-                    segment.audio_path = segment.audio_url = None
-                    segment.tts_duration, segment.speed_ratio = 0., 1.
-                    segment.subtitle_cues = []
-                    segment.speech_start = segment.speech_end = None
-                    segment.subtitle_timing_source = "pending"
-                    segment._retry_synthesis = True
-                    segment.timing_issue = None
+                    with self._durable_speaker_review_publication(segment):
+                        self._apply_review_metadata(segment, row)
+                        segment.revision += 1
+                        segment.status, segment.failed_stage = "FAILED", "TTS"
+                        segment.error = str(error)
+                        segment.audio_path = segment.audio_url = None
+                        segment.tts_duration, segment.speed_ratio = 0., 1.
+                        segment.subtitle_cues = []
+                        segment.speech_start = segment.speech_end = None
+                        segment.subtitle_timing_source = "pending"
+                        segment._retry_synthesis = True
+                        segment.timing_issue = None
                     if isinstance(error, (SpeechBudgetError, PacingReviewRejected)):
                         # Record the corrected text/source revision, rather than
                         # the pre-review draft which edit_segment kept atomic.
@@ -938,7 +985,8 @@ class StreamingPipelineSession:
                     await self.emit("segment_update", segment.to_dict())
                     await self._update_ready()
             else:
-                self._apply_review_metadata(segment, row)
+                with self._durable_speaker_review_publication(segment):
+                    self._apply_review_metadata(segment, row)
                 if regenerate_audio:
                     await self.emit("segment_update", segment.to_dict())
         for source in result.get("translation_sources", []):
@@ -957,14 +1005,57 @@ class StreamingPipelineSession:
             "warnings": list(self.warnings), "screen_texts": self.screen_texts})
 
     async def _resume_speech_rows(self, rows):
-        """One recovery owner publishes ready speech without waiting on later reviews."""
-        for row in sorted(rows, key=lambda item: (item.start, item.id)):
+        """Publish simple fits before admitting slower semantic pacing requests.
+
+        The first pass measures real TTS and performs only acoustic/timeline
+        fitting. Overlong rows retain their checkpoint for a second pass; a
+        slow rewrite cannot delay every independent missing WAV behind it.
+        Both passes share one owner and the existing TTS lock/cache.
+        """
+        deferred = []
+        ordered = sorted(rows, key=lambda item: (item.start, item.id))
+        for row in ordered:
             if row.status != "WAITING" or not self._published_row(row):
                 continue
             await self.pause_event.wait()
             if self.is_stopped or not self.is_running:
                 raise asyncio.CancelledError
             revision = row.revision
+            try:
+                await self._synthesize_segment(row, allow_pacing=False)
+            except asyncio.CancelledError:
+                raise
+            except SpeechBudgetError:
+                if row.revision != revision:
+                    continue
+                # The complete measured candidate remains in the stage cache.
+                # Do not publish an overlong WAV or repeat synthesis remotely.
+                row.status, row.error, row.failed_stage = "WAITING", None, "ALIGNING"
+                row._retry_synthesis = True
+                deferred.append((row, revision))
+                await self.emit("segment_update", row.to_dict())
+                self._persist_if_enabled()
+            except Exception as error:
+                if getattr(self, "_persistence_capacity_failed", False):
+                    raise
+                if row.revision != revision:
+                    continue
+                row.failed_stage = row.status if row.status in {"TTS", "ALIGNING"} else "TTS"
+                row.status, row.error = "FAILED", str(error)
+                warning = f"Câu {row.id + 1} chưa tạo được giọng; giữ phần đã xong và tiếp tục các câu sau."
+                if warning not in self.warnings:
+                    self.warnings.append(warning)
+                logging.getLogger("errors").error(
+                    "[%s] RECOVERY_SPEECH_FAILED segment_id=%s stage=%s error_type=%s",
+                    self.task_id, row.id, row.failed_stage, type(error).__name__)
+                await self.emit("segment_update", row.to_dict())
+                self._persist_if_enabled()
+        for row, revision in deferred:
+            if row.revision != revision or row.status != "WAITING" or not self._published_row(row):
+                continue
+            await self.pause_event.wait()
+            if self.is_stopped or not self.is_running:
+                raise asyncio.CancelledError
             try:
                 await self._synthesize_segment(row)
             except asyncio.CancelledError:
@@ -980,7 +1071,7 @@ class StreamingPipelineSession:
                 if warning not in self.warnings:
                     self.warnings.append(warning)
                 logging.getLogger("errors").error(
-                    "[%s] RECOVERY_SPEECH_FAILED segment_id=%s stage=%s error_type=%s",
+                    "[%s] RECOVERY_PACING_FAILED segment_id=%s stage=%s error_type=%s",
                     self.task_id, row.id, row.failed_stage, type(error).__name__)
                 await self.emit("segment_update", row.to_dict())
                 self._persist_if_enabled()
@@ -998,8 +1089,10 @@ class StreamingPipelineSession:
         end-of-source pass can request only those rows so it cannot turn an
         unrelated unresolved draft into an unbounded review loop.
         """
-        if not (self._chunked_source_started and self.visual_translation
-                and settings.LLM_PROVIDER == "opencode"):
+        pending_speaker_review = any(row.speaker_review_pending
+            and (row.verification or {}).get("status") != "manual" for row in self.segments.values())
+        if (settings.LLM_PROVIDER != "opencode" or
+                (not (self._chunked_source_started and self.visual_translation) and not pending_speaker_review)):
             return
         if synthesize_pending:
             from core.streaming.speaker_source import recover_speaker_evidence
@@ -1031,16 +1124,32 @@ class StreamingPipelineSession:
             return (audit.get("status") == "unresolved"
                 and audit.get("review_gate_revision") != AutomaticTranslationReviewer.REVIEW_GATE_REVISION
                 and any(key in audit for key in ("address_context", "address_applicable", "audio_evidence")))
+        def needs_numeric_audio_recheck(row):
+            # New exact spelling equivalence can resolve an old ASR comparison
+            # false negative. It is only a reason to perform genuine semantic
+            # review again, never permission to flip its saved verdict.
+            from core.chinese_text import comparable_audio_chinese
+            audit = row.verification or {}
+            readings = audit.get("audio_evidence", [])
+            if (audit.get("status") != "unresolved" or audit.get("audio_consensus") is not False
+                    or not isinstance(readings, list)):
+                return False
+            valid = [item for item in readings if isinstance(item, dict)
+                     and item.get("engine") in {"sensevoice", "faster-whisper-small"}
+                     and isinstance(item.get("text_zh"), str) and item["text_zh"].strip()]
+            keys = {comparable_audio_chinese(item["text_zh"]) for item in valid}
+            return len({item["engine"] for item in valid}) == 2 and len(keys) == 1 and "" not in keys
         def include(row):
             if stale_address_only:
                 return needs_address_source_recheck(row)
             return ((row.verification or {}).get("status") in (None, "pending", "incomplete")
                     or needs_source_scope_recheck(row) or needs_address_source_recheck(row)
-                    or needs_obsolete_gate_recheck(row))
+                    or needs_obsolete_gate_recheck(row) or needs_numeric_audio_recheck(row))
         pending = sorted((row for row in self.segments.values()
-            if self._published_row(row)
-            and row.source_method == "text-ai" and row.translation_provider == "opencode"
-            and include(row)),
+            if (row.speaker_review_pending or
+                 (self._chunked_source_started and self.visual_translation and self._published_row(row)
+                  and row.source_method == "text-ai" and row.translation_provider == "opencode"
+                  and include(row)))),
             key=lambda row: (row.start, row.id))
         if synthesize_pending:
             # These rows already own accepted translation/review state. A
@@ -1062,7 +1171,7 @@ class StreamingPipelineSession:
             revisions = {row.id: row.revision for row in group}
             try:
                 options = {"regenerate_audio": True, "segment_ids": {row.id for row in group}}
-                if any(needs_address_source_recheck(row) for row in group):
+                if any(needs_address_source_recheck(row) or row.speaker_review_pending for row in group):
                     # Reuse source/audio files, but never reuse the address
                     # verdict made before these accepted source words changed.
                     options["force_review"] = True
@@ -1118,7 +1227,10 @@ class StreamingPipelineSession:
                     "output_video_url": "", "output_filename": "", "review_summary": dict(self.review_summary)})
                 # An explicit user retry is a fresh audit; automatic resume
                 # inside the initial pipeline may reuse exact verified batches.
-                await self._review_translations(regenerate_audio=True, force_review=True)
+                pending_ids = {row.id for row in self.segments.values()
+                               if row.speaker_review_pending and (row.verification or {}).get("status") != "manual"}
+                await self._review_translations(regenerate_audio=True, force_review=True,
+                    segment_ids=pending_ids or None)
             except asyncio.CancelledError:
                 self.is_stopped = True
                 raise
@@ -1361,7 +1473,8 @@ class StreamingPipelineSession:
         from core.video_intelligence import VideoIntelligence
         return VideoIntelligence._checkpoint_digest({field: getattr(item, field) for field in (
             "start", "end", "text_zh", "asr_text", "literal_vi", "natural_vi", "final_vi",
-            "translation_provider", "translation_model", "needs_review", "review_reason", "verification")})
+            "translation_provider", "translation_model", "needs_review", "review_reason", "verification",
+            "speaker_confirmation", "voice_id")})
 
     def _visual_source_context_identity(self):
         from core.video_intelligence import VideoIntelligence
@@ -2645,7 +2758,7 @@ class StreamingPipelineSession:
                     spoken = await self._run_blocking(synthesize_natural_speech,
                         text=proposal["final_vi"], source=item.text_zh, duration=budget,
                         output_path=path, engine=self.tts_engine, aligner=self.aligner,
-                        voice=self.voice, ref_audio=self.ref_audio, context=context)
+                        voice=self._segment_voice(item), ref_audio=self.ref_audio, context=context)
                 except SpeechBudgetError:
                     path.unlink(missing_ok=True)
                     staged.pop(sid, None)
@@ -2702,7 +2815,7 @@ class StreamingPipelineSession:
                 spoken = await self._run_blocking(synthesize_natural_speech,
                     text=text, source=source, duration=duration, max_duration=capacity,
                     output_path=output_path, engine=self.tts_engine, aligner=self.aligner,
-                    translator=translator, voice=self.voice, ref_audio=self.ref_audio,
+                    translator=translator, voice=self._segment_voice(seg), ref_audio=self.ref_audio,
                     context=context, on_stage=on_stage,
                     allow_bidirectional_reflow=self._chunked_source_started,
                     **({"max_duration_limit": capacity} if tail_limit is not None else {}),
@@ -2733,7 +2846,7 @@ class StreamingPipelineSession:
                 spoken = await self._run_blocking(synthesize_natural_speech,
                     text=retry_text, source=source, duration=duration, max_duration=capacity,
                     output_path=output_path, engine=self.tts_engine, aligner=self.aligner,
-                    translator=retry_translator, voice=self.voice, ref_audio=self.ref_audio,
+                    translator=retry_translator, voice=self._segment_voice(seg), ref_audio=self.ref_audio,
                     context=context, on_stage=on_stage, allow_bidirectional_reflow=True,
                     **({"max_duration_limit": capacity} if tail_limit is not None else {}),
                     **retry_kwargs)
@@ -2879,6 +2992,7 @@ class StreamingPipelineSession:
             "required": float(required), "candidate": candidate, "proof": deepcopy(proof),
             "revision": seg.revision, "owner": self._visual_review_state(seg), "capacity": capacity,
             "context": self._pacing_source_context(context), "voice": self.voice,
+            "segment_voice": self._segment_voice(seg),
             "engine": self.tts_engine, "tts_engine_name": self.tts_engine_name,
             "aligner": self.aligner, "max_speed": self.aligner.max_speed, "ref_audio": self.ref_audio,
             "following_audio": self._pacing_following_audio_identity(rows, seg.end),
@@ -2889,6 +3003,7 @@ class StreamingPipelineSession:
                 or (seg.verification or {}).get("status") == "manual"
                 or self._visual_review_state(seg) != record["owner"]
                 or self.voice != record["voice"] or self.tts_engine is not record["engine"]
+                or self._segment_voice(seg) != record.get("segment_voice", self.voice)
                 or self.tts_engine_name != record["tts_engine_name"]
                 or self.aligner is not record["aligner"] or self.aligner.max_speed != record["max_speed"]
                 or self.ref_audio != record["ref_audio"]):
@@ -2944,7 +3059,7 @@ class StreamingPipelineSession:
                     "[%s] PACING_FINAL_RECOVERY_FAILED segment_id=%s error_type=%s",
                     self.task_id, sid, type(error).__name__)
 
-    async def _synthesize_segment(self, seg, *, pacing_recovery=None):
+    async def _synthesize_segment(self, seg, *, pacing_recovery=None, allow_pacing=True):
         """Generate playable audio without approving an uncertain translation."""
         raw_tts_wav = self.cache_dir / f"tts_{seg.id}_raw.wav"
         pending_path = self.segments_dir / f"pending_{seg.id}_{uuid.uuid4().hex}.wav"
@@ -2990,12 +3105,17 @@ class StreamingPipelineSession:
                 context = self._dialogue_context_before(seg)
                 if pacing_recovery and not self._pacing_failure_owned(seg, pacing_recovery):
                     raise SegmentEditConflict("Lời thoại đã thay đổi trước khi tạo giọng lại; giữ bản sửa mới.")
-                final_path = self.segments_dir / f"seg_{seg.id}.wav"
+                # A voice override keeps the old valid WAV until its replacement
+                # and metadata commit. Never overwrite the prior manifest file.
+                final_path = self.segments_dir / (f"seg_{seg.id}_{uuid.uuid4().hex}.wav"
+                    if seg.tts_voice_outdated and old_audio_path else f"seg_{seg.id}.wav")
                 spoken, timing, dub_plan = await self._fit_dub(seg,
                     text=pacing_recovery["candidate"] if pacing_recovery else seg.final_vi,
                     source=seg.text_zh, output_path=pending_path,
-                    translator=None if pacing_recovery else self.translator, on_stage=speech_stage,
-                    context=context, neighbor_rescue=pacing_recovery is None,
+                    translator=self.translator if allow_pacing and pacing_recovery is None
+                        and (seg.verification or {}).get("status") != "manual" else None, on_stage=speech_stage,
+                    context=context, neighbor_rescue=allow_pacing and pacing_recovery is None
+                        and (seg.verification or {}).get("status") != "manual",
                     **({"pacing_verification": pacing_recovery["proof"], "preserve_manual_timing": True} if pacing_recovery else {}))
             # Fitting already emitted ALIGNING. Publish the complete WAV and
             # every changed timing without yielding to a concurrent edit/Stop.
@@ -3006,30 +3126,34 @@ class StreamingPipelineSession:
                 raise SegmentEditConflict("Lời thoại đã thay đổi trong khi thử căn lại; giữ bản sửa mới.")
             seg.status = "ALIGNING"
             pending_path.replace(final_path)
-            self._publish_dub_plan(dub_plan, seg.id)
-            if spoken["text"] != seg.final_vi:
-                previous = seg.final_vi
-                seg.final_vi = spoken["text"]
-                proof = spoken["pacing_verification"]
-                seg.verification = {**(seg.verification or {}), "pacing": proof,
-                    "before_pacing": previous, "translation_changed": True}
-                if not seg.needs_review and seg.verification.get("status") == "verified":
-                    seg.verification["status"] = "corrected"
-                    if self.review_summary.get("status") == "completed":
-                        self.review_summary["verified"] = max(0, self.review_summary.get("verified", 0) - 1)
-                        self.review_summary["corrected"] = self.review_summary.get("corrected", 0) + 1
-                seg.revision += 1
-            seg.tts_duration = tts_dur
-            seg.speed_ratio = round(ratio, 2)
-            seg.audio_path = str(final_path.resolve())
-            for key, value in timing.items():
-                setattr(seg, key, value)
-            seg.audio_url = f"/api/streaming/audio/{self.task_id}/{seg.id}"
-            seg.status = "READY"
-            seg.timing_issue = None
-            seg.failed_stage = None
-            seg._retry_synthesis = False
-            self.total_processed_duration += seg.duration
+            publication = (self._durable_edit_publication(seg, dub_plan, final_path)
+                           if seg.tts_voice_outdated else nullcontext())
+            with publication:
+                self._publish_dub_plan(dub_plan, seg.id)
+                if spoken["text"] != seg.final_vi:
+                    previous = seg.final_vi
+                    seg.final_vi = spoken["text"]
+                    proof = spoken["pacing_verification"]
+                    seg.verification = {**(seg.verification or {}), "pacing": proof,
+                        "before_pacing": previous, "translation_changed": True}
+                    if not seg.needs_review and seg.verification.get("status") == "verified":
+                        seg.verification["status"] = "corrected"
+                        if self.review_summary.get("status") == "completed":
+                            self.review_summary["verified"] = max(0, self.review_summary.get("verified", 0) - 1)
+                            self.review_summary["corrected"] = self.review_summary.get("corrected", 0) + 1
+                    seg.revision += 1
+                seg.tts_duration = tts_dur
+                seg.speed_ratio = round(ratio, 2)
+                seg.audio_path = str(final_path.resolve())
+                for key, value in timing.items():
+                    setattr(seg, key, value)
+                seg.audio_url = f"/api/streaming/audio/{self.task_id}/{seg.id}?rev={seg.revision}"
+                seg.tts_voice_outdated = False
+                seg.status = "READY"
+                seg.timing_issue = None
+                seg.failed_stage = None
+                seg._retry_synthesis = False
+                self.total_processed_duration += seg.duration
             for identity in dub_plan:
                 if identity != seg.id:
                     await self.emit("segment_update", self.segments[identity].to_dict())

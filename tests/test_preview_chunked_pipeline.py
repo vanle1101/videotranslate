@@ -74,7 +74,7 @@ def preview(tmp_path, monkeypatch):
             session.segments[sid].needs_review = False
         session.review_summary = {"status": "completed"}
 
-    async def synthesize(item):
+    async def synthesize(item, **options):
         speech.append(item.id)
         path = session.segments_dir / f"seg_{item.id}.wav"
         wav(path)
@@ -320,11 +320,11 @@ def test_preview_promotion_is_rejected_while_edit_owns_audio(preview):
 def test_failed_preview_sentence_does_not_block_explicit_remaining_video(preview, monkeypatch):
     session, prepared, analyzed, speech, events = preview
     original = session._synthesize_segment
-    async def fail_one(row):
+    async def fail_one(row, **options):
         if row.id == 1:
             row.status = "ALIGNING"
             raise ValueError("isolated unfit speech")
-        await original(row)
+        await original(row, **options)
     monkeypatch.setattr(session, "_synthesize_segment", fail_one)
     async def run():
         await session.start()
@@ -429,11 +429,11 @@ def test_retry_reviews_pending_owned_drafts_before_speech_without_replacing_read
                                 "semantic_verified": sid != 6}
             row.needs_review = sid == 6
         session.review_summary = {"status": "completed"}
-    async def synthesize(row):
+    async def synthesize(row, **options):
         if row.id != 7:
             assert any(row.id in ids for ids in reviewed)
         assert row.verification["status"] != "pending"
-        await original_speech(row)
+        await original_speech(row, **options)
     monkeypatch.setattr(session, "_review_translations", review)
     monkeypatch.setattr(session, "_synthesize_segment", synthesize)
     before = deepcopy(saved.to_dict()), audio.read_bytes()
@@ -824,6 +824,36 @@ def test_obsolete_negative_gates_are_reviewed_once_without_force_approval(previe
     assert all(row.final_vi == "Lời đã lưu." for row in session.segments.values())
 
 
+def test_resume_reaudits_exact_numeric_audio_false_negative_without_approving_content(preview, monkeypatch):
+    from core.translation_review import AutomaticTranslationReviewer
+    session, *_ = preview
+    session._chunked_source_started = True
+    session._visual_completed_seconds = 24
+    session.segments = {}
+    for sid, first, second in [(0, "90%。", "百分之九十"), (1, "90%", "百分之十九")]:
+        row = SegmentItem(sid, sid * 2, sid * 2 + 1, 1)
+        row.status, row.text_zh, row.final_vi = "READY", second, "Bản nháp giữ nguyên."
+        row.source_method, row.translation_provider = "text-ai", "opencode"
+        row.verification = {"status": "unresolved", "audio_consensus": False,
+            "review_gate_revision": AutomaticTranslationReviewer.REVIEW_GATE_REVISION,
+            "audio_evidence": [{"engine": "sensevoice", "text_zh": first},
+                               {"engine": "faster-whisper-small", "text_zh": second}]}
+        session.segments[sid] = row
+    calls = []
+    async def review(**options):
+        calls.append(options)
+        assert session.segments[0].verification["status"] == "unresolved"
+        session.segments[0].verification.update(audio_consensus=True, semantic_verified=False)
+    monkeypatch.setattr(session, "_review_translations", review)
+    async def run():
+        await session._resume_pending_chunk_reviews()
+        await session._resume_pending_chunk_reviews()
+    asyncio.run(run())
+    assert calls == [{"regenerate_audio": True, "segment_ids": {0}}]
+    assert session.segments[0].verification["semantic_verified"] is False
+    assert session.segments[1].verification["audio_consensus"] is False
+
+
 def test_source_ocr_owner_is_released_before_next_native_interval(preview, monkeypatch):
     import core.streaming.chunked_source as source
     session, *_ = preview
@@ -1112,12 +1142,12 @@ def test_saved_full_retry_continues_later_rows_after_real_queue_failure(preview,
     saved_full_queue(session)
     original = session._synthesize_segment
     statuses = []
-    async def synthesize(row):
+    async def synthesize(row, **options):
         statuses.append((row.id, session.get_progress()["status"]))
         if row.id == 1:
             row.status = "TTS"
             raise RuntimeError("Empty speech provider response")
-        await original(row)
+        await original(row, **options)
     monkeypatch.setattr(session, "_synthesize_segment", synthesize)
     async def run():
         await session.retry_failed_synthesis()
@@ -1235,12 +1265,12 @@ def test_resume_publishes_each_review_group_before_later_request_and_does_not_re
     session._visual_completed_seconds = session.total_duration = 24
     original = session._synthesize_segment
     attempts, groups = [], []
-    async def synthesize(row):
+    async def synthesize(row, **options):
         attempts.append(row.id)
         if row.id == 1:
             row.status = "TTS"
             raise RuntimeError("Temporary real-provider class of failure")
-        await original(row)
+        await original(row, **options)
     async def review(**options):
         ids = options["segment_ids"]
         if groups:
@@ -1268,10 +1298,60 @@ def test_resume_speech_stop_keeps_later_rows_unstarted(preview, monkeypatch):
     saved_full_queue(session)
     session.error, session.is_running = None, True
     original = session._synthesize_segment
-    async def synthesize(row):
-        await original(row)
+    async def synthesize(row, **options):
+        await original(row, **options)
         session.is_stopped = True
     monkeypatch.setattr(session, "_synthesize_segment", synthesize)
     with pytest.raises(asyncio.CancelledError):
         asyncio.run(session._resume_speech_rows(session.segments.values()))
     assert speech == [2] and session.segments[3].status == "WAITING"
+
+
+def test_resume_generates_independent_wavs_before_slow_pacing_and_preserves_failure(preview, monkeypatch):
+    from core.engines.alignment.timing_aligner import SpeechBudgetError
+    session, *_ = preview
+    saved_full_queue(session)
+    session.error, session.is_running = None, True
+    session.segments[1].status = "WAITING"
+    calls = []
+    original = session._synthesize_segment
+    async def synthesize(row, *, allow_pacing=True):
+        calls.append((row.id, allow_pacing))
+        if row.id == 1:
+            if allow_pacing:
+                assert session.segments[2].status == session.segments[3].status == "READY"
+                raise RuntimeError("Bounded pacing request failed")
+            row.status = "ALIGNING"
+            raise SpeechBudgetError("Measured complete WAV exceeds safe capacity")
+        await original(row)
+    monkeypatch.setattr(session, "_synthesize_segment", synthesize)
+    asyncio.run(session._resume_speech_rows(session.segments.values()))
+    assert calls == [(1, False), (2, False), (3, False), (1, True)]
+    assert session.segments[1].status == "FAILED"
+    assert session.segments[2].status == session.segments[3].status == "READY"
+
+
+def test_resume_does_not_overwrite_manual_revision_while_pacing_deferred(preview, monkeypatch):
+    from core.engines.alignment.timing_aligner import SpeechBudgetError
+    session, *_ = preview
+    saved_full_queue(session)
+    session.error, session.is_running = None, True
+    session.segments[1].status = "WAITING"
+    calls = []
+    original = session._synthesize_segment
+    async def synthesize(row, *, allow_pacing=True):
+        calls.append((row.id, allow_pacing))
+        if row.id == 1:
+            row.status = "ALIGNING"
+            raise SpeechBudgetError("Measured complete WAV exceeds safe capacity")
+        if row.id == 2:
+            changed = session.segments[1]
+            changed.revision += 1
+            changed.final_vi, changed.status = "Lời người dùng vừa lưu.", "READY"
+            changed.verification = {"status": "manual"}
+        await original(row)
+    monkeypatch.setattr(session, "_synthesize_segment", synthesize)
+    asyncio.run(session._resume_speech_rows(session.segments.values()))
+    assert calls == [(1, False), (2, False), (3, False)]
+    assert session.segments[1].final_vi == "Lời người dùng vừa lưu."
+    assert session.segments[1].verification["status"] == "manual"

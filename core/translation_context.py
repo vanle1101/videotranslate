@@ -11,7 +11,7 @@ import re
 from copy import deepcopy
 
 
-ADDRESS_POLICY_REVISION = 7
+ADDRESS_POLICY_REVISION = 8
 
 VIETNAMESE_ADDRESS_POLICY = """
 QUY TẮC XƯNG HÔ THEO NGỮ CẢNH (áp dụng cả dịch, kiểm định và rút gọn lời đọc):
@@ -59,6 +59,10 @@ QUY TẮC XƯNG HÔ THEO NGỮ CẢNH (áp dụng cả dịch, kiểm định v�
   phụ thuộc việc nối một câu ở xa với người nói hiện tại mà chưa có căn cứ nối,
   giữ needs_review=true; không dùng đại từ của bản Việt cũ để tự xác nhận.
 - Bản Việt cũ và tóm tắt AI chỉ là bản nháp có thể sai, không phải bằng chứng.
+  speaker_confirmation là xác nhận trực tiếp của người dùng cho đúng affected_ids.
+  Dùng label để phân biệt người nói; self_address/listener_address chỉ áp dụng các
+  câu đã chọn, không suy quan hệ ruột thịt/giới tính hay người nghe các lượt khác.
+  Xác nhận này không tự chứng minh chữ nguồn hoặc toàn bộ nghĩa bản dịch.
   Ưu tiên nguồn Trung/OCR/âm thanh được cung cấp. Rà mọi lần đổi xưng hô; chỉ
   semantic_verified=true khi nghĩa, vai người nói/nghe và sắc thái đều phù hợp.
   verification_reason cần nêu căn cứ nguồn cho cách xưng hô khi câu có đại từ.
@@ -100,7 +104,7 @@ def dialogue_context(rows, focus=(), *, max_rows=64, max_chars=18000):
                 if key in row and isinstance(row[key], (str, int, float))}
         # Reformatting a prepared context must not drop the independently
         # measured speaker/utterance proof or the ASR fragment's provenance.
-        for key in ("speaker_evidence", "utterance_id", "utterance_evidence", "source_asr_row_id",
+        for key in ("speaker_evidence", "speaker_confirmation", "utterance_id", "utterance_evidence", "source_asr_row_id",
                 "source_asr_start", "source_asr_end", "source_piece_index", "source_piece_count"):
             if key in row:
                 item[key] = deepcopy(row[key])
@@ -255,7 +259,7 @@ def source_dialogue(rows):
     """Retain owned source proof, never Vietnamese drafts or AI role verdicts."""
     return [{key: deepcopy(value) for key, value in row.items()
              if key in {"id", "start", "end", "text_zh", "asr_text", "speaker_id", "addressee_id",
-                        "speaker_evidence", "utterance_id", "utterance_evidence",
+                        "speaker_evidence", "speaker_confirmation", "utterance_id", "utterance_evidence",
                         "source_asr_row_id", "source_asr_start", "source_asr_end",
                         "source_piece_index", "source_piece_count",
                         "source_needs_review", "source_truncated"}}

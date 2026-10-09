@@ -135,6 +135,17 @@ class SegmentEditRequest(BaseModel):
     final_vi: str = Field(max_length=2000, strict=True)
     confirm_silence: bool = Field(default=False, strict=True)
 
+
+class SpeakerConfirmationRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    anchor_segment_id: int = Field(ge=0, le=2147483647, strict=True)
+    expected_revision: int = Field(ge=0, strict=True)
+    apply_same_voice: bool = Field(default=False, strict=True)
+    label: str = Field(min_length=1, max_length=100, strict=True)
+    self_address: str = Field(default="", max_length=80, strict=True)
+    listener_address: str = Field(default="", max_length=80, strict=True)
+    voice_id: Optional[str] = Field(default=None, max_length=160, strict=True)
+
 class CaptionStyleRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
     background_color: Optional[str] = Field(default=None, pattern=r"^#[0-9A-Fa-f]{6}$", strict=True)
@@ -1154,6 +1165,32 @@ async def review_streaming_translation(task_id: str):
         raise HTTPException(status_code=409, detail=str(exc)) from None
     session.auto_export_result = True
     return {"task_id": task_id, "status": "reviewing", "progress": progress}
+
+
+@app.patch("/api/streaming/{task_id}/speaker-confirmation")
+async def confirm_streaming_speaker(task_id: str, req: SpeakerConfirmationRequest):
+    session = await editable_session(task_id)
+    if not session:
+        raise HTTPException(status_code=404, detail="Phiên dịch không còn tồn tại.")
+    if active_export_tasks.get(f"export_{task_id}", {}).get("status") in {"RUNNING", "CANCELLING"}:
+        raise HTTPException(status_code=409, detail="Hãy chờ xuất video kết thúc trước khi xác nhận người nói.")
+    try:
+        result = session.confirm_speaker(**req.model_dump())
+    except KeyError:
+        raise HTTPException(status_code=404, detail="Không tìm thấy câu thoại.") from None
+    except SegmentEditConflict as error:
+        raise HTTPException(status_code=409, detail=str(error)) from None
+    except ProjectEditSaveError as error:
+        raise HTTPException(status_code=507, detail=str(error)) from None
+    except ValueError as error:
+        raise HTTPException(status_code=422, detail=str(error)) from None
+    active_export_tasks.pop(f"export_{task_id}", None)
+    try:
+        await broadcast_session_event(task_id, "speaker_confirmation", result)
+    except Exception as error:
+        logging.getLogger("errors").warning("SPEAKER_CONFIRMATION_EVENT_FAILED run_id=%s error_type=%s",
+            task_id, type(error).__name__)
+    return result
 
 
 @app.patch("/api/streaming/{task_id}/segments/{segment_id}")
