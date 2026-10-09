@@ -506,7 +506,7 @@ class StreamingPipelineSession:
                 await self.emit("progress", self.get_progress())
                 for segment in retried:
                     await self.emit("segment_update", segment.to_dict())
-                await self._resume_pending_chunk_reviews()
+                await self._resume_pending_chunk_reviews(synthesize_pending=True)
                 # Review may replace a playable draft and defer failed speech.
                 # Rebuild the reserved queue before its sole worker starts so
                 # newly missing audio is retried with its accepted audit.
@@ -956,7 +956,36 @@ class StreamingPipelineSession:
         await self.emit("review_complete", {"review_summary": self.review_summary,
             "warnings": list(self.warnings), "screen_texts": self.screen_texts})
 
-    async def _resume_pending_chunk_reviews(self, *, stale_address_only=False):
+    async def _resume_speech_rows(self, rows):
+        """One recovery owner publishes ready speech without waiting on later reviews."""
+        for row in sorted(rows, key=lambda item: (item.start, item.id)):
+            await self.pause_event.wait()
+            if self.is_stopped or not self.is_running:
+                raise asyncio.CancelledError
+            if row.status != "WAITING" or not self._published_row(row):
+                continue
+            revision = row.revision
+            try:
+                await self._synthesize_segment(row)
+            except asyncio.CancelledError:
+                raise
+            except Exception as error:
+                if getattr(self, "_persistence_capacity_failed", False):
+                    raise
+                if row.revision != revision:
+                    continue
+                row.failed_stage = row.status if row.status in {"TTS", "ALIGNING"} else "TTS"
+                row.status, row.error = "FAILED", str(error)
+                warning = f"Câu {row.id + 1} chưa tạo được giọng; giữ phần đã xong và tiếp tục các câu sau."
+                if warning not in self.warnings:
+                    self.warnings.append(warning)
+                logging.getLogger("errors").error(
+                    "[%s] RECOVERY_SPEECH_FAILED segment_id=%s stage=%s error_type=%s",
+                    self.task_id, row.id, row.failed_stage, type(error).__name__)
+                await self.emit("segment_update", row.to_dict())
+                self._persist_if_enabled()
+
+    async def _resume_pending_chunk_reviews(self, *, stale_address_only=False, synthesize_pending=False):
         """Finish interrupted review ownership before retrying its saved speech.
 
         Source coverage is committed when a validated draft arrives. A Stop in
@@ -1010,6 +1039,13 @@ class StreamingPipelineSession:
             and row.source_method == "text-ai" and row.translation_provider == "opencode"
             and include(row)),
             key=lambda row: (row.start, row.id))
+        if synthesize_pending:
+            # These rows already own accepted translation/review state. A
+            # missing WAV must not wait behind unrelated slow Muse requests.
+            # No second speech worker runs until this recovery owner finishes.
+            reserved = {row.id for row in pending}
+            await self._resume_speech_rows(
+                row for row in self.segments.values() if row.id not in reserved)
         for offset in range(0, len(pending), self.VISUAL_REVIEW_GROUP_SIZE):
             await self.pause_event.wait()
             if self.is_stopped:
@@ -1056,6 +1092,12 @@ class StreamingPipelineSession:
                 await self.emit("segment_update", row.to_dict())
             self._refresh_review_counts()
             self._persist_if_enabled()
+            if synthesize_pending:
+                # Persist the reviewed text first, then publish this group's
+                # valid WAVs before admitting the next semantic request. A
+                # failed row stays FAILED and is not retried twice by the later
+                # queue in the same run. Its siblings continue independently.
+                await self._resume_speech_rows(group)
 
     async def start_automatic_review(self):
         if (not self.initialized or self.is_running or self.is_stopped or self.is_editing or self.error

@@ -1,6 +1,7 @@
 """Retry empty Edge responses without publishing incomplete speech files."""
 import asyncio
 import logging
+import ssl
 from pathlib import Path
 from unittest.mock import AsyncMock, Mock, patch
 
@@ -8,7 +9,7 @@ import pytest
 import aiohttp
 from edge_tts.exceptions import NoAudioReceived
 
-from core.engines.tts.edge_fallback import EdgeTTSFallbackEngine
+from core.engines.tts.edge_fallback import EdgeTTSFallbackEngine, EdgeTTSRequestError
 from core.runtime_context import execution_context
 
 
@@ -96,6 +97,47 @@ def test_nontransient_http_errors_are_not_retried(tmp_path, status):
         with pytest.raises(RuntimeError, match="Edge-TTS"):
             EdgeTTSFallbackEngine().synthesize("Xin chào", tmp_path / "speech.mp3")
     factory.assert_called_once()
+
+
+@pytest.mark.parametrize("verify_code, expected", [(9, "ngày giờ"), (10, "hết hạn"),
+                                                  (62, "khớp máy chủ"), (20, "chứng chỉ")])
+def test_certificate_failure_has_precise_safe_diagnostic_and_never_disables_verification(
+        tmp_path, caplog, verify_code, expected):
+    certificate = ssl.SSLCertVerificationError(1, "private-certificate-name private-url")
+    certificate.verify_code = verify_code
+    certificate.verify_message = "private-provider-details"
+    error = aiohttp.ClientConnectorCertificateError(None, certificate)
+    output = tmp_path / "speech.wav"
+    output.write_bytes(b"previous user audio")
+    with caplog.at_level(logging.INFO, logger="pipeline"), execution_context("edge-cert-test"), \
+            patch("core.engines.tts.edge_fallback.edge_tts.Communicate", side_effect=error) as factory, \
+            patch("core.engines.tts.edge_fallback.asyncio.sleep", new_callable=AsyncMock) as sleep:
+        with pytest.raises(EdgeTTSRequestError, match=expected) as caught:
+            EdgeTTSFallbackEngine().synthesize("Private dialogue", output)
+    assert caught.value.code == "tts_tls_certificate" and caught.value.status is None
+    assert caught.value.tls_verify_code == verify_code
+    assert "TLS" in str(caught.value) and "Kiểm tra mạng" not in str(caught.value)
+    assert f"code=tts_tls_certificate tls_verify_code={verify_code}" in caplog.text
+    assert "status=none" in caplog.text and "TTS_RESPONSE" not in caplog.text
+    assert "private-" not in caplog.text + str(caught.value) and "Private dialogue" not in caplog.text
+    factory.assert_called_once()
+    sleep.assert_not_awaited()
+    assert "connector" not in factory.call_args.kwargs and "ssl" not in factory.call_args.kwargs
+    assert output.read_bytes() == b"previous user audio"
+    assert not list(tmp_path.glob("edge_tts_*"))
+
+
+def test_tls_handshake_failure_is_distinct_from_http_and_transport(tmp_path, caplog):
+    error = aiohttp.ClientConnectorSSLError(None, ssl.SSLError("private-sensitive-host"))
+    with caplog.at_level(logging.INFO, logger="pipeline"), \
+            patch("core.engines.tts.edge_fallback.edge_tts.Communicate", side_effect=error) as factory:
+        with pytest.raises(EdgeTTSRequestError, match="TLS") as caught:
+            EdgeTTSFallbackEngine().synthesize("Xin chào", tmp_path / "speech.mp3")
+    assert caught.value.code == "tts_tls_handshake" and caught.value.status is None
+    assert "code=tts_tls_handshake tls_verify_code=none" in caplog.text
+    assert "private-sensitive-host" not in caplog.text + str(caught.value)
+    factory.assert_called_once()
+    assert not list(tmp_path.iterdir())
 
 
 def test_stop_interrupts_pending_service_request_and_preserves_previous_output(tmp_path):

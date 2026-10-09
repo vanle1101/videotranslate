@@ -19,6 +19,35 @@ from core.runtime_context import current_execution_context
 EDGE_REQUEST_TIMEOUT = 45.0
 
 
+class EdgeTTSRequestError(RuntimeError):
+    """Safe provider category retained by runtime/recovery diagnostics."""
+
+    def __init__(self, message, *, code, status=None, tls_verify_code=None):
+        super().__init__(message)
+        self.code = code
+        self.status = status
+        self.tls_verify_code = tls_verify_code
+
+
+def _tls_verify_code(error):
+    code = getattr(getattr(error, "certificate_error", None), "verify_code", None)
+    return code if type(code) is int and 0 <= code <= 1000 else None
+
+
+def _failure_category(error):
+    if isinstance(error, aiohttp.ClientConnectorCertificateError):
+        return "tts_tls_certificate"
+    if isinstance(error, aiohttp.ClientConnectorSSLError):
+        return "tts_tls_handshake"
+    if isinstance(error, aiohttp.ClientResponseError):
+        return "tts_rate_limited" if error.status == 429 else "tts_http_error"
+    if isinstance(error, asyncio.TimeoutError):
+        return "tts_timeout"
+    if isinstance(error, edge_tts.exceptions.NoAudioReceived):
+        return "tts_empty_audio"
+    return "tts_transport" if isinstance(error, aiohttp.ClientError) else "tts_failed"
+
+
 def _retryable(error):
     if isinstance(error, (aiohttp.ClientConnectorCertificateError, aiohttp.ClientConnectorSSLError)):
         return False
@@ -30,6 +59,19 @@ def _retryable(error):
 
 def _provider_error(error):
     """Keep URLs, headers and SDK response bodies out of the user-facing task."""
+    if isinstance(error, aiohttp.ClientConnectorCertificateError):
+        verify_code = _tls_verify_code(error)
+        reason = ("Chứng chỉ đã hết hạn hoặc chưa có hiệu lực; kiểm tra ngày giờ máy."
+                  if verify_code in {9, 10} else
+                  "Chứng chỉ không khớp máy chủ; kiểm tra proxy/VPN hoặc phần mềm lọc mạng."
+                  if verify_code == 62 else
+                  "Kiểm tra ngày giờ máy và chứng chỉ của proxy/VPN hoặc phần mềm lọc mạng.")
+        return EdgeTTSRequestError("Edge-TTS không xác minh được chứng chỉ TLS của kết nối. "
+                                  + reason + " Bản dịch được giữ; thử lại câu này sau khi kết nối ổn định.",
+                                  code="tts_tls_certificate", tls_verify_code=verify_code)
+    if isinstance(error, aiohttp.ClientConnectorSSLError):
+        return EdgeTTSRequestError("Edge-TTS không thiết lập được kết nối TLS. "
+            "Kiểm tra proxy/VPN hoặc phần mềm lọc mạng rồi thử lại câu này.", code="tts_tls_handshake")
     if isinstance(error, aiohttp.ClientResponseError):
         status = error.status
         if status in {401, 403}:
@@ -161,9 +203,10 @@ class EdgeTTSFallbackEngine(TTSEngine):
                                     len(boundaries), int((time.monotonic() - started) * 1000))
                         return
                     except Exception as error:
-                        logger.warning("TTS_REQUEST_FAILED run_id=%s request_id=%s provider=edge-tts voice=%s attempt=%d error_type=%s status=%s elapsed_ms=%d",
+                        logger.warning("TTS_REQUEST_FAILED run_id=%s request_id=%s provider=edge-tts voice=%s attempt=%d error_type=%s status=%s code=%s tls_verify_code=%s elapsed_ms=%d",
                                        execution.run_id, request_id, chosen_voice, attempt + 1, type(error).__name__,
                                        error.status if isinstance(error, aiohttp.ClientResponseError) else "none",
+                                       _failure_category(error), _tls_verify_code(error) if _tls_verify_code(error) is not None else "none",
                                        int((time.monotonic() - started) * 1000))
                         if not _retryable(error):
                             raise _provider_error(error) from None

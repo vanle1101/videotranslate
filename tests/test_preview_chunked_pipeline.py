@@ -421,7 +421,7 @@ def test_retry_reviews_pending_owned_drafts_before_speech_without_replacing_read
         ids = sorted(options["segment_ids"])
         reviewed.append(ids)
         assert len(ids) <= session.VISUAL_REVIEW_GROUP_SIZE
-        assert not speech, "Owned pending review must finish before its saved speech is resumed"
+        assert not set(ids).intersection(speech), "A row's own review must finish before its saved speech resumes"
         for sid in ids:
             row = session.segments[sid]
             row.verification = {"status": "unresolved" if sid == 6 else "verified",
@@ -429,7 +429,8 @@ def test_retry_reviews_pending_owned_drafts_before_speech_without_replacing_read
             row.needs_review = sid == 6
         session.review_summary = {"status": "completed"}
     async def synthesize(row):
-        assert reviewed == [[1, 2, 3, 4], [5, 6]]
+        if row.id != 7:
+            assert any(row.id in ids for ids in reviewed)
         assert row.verification["status"] != "pending"
         await original_speech(row)
     monkeypatch.setattr(session, "_review_translations", review)
@@ -447,7 +448,7 @@ def test_retry_reviews_pending_owned_drafts_before_speech_without_replacing_read
     assert saved.to_dict() == before[0] and audio.read_bytes() == before[1]
     assert session.segments[8].status == "WAITING" and not session.segments[8].final_vi
     assert prepared == analyzed == []
-    assert speech == list(range(1, 8))
+    assert speech == (list(range(1, 8)) if startup else [7, 1, 2, 3, 4, 5, 6])
 
 
 def test_retry_review_failure_keeps_incomplete_evidence_instead_of_forcing_verification(preview, monkeypatch):
@@ -1132,7 +1133,8 @@ def test_saved_retry_capacity_failure_cannot_start_speech_worker(preview, monkey
     session, *_ = preview
     saved_full_queue(session)
     workers = []
-    async def review():
+    async def review(**options):
+        assert options == {"synthesize_pending": True}
         session._persistence_capacity_failed = True
         raise ProjectCapacityError("Dự án đạt giới hạn dữ liệu lưu.")
     async def worker():
@@ -1193,3 +1195,81 @@ def test_accepted_review_survives_failed_speech_rebuild_and_queues_only_missing_
     assert row.verification == {"status": "corrected", "semantic_verified": True}
     assert row.revision == 1 and row.audio_url
     assert Path(row.audio_path).read_bytes() == old_audio
+
+
+def test_resume_missing_reviewed_speech_is_not_blocked_by_unrelated_review(preview, monkeypatch):
+    session, _, _, speech, _ = preview
+    saved_full_queue(session)
+    for row in session.segments.values():
+        row.source_method, row.translation_provider = "text-ai", "opencode"
+        row.verification = {"status": "verified", "semantic_verified": True}
+    pending = session.segments[2]
+    pending.verification = {"status": "incomplete", "semantic_verified": False}
+    calls = []
+    async def review(**options):
+        assert speech == [1, 3], "Already-reviewed missing WAVs waited on unrelated Muse work"
+        calls.append(options)
+        pending.verification = {"status": "verified", "semantic_verified": True}
+    monkeypatch.setattr(session, "_review_translations", review)
+    async def run():
+        await session.retry_failed_synthesis()
+        await session.worker_task
+    asyncio.run(run())
+    assert calls == [{"regenerate_audio": True, "segment_ids": {2}}]
+    assert speech == [1, 3, 2] and all(row.status == "READY" for row in session.segments.values())
+
+
+def test_resume_publishes_each_review_group_before_later_request_and_does_not_repeat_failure(preview, monkeypatch):
+    session, _, _, speech, _ = preview
+    saved_full_queue(session)
+    session.segments = {}
+    for sid in range(6):
+        row = SegmentItem(sid, sid * 4, sid * 4 + 2, 2)
+        row.source_method, row.translation_provider = "text-ai", "opencode"
+        row.status, row.final_vi, row.failed_stage = "WAITING", f"Lời {sid}.", "TTS"
+        row._retry_synthesis = True
+        row.verification = {"status": "incomplete", "semantic_verified": False}
+        session.segments[sid] = row
+    session._visual_completed_seconds = session.total_duration = 24
+    original = session._synthesize_segment
+    attempts, groups = [], []
+    async def synthesize(row):
+        attempts.append(row.id)
+        if row.id == 1:
+            row.status = "TTS"
+            raise RuntimeError("Temporary real-provider class of failure")
+        await original(row)
+    async def review(**options):
+        ids = options["segment_ids"]
+        if groups:
+            assert speech == [0, 2, 3] and session.segments[1].status == "FAILED"
+        groups.append(ids)
+        for sid in ids:
+            session.segments[sid].verification = {"status": "verified", "semantic_verified": True}
+    monkeypatch.setattr(session, "_synthesize_segment", synthesize)
+    monkeypatch.setattr(session, "_review_translations", review)
+    session.error, session.is_running = None, True
+    async def run():
+        await session._resume_pending_chunk_reviews(synthesize_pending=True)
+        # The final queue must contain only still-unstarted speech; FAILED
+        # stays a durable failure for a later explicit/bounded recovery pass.
+        assert not [row for row in session.segments.values() if row.status == "WAITING"]
+        await session._worker_loop()
+    asyncio.run(run())
+    assert groups == [{0, 1, 2, 3}, {4, 5}]
+    assert attempts == [0, 1, 2, 3, 4, 5] and speech == [0, 2, 3, 4, 5]
+    assert session.segments[1].status == "FAILED" and session.can_retry
+
+
+def test_resume_speech_stop_keeps_later_rows_unstarted(preview, monkeypatch):
+    session, _, _, speech, _ = preview
+    saved_full_queue(session)
+    session.error, session.is_running = None, True
+    original = session._synthesize_segment
+    async def synthesize(row):
+        await original(row)
+        session.is_stopped = True
+    monkeypatch.setattr(session, "_synthesize_segment", synthesize)
+    with pytest.raises(asyncio.CancelledError):
+        asyncio.run(session._resume_speech_rows(session.segments.values()))
+    assert speech == [2] and session.segments[3].status == "WAITING"
