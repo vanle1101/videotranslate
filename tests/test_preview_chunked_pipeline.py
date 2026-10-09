@@ -574,7 +574,7 @@ def test_bounded_preparation_reuses_exact_checkpoint_and_rejects_changed_asset(p
     asyncio.run(run())
 
 
-@pytest.mark.parametrize("change", ["model_asset", "loaded_grouping", "runtime", "missing_model"])
+@pytest.mark.parametrize("change", ["model_asset", "loaded_grouping", "runtime", "missing_model", "chunk_policy"])
 def test_source_cache_rejects_changed_runtime_but_preserves_valid_background(preview, monkeypatch, change):
     from core.streaming import chunked_source as source
     from core.streaming import source_revision
@@ -596,6 +596,8 @@ def test_source_cache_rejects_changed_runtime_but_preserves_valid_background(pre
         (model / "model.bin").unlink()
     elif change == "loaded_grouping":
         monkeypatch.setattr(session, "_grounded_visual_segments", lambda rows: rows)
+    elif change == "chunk_policy":
+        monkeypatch.setattr(source, "LOOKAHEAD_SECONDS", source.LOOKAHEAD_SECONDS + 1.)
     else:
         version = source_revision.metadata.version
         monkeypatch.setattr(source_revision.metadata, "version",

@@ -538,6 +538,10 @@ class StreamingPipelineSession:
             self.queue.task_done()
         retried = []
         for segment in self.segments.values():
+            if (segment.status in {"READY", "PLAYED"} and segment.error is None
+                    and segment.failed_stage is None):
+                self._retire_speech_failure(segment)
+                self._retire_superseded_speech(segment)
             if segment.status == "FAILED":
                 segment.status = "WAITING"
                 segment.error = None
@@ -727,6 +731,8 @@ class StreamingPipelineSession:
                 fitted_path.replace(final_path)
             with self._durable_edit_publication(seg, dub_plan, final_path):
                 self._publish_dub_plan(dub_plan, seg.id)
+                if old_audio_path and old_audio_path not in seg.superseded_audio_paths:
+                    seg.superseded_audio_paths.append(old_audio_path)
                 old_text = seg.final_vi
                 seg.final_vi = text
                 seg.confirmed_silence = confirm_silence
@@ -740,6 +746,7 @@ class StreamingPipelineSession:
                     setattr(seg, key, value)
                 seg.revision += 1
                 seg.audio_url = None if without_audio else f"/api/streaming/audio/{self.task_id}/{seg.id}?rev={seg.revision}"
+                self._retire_speech_failure(seg)
                 if was_review:
                     seg.needs_review = False
                     seg.review_reason = None
@@ -784,6 +791,8 @@ class StreamingPipelineSession:
                     if context.get("zh") == old_source and context.get("vi") == old_text:
                         context["zh"] = seg.text_zh
                         context["vi"] = text
+            for identity in {*dub_plan, seg.id}:
+                self._retire_superseded_speech(self.segments[identity])
             # Neighbor rescue publishes versioned WAVs.  A later manual edit
             # must retire the superseded version after the new metadata is
             # durable, otherwise repeated edits accumulate orphan audio.
@@ -3154,6 +3163,8 @@ class StreamingPipelineSession:
             if update is not None:
                 spoken = update["spoken"]
                 old_text = item.final_vi
+                if item.audio_path and item.audio_path not in item.superseded_audio_paths:
+                    item.superseded_audio_paths.append(item.audio_path)
                 item.final_vi = spoken["text"]
                 item.audio_path = update["audio_path"]
                 item.tts_duration, item.speed_ratio = spoken["tts_duration"], round(spoken["speed_ratio"], 2)
@@ -3166,6 +3177,7 @@ class StreamingPipelineSession:
                         item.verification["status"] = "corrected"
                 item.revision += 1
                 item.audio_url = f"/api/streaming/audio/{self.task_id}/{item.id}?rev={item.revision}"
+                self._retire_speech_failure(item)
                 continue
             if "dub_tail_limit" in bounds:
                 item.dub_tail_limit = bounds["dub_tail_limit"]
@@ -3324,8 +3336,19 @@ class StreamingPipelineSession:
                 # next successful publication/Resume; never delete broadly.
                 remaining.append(value)
         if remaining != seg.superseded_audio_paths:
+            previous = seg.superseded_audio_paths
             seg.superseded_audio_paths = remaining
-            self._persist_if_enabled()
+            if self._persistence_enabled:
+                try:
+                    self.persist()
+                except (OSError, ValueError, TypeError) as error:
+                    # New speech was committed before cleanup began. A stale
+                    # retirement list can safely retry missing paths later;
+                    # it must not turn that already-durable output into FAILED.
+                    seg.superseded_audio_paths = previous
+                    logging.getLogger("errors").warning(
+                        "AUDIO_RETIREMENT_CHECKPOINT_PENDING run_id=%s segment_id=%s error_type=%s",
+                        self.task_id, seg.id, type(error).__name__)
 
     async def _synthesize_segment(self, seg, *, pacing_recovery=None, allow_pacing=True):
         """Generate playable audio without approving an uncertain translation."""
@@ -3408,6 +3431,8 @@ class StreamingPipelineSession:
                            if self._persistence_enabled or seg.tts_voice_outdated else nullcontext())
             with publication:
                 self._publish_dub_plan(dub_plan, seg.id)
+                if old_audio_path and old_audio_path not in seg.superseded_audio_paths:
+                    seg.superseded_audio_paths.append(old_audio_path)
                 if spoken["text"] != seg.final_vi:
                     previous = seg.final_vi
                     seg.final_vi = spoken["text"]
@@ -3435,6 +3460,7 @@ class StreamingPipelineSession:
                 self._refresh_processed_duration()
             for identity in dub_plan:
                 if identity != seg.id:
+                    self._retire_superseded_speech(self.segments[identity])
                     await self.emit("segment_update", self.segments[identity].to_dict())
             self._retire_superseded_speech(seg)
             await self.emit("segment_update", seg.to_dict())

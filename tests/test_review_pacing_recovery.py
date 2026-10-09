@@ -413,6 +413,56 @@ def test_deferred_audio_retirement_survives_restore_and_windows_handle_failure(r
         pipeline.active_streaming_sessions.pop(session.task_id, None)
 
 
+def test_manual_speech_commit_clears_stale_warning_and_retires_its_old_wav(reviewed_session, monkeypatch):
+    session, focus = reviewed_session, reviewed_session.segments[112]
+    old_audio = Path(focus.audio_path)
+    session.warnings = ["Câu 113 chưa tạo được giọng; giữ phần đã xong và tiếp tục các câu sau.",
+                        "Một câu khác vẫn cần kiểm tra."]
+    session.persist()
+    async def fit(row, *, text, output_path, **kwargs):
+        return fitted_speech(row, text, output_path)
+    monkeypatch.setattr(session, "_fit_dub", fit)
+    asyncio.run(session.edit_segment(112, "Lời người dùng đã sửa."))
+    assert focus.verification["status"] == "manual" and focus.error is None
+    assert session.warnings == ["Một câu khác vẫn cần kiểm tra."]
+    assert not old_audio.exists() and Path(focus.audio_path).is_file()
+
+
+def test_retirement_metadata_failure_does_not_fail_already_committed_speech(reviewed_session, monkeypatch):
+    session, focus = reviewed_session, reviewed_session.segments[112]
+    old_audio = Path(focus.audio_path)
+    focus.superseded_audio_paths = [str(old_audio)]
+    focus.audio_path = None
+    session.persist()
+    async def fit(row, *, text, output_path, **kwargs):
+        return fitted_speech(row, text, output_path)
+    monkeypatch.setattr(session, "_fit_dub", fit)
+    persist = session.persist
+    def fail_only_retirement():
+        if focus.status == "READY" and not focus.superseded_audio_paths:
+            raise OSError("injected retirement-list save failure")
+        return persist()
+    monkeypatch.setattr(session, "persist", fail_only_retirement)
+    asyncio.run(session._synthesize_segment(focus, allow_pacing=False))
+    assert focus.status == "READY" and not old_audio.exists()
+    saved = next(row for row in _read(session.task_id)["segments"] if row["id"] == 112)
+    assert saved["status"] == "READY" and saved["audio_path"] == focus.audio_path
+    assert focus.superseded_audio_paths == [str(old_audio)]
+    monkeypatch.setattr(session, "persist", persist)
+    session._retire_superseded_speech(focus)
+    assert focus.superseded_audio_paths == [] and Path(focus.audio_path).is_file()
+
+
+def test_retirement_never_deletes_a_foreign_source_path(reviewed_session):
+    session, focus = reviewed_session, reviewed_session.segments[112]
+    original = session.video_path.read_bytes()
+    focus.superseded_audio_paths = [str(session.video_path)]
+    session._retire_superseded_speech(focus)
+    assert session.video_path.read_bytes() == original
+    with pytest.raises(ValueError, match="phải nằm trong cache ứng dụng"):
+        session.persist()
+
+
 @pytest.mark.parametrize("failure_kind", ["budget", "rejected_rewrite", "unmeasured_rewrite", "provider"])
 def test_review_audio_failure_retains_corrected_revision_and_only_measured_timing(
         reviewed_session, monkeypatch, failure_kind):

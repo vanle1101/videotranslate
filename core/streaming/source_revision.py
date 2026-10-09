@@ -57,7 +57,11 @@ def source_runtime_identity(session):
         "whisper_asset_revision_known": (all(whisper[name] != "unavailable"
             for name in ("model.bin", "config.json", "tokenizer.json"))
             and any(whisper[name] != "unavailable" for name in ("vocabulary.json", "vocabulary.txt"))),
-        "device": settings.DEVICE, "diarization_enabled": settings.DIARIZATION_ENABLED}
+        "device": settings.DEVICE, "asr_threads": settings.ASR_CPU_THREADS,
+        "diarization_enabled": settings.DIARIZATION_ENABLED,
+        "diarization_threads": settings.DIARIZATION_CPU_THREADS,
+        "chunk_policy": {"version": chunked_source.VERSION, "lookahead": chunked_source.LOOKAHEAD_SECONDS,
+                         "max_scan": chunked_source.MAX_SCAN_SECONDS}}
     identity["sensevoice_assets"] = _assets(settings.BASE_DIR / "workspace/models/sensevoice_onnx",
         ("model.int8.onnx", "tokens.txt"))
     if settings.DIARIZATION_ENABLED:
