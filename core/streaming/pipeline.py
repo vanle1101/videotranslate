@@ -1806,6 +1806,7 @@ class StreamingPipelineSession:
         # queue keeps source decoding and provider work from monopolizing RAM.
         retry_intervals = [(row["start"], row["end"]) for row in self._chunk_jobs
                            if row["state"] != "COMPLETED" and row["start"] < target]
+        source_blocked = False
         while self._visual_scanned_seconds < target - .001 or retry_intervals:
             await self.pause_event.wait()
             if self.is_stopped:
@@ -1816,8 +1817,31 @@ class StreamingPipelineSession:
             else:
                 cursor, nominal_end = retry_intervals.pop(0)
             while self._source_prepared_seconds < nominal_end - .001:
-                record = await prepare_interval(self, self._source_prepared_seconds,
-                    min(self.total_duration, self._source_prepared_seconds + self.preview_seconds))
+                try:
+                    record = await prepare_interval(self, self._source_prepared_seconds,
+                        min(self.total_duration, self._source_prepared_seconds + self.preview_seconds))
+                except asyncio.CancelledError:
+                    raise
+                except Exception as error:
+                    if getattr(self, "_persistence_capacity_failed", False):
+                        raise
+                    # A native recognizer/resource failure in the source tail
+                    # must not cancel already admitted review/TTS work. Keep
+                    # the exact prepared cursor for Resume, drain its healthy
+                    # predecessors, and report the incomplete source at the
+                    # terminal gate. A failed durable write still propagates.
+                    source_blocked = True
+                    self._startup_failed = True
+                    warning = (f"Chưa nhận diện được đoạn từ {self._source_prepared_seconds:.2f} giây; "
+                               "các đoạn đã nhận diện tiếp tục xử lý. Tiếp tục sẽ thử đúng đoạn còn thiếu.")
+                    if warning not in self.warnings:
+                        self.warnings.append(warning)
+                    logging.getLogger("errors").error(
+                        "[%s] SOURCE_RETRY_PENDING source_start=%s error_type=%s",
+                        self.task_id, self._source_prepared_seconds, type(error).__name__)
+                    self._persist_if_enabled()
+                    await self.emit("progress", self.get_progress())
+                    break
                 old_background = self.bgm_audio_path
                 background = await publish_background_prefix(self, record)
                 next_id = max(self.segments, default=-1) + 1
@@ -1847,6 +1871,8 @@ class StreamingPipelineSession:
                         pass
                 await self.emit("background_update", {"bgm_url": self.bgm_url,
                     "source_prepared_seconds": self._source_prepared_seconds})
+            if source_blocked:
+                break
             end = min(nominal_end, self._source_prepared_seconds)
             crossing = [row for row in self.segments.values() if row.start < end < row.end]
             if crossing:

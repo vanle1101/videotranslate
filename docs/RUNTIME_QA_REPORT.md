@@ -6,7 +6,7 @@
 
 ### Segmented-pipeline audit — latest code, October 9, 2026
 
-**Acceptance PENDING / incomplete.** Current production recovery uses commit `fc65c0a`, OpenCode Muse and Edge-TTS, through the actual Qt/WebEngine History → Retry flow offscreen and muted. It does not use mocked provider/media success. The older entries below are historical evidence and must not be read as the current state.
+**Acceptance FAILED / incomplete.** Latest production recovery used commit `fc65c0a`, OpenCode Muse and Edge-TTS, through the actual Qt/WebEngine History → Retry flow offscreen and muted. It did not use mocked provider/media success. The older entries below are historical evidence and must not be read as the current state.
 
 #### Architecture and root causes
 
@@ -26,14 +26,14 @@
 
 - Latest clean-process History → Retry → existing picture/dub playback → Stop: **PASS** on `b53999e`, PID7008/backend62598. Source preview readyState4, 640×360; real row-0 audio advanced to0.054217s, no media/JavaScript errors. 149 actual retained WAV hashes matched before/after Stop; two other READY rows do not have spoken WAVs. Row0 remains `Bố.`, revision1, SHA256 `27cc59e232232bdba7b8571179c9b6e13c1911f329d1b3e5fb5842f2953bf38e`. No late row change after five seconds. Owned process exited.
 - Interrupted real recovery PID24556/backend50730: **FAIL**, status endpoint returned HTTP500 following WinError1450. Last valid atomic checkpoint preserved193 rows (151READY,7FAILED,34WAITING,1TTS), source316.64s, contiguous translated270.07s. No full320s MP4 was created. Final unsaved metadata error was only logged as ValueError by that older code; its exact cause is not established. The new code logs redacted details for a reproducible diagnosis.
-- Fresh recovery on `fc65c0a`: **IN PROGRESS**, PID36760/backend52453. Existing QA project `76f5aa6b`, actual320.040635s H264/AAC source. Initial snapshot:151 ready rows,103COMPLETED,48REVIEW_REQUIRED,20FAILED,22PENDING. These are evolving runtime counts, not final acceptance.
+- Fresh recovery on `fc65c0a`: **FAIL**, PID36760/backend52453, process exited. Existing QA project `76f5aa6b`, actual320.040635s H264/AAC source. It advanced151→155READY and contiguous translated270.07→294.07s; source preparation remained316.64s. Loading the configured Whisper model for the last316.64→320.040635s interval failed with `mkl_malloc: failed to allocate memory`. UI/backend showed FAILED with retained checkpoints/retry. Actual measured recovery:725.797s elapsed,17Muse requests,1retry,0cache hits, sampled peak process-tree RSS2178.426MiB from120samples. Terminal runtime counters:106COMPLETED,49REVIEW_REQUIRED,31PENDING,7FAILED,0RUNNING/RETRY_PENDING. Review:174checked,72verified,44corrected,46unresolved,1manual,18incomplete. No complete320s MP4 exists. Host free physical RAM during investigation was approximately0.4–1.7GiB; native-model concurrency/lifecycle remains under repair.
 - Original user project `5a7b66a9` is preserved. Its durable snapshot has197WAITING rows and FAILED session status; it does not contain the claimed13FAILED row snapshot. Do not claim that exact historical set has been recovered from a checkpoint that lacks it. The retained QA continuation reuses the same source and real stage artifacts.
 - Full current320s export, full decode and reopen/playback: **NOT YET PASSED**. Earlier real15s output verification is historical evidence only.
 
 #### Automated checks
 
 - Latest targeted state/store/API checks:307passed. Contextual pacing/schema:123passed plus47subtests. Legacy ASR/timing plus real silent-source rejection:88passed. Media/RF64/handle checks:40passed. Saved-duration regression passed with the strict0.5s bound.
-- Broad rerun before the Windows process-identity correction:2259passed,1failed,1skipped,127subtests,173.91s. Failure used bare PID existence after cancellation. A real15-trial process probe showed immediate PID reuse/registry fluctuation; the assertion now tracks the original process identity. The bounded real child tests passed after that correction. This is not relabeled as a broad-suite PASS; the final full rerun remains required.
+- Broad final rerun on `3b2cd7c`:2263passed,1skipped,127subtests,162.15s, three upstream WebSocket deprecation warnings. The same historical standalone/native exclusions apply. The previous2259passed/1failed run used bare PID existence immediately after cancellation. A15-trial real process probe did not reproduce immediate PID reuse; it showed one15ms wait fluctuation. The corrected assertion follows the original process identity and permits a bounded1s release interval; actual subprocess tests passed. This automated PASS does not replace failed real recovery/media acceptance.
 - Native desktop/lifecycle/local-runtime:44passed,17.86s, two upstream WebSocket deprecation warnings.
 - JavaScript:225passed. Runtime readiness:existing dependencies, FFmpeg/ffprobe, configured Muse CLI/key and Edge-TTS passed. TypeScript/npm build/lint are N/A for this Python/Qt project; no unconfigured check is claimed.
 
@@ -46,7 +46,7 @@
 | 1h | 60 | 0.002024 | 28808 | 14963 |
 | 4h | 240 | 0.011822 | 113136 | 59961 |
 
-Each workload retained a60s contiguous prefix while the second interval became RETRY_PENDING; later successful intervals remained successful. These measurements cover the ledger only. They are **not** real video throughput, cache-hit rates, peak application RAM/VRAM, or long-media acceptance. The running real recovery samples process-tree RSS every5s and records actual queue counters/elapsed time at a terminal state.
+Each workload retained a60s contiguous prefix while the second interval became RETRY_PENDING; later successful intervals remained successful. These measurements cover the ledger only. They are **not** real video throughput, cache-hit rates, peak application RAM/VRAM, or long-media acceptance. The latest completed real recovery sampled process-tree RSS every5s and recorded actual queue counters/elapsed time at its failed terminal state above.
 
 #### Known limits and incidents
 

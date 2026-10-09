@@ -218,6 +218,57 @@ def test_followup_worker_failure_does_not_leave_producer_hung(preview, monkeypat
     asyncio.run(run())
 
 
+def test_source_memory_failure_drains_admitted_work_and_resumes_exact_tail(preview, monkeypatch):
+    import core.streaming.chunked_source as source
+    session, prepared, analyzed, speech, events = preview
+    session.translation_mode = "full"
+    original_prepare = source.prepare_interval
+    original_review = session._review_translations
+    rejected = []
+    blocked = True
+
+    async def prepare(current, start, end):
+        if blocked and start == 32:
+            rejected.append((start, end))
+            raise MemoryError("injected native allocation failure")
+        return await original_prepare(current, start, end)
+
+    async def review(**options):
+        # The source worker fails while this earlier stage is still admitted.
+        # Its healthy output must be drained rather than cancelled.
+        await asyncio.sleep(.02)
+        await original_review(**options)
+
+    monkeypatch.setattr(source, "prepare_interval", prepare)
+    monkeypatch.setattr(session, "_review_translations", review)
+
+    async def run():
+        nonlocal blocked
+        await session.start()
+        await session.worker_task
+        assert rejected == [(32, 56)]
+        assert prepared == [(0, 24)]
+        assert session._source_prepared_seconds == 32
+        assert session._visual_completed_seconds == 24
+        assert session.get_progress()["status"] == "FAILED" and session.can_retry
+        healthy = {row.id: (row.final_vi, Path(row.audio_path).read_bytes())
+                   for row in session.segments.values() if row.status == "READY"}
+        assert set(healthy) == {0, 1, 2}
+        assert any("32.00" in warning for warning in session.warnings)
+        assert not any(event == "progress" and payload["status"] == "COMPLETED" for event, payload in events)
+        blocked = False
+        await session.retry_failed_synthesis()
+        await session.start_task
+        await session.worker_task
+        assert prepared == [(0, 24), (32, 56)]
+        assert [lo for lo, *_ in analyzed] == [0, 24, 48], "Do not rerun the successful provider interval"
+        assert session._visual_prepass_complete
+        assert all(row.status == "READY" for row in session.segments.values())
+        assert all((session.segments[sid].final_vi, Path(session.segments[sid].audio_path).read_bytes()) == value
+                   for sid, value in healthy.items())
+    asyncio.run(run())
+
+
 def test_full_promotion_keeps_prefix_global_ids_and_manual_audio(preview):
     session, prepared, analyzed, speech, events = preview
     async def run():
