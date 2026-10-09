@@ -585,6 +585,156 @@ def test_resume_revalidates_failed_spanning_ocr_correction_before_resynthesizing
     assert session.segments[6].status == 'READY'
 
 
+def test_resume_fresh_reviews_stale_address_rows_in_bounded_groups_only(preview, monkeypatch):
+    session, *_ = preview
+    session._chunked_source_started = True
+    session._visual_completed_seconds = 24
+    session.segments = {}
+    for sid in range(9):
+        row = SegmentItem(sid, sid * 2, sid * 2 + 1, 1)
+        row.source_method, row.translation_provider = "text-ai", "opencode"
+        row.status, row.final_vi = "READY", "Con về rồi."
+        row.verification = {"status": "unresolved", "address_stale_source_ids": [8]}
+        session.segments[sid] = row
+    # Unresolved source/meaning alone is not a stale address verdict. Manual
+    # edits, already verified rows, other providers and future rows stay intact.
+    excluded = [(10, "unresolved", []), (11, "manual", [8]),
+                (12, "verified", [8]), (13, "unresolved", [8]),
+                (14, "unresolved", [8])]
+    for sid, status, stale_ids in excluded:
+        row = SegmentItem(sid, 20 if sid != 14 else 26, 21 if sid != 14 else 27, 1)
+        row.source_method, row.translation_provider = "text-ai", "other" if sid == 13 else "opencode"
+        row.status, row.final_vi = "READY", "Lời giữ nguyên."
+        row.verification = {"status": status, "address_stale_source_ids": stale_ids}
+        session.segments[sid] = row
+    calls = []
+    async def review(**options):
+        calls.append(options)
+        for sid in options["segment_ids"]:
+            session.segments[sid].verification = {"status": "verified"}
+    monkeypatch.setattr(session, "_review_translations", review)
+    asyncio.run(session._resume_pending_chunk_reviews())
+    assert calls == [
+        {"regenerate_audio": True, "segment_ids": {0, 1, 2, 3}, "force_review": True},
+        {"regenerate_audio": True, "segment_ids": {4, 5, 6, 7}, "force_review": True},
+        {"regenerate_audio": True, "segment_ids": {8}, "force_review": True}]
+    for sid, status, stale_ids in excluded:
+        assert session.segments[sid].verification == {"status": status, "address_stale_source_ids": stale_ids}
+        assert session.segments[sid].final_vi == "Lời giữ nguyên."
+
+
+def test_stale_address_resume_uses_current_context_and_keeps_unchanged_ready_audio(preview, monkeypatch):
+    session, *_ = preview
+    session._chunked_source_started = True
+    session._visual_completed_seconds = 24
+    row = SegmentItem(0, 0, 1, 1)
+    row.source_method, row.translation_provider = "text-ai", "opencode"
+    row.text_zh, row.final_vi, row.status = "我回来了", "Con về rồi.", "READY"
+    row.verification = {"status": "unresolved", "address_stale_source_ids": [1],
+                        "address_context_sources": {"0": row.text_zh, "1": "爸爸"}}
+    row.audio_path = str(session.segments_dir / "seg_0.wav")
+    row.audio_url = "/api/streaming/audio/preview-owned/0?rev=0"
+    wav(Path(row.audio_path))
+    old_audio = Path(row.audio_path).read_bytes()
+    source = SegmentItem(1, 2, 3, 1)
+    source.text_zh, source.final_vi, source.status = "妈妈", "Mẹ.", "READY"
+    source.verification = {"status": "manual"}
+    session.segments = {0: row, 1: source}
+    calls = []
+    def review(_reviewer, video_path, rows, screens, **options):
+        calls.append(options)
+        assert [item.id for item in rows] == [0]
+        assert [(item.id, item.text_zh) for item in options["context_segments"]] == [(0, "我回来了"), (1, "妈妈")]
+        assert options["force_review"] is True
+        return {"segments": {0: {**row.to_dict(), "needs_review": False,
+            "verification": {"status": "verified", "semantic_verified": True,
+                             "address_context_sources": {"0": row.text_zh, "1": source.text_zh}}}},
+            "summary": {"checked": 1, "verified": 1}, "translation_sources": []}
+    async def no_audio_rebuild(*args, **options):
+        raise AssertionError("Unchanged reviewed speech must preserve its existing WAV")
+    monkeypatch.setattr("core.translation_review.AutomaticTranslationReviewer.review", review)
+    monkeypatch.setattr(session, "_review_translations", StreamingPipelineSession._review_translations.__get__(session))
+    monkeypatch.setattr(session, "edit_segment", no_audio_rebuild)
+    asyncio.run(session._resume_pending_chunk_reviews())
+    assert len(calls) == 1
+    assert row.verification["status"] == "verified" and not row.needs_review
+    assert row.status == "READY" and row.revision == 0
+    assert row.audio_url == "/api/streaming/audio/preview-owned/0?rev=0"
+    assert Path(row.audio_path).read_bytes() == old_audio
+    assert source.verification == {"status": "manual"} and source.final_vi == "Mẹ."
+
+
+def test_resume_does_not_review_a_later_stale_address_row_after_manual_commit(preview, monkeypatch):
+    session, *_ = preview
+    session._chunked_source_started = True
+    session._visual_completed_seconds = 24
+    session.segments = {}
+    for sid in range(5):
+        row = SegmentItem(sid, sid * 2, sid * 2 + 1, 1)
+        row.source_method, row.translation_provider = "text-ai", "opencode"
+        row.status, row.final_vi = "READY", "Con về rồi."
+        row.verification = {"status": "unresolved", "address_stale_source_ids": [3]}
+        session.segments[sid] = row
+    calls = []
+    async def review(**options):
+        calls.append(options)
+        # The edit arrives while the first provider request is in progress.
+        edited = session.segments[4]
+        edited.final_vi = "Lời người dùng đã sửa."
+        edited.revision += 1
+        edited.verification = {"status": "manual"}
+    monkeypatch.setattr(session, "_review_translations", review)
+    asyncio.run(session._resume_pending_chunk_reviews())
+    assert calls == [{"regenerate_audio": True, "segment_ids": {0, 1, 2, 3}, "force_review": True}]
+    assert session.segments[4].verification == {"status": "manual"}
+    assert session.segments[4].final_vi == "Lời người dùng đã sửa."
+
+
+def test_final_source_pass_reviews_newly_stale_ready_address_once_and_keeps_uncertainty(preview, monkeypatch):
+    session, *_ = preview
+    session.total_duration = session._visual_completed_seconds = 24
+    session.translation_mode = "full"
+    session.initialized = True
+    row = SegmentItem(0, 0, 1, 1)
+    row.source_method, row.translation_provider = "text-ai", "opencode"
+    row.status, row.final_vi = "READY", "Con về rồi."
+    row.verification = {"status": "verified"}
+    unrelated = SegmentItem(1, 2, 3, 1)
+    unrelated.source_method, unrelated.translation_provider = "text-ai", "opencode"
+    unrelated.status, unrelated.final_vi = "READY", "Bản nháp chưa rõ."
+    unrelated.verification = {"status": "unresolved"}
+    session.segments = {0: row, 1: unrelated}
+    resume = StreamingPipelineSession._resume_pending_chunk_reviews.__get__(session)
+    calls, stages = [], []
+    async def resume_then_simulate_last_source_correction(**options):
+        stages.append(("resume", options))
+        await resume(**options)
+        if not options:
+            # A later accepted source correction invalidates the earlier row
+            # after startup's recovery selection, before the final speech queue.
+            row.verification = {"status": "unresolved", "address_stale_source_ids": [1]}
+    async def still_uncertain(**options):
+        calls.append(options)
+        row.needs_review = True
+        row.review_reason = "Chưa xác định chắc người nghe."
+        # Keep stale evidence deliberately to prove no automatic review loop.
+    async def worker():
+        stages.append(("worker", row.verification["status"]))
+    monkeypatch.setattr(session, "_resume_pending_chunk_reviews", resume_then_simulate_last_source_correction)
+    monkeypatch.setattr(session, "_review_translations", still_uncertain)
+    monkeypatch.setattr(session, "_worker_loop", worker)
+    async def run():
+        await session._start_chunked_visual()
+        await session.worker_task
+    asyncio.run(run())
+    assert calls == [{"regenerate_audio": True, "segment_ids": {0}, "force_review": True}]
+    assert stages == [("resume", {}), ("resume", {"stale_address_only": True}),
+                      ("worker", "unresolved")]
+    assert row.needs_review and row.verification["status"] == "unresolved"
+    assert row.status == "READY" and row.final_vi == "Con về rồi."
+    assert unrelated.verification == {"status": "unresolved"}
+
+
 def test_pending_review_cannot_be_hidden_by_a_later_completed_group(preview):
     session, *_ = preview
     early = SegmentItem(0, 0, 1, 1)

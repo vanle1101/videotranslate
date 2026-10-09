@@ -868,7 +868,7 @@ class StreamingPipelineSession:
         await self.emit("review_complete", {"review_summary": self.review_summary,
             "warnings": list(self.warnings), "screen_texts": self.screen_texts})
 
-    async def _resume_pending_chunk_reviews(self):
+    async def _resume_pending_chunk_reviews(self, *, stale_address_only=False):
         """Finish interrupted review ownership before retrying its saved speech.
 
         Source coverage is committed when a validated draft arrives. A Stop in
@@ -876,6 +876,10 @@ class StreamingPipelineSession:
         that cursor; resuming source preparation alone cannot revisit them.
         Manual edits and verified WAVs remain outside this selection. A draft
         synthesized by an older retry implementation still needs real review.
+        Address readings invalidated by a later source correction need a fresh
+        bounded review, even when their existing speech is already READY. The
+        end-of-source pass can request only those rows so it cannot turn an
+        unrelated unresolved draft into an unbounded review loop.
         """
         if not (self._chunked_source_started and self.visual_translation
                 and settings.LLM_PROVIDER == "opencode"):
@@ -893,20 +897,39 @@ class StreamingPipelineSession:
                 and audit.get("source_supported") is True
                 and any(isinstance(proof, dict) and proof.get("text_zh")
                         for proof in audit.get("evidence", [])))
+        def needs_address_source_recheck(row):
+            audit = row.verification or {}
+            return (audit.get("status") == "unresolved"
+                and isinstance(audit.get("address_stale_source_ids"), list)
+                and bool(audit["address_stale_source_ids"]))
+        def include(row):
+            if stale_address_only:
+                return needs_address_source_recheck(row)
+            return ((row.verification or {}).get("status") in (None, "pending", "incomplete")
+                    or needs_source_scope_recheck(row) or needs_address_source_recheck(row))
         pending = sorted((row for row in self.segments.values()
             if row.end <= self._visual_completed_seconds + .001
             and row.source_method == "text-ai" and row.translation_provider == "opencode"
-            and ((row.verification or {}).get("status") in (None, "pending", "incomplete")
-                 or needs_source_scope_recheck(row))),
+            and include(row)),
             key=lambda row: (row.start, row.id))
         for offset in range(0, len(pending), self.VISUAL_REVIEW_GROUP_SIZE):
             await self.pause_event.wait()
             if self.is_stopped:
                 raise asyncio.CancelledError
-            group = pending[offset:offset + self.VISUAL_REVIEW_GROUP_SIZE]
+            # A user may commit an edit while the previous group is reviewed.
+            # Do not include that now-manual row in the next automatic request.
+            group = [row for row in pending[offset:offset + self.VISUAL_REVIEW_GROUP_SIZE]
+                     if (row.verification or {}).get("status") != "manual"]
+            if not group:
+                continue
             revisions = {row.id: row.revision for row in group}
             try:
-                await self._review_translations(regenerate_audio=True, segment_ids={row.id for row in group})
+                options = {"regenerate_audio": True, "segment_ids": {row.id for row in group}}
+                if any(needs_address_source_recheck(row) for row in group):
+                    # Reuse source/audio files, but never reuse the address
+                    # verdict made before these accepted source words changed.
+                    options["force_review"] = True
+                await self._review_translations(**options)
             except asyncio.CancelledError:
                 raise
             except Exception as error:
@@ -1729,6 +1752,19 @@ class StreamingPipelineSession:
                 raise ValueError("Đoạn dịch chưa xuất bản đủ dữ liệu hợp lệ.")
             self._persist_if_enabled()
         self._visual_prepass_complete = self._visual_completed_seconds >= self.total_duration - .05
+        # A later bounded chunk may correct source words cited by an earlier
+        # address audit. Re-review that finite stale set once before speech
+        # starts so the final queue never presents an obsolete role verdict.
+        stale_address_rows = any(
+            row.end <= self._visual_completed_seconds + .001
+            and row.source_method == "text-ai"
+            and row.translation_provider == "opencode"
+            and (row.verification or {}).get("status") == "unresolved"
+            and isinstance((row.verification or {}).get("address_stale_source_ids"), list)
+            and bool((row.verification or {}).get("address_stale_source_ids"))
+            for row in self.segments.values())
+        if stale_address_rows:
+            await self._resume_pending_chunk_reviews(stale_address_only=True)
         while not self.queue.empty():
             self.queue.get_nowait()
             self.queue.task_done()
