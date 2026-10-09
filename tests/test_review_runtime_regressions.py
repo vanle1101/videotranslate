@@ -124,6 +124,19 @@ def test_audio_failure_retains_safe_diagnostic_and_segment_ids(caplog):
     assert "secret-token-do-not-log" not in caplog.text + json.dumps(result)
 
 
+def test_owned_cli_deadline_is_reported_as_timeout_without_guessing_network(caplog):
+    from core.engines.translation.opencode_client import OpenCodeTimeoutError
+
+    with execution_context("real-deadline-category"):
+        diagnostic = AutomaticTranslationReviewer._diagnostic(
+            OpenCodeTimeoutError("private-cli-output"), "semantic_request", [source(16)])
+    assert diagnostic["code"] == "provider_timeout"
+    assert diagnostic["segment_ids"] == [16]
+    assert diagnostic["run_id"] == "real-deadline-category"
+    assert "quá thời gian" in AutomaticTranslationReviewer._diagnostic_message(diagnostic)
+    assert "private-cli-output" not in caplog.text
+
+
 def test_audio_schema_failure_retries_only_requested_id_without_repeating_asr():
     client = Mock(has_credentials=True, model="offline-schema-probe")
     audio = Mock()

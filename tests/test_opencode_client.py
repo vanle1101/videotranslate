@@ -235,6 +235,7 @@ def test_timeout_retries_after_owned_process_cleanup_and_logs_each_attempt(
     assert [line.split()[0] for line in lines] == ["PROVIDER_REQUEST", "PROVIDER_FAILED", "PROVIDER_REQUEST", "PROVIDER_COMPLETED"]
     assert [re.search(r"attempt=(\d)", line).group(1) for line in lines] == ["1", "1", "2", "2"]
     assert len({re.search(r"request_id=([a-f0-9]{32})", line).group(1) for line in lines}) == 1
+    assert "code=provider_timeout" in lines[1]
     assert "private-" not in caplog.text
 
 
@@ -260,6 +261,7 @@ def test_timeout_exhaustion_is_typed_bounded_and_cleans_every_attempt(isolated, 
     lines = [record.getMessage() for record in caplog.records if record.name == "ai"]
     assert [line.split()[0] for line in lines] == ["PROVIDER_REQUEST", "PROVIDER_FAILED"] * (max_retries + 1)
     assert "PROVIDER_COMPLETED" not in caplog.text and "private-" not in caplog.text
+    assert all("code=provider_timeout" in line for line in lines if line.startswith("PROVIDER_FAILED"))
     assert "private-" not in str(caught.value)
 
 
@@ -347,6 +349,8 @@ def test_errors_do_not_include_raw_cli_outputs(isolated, monkeypatch):
         oc.OpenCodeZenClient(api_key="fixture-key").translate("private-prompt")
     assert "fixture-key" not in str(caught.value)
     assert "private-prompt" not in str(caught.value)
+    assert "chưa xác định được nguyên nhân" in str(caught.value)
+    assert "kiểm tra kết nối" not in str(caught.value).casefold()
 
 
 def test_free_list_excludes_paid_models_and_non_chat_classifier():

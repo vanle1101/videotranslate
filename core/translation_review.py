@@ -115,14 +115,14 @@ class AutomaticTranslationReviewer:
     def _diagnostic(error, stage, rows):
         """Retain a useful category, never exception text/URLs/provider bodies."""
         from core.engines.translation.opencode_client import (
-            OpenCodeConfigurationError, OpenCodeModelError)
+            OpenCodeConfigurationError, OpenCodeModelError, OpenCodeTimeoutError)
         if isinstance(error, VideoIntelligenceError):
             code = "invalid_response"
         elif isinstance(error, OpenCodeConfigurationError):
             code = "provider_configuration"
         elif isinstance(error, OpenCodeModelError):
             code = "provider_model"
-        elif isinstance(error, (TimeoutError,)):
+        elif isinstance(error, (TimeoutError, OpenCodeTimeoutError)):
             code = "provider_timeout" if stage != "audio_evidence" else "asr_timeout"
         elif isinstance(error, (FileNotFoundError, ImportError)):
             code = "asr_unavailable" if stage == "audio_evidence" else "runtime_unavailable"

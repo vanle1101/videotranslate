@@ -219,7 +219,7 @@ def _safe_failure(text: str) -> str:
         return "OpenCode từ chối API key. Hãy đăng nhập lại OpenCode Zen."
     if "model not found" in value or "providermodelnotfound" in value:
         return "Model miễn phí này không còn khả dụng trong OpenCode. Hãy chọn model khác."
-    return "OpenCode chưa trả được bản dịch. Hãy kiểm tra kết nối và thử lại."
+    return "OpenCode chưa trả được bản dịch; chưa xác định được nguyên nhân từ phản hồi CLI. Hãy thử lại."
 
 
 def _managed_configuration_present() -> bool:
@@ -403,15 +403,22 @@ class OpenCodeZenClient:
         request_id = uuid.uuid4().hex
         trace = {"attempt": 1, "started": time.monotonic()}
 
-        def record(event, output_chars=0):
+        def record(event, output_chars=0, error=None):
+            # Fixed categories only: exception/CLI text can contain credentials,
+            # source dialogue or remote URLs. A deadline is not a network verdict.
+            code = ("provider_timeout" if isinstance(error, OpenCodeTimeoutError)
+                    else "provider_cancelled" if isinstance(error, OpenCodeCancelledError)
+                    else "provider_configuration" if isinstance(error, OpenCodeConfigurationError)
+                    else "provider_model" if isinstance(error, OpenCodeModelError)
+                    else "provider_failed" if error is not None else "none")
             logging.getLogger("ai").info(
-                "%s run_id=%s request_id=%s model=%s attempt=%s elapsed_ms=%s output_chars=%s",
+                "%s run_id=%s request_id=%s model=%s attempt=%s elapsed_ms=%s output_chars=%s code=%s",
                 event, context.run_id, request_id, selected, trace["attempt"],
-                round((time.monotonic() - trace["started"]) * 1000), output_chars,
+                round((time.monotonic() - trace["started"]) * 1000), output_chars, code,
             )
 
-        def retry(attempt):
-            record("PROVIDER_FAILED")
+        def retry(attempt, error):
+            record("PROVIDER_FAILED", error=error)
             trace.update(attempt=attempt, started=time.monotonic())
             record("PROVIDER_REQUEST")
 
@@ -420,14 +427,14 @@ class OpenCodeZenClient:
             _check_cancelled(context)
             answer = self._translate(prompt, selected, system, max_tokens, context, retry)
             _check_cancelled(context)
-        except OpenCodeCancelledError:
-            record("PROVIDER_CANCELLED")
+        except OpenCodeCancelledError as error:
+            record("PROVIDER_CANCELLED", error=error)
             raise
-        except OpenCodeClientError:
-            record("PROVIDER_FAILED")
+        except OpenCodeClientError as error:
+            record("PROVIDER_FAILED", error=error)
             raise
-        except Exception:
-            record("PROVIDER_FAILED")
+        except Exception as error:
+            record("PROVIDER_FAILED", error=error)
             raise OpenCodeRequestError("OpenCode chưa hoàn tất yêu cầu dịch. Hãy thử lại.") from None
         record("PROVIDER_COMPLETED", len(answer))
         return answer
@@ -472,14 +479,14 @@ class OpenCodeZenClient:
                         creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
                     )
                     stdout, stderr = _communicate(process, request, self.timeout, context)
-                except OpenCodeTimeoutError:
+                except OpenCodeTimeoutError as error:
                     # _communicate terminates/reaps this attempt before raising;
                     # only its typed deadline failure is eligible for a retry.
                     # Cancellation, configuration and parsing errors propagate.
                     if attempt >= self.max_retries:
                         raise
                     _retry_delay(min(2 ** attempt, 2), context)
-                    retry(attempt + 2)
+                    retry(attempt + 2, error)
                     continue
                 except OSError:
                     raise OpenCodeConfigurationError("Không khởi chạy được OpenCode CLI.") from None
@@ -498,7 +505,7 @@ class OpenCodeZenClient:
                 if process.returncode:
                     if attempt < self.max_retries:
                         _retry_delay(min(2 ** attempt, 2), context)
-                        retry(attempt + 2)
+                        retry(attempt + 2, OpenCodeRequestError("CLI request failed."))
                         continue
                     raise OpenCodeRequestError(_safe_failure(stdout + "\n" + stderr))
                 parts: list[str] = []
