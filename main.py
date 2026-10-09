@@ -567,13 +567,16 @@ def schedule_reviewed_export(task_id):
     if (session is None or getattr(session, "auto_export_result", False) is not True
             or getattr(session, "review_summary", {}).get("status") != "completed"
             or session.is_running or session.error or getattr(session, "is_stopped", False)
+            or getattr(session, "_stop_draining", False)
             or getattr(session, "is_editing", False) or not session.segments
             or (getattr(session, "translation_mode", "full") == "preview"
                 and not getattr(session, "_visual_prepass_complete", False))
             or missing_spoken_output_ids(session.segments.values())
             or any(s.status not in ("READY", "PLAYED") for s in session.segments.values())):
         return
-    if active_export_tasks.get(f"export_{task_id}", {}).get("status") in {"RUNNING", "CANCELLING"}:
+    owner = getattr(session, "auto_export_task", None)
+    if (owner is not None and not owner.done()) or active_export_tasks.get(
+            f"export_{task_id}", {}).get("status") in {"RUNNING", "CANCELLING"}:
         return
     signature = export_revision_signature(session)
     if getattr(session, "auto_export_signature", None) == signature:
@@ -583,16 +586,21 @@ def schedule_reviewed_export(task_id):
     session.output_filename = ""
 
     async def generate_result():
+        failed = False
+        previous_export = active_export_tasks.get(f"export_{task_id}")
         try:
-            if getattr(session, "is_stopped", False):
+            if (get_streaming_session(task_id) is not session
+                    or getattr(session, "is_stopped", False)
+                    or getattr(session, "_stop_draining", False)
+                    or getattr(session, "auto_export_signature", None) != signature):
                 return
             await export_hq(ExportHQRequest(task_id=task_id))
         except asyncio.CancelledError:
-            task = active_export_tasks.get(f"export_{task_id}")
-            if task and task.get("status") in {"RUNNING", "CANCELLING"}:
-                task.update(cancelled=True, status="CANCELLING", stage="Đang dừng xuất video...")
+            # export_hq owns cancellation and drains its media thread. Do not
+            # mutate whichever export now occupies this ID after it returns.
             raise
         except Exception as error:
+            failed = True
             # export_hq already emitted its classified error. A second generic
             # event would replace the useful cause in the user's status panel.
             if getattr(error, "result_error_reported", False):
@@ -603,6 +611,23 @@ def schedule_reviewed_export(task_id):
                 "message": message,
                 **review_result_details(session),
             })
+        finally:
+            export = active_export_tasks.get(f"export_{task_id}", {})
+            # A preflight rejection creates no runtime record; an older valid
+            # or cancelled export must not hold this new failed reservation.
+            owned_export = export if export is not previous_export else {}
+            if (failed and get_streaming_session(task_id) is session
+                    and getattr(session, "auto_export_task", None) is asyncio.current_task()
+                    and getattr(session, "auto_export_signature", None) == signature
+                    and not getattr(session, "is_stopped", False)
+                    and not getattr(session, "_stop_draining", False)
+                    and export.get("status") not in {"RUNNING", "CANCELLING"}
+                    and not owned_export.get("published") and not owned_export.get("cancelled")
+                    and owned_export.get("status") not in {"CANCELLED", "COMPLETED"}):
+                # Reserve successful/cancelled publication, not a failed attempt.
+                # Only a later genuine finished event may retry; never reschedule
+                # from this cleanup or persistent render errors would loop.
+                session.auto_export_signature = None
 
     session.auto_export_task = asyncio.create_task(generate_result())
 

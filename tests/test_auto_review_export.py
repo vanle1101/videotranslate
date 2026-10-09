@@ -132,7 +132,7 @@ def test_finished_event_automatically_exports_once_per_revision_and_publishes(se
     assert ready[-1]["review_warning"]
 
 
-@pytest.mark.parametrize("change", ["legacy", "failed", "running", "stopped", "synthesis", "busy"])
+@pytest.mark.parametrize("change", ["legacy", "failed", "running", "stopped", "draining", "synthesis", "busy"])
 def test_automatic_export_does_not_launch_for_ineligible_session(session, change):
     item, exporter = session
     if change == "legacy":
@@ -143,6 +143,8 @@ def test_automatic_export_does_not_launch_for_ineligible_session(session, change
         item.is_running = True
     elif change == "stopped":
         item.is_stopped = True
+    elif change == "draining":
+        item._stop_draining = True
     elif change == "synthesis":
         item.segments[0].status = "TTS"
     elif change == "busy":
@@ -171,6 +173,154 @@ def test_automatic_export_error_is_safe_and_manual_retry_remains_available(sessi
     assert "secret-token" not in str(error)
     assert "Xuất video" in error["message"]
     assert result["status"] == "ok"
+
+
+def test_failed_automatic_export_retries_on_next_finished_event_then_keeps_success(session):
+    item, exporter = session
+    exporter.export.side_effect = [RuntimeError("transient render failure"),
+        {"output_filename": "reviewed.mp4", "elapsed_seconds": 1}]
+
+    async def run():
+        await main.broadcast_session_event(item.task_id, "finished", {})
+        first = item.auto_export_task
+        await first
+        assert main.active_export_tasks[f"export_{item.task_id}"]["status"] == "FAILED"
+        assert item.auto_export_signature is None
+        # Failed cleanup must not start another render by itself.
+        await asyncio.sleep(0)
+        assert item.auto_export_task is first and exporter.export.call_count == 1
+        await main.broadcast_session_event(item.task_id, "finished", {})
+        retry = item.auto_export_task
+        assert retry is not first
+        await main.broadcast_session_event(item.task_id, "finished", {})
+        assert item.auto_export_task is retry
+        await retry
+        signature = item.auto_export_signature
+        assert signature == main.export_revision_signature(item)
+        assert main.active_export_tasks[f"export_{item.task_id}"]["status"] == "COMPLETED"
+        await main.broadcast_session_event(item.task_id, "finished", {})
+        assert item.auto_export_task is retry and item.auto_export_signature == signature
+        assert exporter.export.call_count == 2
+
+    asyncio.run(run())
+
+
+def test_queued_automatic_export_keeps_one_owner_before_runtime_record_exists(session):
+    item, exporter = session
+
+    async def run():
+        main.schedule_reviewed_export(item.task_id)
+        first = item.auto_export_task
+        assert not main.active_export_tasks
+        # A concurrent edit may invalidate the signature before the queued
+        # coroutine starts; the task owner must still prevent a second render.
+        item.auto_export_signature = None
+        item.segments[0].revision += 1
+        main.schedule_reviewed_export(item.task_id)
+        assert item.auto_export_task is first
+        await first
+        exporter.export.assert_not_called()
+        # Once the superseded owner drains, the next completion can reserve
+        # and export the current revision rather than the abandoned snapshot.
+        main.schedule_reviewed_export(item.task_id)
+        assert item.auto_export_task is not first
+        await item.auto_export_task
+        assert exporter.export.call_count == 1
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("change", ["signature", "owner", "session", "stopped", "draining", "published", "cancelled", "new_render"])
+def test_failed_automatic_export_cannot_release_newer_or_cancelled_reservation(session, monkeypatch, change):
+    item, _ = session
+
+    async def run():
+        entered, release = asyncio.Event(), asyncio.Event()
+
+        async def fail(req):
+            entered.set()
+            await release.wait()
+            raise HTTPException(500, detail="Temporary export failure")
+
+        monkeypatch.setattr(main, "export_hq", fail)
+        main.schedule_reviewed_export(item.task_id)
+        first = item.auto_export_task
+        await entered.wait()
+        signature = item.auto_export_signature
+        if change == "signature":
+            item.auto_export_signature = signature = "newer-signature"
+        elif change == "owner":
+            item.auto_export_task = asyncio.create_task(asyncio.sleep(0))
+            await item.auto_export_task
+        elif change == "session":
+            replacement = SimpleNamespace(task_id=item.task_id, auto_export_signature="replacement-signature")
+            monkeypatch.setattr(main, "get_streaming_session", lambda task_id: replacement)
+        elif change == "stopped":
+            item.is_stopped = True
+        elif change == "draining":
+            item._stop_draining = True
+        elif change == "published":
+            main.active_export_tasks[f"export_{item.task_id}"] = {"status": "FAILED", "published": True}
+        elif change == "cancelled":
+            main.active_export_tasks[f"export_{item.task_id}"] = {"status": "CANCELLED", "cancelled": True}
+        else:
+            main.active_export_tasks[f"export_{item.task_id}"] = {"status": "RUNNING"}
+        release.set()
+        await first
+        assert item.auto_export_signature == signature
+        if change == "session":
+            assert replacement.auto_export_signature == "replacement-signature"
+
+    asyncio.run(run())
+
+
+def test_queued_automatic_export_does_not_run_after_stop_or_session_replacement(session, monkeypatch):
+    item, exporter = session
+
+    async def run():
+        main.schedule_reviewed_export(item.task_id)
+        first, signature = item.auto_export_task, item.auto_export_signature
+        item.is_stopped = True
+        await first
+        assert item.auto_export_signature == signature
+        main.schedule_reviewed_export(item.task_id)
+        assert item.auto_export_task is first
+        item.is_stopped = False
+        item.auto_export_signature = None
+        main.schedule_reviewed_export(item.task_id)
+        replacement = SimpleNamespace(task_id=item.task_id, auto_export_signature="replacement-signature")
+        monkeypatch.setattr(main, "get_streaming_session", lambda task_id: replacement)
+        await item.auto_export_task
+        assert replacement.auto_export_signature == "replacement-signature"
+        exporter.export.assert_not_called()
+
+    asyncio.run(run())
+
+
+def test_cancelled_automatic_owner_cannot_cancel_replacement_runtime_record(session, monkeypatch):
+    item, _ = session
+
+    async def run():
+        entered, release = asyncio.Event(), asyncio.Event()
+
+        async def pending(req):
+            main.active_export_tasks[f"export_{item.task_id}"] = {"status": "RUNNING"}
+            entered.set()
+            await release.wait()
+
+        monkeypatch.setattr(main, "export_hq", pending)
+        main.schedule_reviewed_export(item.task_id)
+        first, signature = item.auto_export_task, item.auto_export_signature
+        await entered.wait()
+        replacement = {"status": "RUNNING", "cancelled": False}
+        main.active_export_tasks[f"export_{item.task_id}"] = replacement
+        first.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await first
+        assert replacement == {"status": "RUNNING", "cancelled": False}
+        assert item.auto_export_signature == signature
+
+    asyncio.run(run())
 
 
 @pytest.mark.parametrize("failure,expected", [
@@ -209,6 +359,25 @@ def test_automatic_export_preflight_error_keeps_original_actionable_detail(sessi
     asyncio.run(run())
     errors = [call.args[0] for call in socket.send_json.call_args_list if call.args[0]["type"] == "result_error"]
     assert len(errors) == 1 and errors[0]["message"] == message
+    assert item.auto_export_signature is None
+
+
+@pytest.mark.parametrize("previous", [
+    {"status": "COMPLETED", "published": True},
+    {"status": "CANCELLED", "cancelled": True},
+])
+def test_preflight_failure_releases_only_current_reservation_despite_older_terminal_export(session, monkeypatch, previous):
+    item, _ = session
+    main.active_export_tasks[f"export_{item.task_id}"] = previous
+    monkeypatch.setattr(main, "export_hq", AsyncMock(side_effect=HTTPException(409, detail="Source temporarily unavailable")))
+
+    async def run():
+        main.schedule_reviewed_export(item.task_id)
+        await item.auto_export_task
+        assert item.auto_export_signature is None
+        assert main.active_export_tasks[f"export_{item.task_id}"] is previous
+
+    asyncio.run(run())
 
 
 def test_export_report_write_failure_preserves_published_mp4_and_warns(session, monkeypatch, tmp_path):
@@ -428,12 +597,16 @@ def test_stop_also_cancels_and_drains_automatic_export(session):
         item.stop = stop
         try:
             await main.broadcast_session_event(item.task_id, "finished", {})
+            signature = item.auto_export_signature
             await asyncio.wait_for(started.wait(), timeout=5)
             await main.stop_task(item.task_id)
             assert item.auto_export_task.done()
             assert main.active_export_tasks[f"export_{item.task_id}"]["status"] == "CANCELLED"
             assert not item._stop_draining
             item.emit.assert_awaited_once()
+            assert item.auto_export_signature == signature
+            await main.broadcast_session_event(item.task_id, "finished", {})
+            assert exporter.export.call_count == 1
         finally:
             release.set()
             await item.auto_export_task
