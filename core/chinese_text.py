@@ -50,7 +50,8 @@ def comparable_chinese(value):
             kept.append(char)
         elif char == "." and index > 0 and index + 1 < len(text) and text[index - 1].isdigit() and text[index + 1].isdigit():
             kept.append(char)
-        elif char in "+-" and index + 1 < len(text) and text[index + 1].isdigit():
+        elif char in "+-" and index + 1 < len(text) and (
+                text[index + 1].isdigit() or text[index + 1] in "零〇一二三四五六七八九十百千万亿两"):
             kept.append(char)
         elif char == "%" and index > 0 and text[index - 1].isdigit():
             kept.append(char)
@@ -59,15 +60,8 @@ def comparable_chinese(value):
     return "".join(kept)
 
 
-def comparable_audio_chinese(value):
-    """Allow exact spelling variants of a standalone 0–99 spoken integer.
-
-    Actual independent ASR returned '19。' and '十九' for the same age. Only a
-    whole numeric utterance is normalized: names, dates, units, signs, decimals
-    and longer phrases keep their original comparison, without fuzzy matching.
-    OCR substring ownership deliberately continues using comparable_chinese.
-    """
-    text = comparable_chinese(value)
+def _small_chinese_integer(text):
+    """Parse only the ordinary exact spelling of a whole 0–99 integer."""
     digits = {char: index for index, char in enumerate('零一二三四五六七八九')}
     digits['〇'] = 0
     if len(text) == 1 and text in digits:
@@ -75,4 +69,34 @@ def comparable_audio_chinese(value):
     if re.fullmatch(r'[一二三四五六七八九]?十[一二三四五六七八九]?', text):
         tens, ones = text.split('十')
         return str((digits[tens] if tens else 1) * 10 + (digits[ones] if ones else 0))
-    return text
+    return None
+
+
+def comparable_audio_chinese(value):
+    """Allow exact numeric spellings without deciding what ASR meant.
+
+    Independent recognition produced '12岁在院子里洗澡'/'十二岁在院子里洗澡'
+    and '25年以后'/'二十五年以后'. In addition to standalone 0–99 integers,
+    normalize a whole bounded numeral immediately before 岁/年. Only an
+    utterance start or an explicit text boundary is eligible; a numeral inside
+    a name or adjoining Chinese word is left untouched. Larger numerals,
+    dates, decimals, signs and other units remain distinct. OCR substring
+    ownership deliberately continues using comparable_chinese.
+    """
+    text = comparable_chinese(value)
+    standalone = _small_chinese_integer(text)
+    if standalone is not None:
+        return standalone
+    if not isinstance(value, str):
+        return text
+    raw = simplified_text(value).replace("−", "-")
+
+    def normalize(match):
+        number = _small_chinese_integer(match.group(0))
+        return number if number is not None else match.group(0)
+
+    # Match the entire numeric token so a suffix of 2025, 一九八二, 百十二
+    # or a decimal cannot be accepted as a different age/year count.
+    raw = re.sub(r"(?<![\w.+\-/:])"
+                 r"[0-9零〇一二三四五六七八九十百千万亿两点]+(?=岁|年)", normalize, raw)
+    return comparable_chinese(raw)

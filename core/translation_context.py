@@ -230,9 +230,12 @@ def needs_address_audit(rows, context=()):
 
 
 def source_dialogue(rows):
-    """Remove every Vietnamese draft before the independent source reading."""
-    return [{key: value for key, value in row.items()
+    """Retain owned source proof, never Vietnamese drafts or AI role verdicts."""
+    return [{key: deepcopy(value) for key, value in row.items()
              if key in {"id", "start", "end", "text_zh", "asr_text", "speaker_id", "addressee_id",
+                        "speaker_evidence", "utterance_id", "utterance_evidence",
+                        "source_asr_row_id", "source_asr_start", "source_asr_end",
+                        "source_piece_index", "source_piece_count",
                         "source_needs_review", "source_truncated"}}
             for row in rows]
 

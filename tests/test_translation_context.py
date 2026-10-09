@@ -9,7 +9,7 @@ from config import settings
 from core.engines.translation.semantic_translator import SemanticTranslator, PacingReviewRejected
 from core.translation_context import (
     VIETNAMESE_ADDRESS_POLICY, added_rude_address,
-    dialogue_context, address_reading_prompt, validate_address_reading,
+    dialogue_context, source_dialogue, address_reading_prompt, validate_address_reading,
 )
 from core.translation_review import AutomaticTranslationReviewer
 from core.video_intelligence import VISUAL_TRANSLATION_PROMPT, VideoIntelligenceError
@@ -55,6 +55,34 @@ def test_context_does_not_assign_relationships_from_a_kinship_keyword():
     context = dialogue_context([source(0, "他说他妈妈今天没来", "Anh ấy nói hôm nay mẹ không đến.")])
     assert "speaker_id" not in context[0] and "addressee_id" not in context[0]
     assert context[0]["text_zh"] == "他说他妈妈今天没来"
+
+
+def test_independent_address_reading_keeps_source_proof_without_a_translated_draft():
+    row = source(12, "我真的不是回来", "Bản nháp Việt không phải bằng chứng.")
+    row.update(speaker_id="voice-a", addressee_id="voice-b", utterance_id="utterance-a",
+        speaker_evidence={"speaker_id": "voice-a", "verified": True,
+            "method": "audio_diarization", "confidence": .94, "model": "measured-model",
+            "scope_id": "source-video"},
+        utterance_evidence={"utterance_id": "utterance-a", "verified": False,
+            "reason": "Unknown continuity"},
+        source_asr_row_id=4, source_asr_start=36., source_asr_end=39.,
+        source_piece_index=0, source_piece_count=2,
+        verification={"address_verified": True, "address_context": {"self_address": "con"}})
+    before = deepcopy(row)
+    context = dialogue_context([row], [row])
+    payload = source_dialogue(context)
+    for key in ("speaker_id", "speaker_evidence", "addressee_id", "utterance_id", "utterance_evidence",
+            "source_asr_row_id", "source_asr_start", "source_asr_end", "source_piece_index", "source_piece_count"):
+        assert payload[0][key] == row[key]
+    assert not any(key in payload[0] for key in ("final_vi", "literal_vi", "natural_vi",
+        "translation_is_draft", "reviewed_address_context", "verification"))
+    prompt_payload = json.loads(address_reading_prompt([row], context).split("Nguồn thoại theo thời gian: ", 1)[1])
+    assert prompt_payload == payload
+    assert row["final_vi"] not in address_reading_prompt([row], context)
+    assert payload[0]["utterance_evidence"]["verified"] is False
+    payload[0]["speaker_evidence"]["confidence"] = 0
+    payload[0]["utterance_evidence"]["verified"] = True
+    assert row == before and context[0]["speaker_evidence"]["confidence"] == .94
 
 
 def test_address_guard_does_not_confuse_pronouns_with_other_vietnamese_words():
