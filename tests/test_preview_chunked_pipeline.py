@@ -33,6 +33,10 @@ def preview(tmp_path, monkeypatch):
     monkeypatch.setattr(settings, "BASE_DIR", tmp_path)
     monkeypatch.setattr(settings, "LLM_PROVIDER", "opencode")
     monkeypatch.setattr(settings, "DIARIZATION_ENABLED", False)
+    model = tmp_path / "workspace/models" / f"faster-whisper-{settings.WHISPER_MODEL_SIZE}"
+    model.mkdir(parents=True)
+    for name in ("config.json", "model.bin", "tokenizer.json", "vocabulary.json"):
+        (model / name).write_bytes(b"isolated asset-identity fixture; never used for inference")
     source = tmp_path / "source.mp4"
     source.write_bytes(b"isolated source identity")
     session = StreamingPipelineSession("preview-owned", source, visual_translation=True,
@@ -570,6 +574,37 @@ def test_bounded_preparation_reuses_exact_checkpoint_and_rejects_changed_asset(p
     asyncio.run(run())
 
 
+@pytest.mark.parametrize("change", ["model_asset", "loaded_grouping", "runtime", "missing_model"])
+def test_source_cache_rejects_changed_runtime_but_preserves_valid_background(preview, monkeypatch, change):
+    from core.streaming import chunked_source as source
+    from core.streaming import source_revision
+    session, *_ = preview
+    root = session.cache_dir / "source_preparation"
+    root.mkdir(parents=True)
+    raw, bgm = root / "raw.wav", root / "bgm.wav"
+    wav(raw)
+    wav(bgm)
+    record = {"identity": source._source_identity(session), "start": 0., "end": 5.,
+        "rows": [{"start": 0., "end": 5., "duration": 5., "text_zh": "开头"}],
+        "raw_audio": source._asset(raw), "bgm": source._asset(bgm)}
+    source._save(session, record)
+    assert source._load(session, 0.) == record
+    model = settings.BASE_DIR / "workspace/models" / f"faster-whisper-{session.faster_whisper.model_size}"
+    if change == "model_asset":
+        (model / "model.bin").write_bytes(b"different asset bytes under the same model name")
+    elif change == "missing_model":
+        (model / "model.bin").unlink()
+    elif change == "loaded_grouping":
+        monkeypatch.setattr(session, "_grounded_visual_segments", lambda rows: rows)
+    else:
+        version = source_revision.metadata.version
+        monkeypatch.setattr(source_revision.metadata, "version",
+            lambda name: "different-runtime-version" if name == "faster-whisper" else version(name))
+    assert source._load(session, 0.) is None
+    assert source._load(session, 0., background_only=True) == record
+    assert raw.is_file() and bgm.is_file()
+
+
 def test_global_source_offsets_survive_following_chunk_preparation(preview, monkeypatch):
     session, *_ = preview
     async def ffmpeg(command):
@@ -668,7 +703,10 @@ def test_opus_prefix_uses_source_offsets_without_per_chunk_encoder_delay(preview
         records.append({"start": round(index * duration, 6), "end": round((index + 1) * duration, 6),
                         "bgm": {"path": str(audio)}})
     by_start = {record["start"]: record for record in records}
-    monkeypatch.setattr("core.streaming.chunked_source._load", lambda current, start: by_start[round(start, 6)])
+    def saved_packet(current, start, *, background_only=False):
+        assert background_only
+        return by_start[round(start, 6)]
+    monkeypatch.setattr("core.streaming.chunked_source._load", saved_packet)
     path = asyncio.run(real_background_prefix(session, records[-1]))
     data = json.loads(subprocess.check_output(["ffprobe", "-v", "error", "-show_entries", "format=duration", "-of", "json", str(path)],
                                              creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0)))

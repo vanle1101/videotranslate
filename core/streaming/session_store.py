@@ -68,7 +68,7 @@ def _decode_project(encoded):
 ID_PATTERN = re.compile(r"^[a-zA-Z0-9_-]{1,80}$")
 SEGMENT_FIELDS = frozenset((
     "id start end duration status text_zh emotion literal_vi natural_vi final_vi tts_duration speed_ratio "
-    "audio_path failed_stage error revision source_method translation_provider translation_model evidence_mode "
+    "audio_path superseded_audio_paths failed_stage error revision source_method translation_provider translation_model evidence_mode "
     "needs_review review_reason asr_text verification confirmed_silence subtitle_cues subtitle_timing_source "
     "speech_start speech_end asr_pretranscribed dub_start dub_end dub_tail_limit timing_issue"
     " speaker_id speaker_evidence speaker_diagnostics speaker_confirmation speaker_review_pending voice_id tts_voice_outdated utterance_id utterance_evidence source_asr_row_id source_asr_start source_asr_end source_piece_index source_piece_count"
@@ -720,6 +720,14 @@ def _validate_project(data, task_id):
                         or not cue["start"] - .05 <= word["start"] <= word["end"] <= cue["end"] + .05):
                     raise ValueError("Mốc từ không khớp phụ đề.")
         row["audio_path"] = _local_path(row.get("audio_path"), generated=True)
+        old_audio = row.get("superseded_audio_paths", [])
+        if not isinstance(old_audio, list) or len(old_audio) > 64:
+            raise ValueError("Danh sách giọng cũ không hợp lệ.")
+        owner = (settings.BASE_DIR / "workspace" / "cache" / task_id / "segments").resolve()
+        for value in old_audio:
+            retired = Path(_local_path(value, generated=True))
+            if retired.parent != owner or not re.fullmatch(rf"seg_{row['id']}(?:_[0-9a-f]{{32}})?\.wav", retired.name):
+                raise ValueError("Giọng cũ không thuộc dự án này.")
         if row["audio_path"]:
             audio = Path(row["audio_path"])
             owner = (settings.BASE_DIR / "workspace" / "cache" / task_id / "segments").resolve()

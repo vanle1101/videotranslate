@@ -15,12 +15,13 @@ def digest(path):
 
 
 def identity(session):
+    from core.streaming.source_revision import source_runtime_identity
     source = session.video_path.resolve(strict=True)
     info = source.stat()
     return {"version": 1, "source": str(source), "size": info.st_size, "mtime": info.st_mtime_ns,
             "asr": session.asr_engine_name, "model": settings.WHISPER_MODEL_SIZE,
             "visual": session.visual_translation, "suppression": settings.SUPPRESSION_MODE,
-            "code": hashlib.sha256(Path(__file__).with_name("pipeline.py").read_bytes()).hexdigest()}
+            "runtime": source_runtime_identity(session)}
 
 
 def location(key):
@@ -59,6 +60,8 @@ def save(session):
 def load(session):
     try:
         key = identity(session)
+        if not key["runtime"]["whisper_asset_revision_known"]:
+            return None
         target = location(key)
         if target.is_symlink() or not target.is_file() or target.stat().st_size > 8_000_000:
             return None

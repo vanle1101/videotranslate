@@ -73,6 +73,7 @@ class SegmentItem:
         self.tts_duration = 0.0
         self.speed_ratio = 1.0
         self.audio_path: Optional[str] = None
+        self.superseded_audio_paths = []
         self.audio_url: Optional[str] = None
         self.error: Optional[str] = None
         self.failed_stage: Optional[str] = None
@@ -165,6 +166,8 @@ class StreamingPipelineSession:
     """
     VISUAL_REVIEW_GROUP_SIZE = 4
     PREVIEW_SECONDS = 24.0
+    SOURCE_SCOPE_REVIEW_METHOD = "pipeline-source-scope-review"
+    SOURCE_SCOPE_REVIEW_VERSION = 1
     def __init__(
         self,
         task_id: str,
@@ -826,7 +829,7 @@ class StreamingPipelineSession:
         """Commit edit metadata before any event or retirement of old media."""
         owners = {sid: self.segments[sid] for sid in {*plan, segment.id}}
         old_rows = {sid: deepcopy(vars(row)) for sid, row in owners.items()}
-        fields = ("screen_texts", "rolling_context", "review_summary", "error", "total_processed_duration",
+        fields = ("screen_texts", "rolling_context", "review_summary", "warnings", "error", "total_processed_duration",
                   "output_video_url", "output_filename", "output_review_url", "auto_export_signature")
         old_fields = {name: deepcopy(getattr(self, name)) for name in fields if hasattr(self, name)}
         try:
@@ -862,10 +865,130 @@ class StreamingPipelineSession:
     def _apply_review_metadata(segment, row):
         for field in ("text_zh", "literal_vi", "natural_vi", "final_vi", "needs_review", "review_reason", "verification"):
             if field in row:
-                setattr(segment, field, row[field])
+                value = row[field]
+                if field == "verification" and isinstance(value, dict):
+                    value = deepcopy(value)
+                    stamp = value.get("source")
+                    if isinstance(stamp, dict) and stamp.get("method") == StreamingPipelineSession.SOURCE_SCOPE_REVIEW_METHOD:
+                        # Provider/reviewer copies cannot mint an application
+                        # ownership stamp. Publish one only after this batch's
+                        # complete source corrections are durably committed.
+                        value.pop("source", None)
+                setattr(segment, field, value)
         audit = row.get("verification") or {}
         if isinstance(audit, dict) and audit.get("status") in {"verified", "corrected", "unresolved"}:
             segment.speaker_review_pending = False
+
+    def _source_scope_review_rows(self):
+        return [{"id": row.id, "start": row.start, "end": row.end,
+            "text_zh": row.text_zh, "asr_text": row.asr_text,
+            **{name: deepcopy(value) for name in SOURCE_METADATA_FIELDS
+               if (value := getattr(row, name, None)) is not None}}
+            for row in sorted(self.segments.values(), key=lambda item: (item.start, item.id))]
+
+    def _source_scope_review_runtime(self):
+        from core.review_checkpoint import loaded_implementation_revision
+        from core.translation_review import AutomaticTranslationReviewer
+        try:
+            source = Path(self.video_path).resolve(strict=True)
+            info = source.stat()
+            return {"provider": settings.LLM_PROVIDER, "model": settings.OPENCODE_MODEL,
+                "gate": AutomaticTranslationReviewer.REVIEW_GATE_REVISION,
+                "implementation": loaded_implementation_revision(),
+                "video": {"path": str(source), "bytes": info.st_size,
+                          "modified": info.st_mtime_ns, "created": info.st_ctime_ns}}
+        except (OSError, TypeError, ValueError):
+            return None
+
+    def _source_scope_review_identity(self, segment, *, source_rows=None, focus_ids=None):
+        """Exact owned source/context identity, independent of speech retries.
+
+        An OCR-supported source can legitimately differ from ASR. Retrying a
+        missing WAV is not new semantic evidence. Keep the bounded source
+        exchange, confirmations, actual model/gate/code and source-file
+        identity; exclude audio paths, retry counters and review verdicts.
+        """
+        from core.review_checkpoint import digest
+        from core.translation_context import dialogue_context, source_dialogue
+        from core.translation_review import AutomaticTranslationReviewer
+        from core.video_intelligence import VideoIntelligence
+        rows = source_dialogue(source_rows if source_rows is not None else self._source_scope_review_rows())
+        focus_ids = [segment.id] if focus_ids is None else focus_ids
+        if (not isinstance(focus_ids, list) or not 0 < len(focus_ids) <= AutomaticTranslationReviewer.BATCH_SIZE
+                or any(type(sid) is not int for sid in focus_ids) or len(set(focus_ids)) != len(focus_ids)
+                or segment.id not in focus_ids):
+            return None
+        focus = [row for row in rows if row["id"] in focus_ids]
+        if len(focus) != len(focus_ids):
+            return None
+        selected = dialogue_context(rows, focus)
+        selected_ids = {row.get("id") for row in selected} | {segment.id}
+        semantics = VideoIntelligence._semantic_context(rows, focus)
+        selected_ids.update(sid for unit in semantics["units"] for sid in unit["source_ids"])
+        # Retain full ASR/source text for selected IDs, not the selector's
+        # display truncation. That same ASR scopes fresh OCR to this utterance.
+        context = [row for row in rows if row.get("id") in selected_ids]
+        try:
+            runtime = self._source_scope_review_runtime()
+            if runtime is None:
+                return None
+            return digest({"method": self.SOURCE_SCOPE_REVIEW_METHOD, "version": self.SOURCE_SCOPE_REVIEW_VERSION,
+                "runtime": runtime, "focus": sorted(focus_ids),
+                "translation": {key: getattr(segment, key) for key in ("literal_vi", "natural_vi", "final_vi")},
+                "context": context})
+        except (OSError, TypeError, ValueError):
+            return None
+
+    def _source_scope_review_is_current(self, segment):
+        audit = segment.verification or {}
+        stamp = audit.get("source")
+        if (audit.get("status") not in {"verified", "corrected", "unresolved"}
+                or not isinstance(stamp, dict) or stamp.get("method") != self.SOURCE_SCOPE_REVIEW_METHOD
+                or stamp.get("version") != self.SOURCE_SCOPE_REVIEW_VERSION):
+            return False
+        identity = self._source_scope_review_identity(segment, focus_ids=stamp.get("focus_ids"))
+        return bool(identity and stamp.get("input_hash") == identity)
+
+    def _publish_source_scope_review_stamps(self, result, published_revisions, source_rows, runtime_identity):
+        from core.translation_review import AutomaticTranslationReviewer
+        if not runtime_identity or runtime_identity != self._source_scope_review_runtime():
+            return
+        # A bounded Resume group shares context across every target. A stamp
+        # for one target must cover evidence selected for its siblings too.
+        # Larger explicit audits span several reviewer batches; do not claim
+        # exact batch ownership without a recorded boundary for each batch.
+        focus_ids = list(result["segments"])
+        if not 0 < len(focus_ids) <= AutomaticTranslationReviewer.BATCH_SIZE:
+            return
+        expected_rows = deepcopy(source_rows)
+        current_rows = self._source_scope_review_rows()
+        for source in expected_rows:
+            reviewed = result["segments"].get(source["id"], {})
+            if "text_zh" in reviewed:
+                source["text_zh"] = reviewed["text_zh"]
+        for sid, revision in published_revisions.items():
+            segment = self.segments[sid]
+            audit = segment.verification or {}
+            reviewed = result["segments"][sid]
+            if (self.is_stopped or segment.revision != revision
+                    or audit.get("status") not in {"verified", "corrected", "unresolved"}
+                    or audit.get("review_gate_revision") != AutomaticTranslationReviewer.REVIEW_GATE_REVISION
+                    or audit.get("provider") != "opencode" or audit.get("model") != settings.OPENCODE_MODEL
+                    or segment.final_vi != reviewed.get("final_vi")
+                    or segment.text_zh != reviewed.get("text_zh")
+                    or not segment.asr_text or segment.text_zh == segment.asr_text
+                    or audit.get("source_supported") is not True
+                    or not any(isinstance(proof, dict) and proof.get("text_zh")
+                               for proof in audit.get("evidence", []))):
+                continue
+            identity = self._source_scope_review_identity(segment, source_rows=expected_rows, focus_ids=focus_ids)
+            # A concurrent manual edit, changed confirmation or uncommitted
+            # sibling correction must not be mistaken for reviewed context.
+            if not identity or identity != self._source_scope_review_identity(segment, source_rows=current_rows, focus_ids=focus_ids):
+                continue
+            with self._durable_speaker_review_publication(segment):
+                segment.verification = {**audit, "source": {"method": self.SOURCE_SCOPE_REVIEW_METHOD,
+                    "version": self.SOURCE_SCOPE_REVIEW_VERSION, "input_hash": identity, "focus_ids": focus_ids}}
 
     @contextmanager
     def _durable_speaker_review_publication(self, segment):
@@ -950,6 +1073,9 @@ class StreamingPipelineSession:
         targets = [segment for segment in self.segments.values()
                    if segment_ids is None or segment.id in segment_ids]
         target_revisions = {segment.id: segment.revision for segment in targets}
+        source_rows = self._source_scope_review_rows()
+        source_runtime_identity = self._source_scope_review_runtime()
+        published_revisions = {}
         options = {"cancel_check": lambda: self.is_stopped, "progress_callback": progress,
                    "force_review": force_review}
         if segment_ids is not None:
@@ -982,6 +1108,8 @@ class StreamingPipelineSession:
                     # must never remain served for the changed wording.
                     reason = "wording_changed" if row["final_vi"] != segment.final_vi else "voice_changed"
                     with self._durable_speaker_review_publication(segment):
+                        if segment.audio_path and segment.audio_path not in segment.superseded_audio_paths:
+                            segment.superseded_audio_paths.append(segment.audio_path)
                         self._apply_review_metadata(segment, row)
                         segment.revision += 1
                         segment.status, segment.failed_stage = "WAITING", "TTS"
@@ -998,6 +1126,7 @@ class StreamingPipelineSession:
                     self._invalidate_output()
                     logging.getLogger("pipeline").info(
                         "REVIEW_AUDIO_QUEUED run_id=%s segment_id=%s reason=%s", self.task_id, sid, reason)
+                    published_revisions[sid] = segment.revision
                     await self.emit("segment_update", segment.to_dict())
                     continue
                 try:
@@ -1046,12 +1175,15 @@ class StreamingPipelineSession:
                     self._apply_review_metadata(segment, row)
                 if regenerate_audio:
                     await self.emit("segment_update", segment.to_dict())
+            published_revisions[sid] = segment.revision
         for source in result.get("translation_sources", []):
             if source not in self.translation_sources:
                 self.translation_sources.append(source)
         self.review_summary = {"status": "completed", **result["summary"]}
         if segment_ids is not None:
             await self._invalidate_changed_address_verifications()
+        await self._wait_for_edit_publication()
+        self._publish_source_scope_review_stamps(result, published_revisions, source_rows, source_runtime_identity)
         # Pacing may change a verified translation while rebuilding its audio.
         # Report the committed text/audio state, not the earlier review draft.
         self._refresh_review_counts()
@@ -1202,7 +1334,8 @@ class StreamingPipelineSession:
                 and bool(row.asr_text) and row.text_zh != row.asr_text
                 and audit.get("source_supported") is True
                 and any(isinstance(proof, dict) and proof.get("text_zh")
-                        for proof in audit.get("evidence", [])))
+                        for proof in audit.get("evidence", []))
+                and not self._source_scope_review_is_current(row))
         def needs_address_source_recheck(row):
             audit = row.verification or {}
             return (audit.get("status") == "unresolved"
@@ -2591,6 +2724,9 @@ class StreamingPipelineSession:
             if any(task is not None and task is not current and not task.done()
                    for task in (self.start_task, self.worker_task, self._chunk_followup_task)):
                 return
+        if not self.is_running:
+            for row in self.segments.values():
+                self._retire_superseded_speech(row)
         # Finished sessions retain media for replay/export, not another copy of
         # Whisper/SenseVoice in RAM for every video processed in this app.
         self.faster_whisper.model = None
@@ -3160,6 +3296,37 @@ class StreamingPipelineSession:
                     "[%s] PACING_FINAL_RECOVERY_FAILED segment_id=%s error_type=%s",
                     self.task_id, sid, type(error).__name__)
 
+    def _retire_speech_failure(self, seg):
+        seg.error = None
+        warning = f"Câu {seg.id + 1} chưa tạo được giọng; giữ phần đã xong và tiếp tục các câu sau."
+        self.warnings[:] = [value for value in self.warnings if value != warning]
+
+    def _retire_superseded_speech(self, seg):
+        # Deferred review hides old speech immediately, but its bytes remain
+        # recoverable until a replacement WAV has been durably published.
+        if (not seg.superseded_audio_paths or (not seg.audio_path and not seg.confirmed_silence)
+                or seg.status not in {"READY", "PLAYED"}):
+            return
+        import re
+        active = {Path(row.audio_path).resolve() for row in self.segments.values() if row.audio_path}
+        remaining = []
+        for value in seg.superseded_audio_paths:
+            path = Path(value)
+            if (path.is_symlink() or path.resolve().parent != self.segments_dir.resolve()
+                    or not re.fullmatch(rf"seg_{seg.id}(?:_[0-9a-f]{{32}})?\.wav", path.name)
+                    or path.resolve() in active):
+                remaining.append(value)
+                continue
+            try:
+                path.unlink(missing_ok=True)
+            except OSError:
+                # A Windows player may still own the old handle. Retry on the
+                # next successful publication/Resume; never delete broadly.
+                remaining.append(value)
+        if remaining != seg.superseded_audio_paths:
+            seg.superseded_audio_paths = remaining
+            self._persist_if_enabled()
+
     async def _synthesize_segment(self, seg, *, pacing_recovery=None, allow_pacing=True):
         """Generate playable audio without approving an uncertain translation."""
         raw_tts_wav = self.cache_dir / f"tts_{seg.id}_raw.wav"
@@ -3171,15 +3338,24 @@ class StreamingPipelineSession:
             self._pacing_failures.pop(seg.id, None)
         try:
             if not seg.final_vi.strip():
-                if seg.text_zh.strip() and not seg.needs_review:
+                if seg.text_zh.strip() and not seg.needs_review and not seg.confirmed_silence:
                     raise RuntimeError("Dịch thuật trả về nội dung trống.")
                 # An empty uncertain draft has nothing defensible to read.
                 # Keep its review flag, but allow playback past its time span.
-                seg.status = "READY"
-                seg.timing_issue = None
-                seg.failed_stage = None
-                seg._retry_synthesis = False
-                self._refresh_processed_duration()
+                with self._durable_edit_publication(seg, {}, pending_path):
+                    if seg.audio_path and seg.audio_path not in seg.superseded_audio_paths:
+                        seg.superseded_audio_paths.append(seg.audio_path)
+                    seg.audio_path = seg.audio_url = None
+                    seg.tts_duration, seg.speed_ratio = 0.0, 1.0
+                    seg.subtitle_cues = []
+                    seg.subtitle_timing_source = "empty"
+                    seg.status = "READY"
+                    seg.timing_issue = None
+                    seg.failed_stage = None
+                    seg._retry_synthesis = False
+                    self._retire_speech_failure(seg)
+                    self._refresh_processed_duration()
+                self._retire_superseded_speech(seg)
                 await self.emit("segment_update", seg.to_dict())
                 await self._update_ready()
                 return
@@ -3255,10 +3431,12 @@ class StreamingPipelineSession:
                 seg.timing_issue = None
                 seg.failed_stage = None
                 seg._retry_synthesis = False
+                self._retire_speech_failure(seg)
                 self._refresh_processed_duration()
             for identity in dub_plan:
                 if identity != seg.id:
                     await self.emit("segment_update", self.segments[identity].to_dict())
+            self._retire_superseded_speech(seg)
             await self.emit("segment_update", seg.to_dict())
             await self._update_ready()
             if any("_audio_update" in bounds for bounds in dub_plan.values()):

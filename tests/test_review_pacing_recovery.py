@@ -56,6 +56,363 @@ def review_response():
     }, "summary": {"checked": 2, "verified": 1, "corrected": 1, "unresolved": 0, "manual": 0}}
 
 
+def source_scope_recovery_row(session):
+    session.visual_translation = True
+    session._visual_completed_seconds = session.total_duration
+    session._visual_prepass_complete = True
+    focus = session.segments[112]
+    focus.asr_text, focus.text_zh = "小满", "小满今年十九"
+    focus.final_vi = "Tiểu Mãn, năm nay mười chín."
+    focus.source_method, focus.translation_provider = "text-ai", "opencode"
+    focus.status, focus.failed_stage = "FAILED", "TTS"
+    focus.verification = {"status": "corrected", "source_supported": True,
+        "semantic_verified": True, "evidence": [{"text_zh": focus.text_zh}]}
+    return focus
+
+
+def source_scope_terminal_response(session, status):
+    focus = session.segments[112]
+    return {"segments": {112: {"id": 112, "text_zh": focus.text_zh,
+        "final_vi": focus.final_vi, "needs_review": status == "unresolved",
+        "review_reason": "Role remains uncertain" if status == "unresolved" else None,
+        "verification": {"status": status, "provider": "opencode", "model": settings.OPENCODE_MODEL,
+            "source_supported": True, "semantic_verified": status != "unresolved",
+            "second_pass_status": "completed",
+            "review_gate_revision": AutomaticTranslationReviewer.REVIEW_GATE_REVISION,
+            "evidence": [{"text_zh": focus.text_zh}]}}},
+        "summary": {"checked": 1, status: 1}}
+
+
+@pytest.mark.parametrize("status", ["corrected", "unresolved"])
+def test_unchanged_source_scope_review_survives_restart_without_repeat_provider_call(
+        reviewed_session, monkeypatch, status):
+    from core.streaming.session_store import restore_saved_session
+    session = reviewed_session
+    monkeypatch.setattr(settings, "LLM_PROVIDER", "opencode")
+    focus = source_scope_recovery_row(session)
+    calls = []
+    def review(*args, **kwargs):
+        calls.append([row.id for row in args[2]])
+        return source_scope_terminal_response(session, status)
+    monkeypatch.setattr(AutomaticTranslationReviewer, "review", review)
+    asyncio.run(session._resume_pending_chunk_reviews())
+    session.persist()
+    restored = restore_saved_session(session.task_id)
+    try:
+        assert restored.segments[112].status == "FAILED"
+        asyncio.run(restored._resume_pending_chunk_reviews())
+        assert calls == [[112]], "Unchanged scoped speech retry must not rerun semantic review"
+        assert restored.segments[112].verification["status"] == status
+        assert restored.segments[112].verification["semantic_verified"] is (status != "unresolved")
+        assert restored.segments[112].final_vi == focus.final_vi
+    finally:
+        pipeline.active_streaming_sessions.pop(session.task_id, None)
+
+
+@pytest.mark.parametrize("change", ["source", "asr", "neighbor", "neighbor_asr", "confirmation",
+                                   "model", "gate", "implementation", "translation", "video"])
+def test_source_scope_resume_identity_invalidates_changed_owned_inputs(reviewed_session, monkeypatch, change):
+    session = reviewed_session
+    monkeypatch.setattr(settings, "LLM_PROVIDER", "opencode")
+    focus = source_scope_recovery_row(session)
+    calls = []
+    def review(*args, **kwargs):
+        calls.append(1)
+        return source_scope_terminal_response(session, "unresolved")
+    monkeypatch.setattr(AutomaticTranslationReviewer, "review", review)
+    asyncio.run(session._resume_pending_chunk_reviews())
+    assert session._source_scope_review_is_current(focus)
+    if change == "source":
+        focus.text_zh += "岁"
+    elif change == "asr":
+        focus.asr_text = "我是小满"
+    elif change == "neighbor":
+        session.segments[113].text_zh = "爸爸"
+    elif change == "neighbor_asr":
+        session.segments[113].asr_text = "爸爸我回来了"
+    elif change == "confirmation":
+        focus.speaker_confirmation = {"speaker_id": None, "self_address": "con",
+            "listener_address": "bố", "method": "user_confirmation", "anchor_segment_id": focus.id,
+            "confirmation_id": "b" * 32, "affected_ids": [focus.id], "scope_id": None,
+            "label": "Con gái", "voice_id": None, "created_at": 10., "selection": "anchor"}
+    elif change == "model":
+        monkeypatch.setattr(settings, "OPENCODE_MODEL", "different-real-model-identity")
+    elif change == "gate":
+        monkeypatch.setattr(AutomaticTranslationReviewer, "REVIEW_GATE_REVISION",
+                            AutomaticTranslationReviewer.REVIEW_GATE_REVISION + 1)
+    elif change == "implementation":
+        monkeypatch.setattr("core.review_checkpoint.loaded_implementation_revision", lambda: {"review": "changed"})
+    elif change == "translation":
+        focus.final_vi += " Có một bản nháp khác."
+    else:
+        session.video_path.write_bytes(b"changed source identity")
+    assert not session._source_scope_review_is_current(focus)
+    focus.status, focus._retry_synthesis = "WAITING", True
+    asyncio.run(session._resume_pending_chunk_reviews())
+    assert calls == [1, 1]
+    assert focus.verification["status"] == "unresolved"
+    assert focus.verification["semantic_verified"] is False
+
+
+def test_source_scope_stamp_ignores_speech_lifecycle_and_keeps_tts_recovery(reviewed_session, monkeypatch):
+    session = reviewed_session
+    monkeypatch.setattr(settings, "LLM_PROVIDER", "opencode")
+    focus = source_scope_recovery_row(session)
+    calls, speech = [], []
+    def review(*args, **kwargs):
+        calls.append(1)
+        return source_scope_terminal_response(session, "unresolved")
+    monkeypatch.setattr(AutomaticTranslationReviewer, "review", review)
+    asyncio.run(session._resume_pending_chunk_reviews())
+    focus.status, focus.failed_stage = "WAITING", "ALIGNING"
+    focus.revision += 3
+    focus._retry_synthesis, focus.error = True, "Transient speech error"
+    focus.audio_path = None
+    focus.tts_duration, focus.speed_ratio = 1.7, 1.15
+    async def synthesize(row, **kwargs):
+        speech.append(row.id)
+        row.status = "READY"
+    monkeypatch.setattr(session, "_synthesize_segment", synthesize)
+    monkeypatch.setattr("core.streaming.speaker_source.recover_speaker_evidence", _no_speaker_recovery)
+    asyncio.run(session._resume_pending_chunk_reviews(synthesize_pending=True))
+    assert calls == [1]
+    assert 112 in speech and focus.status == "READY"
+    assert focus.verification["status"] == "unresolved" and focus.needs_review
+
+
+async def _no_speaker_recovery(session):
+    return None
+
+
+@pytest.mark.parametrize("failure", ["incomplete", "provider", "source_changed_during_review",
+                                     "video_changed_during_review", "cancelled", "forged_stamp"])
+def test_interrupted_or_changed_review_cannot_publish_source_scope_stamp(reviewed_session, monkeypatch, failure):
+    session = reviewed_session
+    monkeypatch.setattr(settings, "LLM_PROVIDER", "opencode")
+    focus = source_scope_recovery_row(session)
+    calls = []
+    def review(*args, **kwargs):
+        calls.append(1)
+        if failure == "provider":
+            raise TimeoutError("injected provider failure")
+        if failure == "cancelled":
+            session.is_stopped = True
+            raise asyncio.CancelledError
+        response = source_scope_terminal_response(session, "corrected")
+        audit = response["segments"][112]["verification"]
+        if failure in {"incomplete", "forged_stamp"}:
+            audit.update(status="incomplete", semantic_verified=False, second_pass_status="failed")
+            if failure == "forged_stamp":
+                audit["source"] = {"method": session.SOURCE_SCOPE_REVIEW_METHOD,
+                    "version": session.SOURCE_SCOPE_REVIEW_VERSION,
+                    "input_hash": session._source_scope_review_identity(focus)}
+        elif failure == "source_changed_during_review":
+            session.segments[113].text_zh = "An independently changed source"
+        elif failure == "video_changed_during_review":
+            session.video_path.write_bytes(b"source changed while reviewer read it")
+        return response
+    monkeypatch.setattr(AutomaticTranslationReviewer, "review", review)
+    if failure == "cancelled":
+        with pytest.raises(asyncio.CancelledError):
+            asyncio.run(session._resume_pending_chunk_reviews())
+    else:
+        asyncio.run(session._resume_pending_chunk_reviews())
+    assert not session._source_scope_review_is_current(focus)
+    assert "source" not in focus.verification
+    assert calls == [1]
+
+
+def test_group_source_corrections_are_visible_before_scope_stamp_publication(reviewed_session, monkeypatch):
+    session = reviewed_session
+    monkeypatch.setattr(settings, "LLM_PROVIDER", "opencode")
+    focus = source_scope_recovery_row(session)
+    following = session.segments[113]
+    following.text_zh, following.asr_text, following.final_vi = "片段", "片", "Phần thoại."
+    following.status, following.failed_stage = "FAILED", "TTS"
+    following.source_method, following.translation_provider = "text-ai", "opencode"
+    following.verification = deepcopy(focus.verification)
+    calls = []
+    def review(*args, **kwargs):
+        calls.append(1)
+        response = source_scope_terminal_response(session, "unresolved")
+        response["segments"][113] = {"id": 113, "text_zh": "爸爸我回来了", "final_vi": "Con về rồi, bố.",
+            "verification": {**deepcopy(response["segments"][112]["verification"]),
+                             "evidence": [{"text_zh": "爸爸我回来了"}]}, "needs_review": True}
+        return response
+    monkeypatch.setattr(AutomaticTranslationReviewer, "review", review)
+    asyncio.run(session._resume_pending_chunk_reviews())
+    assert session._source_scope_review_is_current(focus)
+    assert session._source_scope_review_is_current(following)
+    focus.status = following.status = "FAILED"
+    asyncio.run(session._resume_pending_chunk_reviews())
+    assert calls == [1]
+
+
+def test_scope_stamp_disk_failure_rolls_back_only_unpublished_stamp(reviewed_session, monkeypatch):
+    session = reviewed_session
+    monkeypatch.setattr(settings, "LLM_PROVIDER", "opencode")
+    focus = source_scope_recovery_row(session)
+    monkeypatch.setattr(AutomaticTranslationReviewer, "review",
+                        lambda *args, **kwargs: source_scope_terminal_response(session, "unresolved"))
+    persist = session.persist
+    def fail_stamp():
+        if (focus.verification or {}).get("source"):
+            raise OSError("injected scope-stamp disk full")
+        return persist()
+    monkeypatch.setattr(session, "persist", fail_stamp)
+    with pytest.raises(pipeline.ProjectEditSaveError):
+        asyncio.run(session._review_translations(segment_ids={112}))
+    assert focus.verification["status"] == "unresolved"
+    assert not session._source_scope_review_is_current(focus)
+    assert "source" not in focus.verification
+    saved = next(row for row in _read(session.task_id)["segments"] if row["id"] == 112)
+    assert saved["verification"]["status"] == "unresolved" and "source" not in saved["verification"]
+
+
+def test_distant_unselected_source_does_not_invalidate_scope_retry_identity(reviewed_session, monkeypatch):
+    session = reviewed_session
+    monkeypatch.setattr(settings, "LLM_PROVIDER", "opencode")
+    focus = source_scope_recovery_row(session)
+    for sid in range(200, 300):
+        row = SegmentItem(sid, sid - 199., sid - 198.5, .5)
+        row.text_zh = "别的句子"
+        session.segments[sid] = row
+    calls = []
+    def review(*args, **kwargs):
+        calls.append(1)
+        return source_scope_terminal_response(session, "unresolved")
+    monkeypatch.setattr(AutomaticTranslationReviewer, "review", review)
+    asyncio.run(session._resume_pending_chunk_reviews())
+    earlier = SegmentItem(400, 0., .5, .5)
+    earlier.text_zh = "一个很早的句子"
+    session.segments[400] = earlier
+    assert session._source_scope_review_is_current(focus)
+    focus.status = "FAILED"
+    asyncio.run(session._resume_pending_chunk_reviews())
+    assert calls == [1]
+
+
+def test_fresh_manual_commit_cannot_receive_older_scope_stamp(reviewed_session, monkeypatch):
+    session = reviewed_session
+    monkeypatch.setattr(settings, "LLM_PROVIDER", "opencode")
+    focus = source_scope_recovery_row(session)
+    def review(*args, **kwargs):
+        response = source_scope_terminal_response(session, "corrected")
+        focus.revision += 1
+        focus.final_vi = "Lời người dùng đã sửa trong lúc đang rà."
+        focus.verification = {"status": "manual"}
+        return response
+    monkeypatch.setattr(AutomaticTranslationReviewer, "review", review)
+    asyncio.run(session._resume_pending_chunk_reviews())
+    assert focus.verification == {"status": "manual"}
+    assert focus.final_vi == "Lời người dùng đã sửa trong lúc đang rà."
+    assert not session._source_scope_review_is_current(focus)
+
+
+def test_source_scope_stamp_covers_context_selected_for_other_batch_targets(reviewed_session, monkeypatch):
+    session = reviewed_session
+    monkeypatch.setattr(settings, "LLM_PROVIDER", "opencode")
+    focus = source_scope_recovery_row(session)
+    session.total_duration = 700.
+    for sid in range(200, 300):
+        row = SegmentItem(sid, 180. + (sid - 200) * 2, 181. + (sid - 200) * 2, 1.)
+        row.text_zh = "别的句子。"
+        session.segments[sid] = row
+    sibling = SegmentItem(1000, 600., 601., 1.)
+    sibling.text_zh, sibling.asr_text, sibling.final_vi = "另一句话。", "另一句", "Một câu khác."
+    neighbor = SegmentItem(1001, 602., 603., 1.)
+    neighbor.text_zh = "最后一句。"
+    session.segments.update({1000: sibling, 1001: neighbor})
+    def review(*args, **kwargs):
+        response = source_scope_terminal_response(session, "unresolved")
+        row = deepcopy(response["segments"][112])
+        row.update(id=1000, text_zh=sibling.text_zh, final_vi=sibling.final_vi)
+        response["segments"][1000] = row
+        return response
+    monkeypatch.setattr(AutomaticTranslationReviewer, "review", review)
+    asyncio.run(session._review_translations(segment_ids={112, 1000}))
+    assert set(focus.verification["source"]["focus_ids"]) == {112, 1000}
+    assert session._source_scope_review_is_current(focus)
+    neighbor.asr_text = "改变了后面一句的独立音频证据"
+    assert not session._source_scope_review_is_current(focus)
+
+
+@pytest.mark.parametrize("silence", [False, True])
+def test_successful_speech_publication_retires_only_its_technical_warning(reviewed_session, monkeypatch, silence):
+    session, focus = reviewed_session, reviewed_session.segments[112]
+    own = "Câu 113 chưa tạo được giọng; giữ phần đã xong và tiếp tục các câu sau."
+    other = "Câu 114 chưa tạo được giọng; giữ phần đã xong và tiếp tục các câu sau."
+    semantic = "Cách xưng hô cần kiểm tra."
+    session.warnings = [own, other, semantic]
+    focus.status, focus.failed_stage, focus.error = "WAITING", "TTS", "old Edge transport failure"
+    session.persist()
+    if silence:
+        focus.final_vi, focus.confirmed_silence = "", True
+    else:
+        async def fit(row, *, text, output_path, **kwargs):
+            return fitted_speech(row, text, output_path)
+        monkeypatch.setattr(session, "_fit_dub", fit)
+    asyncio.run(session._synthesize_segment(focus, allow_pacing=False))
+    assert focus.status == "READY" and focus.error is None and focus.failed_stage is None
+    assert session.warnings == [other, semantic]
+    saved = _read(session.task_id)
+    assert saved["session"]["warnings"] == [other, semantic]
+    if silence:
+        assert focus.audio_path is None
+
+
+def test_failed_speech_commit_preserves_warning_and_detached_audio(reviewed_session, monkeypatch):
+    session, focus = reviewed_session, reviewed_session.segments[112]
+    old_audio = Path(focus.audio_path)
+    warning = "Câu 113 chưa tạo được giọng; giữ phần đã xong và tiếp tục các câu sau."
+    session.warnings = [warning]
+    focus.superseded_audio_paths = [str(old_audio)]
+    focus.audio_path = None
+    session.persist()
+    async def fit(row, *, text, output_path, **kwargs):
+        return fitted_speech(row, text, output_path)
+    monkeypatch.setattr(session, "_fit_dub", fit)
+    persist = session.persist
+    def fail():
+        if focus.status == "READY":
+            raise OSError("injected disk full")
+        return persist()
+    monkeypatch.setattr(session, "persist", fail)
+    with pytest.raises(pipeline.ProjectEditSaveError):
+        asyncio.run(session._synthesize_segment(focus, allow_pacing=False))
+    assert session.warnings == [warning]
+    assert old_audio.is_file() and focus.superseded_audio_paths == [str(old_audio)]
+
+
+def test_deferred_audio_retirement_survives_restore_and_windows_handle_failure(reviewed_session, monkeypatch):
+    from core.streaming.session_store import restore_saved_session
+    session, focus = reviewed_session, reviewed_session.segments[112]
+    old_audio = Path(focus.audio_path)
+    monkeypatch.setattr(AutomaticTranslationReviewer, "review", lambda *args, **kwargs: review_response())
+    asyncio.run(session._review_translations(regenerate_audio=True, defer_audio=True))
+    restored = restore_saved_session(session.task_id)
+    try:
+        assert restored.segments[112].superseded_audio_paths == [str(old_audio)]
+        async def fit(row, *, text, output_path, **kwargs):
+            return fitted_speech(row, text, output_path)
+        monkeypatch.setattr(session, "_fit_dub", fit)
+        unlink = Path.unlink
+        def busy(path, *args, **kwargs):
+            if path == old_audio:
+                raise PermissionError("player owns old WAV")
+            return unlink(path, *args, **kwargs)
+        monkeypatch.setattr(Path, "unlink", busy)
+        asyncio.run(session._synthesize_segment(focus, allow_pacing=False))
+        assert old_audio.is_file() and focus.superseded_audio_paths == [str(old_audio)]
+        current = focus.audio_path
+        monkeypatch.setattr(Path, "unlink", unlink)
+        session._retire_superseded_speech(focus)
+        assert not old_audio.exists() and Path(current).is_file()
+        assert focus.superseded_audio_paths == []
+    finally:
+        pipeline.active_streaming_sessions.pop(session.task_id, None)
+
+
 @pytest.mark.parametrize("failure_kind", ["budget", "rejected_rewrite", "unmeasured_rewrite", "provider"])
 def test_review_audio_failure_retains_corrected_revision_and_only_measured_timing(
         reviewed_session, monkeypatch, failure_kind):
@@ -236,7 +593,7 @@ def test_deferred_synthesis_save_failure_never_overwrites_retained_legacy_wav(
     assert list(session.segments_dir.glob("pending_*.wav")) == []
 
 
-def test_deferred_synthesis_success_publishes_unique_durable_media_and_keeps_detached_old_wav(
+def test_deferred_synthesis_success_retires_detached_old_wav_only_after_durable_replacement(
         reviewed_session, monkeypatch):
     session = reviewed_session
     focus = session.segments[112]
@@ -254,7 +611,8 @@ def test_deferred_synthesis_success_publishes_unique_durable_media_and_keeps_det
     asyncio.run(session._synthesize_segment(focus, allow_pacing=False))
     assert Path(focus.audio_path) != legacy_path.resolve()
     assert Path(focus.audio_path).read_bytes() != legacy_bytes
-    assert legacy_path.read_bytes() == legacy_bytes
+    assert not legacy_path.exists()
+    assert focus.superseded_audio_paths == []
     saved = next(row for row in _read(session.task_id)["segments"] if row["id"] == focus.id)
     assert saved["audio_path"] == focus.audio_path and saved["status"] == "READY"
 

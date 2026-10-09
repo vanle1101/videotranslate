@@ -26,6 +26,11 @@ def _number(value):
 
 
 def _source_identity(session):
+    from core.streaming.source_revision import source_runtime_identity
+    return {**_media_identity(session), "runtime": source_runtime_identity(session)}
+
+
+def _media_identity(session):
     source = session.video_path.resolve(strict=True)
     stat = source.stat()
     return {"version": VERSION, "source": str(source), "size": stat.st_size,
@@ -36,7 +41,7 @@ def _source_identity(session):
 
 def ensure_source_identity(session):
     """Pin the media across intervals, promotion, retry and export."""
-    current = _source_identity(session)
+    current = _media_identity(session)
     media = {key: current[key] for key in ("source", "size", "mtime_ns", "ctime_ns", "file_id")}
     signature = hashlib.sha256(json.dumps(media, sort_keys=True).encode("utf-8")).hexdigest()
     saved = getattr(session, "_chunked_source_identity", "")
@@ -65,13 +70,24 @@ def _record_path(session, start):
     return session.cache_dir / "source_preparation" / f"{round(start * 1000):012d}.json"
 
 
-def _load(session, start):
+def _load(session, start, *, background_only=False):
     path = _record_path(session, start)
     try:
         if path.is_symlink() or path.stat().st_size > 4_000_000:
             return None
         record = json.loads(path.read_text(encoding="utf-8"))
-        if (record["identity"] != _source_identity(session) or record["start"] != start
+        expected = _media_identity(session) if background_only else _source_identity(session)
+        if not background_only and not expected["runtime"]["whisper_asset_revision_known"]:
+            return None
+        actual = {key: record["identity"].get(key) for key in expected} if background_only else record["identity"]
+        if background_only:
+            # The old BGM's measured timestamps, SHA-256 and suppression are
+            # still validated. A changed recognition model does not invalidate
+            # already-committed background bytes or require ASR of that prefix.
+            for key in ("model", "compute"):
+                expected.pop(key, None)
+                actual.pop(key, None)
+        if (actual != expected or record["start"] != start
                 or not _number(record["end"]) or not start < record["end"] <= session.total_duration + .05
                 or not isinstance(record["rows"], list)):
             return None
@@ -215,7 +231,7 @@ async def publish_background_prefix(session, new_record):
         records = []
     cursor = records[-1]["end"] if records else 0.0
     while cursor < new_record["end"] - .05:
-        record = new_record if abs(cursor - new_record["start"]) < .001 else await session._run_blocking(_load, session, cursor)
+        record = new_record if abs(cursor - new_record["start"]) < .001 else await session._run_blocking(_load, session, cursor, background_only=True)
         if record is None or record["end"] <= cursor:
             raise ValueError("Thiếu đoạn nhạc nền đã lưu; chưa thể ghép bản xem trước.")
         records.append(record)

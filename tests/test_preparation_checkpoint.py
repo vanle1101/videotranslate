@@ -11,6 +11,10 @@ from core.streaming.pipeline import SegmentItem
 @pytest.fixture
 def prepared(tmp_path, monkeypatch):
     monkeypatch.setattr(settings, "BASE_DIR", tmp_path)
+    model = tmp_path / "workspace/models" / f"faster-whisper-{settings.WHISPER_MODEL_SIZE}"
+    model.mkdir(parents=True)
+    for name in ("config.json", "model.bin", "tokenizer.json", "vocabulary.json"):
+        (model / name).write_bytes(b"isolated asset-identity fixture; never used for inference")
     root = tmp_path / "workspace" / "cache" / "source-run"
     root.mkdir(parents=True)
     source = tmp_path / "source.mp4"
@@ -32,6 +36,18 @@ def test_preparation_survives_new_session_and_keeps_source_unchanged(prepared):
     assert saved["segments"][0]["text_zh"] == "你好"
     assert saved["assets"]["raw_audio_16k"]["path"] == str(prepared.raw_audio_16k.resolve())
     assert not list(checkpoint.location(checkpoint.identity(prepared)).parent.glob("*.tmp"))
+
+
+def test_preparation_cache_accepts_real_ct2_text_vocabulary_and_rejects_missing_assets(prepared):
+    model = settings.BASE_DIR / "workspace/models" / f"faster-whisper-{settings.WHISPER_MODEL_SIZE}"
+    (model / "vocabulary.json").unlink()
+    (model / "vocabulary.txt").write_bytes(b"isolated CTranslate2 text-vocabulary identity fixture")
+    checkpoint.save(prepared)
+    assert checkpoint.identity(prepared)["runtime"]["whisper_asset_revision_known"]
+    assert checkpoint.load(prepared) is not None
+    (model / "model.bin").unlink()
+    assert not checkpoint.identity(prepared)["runtime"]["whisper_asset_revision_known"]
+    assert checkpoint.load(prepared) is None
 
 
 @pytest.mark.parametrize("damage", ["source", "audio", "model", "json", "timing", "foreign", "missing"])
