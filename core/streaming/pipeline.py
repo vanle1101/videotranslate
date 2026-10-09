@@ -355,6 +355,13 @@ class StreamingPipelineSession:
                 continue
             row = {"id": item.id, "start": item.start, "end": item.end,
                    "text_zh": source, "asr_text": asr_source}
+            # Timing/pacing must receive the same measured provenance as the
+            # original translation. Read owned source metadata, never role
+            # labels invented in a provider's translated review response.
+            for name in SOURCE_METADATA_FIELDS:
+                evidence = getattr(item, name, None)
+                if evidence is not None:
+                    row[name] = deepcopy(evidence)
             # Keep the focused review's independent address verdict in the
             # private context used by pacing.  It is evidence for the model,
             # never a replacement for the source-only reading.

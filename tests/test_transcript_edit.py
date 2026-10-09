@@ -76,6 +76,23 @@ def test_unknown_source_rows_never_advertise_one_hundred_percent(session):
     assert progress["progress_pct"] is None and progress["status"] == "RUNNING"
 
 
+def test_pipeline_pacing_context_retains_owned_source_provenance_without_role_inference(session):
+    row = session.segments[0]
+    row.speaker_id = "speaker-a"
+    row.speaker_evidence = {"speaker_id":"speaker-a", "method":"audio_diarization",
+        "scope_id":"offline-fixture", "model":"fixture-only", "verified":False, "confidence":.4}
+    row.source_asr_row_id, row.source_asr_start, row.source_asr_end = 9, row.start, row.end
+    row.source_piece_index, row.source_piece_count = 0, 1
+    context = session._dialogue_context_before(row, _review_context={row.id:{
+        "id":row.id, "speaker_id":"invented-provider-role", "text_zh":row.text_zh}})
+    focused = next(item for item in context if item["id"] == row.id)
+    assert focused["speaker_id"] == "speaker-a"
+    assert focused["speaker_evidence"]["verified"] is False
+    assert focused["source_asr_row_id"] == 9 and focused["source_piece_count"] == 1
+    focused["speaker_evidence"]["confidence"] = 1
+    assert row.speaker_evidence["confidence"] == .4
+
+
 def test_finished_source_stage_cannot_publish_overall_one_hundred_before_mp4(session):
     session.auto_export_result = True
     asyncio.run(session.report_progress("visual", "Nguồn đã dịch hết; còn chờ giọng và MP4.", 100))

@@ -4,6 +4,56 @@
 
 **PARTIAL: runtime recovery and media checks passed; complete semantic and long-video acceptance remain pending.** Target: Douyin2TikTok AI Studio using the configured OpenCode Muse model. Seedream/Seedance graph tests do not apply to this application. Tests honor background-only operation through the actual production Qt/WebEngine page offscreen and muted. HTTP, Muse, Edge-TTS and exported media are real. Physical desktop clicks/native file-picker and tray interaction are not claimed.
 
+### Segmented-pipeline audit — latest code, October 9, 2026
+
+**Acceptance PENDING / incomplete.** Current production recovery uses commit `fc65c0a`, OpenCode Muse and Edge-TTS, through the actual Qt/WebEngine History → Retry flow offscreen and muted. It does not use mocked provider/media success. The older entries below are historical evidence and must not be read as the current state.
+
+#### Architecture and root causes
+
+| Finding | Cause | Implemented correction | Acceptance limit |
+| --- | --- | --- | --- |
+| Slow or hanging Muse | Independent clients lacked shared admission/backpressure, bounded stage deadlines and a provider circuit. | Shared FIFO queue (default one active request), independent 180s admission deadline, finite stage/request deadlines, exponential retry/jitter, circuit recovery, cancellation and validated exact-identity cache. | Free-provider availability/latency is external; retries are bounded, never claimed guaranteed successful. No unconfigured fallback is enabled. |
+| Malformed structured replies | Several translation/pacing/review paths parsed permissive JSON or assumed required fields. | Shared schemas separate syntax/missing/type/content failures; bounded structural repair; successful repaired responses cache under the original identity; bounded redacted diagnostics. Valid negative semantic verdicts are not repaired to change the vote. | Real semantic disagreement remains a review/timing issue, not schema success. |
+| Unverified speakers/address | Source words/OCR matching did not establish speaker/listener identities; context/provenance was lost between stages. | Preserve speaker/utterance evidence and ASR provenance through source correction, translation, review, pacing, hashes and durable projects. OCR agreement remains independent from address proof. | No genuine audio diarization model is installed/integrated. Stable audio-grounded speaker identity and the requested one-time role-confirmation propagation remain incomplete. Uncertain roles are not force-approved. |
+| Short-line timing failure | Vietnamese TTS can exceed the safe interval even at the natural 1.15× cap; rejected shortening cannot be treated as a successful fit. | Measure real speech; use only measured neighboring silence, bounded local reflow, speech cache and independent meaning/address/fluency checks; durable `TIMING_CONFLICT` records required/available seconds and remedy. | Sentence 113 and every other unfit line require a real fitting/faithful result or remain unresolved. No words are cut and no speaker overlap is accepted. |
+| Fragmented semantics | A measured ASR/VAD row was incorrectly treated as a complete translation sentence. | Semantic units retain all source parts and before/after context without shifting IDs/timestamps. Only audio/user-grounded continuity permits combined dubbing. | Unknown speaker continuity cannot justify merging two voices. |
+| Monolithic failure/recovery | One failed interval could abort the tail; coarse coverage could hide gaps or restart healthy work. | Stable interval ledger and atomic manifests; separate attempted/contiguous coverage; interrupted RUNNING → RETRY_PENDING; independent interval retry and retained valid WAVs; bounded source/review queue. New full jobs route through bounded preparation; legacy prepared sessions retain a reusable compatibility method. | A failed durable write stops advancement so unsaved success is not displayed. Existing capacity bounds still apply. |
+| False completion/cancellation | Prepared speech without an MP4 remained RUNNING; draining Stop appeared STOPPED, and a finished event could become Completed. | Distinct PREPARED and CANCELLING backend/UI states; Stop drains all owners; no overall 100% before final validation; real per-stage 100% is kept separately. | COMPLETED for automatic result requires validated published output; prepared or cancelled events cannot manufacture a result. |
+| Resource-pressure status failure | Real latest recovery exited after Windows WinError1450 in repeated filesystem resolution for the shared AI queue identity. | Queue identity now uses lexical normalization with no filesystem resolution on progress reads; save failures include redacted diagnostic details. Media children have bounded file-backed output, kill/wait and explicit Windows handle release. | This removes the reproduced status-path dependency; it does not guarantee success under exhausted system RAM/commit. |
+| Long output verification | A saved one-hour MP4 could pass with up to 36s duration mismatch under a proportional tolerance. | Saved-output and final-render duration tolerance is absolute 0.5s; final output remains temporary until validation. RF64 and file-backed mixing avoid RIFF/whole-audio limits. | An actual multi-hour full render remains untested. |
+
+#### Real UI tests and recovery
+
+- Latest clean-process History → Retry → existing picture/dub playback → Stop: **PASS** on `b53999e`, PID7008/backend62598. Source preview readyState4, 640×360; real row-0 audio advanced to0.054217s, no media/JavaScript errors. 149 actual retained WAV hashes matched before/after Stop; two other READY rows do not have spoken WAVs. Row0 remains `Bố.`, revision1, SHA256 `27cc59e232232bdba7b8571179c9b6e13c1911f329d1b3e5fb5842f2953bf38e`. No late row change after five seconds. Owned process exited.
+- Interrupted real recovery PID24556/backend50730: **FAIL**, status endpoint returned HTTP500 following WinError1450. Last valid atomic checkpoint preserved193 rows (151READY,7FAILED,34WAITING,1TTS), source316.64s, contiguous translated270.07s. No full320s MP4 was created. Final unsaved metadata error was only logged as ValueError by that older code; its exact cause is not established. The new code logs redacted details for a reproducible diagnosis.
+- Fresh recovery on `fc65c0a`: **IN PROGRESS**, PID36760/backend52453. Existing QA project `76f5aa6b`, actual320.040635s H264/AAC source. Initial snapshot:151 ready rows,103COMPLETED,48REVIEW_REQUIRED,20FAILED,22PENDING. These are evolving runtime counts, not final acceptance.
+- Original user project `5a7b66a9` is preserved. Its durable snapshot has197WAITING rows and FAILED session status; it does not contain the claimed13FAILED row snapshot. Do not claim that exact historical set has been recovered from a checkpoint that lacks it. The retained QA continuation reuses the same source and real stage artifacts.
+- Full current320s export, full decode and reopen/playback: **NOT YET PASSED**. Earlier real15s output verification is historical evidence only.
+
+#### Automated checks
+
+- Latest targeted state/store/API checks:307passed. Contextual pacing/schema:123passed plus47subtests. Legacy ASR/timing plus real silent-source rejection:88passed. Media/RF64/handle checks:40passed. Saved-duration regression passed with the strict0.5s bound.
+- Broad rerun before the Windows process-identity correction:2259passed,1failed,1skipped,127subtests,173.91s. Failure used bare PID existence after cancellation. A real15-trial process probe showed immediate PID reuse/registry fluctuation; the assertion now tracks the original process identity. The bounded real child tests passed after that correction. This is not relabeled as a broad-suite PASS; the final full rerun remains required.
+- Native desktop/lifecycle/local-runtime:44passed,17.86s, two upstream WebSocket deprecation warnings.
+- JavaScript:225passed. Runtime readiness:existing dependencies, FFmpeg/ffprobe, configured Muse CLI/key and Edge-TTS passed. TypeScript/npm build/lint are N/A for this Python/Qt project; no unconfigured check is claimed.
+
+#### Measured simulated ledger benchmark (no ASR, provider, TTS or render)
+
+| Simulated source | Intervals | Ledger/recovery seconds | Traced Python peak bytes | Checkpoint JSON bytes |
+| --- | ---: | ---: | ---: | ---: |
+| 5min | 5 | 0.000516 | 4442 | 1246 |
+| 30min | 30 | 0.001153 | 16372 | 7469 |
+| 1h | 60 | 0.002024 | 28808 | 14963 |
+| 4h | 240 | 0.011822 | 113136 | 59961 |
+
+Each workload retained a60s contiguous prefix while the second interval became RETRY_PENDING; later successful intervals remained successful. These measurements cover the ledger only. They are **not** real video throughput, cache-hit rates, peak application RAM/VRAM, or long-media acceptance. The running real recovery samples process-tree RSS every5s and records actual queue counters/elapsed time at a terminal state.
+
+#### Known limits and incidents
+
+- Multi-hour source translation/render, accurate diarization and one-time user speaker confirmation are not accepted yet. Manifest limits:50000rows,64MiB expanded JSON and16MiB stored envelope; exceeding capacity is an explicit preserved-checkpoint failure. No claimed unlimited duration.
+- During an intermediate session-store edit, an audio-validation function temporarily lacked its successful return. A QA process imported that intermediate version and stripped146 metadata references while leaving WAV files intact. References were restored from unique surviving owned WAVs, saved timing and measured valid slots; no WAV bytes were modified. Final store/context regression and subsequent UI Stop/reopen passed. This incident is recorded instead of concealed.
+- No dependencies reinstalled, local translation AI enabled, unconfigured fallback selected, backups created, or user source deleted. Previously denied cleanup remains denied; no alternate deletion route is used.
+
 ### Latest checkpoint — 10:17
 
 **Full audit acceptance is not achieved.** The long QA continuation `76f5aa6b` remains RUNNING at translated source 246.07/320.040635s, with 149 READY/PLAYED rows and no full MP4. Some newer review requests succeed while others exhaust bounded deadlines; no blanket network outage or complete semantic acceptance is claimed.
