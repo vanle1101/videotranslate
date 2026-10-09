@@ -1232,6 +1232,10 @@ async def edit_streaming_segment(task_id: str, segment_id: int, req: SegmentEdit
         raise HTTPException(status_code=409, detail="Video đang được xuất. Hãy chờ xuất xong trước khi sửa lời thoại.")
     try:
         segment = await session.edit_segment(segment_id, req.final_vi, confirm_silence=req.confirm_silence)
+    except asyncio.CancelledError:
+        # A real Stop drains the speech worker before the edit returns here.
+        # Preserve cancellation as a terminal outcome rather than Uvicorn 500.
+        raise HTTPException(status_code=409, detail="Đã dừng tạo lại giọng. Nội dung và âm thanh cũ vẫn được giữ.") from None
     except ProjectEditSaveError as error:
         raise HTTPException(status_code=507, detail=str(error)) from None
     except KeyError:

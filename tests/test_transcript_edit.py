@@ -928,6 +928,37 @@ def test_new_stop_cancels_stopped_repair_drains_late_write_and_allows_new_edit_r
     assert not list(session.segments_dir.glob("edit_*"))
 
 
+def test_stop_during_http_repair_returns_actionable_cancel_instead_of_server_failure(session):
+    from core.runtime_context import current_execution_context
+    row = mark_failed_speech(session, stopped=True)
+    session.persist()
+    before = deepcopy(row.to_dict())
+    entered, release = threading.Event(), threading.Event()
+    def synthesize(*, output_path, **kwargs):
+        check = current_execution_context().cancel_check
+        entered.set()
+        assert release.wait(3)
+        assert check()
+        Path(output_path).write_bytes(b"late cancelled voice")
+    session.tts_engine.synthesize.side_effect = synthesize
+    async def run():
+        async with client() as api:
+            editing = asyncio.create_task(api.patch(route(session), json={"final_vi": "Lời mới"}))
+            await wait_until(entered.is_set)
+            stopping = asyncio.create_task(api.post(f"/api/tasks/{session.task_id}/stop"))
+            try:
+                await wait_until(lambda: session._edit_cancellations and
+                                 any(token.is_set() for token, _ in session._edit_cancellations.values()))
+            finally:
+                release.set()
+            cancelled = await editing
+            assert cancelled.status_code == 409
+            assert "Đã dừng" in cancelled.json()["detail"]
+            assert (await stopping).status_code == 200
+            assert row.to_dict() == before and Path(row.audio_path).read_bytes() == b"old audio"
+    asyncio.run(run())
+
+
 def test_inflight_edit_blocks_other_edits_and_export_but_keeps_existing_audio(session):
     entered, release = threading.Event(), threading.Event()
 
