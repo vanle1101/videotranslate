@@ -98,7 +98,7 @@ META_FIELDS = frozenset((
     "reference_zh reference_vi equivalent different_source same_meaning text_preserved "
     "mode input_duration output_duration sample_rate channels elapsed_seconds rtf "
     "diagnostic audio_evidence audio_consensus audio_audit_status review_gate_revision"
-    " state attempts input_hash error_code updated_at"
+    " state attempts input_hash error_code updated_at focus_ids"
     " scope_id confirmation_id code required_seconds available_seconds max_speed remedy"
     " speaker_evidence speaker_confirmation utterance_id utterance_evidence source_asr_row_id source_asr_start source_asr_end source_piece_index source_piece_count"
 ).split())
@@ -426,6 +426,14 @@ def _clean(value, *, depth=0):
                 result[key] = _clean_address_uses(item, depth=depth + 1)
             elif key == "source_scope_ids":
                 result[key] = _clean_source_scope_ids(item)
+            elif key == "focus_ids":
+                # Exact bounded review ownership must survive save/reopen.
+                # Reject arbitrary IDs rather than broadening an old stamp.
+                if (not isinstance(item, list) or not 0 < len(item) <= 16
+                        or any(type(sid) is not int or sid < 0 for sid in item)
+                        or len(set(item)) != len(item)):
+                    raise ValueError("Danh sách nhóm rà nguồn không hợp lệ.")
+                result[key] = list(item)
             elif key == "source_scope_window":
                 result[key] = _clean_source_scope_window(item)
             elif key in {"speaker_evidence", "utterance_evidence"}:

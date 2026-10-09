@@ -310,6 +310,7 @@ def test_fresh_manual_commit_cannot_receive_older_scope_stamp(reviewed_session, 
 
 
 def test_source_scope_stamp_covers_context_selected_for_other_batch_targets(reviewed_session, monkeypatch):
+    from core.streaming.session_store import restore_saved_session
     session = reviewed_session
     monkeypatch.setattr(settings, "LLM_PROVIDER", "opencode")
     focus = source_scope_recovery_row(session)
@@ -323,7 +324,9 @@ def test_source_scope_stamp_covers_context_selected_for_other_batch_targets(revi
     neighbor = SegmentItem(1001, 602., 603., 1.)
     neighbor.text_zh = "最后一句。"
     session.segments.update({1000: sibling, 1001: neighbor})
+    calls = []
     def review(*args, **kwargs):
+        calls.append(1)
         response = source_scope_terminal_response(session, "unresolved")
         row = deepcopy(response["segments"][112])
         row.update(id=1000, text_zh=sibling.text_zh, final_vi=sibling.final_vi)
@@ -333,8 +336,27 @@ def test_source_scope_stamp_covers_context_selected_for_other_batch_targets(revi
     asyncio.run(session._review_translations(segment_ids={112, 1000}))
     assert set(focus.verification["source"]["focus_ids"]) == {112, 1000}
     assert session._source_scope_review_is_current(focus)
+    session.persist()
+    restored = restore_saved_session(session.task_id)
+    try:
+        saved_focus = restored.segments[focus.id]
+        assert set(saved_focus.verification["source"]["focus_ids"]) == {112, 1000}
+        assert restored._source_scope_review_is_current(saved_focus)
+        asyncio.run(restored._resume_pending_chunk_reviews())
+        assert calls == [1], "Reopened bounded group must not repeat unchanged Muse review"
+        restored.segments[neighbor.id].asr_text = "改变了后面一句的独立音频证据"
+        assert not restored._source_scope_review_is_current(saved_focus)
+    finally:
+        pipeline.active_streaming_sessions.pop(session.task_id, None)
     neighbor.asr_text = "改变了后面一句的独立音频证据"
     assert not session._source_scope_review_is_current(focus)
+
+
+@pytest.mark.parametrize("ids", [[], [True], [-1], [1, 1], list(range(17)), "1"])
+def test_review_focus_ids_reject_invalid_durable_ownership(ids):
+    from core.streaming.session_store import _clean
+    with pytest.raises(ValueError, match="nhóm rà nguồn"):
+        _clean({"source": {"focus_ids": ids}})
 
 
 @pytest.mark.parametrize("silence", [False, True])
@@ -515,6 +537,62 @@ def test_review_audio_failure_retains_corrected_revision_and_only_measured_timin
     assert saved["timing_issue"] == focus.timing_issue
     assert saved["status"] == "FAILED" and saved["audio_path"] is None
     assert saved["text_zh"] == focus.text_zh and saved["final_vi"] == focus.final_vi
+    assert saved["superseded_audio_paths"] == [old_path]
+
+
+def test_inline_review_failed_speech_retires_old_wav_only_after_durable_retry(reviewed_session, monkeypatch):
+    from core.streaming.session_store import restore_saved_session
+    session, focus = reviewed_session, reviewed_session.segments[112]
+    old_path, old_bytes = Path(focus.audio_path), Path(focus.audio_path).read_bytes()
+    session.persist()
+    monkeypatch.setattr(AutomaticTranslationReviewer, "review", lambda *args, **kwargs: review_response())
+    async def fail_fit(*args, **kwargs):
+        raise RuntimeError("injected TTS disconnect during inline review")
+    monkeypatch.setattr(session, "_fit_dub", fail_fit)
+    asyncio.run(session._review_translations(regenerate_audio=True))
+    assert focus.audio_path is None and old_path.read_bytes() == old_bytes
+    saved = next(row for row in _read(session.task_id)["segments"] if row["id"] == focus.id)
+    assert saved["superseded_audio_paths"] == [str(old_path)]
+    restored = restore_saved_session(session.task_id)
+    try:
+        focus = restored.segments[112]
+        assert focus.audio_path is None and focus.superseded_audio_paths == [str(old_path)]
+        monkeypatch.setattr(restored, "_ensure_tts_engine", lambda: None)
+        async def fit(row, *, text, output_path, **kwargs):
+            return fitted_speech(row, text, output_path)
+        monkeypatch.setattr(restored, "_fit_dub", fit)
+        persist = restored.persist
+        def fail_commit():
+            if focus.status == "READY":
+                raise OSError("injected disk full at replacement publication")
+            return persist()
+        monkeypatch.setattr(restored, "persist", fail_commit)
+        with pytest.raises(pipeline.ProjectEditSaveError):
+            asyncio.run(restored._synthesize_segment(focus, allow_pacing=False))
+        assert old_path.read_bytes() == old_bytes
+        assert focus.audio_path is None and focus.superseded_audio_paths == [str(old_path)]
+        saved = next(row for row in _read(session.task_id)["segments"] if row["id"] == focus.id)
+        assert saved["audio_path"] is None and saved["superseded_audio_paths"] == [str(old_path)]
+
+        monkeypatch.setattr(restored, "persist", persist)
+        unlink = Path.unlink
+        retirements = []
+        def verify_committed_before_retirement(path, *args, **kwargs):
+            if path == old_path:
+                saved = next(row for row in _read(session.task_id)["segments"] if row["id"] == focus.id)
+                assert saved["status"] == "READY" and saved["audio_path"] == focus.audio_path
+                assert Path(saved["audio_path"]).is_file()
+                retirements.append(path)
+            return unlink(path, *args, **kwargs)
+        monkeypatch.setattr(Path, "unlink", verify_committed_before_retirement)
+        asyncio.run(restored._synthesize_segment(focus, allow_pacing=False))
+        assert retirements == [old_path] and not old_path.exists()
+        saved = next(row for row in _read(session.task_id)["segments"] if row["id"] == focus.id)
+        assert saved["status"] == "READY" and saved["audio_path"] == focus.audio_path
+        assert saved["superseded_audio_paths"] == [] and focus.superseded_audio_paths == []
+        assert Path(focus.audio_path).is_file() and focus.final_vi == "Thật sự không phải về đây."
+    finally:
+        pipeline.active_streaming_sessions.pop(session.task_id, None)
 
 
 @pytest.mark.parametrize("change", ["wording", "voice"])

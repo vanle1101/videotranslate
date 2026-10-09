@@ -1153,6 +1153,8 @@ class StreamingPipelineSession:
                     # audio for the corrected text. The old file stays on disk
                     # until the resumed worker atomically replaces it.
                     with self._durable_speaker_review_publication(segment):
+                        if segment.audio_path and segment.audio_path not in segment.superseded_audio_paths:
+                            segment.superseded_audio_paths.append(segment.audio_path)
                         self._apply_review_metadata(segment, row)
                         segment.revision += 1
                         segment.status, segment.failed_stage = "FAILED", "TTS"
