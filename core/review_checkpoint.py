@@ -6,6 +6,7 @@ Source content, adapter code, model assets and runtime versions form the namespa
 import hashlib
 from importlib import metadata
 import json
+import logging
 import os
 from pathlib import Path
 import re
@@ -206,4 +207,10 @@ class ReviewCheckpoint:
             return False
         finally:
             if temporary is not None:
-                temporary.unlink(missing_ok=True)
+                try:
+                    temporary.unlink(missing_ok=True)
+                except OSError:
+                    # Optional cache cleanup must not replace a validated
+                    # result, a write failure or the caller's cancellation.
+                    logging.getLogger("ai.execution").warning(
+                        "REVIEW_CACHE_TEMP_CLEANUP_FAILED code=cache_io")

@@ -114,3 +114,64 @@ def test_visual_checkpoint_uses_loaded_code_until_process_restart(tmp_path, monk
     assert processor._checkpoint_identity(video, rows, 1)["key"] != first["key"]
     monkeypatch.setattr(visual, "_PROCESS_VISUAL_REVISION", None)
     assert processor._checkpoint_identity(video, rows, 1) is None
+
+
+def test_failed_review_cache_replace_and_cleanup_preserve_prior_result(tmp_path, monkeypatch, caplog):
+    video = tmp_path / "source.mp4"
+    video.write_bytes(b"source")
+    checkpoint = cache.ReviewCheckpoint(video, "offline-model", directory=tmp_path / "checkpoints",
+                                        runtime_revision={"test": True})
+    stage, prior = {"kind": "review_batch"}, {"final_vi": "Lời đã kiểm tra."}
+    assert checkpoint.store(stage, prior)
+    original_replace, original_unlink = Path.replace, Path.unlink
+
+    def blocked_replace(path, target):
+        if path.parent == checkpoint.directory and path.suffix == ".tmp":
+            raise OSError("injected private write detail")
+        return original_replace(path, target)
+
+    def blocked_cleanup(path, *args, **kwargs):
+        if path.parent == checkpoint.directory and path.suffix == ".tmp":
+            raise PermissionError("injected private cleanup detail")
+        return original_unlink(path, *args, **kwargs)
+
+    with monkeypatch.context() as faults:
+        faults.setattr(Path, "replace", blocked_replace)
+        faults.setattr(Path, "unlink", blocked_cleanup)
+        assert checkpoint.store(stage, {"final_vi": "Kết quả mới hợp lệ."}) is False
+        assert checkpoint.load(stage) == prior
+    assert "REVIEW_CACHE_TEMP_CLEANUP_FAILED code=cache_io" in caplog.text
+    assert "private" not in caplog.text
+    for path in checkpoint.directory.glob("*.tmp"):
+        path.unlink()
+
+
+def test_review_cache_cleanup_error_does_not_mask_cancellation(tmp_path, monkeypatch):
+    import asyncio
+    import pytest
+    video = tmp_path / "source.mp4"
+    video.write_bytes(b"source")
+    checkpoint = cache.ReviewCheckpoint(video, "offline-model", directory=tmp_path / "checkpoints",
+                                        runtime_revision={"test": True})
+    calls = 0
+
+    def stop_before_publish():
+        nonlocal calls
+        calls += 1
+        if calls == 2:
+            raise asyncio.CancelledError
+
+    original = Path.unlink
+    def blocked_cleanup(path, *args, **kwargs):
+        if path.parent == checkpoint.directory and path.suffix == ".tmp":
+            raise PermissionError("injected cleanup failure")
+        return original(path, *args, **kwargs)
+
+    checkpoint.check = stop_before_publish
+    with monkeypatch.context() as faults:
+        faults.setattr(Path, "unlink", blocked_cleanup)
+        with pytest.raises(asyncio.CancelledError):
+            checkpoint.store({"kind": "review_batch"}, {"final_vi": "Hợp lệ."})
+    assert not list(checkpoint.directory.glob("*.review"))
+    for path in checkpoint.directory.glob("*.tmp"):
+        path.unlink()
