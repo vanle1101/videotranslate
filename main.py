@@ -659,7 +659,7 @@ async def list_tasks():
             "video_url": session_output_details(sess)["output_video_url"],
             **session_output_details(sess),
             "can_resume": status_str == "PAUSED",
-            "can_stop": status_str in ["RUNNING", "PAUSED"]
+            "can_stop": progress.get("can_stop", status_str in ["RUNNING", "PAUSED"])
         })
 
     # 2. HQ Export Tasks

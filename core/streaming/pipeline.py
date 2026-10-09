@@ -292,11 +292,36 @@ class StreamingPipelineSession:
         self.start_task: Optional[asyncio.Task] = None
         self.rolling_context: List[Dict[str, str]] = []
         self.edit_tasks: set[asyncio.Task] = set()
+        # A repair may start while the project deliberately remains STOPPED.
+        # Its own cancellation token distinguishes that saved state from a new
+        # Stop, without restarting the source/translation pipeline.
+        self._edit_cancellations = {}
         self._tts_lock = asyncio.Lock()
 
     @property
     def is_editing(self):
         return bool(self.edit_tasks) or bool(self.review_task and not self.review_task.done())
+
+    def _can_repair_failed_segment(self, segment):
+        owners = (self.start_task, self.worker_task, self.review_task, self._chunk_followup_task,
+                  getattr(self, "export_task", None), getattr(self, "auto_export_task", None))
+        return bool(self.initialized and not self.is_running and not self.is_editing
+                    and not getattr(self, "_stop_draining", False)
+                    and not any(owner is not None and not owner.done() for owner in owners)
+                    and segment.status == "FAILED" and segment.failed_stage in {"TTS", "ALIGNING"}
+                    and (segment.text_zh.strip() or segment.asr_text.strip()) and segment.final_vi.strip())
+
+    def _execution_cancelled(self, owner=None):
+        if owner is None:
+            try:
+                owner = asyncio.current_task()
+            except RuntimeError:
+                pass
+        edit = getattr(self, "_edit_cancellations", {}).get(owner)
+        if edit is not None:
+            token, started_stopped = edit
+            return token.is_set() or (self.is_stopped and not started_stopped)
+        return self.is_stopped
 
     def _refresh_processed_duration(self):
         """Credit each current ready source interval once, including silence."""
@@ -641,7 +666,8 @@ class StreamingPipelineSession:
         seg = self.segments.get(segment_id)
         if seg is None:
             raise KeyError(segment_id)
-        if self.is_stopped or seg.status not in ("READY", "PLAYED", "NEEDS_REVIEW"):
+        recovery_edit = _review_result is None and self._can_repair_failed_segment(seg)
+        if not recovery_edit and (self.is_stopped or seg.status not in ("READY", "PLAYED", "NEEDS_REVIEW")):
             raise SegmentEditConflict("Hãy chờ câu này dịch và tạo giọng xong trước khi sửa.")
         if self.is_editing and not (_review_result is not None and self.review_task is asyncio.current_task()
                                     and not self.edit_tasks):
@@ -656,13 +682,20 @@ class StreamingPipelineSession:
             if seg.confirmed_silence:
                 return seg.to_dict()
             raise SegmentEditConflict("Chỉ xác nhận im lặng cho câu đang cần kiểm tra.")
-        if text == seg.final_vi and not was_review and _review_result is None and not seg.tts_voice_outdated:
+        current_audio = Path(seg.audio_path) if seg.audio_path else None
+        try:
+            has_audio = bool(current_audio and current_audio.is_file() and current_audio.stat().st_size > 0)
+        except OSError:
+            has_audio = False
+        if (text == seg.final_vi and not recovery_edit and not was_review and _review_result is None
+                and not seg.tts_voice_outdated and (has_audio or seg.confirmed_silence)):
             return seg.to_dict()
         review_result = deepcopy(_review_result) if _review_result is not None else None
         old_source = seg.text_zh
         old_audio_path = seg.audio_path
         task = asyncio.current_task()
         self.edit_tasks.add(task)
+        self._edit_cancellations[task] = (threading.Event(), bool(self.is_stopped))
         stem = f"edit_{seg.id}_{uuid.uuid4().hex}"
         raw_path = self.cache_dir / f"{stem}_raw.wav"
         fitted_path = self.segments_dir / f"{stem}.wav"
@@ -699,7 +732,8 @@ class StreamingPipelineSession:
                             focus_source=review_result.get("text_zh", old_source),
                             focus_vi=text,
                             _review_context=_review_context,
-                        ) if review_result is not None else None))
+                        ) if review_result is not None else None),
+                        preserve_manual_timing=recovery_edit)
                 spoken_text = spoken.get("text", text)
                 if spoken_text != text:
                     proof = spoken.get("pacing_verification")
@@ -716,7 +750,7 @@ class StreamingPipelineSession:
                 if review_result is not None:
                     review_result["final_vi"] = text
                 tts_duration, ratio, boundaries = spoken["tts_duration"], spoken["speed_ratio"], spoken["boundaries"]
-            if self.is_stopped:
+            if self._execution_cancelled(task):
                 raise asyncio.CancelledError
             # A persistent edit must never overwrite the WAV referenced by the
             # previous manifest before its new text/reference is durable.
@@ -747,7 +781,7 @@ class StreamingPipelineSession:
                 seg.revision += 1
                 seg.audio_url = None if without_audio else f"/api/streaming/audio/{self.task_id}/{seg.id}?rev={seg.revision}"
                 self._retire_speech_failure(seg)
-                if was_review:
+                if was_review or recovery_edit:
                     seg.needs_review = False
                     seg.review_reason = None
                     seg.error = None
@@ -755,11 +789,19 @@ class StreamingPipelineSession:
                     self._refresh_processed_duration()
                     if was_review_error:
                         self.error = None
+                seg.failed_stage = None
+                seg._retry_synthesis = False
+                seg.timing_issue = None
+                if (recovery_edit and not self._startup_failed
+                        and all(row.status in {"READY", "PLAYED"} for row in self.segments.values())):
+                    # Do not retain a resolved speech error, or erase a separate
+                    # incomplete source/review failure while repairing one row.
+                    self.error = None
                 if review_result is not None:
                     self._apply_review_metadata(seg, review_result)
                 else:
                     seg.verification = {"status": "manual", "reason": "Người dùng đã lưu lời thoại."}
-                if self.review_summary.get("status") == "completed":
+                if recovery_edit or self.review_summary.get("status") == "completed":
                     self._refresh_review_counts()
                 # The file belongs to the old text/audio revision. Keep it on disk,
                 # but never expose it as this session's current final result.
@@ -793,6 +835,7 @@ class StreamingPipelineSession:
                         context["vi"] = text
             for identity in {*dub_plan, seg.id}:
                 self._retire_superseded_speech(self.segments[identity])
+            self._pacing_failures.pop(seg.id, None)
             # Neighbor rescue publishes versioned WAVs.  A later manual edit
             # must retire the superseded version after the new metadata is
             # durable, otherwise repeated edits accumulate orphan audio.
@@ -814,12 +857,14 @@ class StreamingPipelineSession:
                 await self.emit("segment_update", {**snapshot, "screen_texts": self.screen_texts})
             except Exception:
                 logging.getLogger("errors").warning("[%s] Không gửi được cập nhật câu %s", self.task_id, seg.id)
-            if was_review:
+            if was_review or recovery_edit:
                 pending = [s for s in self.segments.values() if s.needs_review]
-                if not pending and not self.is_running and all(s.status in ("READY", "PLAYED") for s in self.segments.values()):
+                may_finish = not recovery_edit or (not self.is_stopped and not self._startup_failed
+                    and self.review_summary.get("status") not in {"failed", "incomplete", "running"})
+                if may_finish and not pending and not self.is_running and all(s.status in ("READY", "PLAYED") for s in self.segments.values()):
                     self.error = None
                     await self.report_progress("complete", "Đã kiểm tra, dịch và lồng tiếng hoàn tất", 100)
-                elif not self.is_running and pending and not any(s.status == "FAILED" for s in self.segments.values()):
+                elif may_finish and not self.is_running and pending and not any(s.status == "FAILED" for s in self.segments.values()):
                     await self.report_progress("complete", self._review_message(), 100)
                 await self._update_ready()
             return snapshot
@@ -830,8 +875,9 @@ class StreamingPipelineSession:
                 except OSError:
                     pass
             self.edit_tasks.discard(task)
+            self._edit_cancellations.pop(task, None)
             if self.is_stopped or not self.is_running:
-                self._release_runtime()
+                self._release_runtime(preserve_media=recovery_edit)
 
     @contextmanager
     def _durable_edit_publication(self, segment, plan, staged_audio):
@@ -1559,6 +1605,7 @@ class StreamingPipelineSession:
             snapshot["ai_queue"] = _shared_execution_layer().snapshot()
         snapshot.update(self._review_metadata())
         snapshot["can_retry"] = self.can_retry
+        snapshot["can_repair_failed"] = any(self._can_repair_failed_segment(row) for row in self.segments.values())
         snapshot.update(translation_mode=self.translation_mode, preview_seconds=self.preview_seconds,
                         source_prepared_seconds=self._source_prepared_seconds,
                         processed_seconds=self._visual_completed_seconds,
@@ -1592,7 +1639,8 @@ class StreamingPipelineSession:
             snapshot.update(status="PREPARED", phase="prepared", progress_pct=None,
                             stage=missing_speech_message(output_gate["missing_speech_ids"]))
         snapshot["can_resume"] = bool(self.initialized and self.is_running and snapshot["status"] == "PAUSED")
-        snapshot["can_stop"] = snapshot["status"] in {"RUNNING", "PAUSED"}
+        snapshot["can_stop"] = (snapshot["status"] in {"RUNNING", "PAUSED"}
+                                or bool(self.edit_tasks) and not getattr(self, "_stop_draining", False))
         return snapshot
 
     async def report_progress(self, phase: str, stage: str, progress_pct=None, **details):
@@ -2691,12 +2739,14 @@ class StreamingPipelineSession:
 
     async def _run_blocking(self, function, *args, **kwargs):
         """Cancellation cannot kill a Python worker thread; wait before removing its files."""
-        if self.is_stopped:
+        owner = asyncio.current_task()
+        check = lambda: StreamingPipelineSession._execution_cancelled(self, owner)
+        if check():
             raise asyncio.CancelledError
         cancellation = threading.Event()
 
         def invoke():
-            with execution_context(self.task_id, lambda: self.is_stopped or cancellation.is_set()):
+            with execution_context(self.task_id, lambda: check() or cancellation.is_set()):
                 return function(*args, **kwargs)
 
         work = asyncio.get_running_loop().run_in_executor(
@@ -2720,11 +2770,11 @@ class StreamingPipelineSession:
                 if cancelled:
                     raise asyncio.CancelledError from None
                 raise
-        if cancelled or self.is_stopped:
+        if cancelled or check():
             raise asyncio.CancelledError
         return result
 
-    def _release_runtime(self):
+    def _release_runtime(self, *, preserve_media=False):
         if self.edit_tasks or (self.review_task and not self.review_task.done()):
             return
         if self.is_stopped:
@@ -2762,7 +2812,7 @@ class StreamingPipelineSession:
         keep_preparation = self._prepared or self._persistence_enabled
         if raw_audio and not needs_remaining_asr and not self._startup_failed and not keep_preparation:
             remove_generated(raw_audio)
-        if self.is_stopped and self._owns_cache and not keep_preparation:
+        if self.is_stopped and self._owns_cache and not keep_preparation and not preserve_media:
             # A stopped session is removed from the registry, so its generated
             # media can no longer be replayed/exported. Remove only paths that
             # this session generated; never recurse into user-owned content.
@@ -2775,7 +2825,7 @@ class StreamingPipelineSession:
                     directory.rmdir()
                 except OSError:
                     pass
-        if (self.is_stopped and not self._persistence_enabled and self._download_info and not self._download_info.get("is_local")
+        if (self.is_stopped and not preserve_media and not self._persistence_enabled and self._download_info and not self._download_info.get("is_local")
                 and not self._download_info.get("reusable_source")):
             # The downloader reports only uniquely named artifacts it created.
             # Never glob a prefix or remove a local user input here.
@@ -2786,7 +2836,7 @@ class StreamingPipelineSession:
                     owned_path = Path(value).resolve()
                     if owned_path.parent == prefix_path.parent and owned_path.name.startswith(prefix_path.name + "."):
                         remove_generated(owned_path)
-        if self.is_stopped and active_streaming_sessions.get(self.task_id) is self:
+        if self.is_stopped and not preserve_media and active_streaming_sessions.get(self.task_id) is self:
             # A History read must not restore a second writer while cancelled
             # native/provider work still owns this project's checkpoint.
             active_streaming_sessions.pop(self.task_id, None)
@@ -3116,7 +3166,7 @@ class StreamingPipelineSession:
                 raise SpeechBudgetError("Căn lại sẽ thay đổi thời gian câu đã sửa tay; giữ nguyên bản sửa.")
             timing = await self._run_blocking(build_speech_timing, spoken.get("text", text), start, end,
                 output_path, spoken["speed_ratio"], spoken["boundaries"])
-            if self.is_stopped:
+            if self._execution_cancelled():
                 raise asyncio.CancelledError
             current = {item.id: (item.revision, item.dub_start, item.dub_end) for item in self.segments.values()}
             if any(current.get(sid) != state for sid, state in revision.items()):
@@ -3137,7 +3187,7 @@ class StreamingPipelineSession:
                     data.get("timing_ratio", data["speed_ratio"]), data["boundaries"])
                 update["old_audio_path"] = item.audio_path
                 bounds["_audio_update"] = update
-            if self.is_stopped:
+            if self._execution_cancelled():
                 raise asyncio.CancelledError
             current = {item.id: (item.revision, item.dub_start, item.dub_end) for item in self.segments.values()}
             if any(current.get(sid) != state for sid, state in revision.items()):
@@ -3650,8 +3700,10 @@ class StreamingPipelineSession:
             if owner.get_loop().is_running() and owner.get_loop() is not current_loop:
                 owner.get_loop().call_soon_threadsafe(self.stop)
                 return
-        if self.is_stopped:
+        if self.is_stopped and not self.edit_tasks:
             return
+        for cancellation, _ in self._edit_cancellations.values():
+            cancellation.set()
         self.is_stopped = True
         self.is_running = False
         self._persist_if_enabled()

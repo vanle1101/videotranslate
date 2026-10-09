@@ -2080,6 +2080,134 @@ test('failed transcript save retains the draft and exposes an actionable server 
   assert.equal(ui.el('btn-export-hq').disabled, true);
 });
 
+test('idle failed speech opens its editor and unchanged wording repairs its missing voice', async () => {
+  for (const failed_stage of ['TTS', 'ALIGNING']) {
+    const ui = studio(); await ui.start(); const socket = ui.sockets.at(-1);
+    const failed = {id:0,start:0,end:1,status:'FAILED',failed_stage,text_zh:'原文',final_vi:'Lời đã dịch.',revision:3,
+      timing_issue:{code:'TIMING_CONFLICT',required_seconds:1.031674,available_seconds:.925125,max_speed:1.15,
+        remedy:'Rà lại lời giữ nguyên nghĩa hoặc chọn giọng khác.'}};
+    socket.receive({type:'segment_update',...failed});
+    assert.equal(ui.el('seg-vi-0').disabled,true,'Active jobs must retain failed-row ownership');
+    socket.receive({type:'progress',status:'STOPPED',can_retry:true});
+    assert.equal(ui.el('seg-vi-0').disabled,false,'Progress alone must unlock terminal speech repair');
+    const row=ui.el('seg-row-0'),timing=row.querySelector('.transcript-timing-issue');
+    assert.equal(timing.hidden,false);
+    assert.match(timing.textContent,/1\.032 giây; có 0\.925 giây, giới hạn 1\.15×/);
+    assert.match(timing.textContent,/giữ nguyên nghĩa/);
+    await ui.el('seg-vi-0').click();
+    assert.equal(row.querySelector('.transcript-editor').hidden,false);
+    assert.equal(ui.el('seg-input-0').value,failed.final_vi);
+    ui.replies.set('/api/streaming/fixture/segments/0',{segment:{...failed,status:'READY',failed_stage:null,
+      timing_issue:null,audio_url:'/repaired.wav',revision:4}});
+    await row.querySelector('.transcript-editor-actions').children[0].click();
+    const patches=ui.requests.filter(request=>request.options.method==='PATCH');
+    assert.equal(patches.length,1,'Same wording must still reach the real repair endpoint');
+    assert.deepEqual(JSON.parse(patches[0].options.body),{final_vi:failed.final_vi});
+    assert.equal(row.querySelector('.transcript-editor').hidden,true);
+    assert.equal(timing.hidden,true);
+    assert.equal(timing.textContent,'');
+    assert.equal(ui.el('task-progress').dataset.status,'STOPPED','Repair does not restart the whole workflow');
+  }
+});
+
+test('failed speech edit remains locked for unfinished source, missing translation and active owners', async () => {
+  for (const override of [
+    {failed_stage:'TRANSLATING'}, {failed_stage:'ASR'}, {failed_stage:''},
+    {text_zh:' ',asr_text:''}, {final_vi:' '}, {status:'WAITING'}, {status:'TTS'}, {status:'ALIGNING'},
+  ]) {
+    const ui=studio();await ui.start();const socket=ui.sockets.at(-1);
+    socket.receive({type:'segment_update',id:0,start:0,end:1,status:'FAILED',failed_stage:'TTS',
+      text_zh:'原文',final_vi:'Lời đã dịch',...override});
+    socket.receive({type:'progress',status:'STOPPED'});
+    assert.equal(ui.el('seg-vi-0').disabled,true,JSON.stringify(override));
+    await ui.el('seg-vi-0').click();
+    assert.equal(ui.el('seg-row-0').querySelector('.transcript-editor').hidden,true);
+    assert.equal(ui.requests.filter(request=>request.options.method==='PATCH').length,0);
+  }
+  for (const status of ['RUNNING','PAUSED','CANCELLING']) {
+    const ui=studio();await ui.start();const socket=ui.sockets.at(-1);
+    socket.receive({type:'progress',status});
+    socket.receive({type:'segment_update',id:0,start:0,end:1,status:'FAILED',failed_stage:'TTS',
+      asr_text:'原文',final_vi:'Lời đã dịch'});
+    assert.equal(ui.el('seg-vi-0').disabled,true);
+    await ui.el('seg-vi-0').click();
+    assert.equal(ui.el('seg-row-0').querySelector('.transcript-editor').hidden,true);
+  }
+});
+
+test('history unlocks an idle failed speech row immediately without waiting for a socket replay', async () => {
+  const ui=studio();await ui.flush();
+  ui.replies.set('/api/streaming/stopped_speech',{video_url:'/source.mp4',initialized:true,duration:1,
+    progress:{status:'STOPPED',can_retry:true},
+    segments:[{id:107,start:0,end:1,status:'FAILED',failed_stage:'ALIGNING',text_zh:'原文',final_vi:'Lời đã dịch'}]});
+  await ui.window.studioAttachTask('stopped_speech');
+  assert.equal(ui.el('seg-vi-107').disabled,false);
+  await ui.el('seg-vi-107').click();
+  assert.equal(ui.el('seg-row-107').querySelector('.transcript-editor').hidden,false);
+  assert.equal(ui.el('seg-input-107').value,'Lời đã dịch');
+});
+
+test('server repair admission and Stop ownership update even when task status stays terminal', async () => {
+  const ui=studio();await ui.start();const socket=ui.sockets.at(-1);
+  socket.receive({type:'segment_update',id:0,start:0,end:1,status:'FAILED',failed_stage:'TTS',text_zh:'原文',final_vi:'Lời đã dịch'});
+  socket.receive({type:'progress',status:'FAILED',can_repair_failed:false,can_stop:false});
+  assert.equal(ui.el('seg-vi-0').disabled,true);
+  assert.equal(ui.el('btn-stop-worker').classList.contains('hidden'),true);
+  ui.replies.set('/api/tasks',{tasks:[{task_id:'fixture',status:'FAILED',can_repair_failed:true,can_stop:false}]});
+  await ui.el('btn-refresh-tasks').click();
+  assert.equal(ui.el('seg-vi-0').disabled,false,'Admission changes alone must refresh row controls');
+  socket.receive({type:'progress',status:'STOPPED',can_repair_failed:false,can_stop:true});
+  assert.equal(ui.el('seg-vi-0').disabled,true);
+  assert.equal(ui.el('btn-stop-worker').classList.contains('hidden'),false,'Stop must remain available for an owned repair');
+  ui.replies.set('/api/tasks/fixture/stop',{});
+  await ui.el('btn-stop-worker').click();
+  assert.ok(ui.requests.some(request=>request.url==='/api/tasks/fixture/stop'&&request.options.method==='POST'));
+});
+
+test('failed speech repair keeps a rejected draft and relocks saving when another owner starts', async () => {
+  const ui=studio();await ui.start();const socket=ui.sockets.at(-1);
+  const failed={id:0,start:0,end:1,status:'FAILED',failed_stage:'ALIGNING',text_zh:'原文',final_vi:'Lời cũ',revision:2};
+  socket.receive({type:'segment_update',...failed});socket.receive({type:'progress',status:'FAILED'});
+  const row=ui.el('seg-row-0');await ui.el('seg-vi-0').click();
+  const input=ui.el('seg-input-0');input.value='Lời sửa còn quá dài';await input.emit('input');
+  const actions=row.querySelector('.transcript-editor-actions');
+  ui.replies.set('/api/streaming/fixture/segments/0',{failure:true,detail:'Giọng vẫn không vừa thời lượng.'});
+  await actions.children[0].click();
+  assert.equal(row.querySelector('.transcript-editor').hidden,false);
+  assert.equal(input.value,'Lời sửa còn quá dài');
+  assert.equal(input.disabled,false);
+  assert.match(row.querySelector('.transcript-edit-message').textContent,/không vừa thời lượng/);
+  socket.receive({type:'progress',status:'RUNNING',phase:'tts'});
+  assert.equal(ui.el('seg-vi-0').disabled,true);
+  assert.equal(input.disabled,true);
+  assert.equal(actions.children[0].disabled,true);
+  await actions.children[0].click();
+  assert.equal(ui.requests.filter(request=>request.options.method==='PATCH').length,1);
+  assert.equal(input.value,'Lời sửa còn quá dài');
+});
+
+test('timing evidence rejects malformed numeric fields and renders remedy as plain text', async () => {
+  const ui=studio();await ui.start();const socket=ui.sockets.at(-1);
+  const timing={code:'TIMING_CONFLICT',required_seconds:1.2,available_seconds:1,max_speed:1.15,
+    remedy:'<img src=x onerror=alert(1)> Giữ nguyên nghĩa.'};
+  const row={id:0,start:0,end:1,status:'FAILED',failed_stage:'TTS',text_zh:'原文',final_vi:'Lời đã dịch'};
+  socket.receive({type:'segment_update',...row,timing_issue:timing});
+  const message=ui.el('seg-row-0').querySelector('.transcript-timing-issue');
+  assert.equal(message.hidden,false);
+  assert.ok(message.textContent.includes(timing.remedy));
+  assert.equal(message.innerHTML,'');
+  assert.equal(message.getAttribute('role'),'status');
+  for(const override of [{required_seconds:'1.2'},{required_seconds:NaN},{required_seconds:Infinity},
+    {required_seconds:0},{available_seconds:-1},{available_seconds:Infinity},{max_speed:'1.15'},
+    {max_speed:0},{max_speed:4},{remedy:''},{remedy:'\0'},{remedy:42},{code:'unknown'}]) {
+    socket.receive({type:'segment_update',...row,timing_issue:{...timing,...override}});
+    assert.equal(message.hidden,true);
+    assert.equal(message.textContent,'');
+  }
+  socket.receive({type:'segment_update',...row,timing_issue:null});
+  assert.equal(message.hidden,true);
+});
+
 test('new source clears transcript drafts and source metadata preserves native aspect ratio', async () => {
   const ui = studio(); await ui.start();
   await ui.el('seg-vi-0').click();

@@ -852,6 +852,25 @@ document.addEventListener("DOMContentLoaded", () => {
     return true;
   }
 
+  function failedSpeechRecoverable(segment) {
+    return segment?.status === "FAILED" && ["TTS", "ALIGNING"].includes(segment.failed_stage) &&
+      [segment.text_zh, segment.asr_text].some(value => typeof value === "string" && value.trim()) &&
+      typeof segment.final_vi === "string" && !!segment.final_vi.trim();
+  }
+
+  function transcriptEditable(segment) {
+    if (!segment || transcriptReviewLocked(segment.id) || automaticExportActive || exportingTaskId ||
+        captionStyleDirty || captionStyleRequest) return false;
+    if (["READY", "PLAYED", "NEEDS_REVIEW"].includes(segment.status)) return true;
+    // A terminal failed speech row has a complete source and translation. Repair
+    // that row only after all background owners have stopped; source failures
+    // and active TTS remain locked rather than becoming editable placeholders.
+    return failedSpeechRecoverable(segment) && currentProgress?.can_repair_failed !== false &&
+      !reviewInProgress() && !pendingTaskAction && !pendingStart &&
+      pendingTranscriptSaves === 0 &&
+      ["COMPLETED", "PREVIEW_READY", "PREPARED", "FAILED", "STOPPED", "CANCELLED"].includes(currentProgress?.status);
+  }
+
   function reviewSummaryText(summary = currentProgress?.review_summary) {
     if (!summary) return "";
     const count = key => Math.max(0, Number(summary[key]) || 0);
@@ -865,11 +884,10 @@ document.addEventListener("DOMContentLoaded", () => {
   }
 
   function updateTranscriptReviewAvailability() {
-    const busy = automaticExportActive || !!exportingTaskId || captionStyleDirty || !!captionStyleRequest;
     for (const [id, item] of transcriptRows) {
       const segment = segments[id];
-      const locked = busy || transcriptReviewLocked(id);
-      item.translation.disabled = locked || !["READY", "PLAYED", "NEEDS_REVIEW"].includes(segment?.status);
+      const locked = !transcriptEditable(segment);
+      item.translation.disabled = locked || item.saving;
       item.silence.disabled = locked || item.saving;
       item.save.disabled = item.input.disabled = locked || item.saving;
       // A lifecycle event can finish review without another segment event.
@@ -1196,6 +1214,10 @@ document.addEventListener("DOMContentLoaded", () => {
     const previousPreparedSeconds = Number(currentProgress?.source_prepared_seconds);
     const previousStatus = currentProgress?.status;
     currentProgress = { ...currentProgress, ...progress };
+    // Do not inherit RUNNING's Stop capability into an older terminal event.
+    // A terminal project with an owned repair supplies can_stop=true explicitly.
+    if (["COMPLETED", "PREVIEW_READY", "PREPARED", "FAILED", "STOPPED", "CANCELLED"].includes(progress.status) &&
+        progress.can_stop === undefined) currentProgress.can_stop = false;
     const preparedSeconds = Number(currentProgress?.source_prepared_seconds);
     if (Number.isFinite(preparedSeconds) &&
         (!Number.isFinite(previousPreparedSeconds) || preparedSeconds > previousPreparedSeconds + .5)) {
@@ -1272,7 +1294,8 @@ document.addEventListener("DOMContentLoaded", () => {
     btnResumeWorker.classList.toggle("hidden", !currentProgress.can_resume || terminal);
     btnRetryWorker?.classList.toggle("hidden", !currentProgress.can_retry);
     btnReviewWorker?.classList.toggle("hidden", !currentProgress.can_review || reviewInProgress());
-    btnStopWorker.classList.toggle("hidden", (terminal && !isPreviewReady(status)) || currentProgress.can_stop === false);
+    btnStopWorker.classList.toggle("hidden", currentProgress.can_stop === false ||
+      (terminal && !isPreviewReady(status) && currentProgress.can_stop !== true));
     btnStopWorker.disabled = status === "CANCELLING";
     if (!terminal && !translationReady && !previewPending) {
       bufferingText.textContent = taskProgressStage.textContent;
@@ -3320,8 +3343,7 @@ document.addEventListener("DOMContentLoaded", () => {
 
   function startTranscriptEdit(id, event) {
     const segment = segments[id], item = transcriptRows.get(id);
-    if (transcriptReviewLocked(id) || automaticExportActive || exportingTaskId || captionStyleDirty || captionStyleRequest) return;
-    if (!item || !["READY", "PLAYED", "NEEDS_REVIEW"].includes(segment?.status)) return;
+    if (!item || item.saving || !transcriptEditable(segment)) return;
     let caretOffset = 0;
     // The text button has one text node: preserve the word the user clicked when opening its editor.
     if (event && Number.isFinite(event.clientX) && Number.isFinite(event.clientY)) {
@@ -3357,7 +3379,7 @@ document.addEventListener("DOMContentLoaded", () => {
 
   async function saveTranscriptEdit(id, confirmSilence = false) {
     const item = transcriptRows.get(id), segment = segments[id];
-    if (transcriptReviewLocked(id) || automaticExportActive || exportingTaskId) return;
+    if (!transcriptEditable(segment)) return;
     if (!item || item.saving || !segment || !currentTaskId) return;
     if (confirmSilence && !(segment.needs_review || segment.status === "NEEDS_REVIEW")) return;
     const text = confirmSilence ? "" : item.input.value.trim();
@@ -3367,12 +3389,14 @@ document.addEventListener("DOMContentLoaded", () => {
       item.input.focus();
       return;
     }
-    if (!confirmSilence && text === segmentTranslation(segment) && !segment.needs_review) { closeTranscriptEdit(id); return; }
+    if (!confirmSilence && text === segmentTranslation(segment) && !segment.needs_review &&
+        !failedSpeechRecoverable(segment)) { closeTranscriptEdit(id); return; }
     const taskId = currentTaskId;
     item.saving = true;
     item.save.disabled = item.cancel.disabled = item.input.disabled = item.silence.disabled = true;
     pendingTranscriptSaves++;
     updateExportAvailability();
+    updateTranscriptReviewAvailability();
     item.message.dataset.error = "false";
     item.message.textContent = confirmSilence ? "Đang xác nhận đoạn không có lời thoại…" : "Đang tạo lại giọng đọc và đồng bộ với câu…";
     try {
@@ -3395,9 +3419,11 @@ document.addEventListener("DOMContentLoaded", () => {
       item.message.dataset.error = "true";
     } finally {
       item.saving = false;
-      item.save.disabled = item.cancel.disabled = item.input.disabled = item.silence.disabled = false;
       pendingTranscriptSaves--;
+      item.cancel.disabled = false;
+      item.save.disabled = item.input.disabled = item.silence.disabled = !transcriptEditable(segments[id]);
       updateExportAvailability();
+      updateTranscriptReviewAvailability();
     }
   }
 
@@ -3533,6 +3559,8 @@ document.addEventListener("DOMContentLoaded", () => {
     editor.append(label, input, actions, message);
     const review = element("p", "transcript-review"); review.hidden = true;
     review.setAttribute("role", "status");
+    const timingIssue = element("p", "transcript-review transcript-timing-issue"); timingIssue.hidden = true;
+    timingIssue.setAttribute("role", "status");
     const silence = element("button", "transcript-time transcript-confirm-silence", "Không có lời thoại");
     silence.type = "button"; silence.hidden = true;
     silence.title = "Xác nhận đã nghe lại: đoạn này không có lời thoại, giữ nguyên âm thanh nền và thời gian.";
@@ -3567,8 +3595,8 @@ document.addEventListener("DOMContentLoaded", () => {
     speakerControls.push(speakerAll, speakerSave, speakerCancel);
     const speakerMessage = element("p", "transcript-edit-message"); speakerMessage.setAttribute("role", "status"); speakerMessage.tabIndex = -1;
     speakerEditor.append(allLabel, speakerScope, speakerActions, speakerMessage);
-    row.append(heading, element("p", "transcript-label", "GỐC"), original, element("p", "transcript-label", "TIẾNG VIỆT · BẤM ĐỂ SỬA"), translation, review, silence, editor, speakerEditor);
-    transcriptRows.set(segment.id, { row, badge, original, listen, translation, review, silence, editor, input, save, cancel, message, saving: false,
+    row.append(heading, element("p", "transcript-label", "GỐC"), original, element("p", "transcript-label", "TIẾNG VIỆT · BẤM ĐỂ SỬA"), translation, review, timingIssue, silence, editor, speakerEditor);
+    transcriptRows.set(segment.id, { row, badge, original, listen, translation, review, timingIssue, silence, editor, input, save, cancel, message, saving: false,
       speakerButton, speakerEditor, speakerName, speakerSelf, speakerListener, speakerVoice, speakerAll, speakerScope, speakerControls, speakerMessage, speakerSaving: false });
     segmentsList.appendChild(row);
     updateSegmentDrawerItem(segment);
@@ -3621,7 +3649,18 @@ document.addEventListener("DOMContentLoaded", () => {
     item.original.textContent = segment.text_zh || (segment.confirmed_silence ? "Không có lời thoại" : "Đang nhận dạng lời thoại…");
     item.translation.textContent = segment.confirmed_silence ? "Đã xác nhận không có lời thoại" : segmentTranslation(segment)
       || (ready && segment.needs_review ? "Chưa đủ căn cứ để dịch câu này." : "Bản dịch sẽ xuất hiện sau khi xử lý.");
-    item.translation.disabled = transcriptReviewLocked(segment.id) || automaticExportActive || !!exportingTaskId || !["READY", "PLAYED", "NEEDS_REVIEW"].includes(segment.status);
+    item.translation.disabled = !transcriptEditable(segment) || item.saving;
+    const timing = segment.timing_issue;
+    const validTiming = timing && !Array.isArray(timing) && timing.code === "TIMING_CONFLICT" &&
+      typeof timing.required_seconds === "number" && Number.isFinite(timing.required_seconds) &&
+      timing.required_seconds >= .000001 && timing.required_seconds <= 86400 &&
+      typeof timing.available_seconds === "number" && Number.isFinite(timing.available_seconds) &&
+      timing.available_seconds >= 0 && timing.available_seconds <= 86400 &&
+      typeof timing.max_speed === "number" && Number.isFinite(timing.max_speed) && timing.max_speed >= 1 && timing.max_speed <= 3 &&
+      typeof timing.remedy === "string" && !!timing.remedy.trim() && timing.remedy.length <= 2000 && !timing.remedy.includes("\x00");
+    item.timingIssue.hidden = !validTiming;
+    item.timingIssue.textContent = validTiming
+      ? `Giọng cần ${timing.required_seconds.toFixed(3)} giây; có ${timing.available_seconds.toFixed(3)} giây, giới hạn ${timing.max_speed.toFixed(2)}×. ${timing.remedy.trim()}` : "";
     item.review.hidden = !segment.needs_review;
     item.silence.hidden = !(segment.needs_review || segment.status === "NEEDS_REVIEW");
     const reviewReason = String(segment.verification?.reason || segment.review_reason || "AI chưa đủ căn cứ xác minh nội dung câu này.")
@@ -3682,10 +3721,11 @@ document.addEventListener("DOMContentLoaded", () => {
   }
 
   function resetWorkerControls() {
-    setWorkerSourceBusy(!!pendingTaskAction || reviewInProgress() || automaticExportActive);
+    setWorkerSourceBusy(!!pendingTaskAction || reviewInProgress() || automaticExportActive ||
+      pendingTranscriptSaves > 0 || currentProgress?.can_stop === true);
     btnPauseWorker.classList.add("hidden");
     btnResumeWorker.classList.add("hidden");
-    btnStopWorker.classList.add("hidden");
+    btnStopWorker.classList.toggle("hidden", currentProgress?.can_stop !== true);
     btnStopWorker.disabled = false;
     updateExportAvailability();
   }
@@ -3767,6 +3807,7 @@ document.addEventListener("DOMContentLoaded", () => {
       pendingTaskAction = null;
       setWorkerSourceBusy(!!currentTaskId && !["COMPLETED", "PREVIEW_READY", "PREPARED", "FAILED", "STOPPED", "CANCELLED"].includes(currentProgress?.status));
       updateExportAvailability();
+      updateTranscriptReviewAvailability();
     }
   };
   window.openTaskInStudio = async taskId => {
@@ -3783,6 +3824,7 @@ document.addEventListener("DOMContentLoaded", () => {
     btnRetryWorker.disabled = true;
     stopVoicePreview();
     setWorkerSourceBusy(true);
+    updateTranscriptReviewAvailability();
     try {
       const response = await fetch(`/api/streaming/${encodeURIComponent(taskId)}/retry`, {method: "POST"});
       const data = await response.json();
@@ -3805,6 +3847,7 @@ document.addEventListener("DOMContentLoaded", () => {
       pendingTaskAction = null;
       btnRetryWorker.disabled = false;
       setWorkerSourceBusy(!!currentTaskId && !["COMPLETED", "PREVIEW_READY", "PREPARED", "FAILED", "STOPPED", "CANCELLED"].includes(currentProgress?.status));
+      updateTranscriptReviewAvailability();
     }
   };
   btnRetryWorker?.addEventListener("click", window.studioRetry);
@@ -3883,7 +3926,7 @@ document.addEventListener("DOMContentLoaded", () => {
       }
       if (activeTask) {
         const statusChanged = activeTask.status !== currentProgress?.status;
-        const progressChanged = ["phase", "stage", "progress_pct", "downloaded_bytes", "total_bytes", "speed", "eta", "can_retry", "can_pause", "can_resume", "can_stop", "can_review", "review_count", "output_video_url", "output_filename", "translation_mode", "can_translate_full", "preview_seconds", "processed_seconds", "source_prepared_seconds", "total_seconds", "review_scope"]
+        const progressChanged = ["phase", "stage", "progress_pct", "downloaded_bytes", "total_bytes", "speed", "eta", "can_retry", "can_repair_failed", "can_pause", "can_resume", "can_stop", "can_review", "review_count", "output_video_url", "output_filename", "translation_mode", "can_translate_full", "preview_seconds", "processed_seconds", "source_prepared_seconds", "total_seconds", "review_scope"]
           .some(key => activeTask[key] !== undefined && activeTask[key] !== currentProgress?.[key]) ||
           (activeTask.review_summary !== undefined && JSON.stringify(activeTask.review_summary) !== JSON.stringify(currentProgress?.review_summary));
         if (taskPollWarning || streamDisconnected || statusChanged || progressChanged) {

@@ -750,6 +750,184 @@ def test_unfinished_segment_cannot_be_edited(session, status):
     session.tts_engine.synthesize.assert_not_called()
 
 
+def mark_failed_speech(session, stage="ALIGNING", *, stopped=False):
+    row = session.segments[0]
+    row.status, row.failed_stage, row.error = "FAILED", stage, "Measured speech does not fit"
+    row.timing_issue = {"code": "TIMING_CONFLICT", "required_seconds": 3.5,
+        "available_seconds": 3.0, "max_speed": 1.15, "remedy": "Revise wording or voice"}
+    row._retry_synthesis = True
+    session.error = row.error
+    session.is_stopped = stopped
+    session.progress.update(status="STOPPED" if stopped else "FAILED", phase="failed", progress_pct=None)
+    return row
+
+
+@pytest.mark.parametrize("stage", ["TTS", "ALIGNING"])
+@pytest.mark.parametrize("stopped", [False, True])
+@pytest.mark.parametrize("same_text", [False, True])
+def test_idle_failed_speech_manual_repair_fits_current_words_and_preserves_neighbors(session, stage, stopped, same_text):
+    row = mark_failed_speech(session, stage, stopped=stopped)
+    neighbor = SegmentItem(1, 6, 9, 3)
+    neighbor.status, neighbor.text_zh, neighbor.final_vi = "READY", "旁白", "Lời đã sửa tay"
+    neighbor.verification = {"status": "manual"}
+    audio = session.segments_dir / "seg_1.wav"
+    audio.write_bytes(b"manual neighbor unchanged")
+    neighbor.audio_path, neighbor.audio_url = str(audio), "/api/streaming/audio/transcript-test/1"
+    session.segments[1] = neighbor
+    neighbor_before = deepcopy(neighbor.to_dict())
+    text = row.final_vi if same_text else "Lời vừa sửa"
+
+    async def run():
+        assert session.get_progress()["can_repair_failed"]
+        async with client() as api:
+            response = await api.patch(route(session), json={"final_vi": text})
+            assert response.status_code == 200, response.text
+            repaired = response.json()["segment"]
+            assert repaired["status"] == "READY" and repaired["final_vi"] == text
+            assert repaired["failed_stage"] is None and repaired["timing_issue"] is None
+            assert repaired["error"] is None and repaired["revision"] == 1
+            assert repaired["verification"]["status"] == "manual"
+            assert (await api.get(repaired["audio_url"])).content == (text + " aligned").encode()
+        assert session.is_stopped is stopped and not session.is_running
+        if stopped:
+            assert session.get_progress()["status"] == "STOPPED"
+            assert main.active_streaming_sessions[session.task_id] is session
+    asyncio.run(run())
+    session.tts_engine.synthesize.assert_called_once()
+    assert not row._retry_synthesis and not session.edit_tasks and not session._edit_cancellations
+    assert neighbor.to_dict() == neighbor_before and audio.read_bytes() == b"manual neighbor unchanged"
+    assert not session.get_progress()["can_repair_failed"]
+
+
+@pytest.mark.parametrize("missing", ["absent", "empty"])
+def test_same_text_ready_row_with_missing_audio_is_really_synthesized(session, missing):
+    row = session.segments[0]
+    path = Path(row.audio_path)
+    path.unlink() if missing == "absent" else path.write_bytes(b"")
+    asyncio.run(session.edit_segment(0, row.final_vi))
+    session.tts_engine.synthesize.assert_called_once()
+    assert row.revision == 1 and Path(row.audio_path).read_bytes() == (row.final_vi + " aligned").encode()
+
+
+@pytest.mark.parametrize("failure", ["synthesis", "timing", "disk"])
+def test_stopped_failed_repair_failure_keeps_durable_rows_audio_and_retry_available(session, monkeypatch, failure):
+    row = mark_failed_speech(session, stopped=True)
+    session._pacing_failures[row.id] = {"existing": "measured evidence"}
+    session.output_filename, session.output_video_url = "retained.mp4", "/api/outputs/retained.mp4"
+    session.auto_export_signature = "old-signature"
+    manifest = session.persist()
+    durable = manifest.read_bytes()
+    before = deepcopy(row.to_dict())
+    context_before = deepcopy(session.rolling_context)
+    old_audio = Path(row.audio_path)
+    if failure == "synthesis":
+        session.tts_engine.synthesize.side_effect = RuntimeError("real stage fails")
+    elif failure == "timing":
+        monkeypatch.setattr("core.streaming.pipeline.build_speech_timing", Mock(side_effect=RuntimeError("timing fails")))
+    else:
+        monkeypatch.setattr(session, "persist", Mock(side_effect=OSError("disk full")))
+    async def run():
+        async with client() as api:
+            response = await api.patch(route(session), json={"final_vi": "Lời mới"})
+            assert response.status_code == (507 if failure == "disk" else 503), response.text
+    asyncio.run(run())
+    assert row.to_dict() == before and old_audio.read_bytes() == b"old audio"
+    assert manifest.read_bytes() == durable and session.rolling_context == context_before
+    assert session.output_filename == "retained.mp4" and session.auto_export_signature == "old-signature"
+    assert session._pacing_failures[row.id] == {"existing": "measured evidence"}
+    assert session.is_stopped and not session.is_running and session.get_progress()["can_repair_failed"]
+    assert not session.edit_tasks and not session._edit_cancellations
+    assert [path.name for path in session.segments_dir.iterdir()] == [old_audio.name]
+
+
+@pytest.mark.parametrize("blocker", ["running", "start", "worker", "review", "chunk", "export", "auto_export", "draining",
+                                    "source", "translation", "uninitialized", "ASR", "TRANSLATING", "WAITING"])
+def test_failed_speech_repair_never_bypasses_runtime_or_source_ownership(session, blocker):
+    row = mark_failed_speech(session, stopped=True)
+    async def run():
+        owner = None
+        if blocker in {"start", "worker", "review", "chunk", "export", "auto_export"}:
+            owner = asyncio.create_task(asyncio.Event().wait())
+            name = {"start": "start_task", "worker": "worker_task", "review": "review_task", "chunk": "_chunk_followup_task",
+                    "export": "export_task", "auto_export": "auto_export_task"}[blocker]
+            setattr(session, name, owner)
+        elif blocker == "running":
+            session.is_running = True
+        elif blocker == "draining":
+            session._stop_draining = True
+        elif blocker == "source":
+            row.text_zh = row.asr_text = ""
+        elif blocker == "translation":
+            row.final_vi = ""
+        elif blocker == "uninitialized":
+            session.initialized = False
+        else:
+            row.failed_stage = blocker
+        try:
+            async with client() as api:
+                response = await api.patch(route(session), json={"final_vi": "Lời mới"})
+                assert response.status_code == 409, response.text
+            assert not session.get_progress()["can_repair_failed"]
+        finally:
+            if owner:
+                owner.cancel()
+                await asyncio.gather(owner, return_exceptions=True)
+    asyncio.run(run())
+    session.tts_engine.synthesize.assert_not_called()
+    assert not session.edit_tasks
+
+
+def test_new_stop_cancels_stopped_repair_drains_late_write_and_allows_new_edit_retry(session):
+    from core.runtime_context import current_execution_context
+    row = mark_failed_speech(session, stopped=True)
+    manifest = session.persist()
+    before, durable = deepcopy(row.to_dict()), manifest.read_bytes()
+    entered, release = threading.Event(), threading.Event()
+    checks = []
+    def synthesize(*, output_path, **kwargs):
+        check = current_execution_context().cancel_check
+        checks.append(check)
+        assert check is not None and not check(), "Saved STOPPED is not a new cancellation"
+        entered.set()
+        assert release.wait(3)
+        assert check(), "New Stop must reach the actual adapter"
+        Path(output_path).write_bytes(b"late provider output")
+    session.tts_engine.synthesize.side_effect = synthesize
+    async def run():
+        editing = asyncio.create_task(session.edit_segment(0, "Lời mới"))
+        await wait_until(entered.is_set)
+        assert session.is_stopped and not session.is_running and session.get_progress()["can_stop"]
+        async with client() as api:
+            response = await api.get("/api/tasks")
+            assert response.status_code == 200
+            listed = next(item for item in response.json()["tasks"] if item["task_id"] == session.task_id)
+            assert listed["status"] == "STOPPED" and listed["can_stop"] is True
+            assert listed["can_repair_failed"] is False
+        stopping = asyncio.create_task(main.stop_task(session.task_id))
+        try:
+            await wait_until(lambda: checks[0]())
+            assert not stopping.done() and row.to_dict() == before
+            assert session.get_progress()["status"] == "CANCELLING"
+        finally:
+            release.set()
+            await asyncio.gather(editing, return_exceptions=True)
+            assert (await stopping)["action"] == "stopped"
+        assert editing.cancelled() and row.to_dict() == before
+        assert session.get_progress()["can_repair_failed"]
+        assert Path(row.audio_path).read_bytes() == b"old audio"
+        def fresh_synthesize(*, text, output_path, **kwargs):
+            assert not current_execution_context().cancel_check()
+            Path(output_path).write_bytes(text.encode())
+        session.tts_engine.synthesize.side_effect = fresh_synthesize
+        repaired = await session.edit_segment(0, "Lời mới")
+        assert repaired["status"] == "READY" and repaired["revision"] == 1
+        assert Path(row.audio_path).read_bytes() == "Lời mới aligned".encode()
+        assert session.is_stopped and not session.is_running
+    asyncio.run(run())
+    assert not session.edit_tasks and not session._edit_cancellations
+    assert not list(session.segments_dir.glob("edit_*"))
+
+
 def test_inflight_edit_blocks_other_edits_and_export_but_keeps_existing_audio(session):
     entered, release = threading.Event(), threading.Event()
 
