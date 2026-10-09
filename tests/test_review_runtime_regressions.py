@@ -7,6 +7,7 @@ import pytest
 from config import settings
 from core.runtime_context import execution_context
 from core.translation_review import AutomaticTranslationReviewer
+from core.video_intelligence import VideoIntelligenceError
 
 
 def source(index=0):
@@ -140,3 +141,42 @@ def test_audio_semantic_fields_are_retried_inside_bounded_schema_helper():
                                                  reviewer._require_semantic_fields)
     assert client.translate.call_count == 2
     assert data["segments"][0]["verification_reason"] == "Giữ đúng lời nguồn."
+
+
+@pytest.mark.parametrize("uses", [None, {}, ["con"], [{"term": "con", "role": "reference"}],
+    [{"term": "", "role": "self"}], [{"term": "con" * 40, "role": "self"}],
+    [{"term": "con\x00", "role": "self"}]])
+def test_malformed_address_metadata_cannot_pass_known_role_then_break_checkpoint(uses):
+    audit = {"address_verified": True, "semantic_verified": True,
+        "address_reason": "Đã đối chiếu nguồn.", "address_uses": uses}
+    reading = {0: {"uncertain": False}}
+    assert not AutomaticTranslationReviewer._address_verified(reading, 0, audit, "Con về rồi.")
+    assert AutomaticTranslationReviewer._address_gate(reading, 0, audit, "我回来了", "Con về rồi.")
+    with pytest.raises(VideoIntelligenceError):
+        AutomaticTranslationReviewer._require_semantic_fields({"segments": [
+            {**source(), **audit, "verification_reason": "Giữ lời về nhà."}]})
+
+
+def test_invalid_provider_address_metadata_retries_before_publication_and_preserves_storage_contract():
+    from core.streaming.session_store import _clean
+    row = {**source(6), "semantic_verified": True, "verification_reason": "Giữ lời chào.",
+        "address_uses": [{"term": "con", "role": "self", "headers": {"Authorization": "unexpected"}}]}
+    bad = {**row, "address_uses": [{"term": "con", "role": "reference"}]}
+    client = Mock(translate=Mock(side_effect=[
+        {"segments": [bad], "screen_texts": [], "summary": ""},
+        {"segments": [row], "screen_texts": [], "summary": ""}]))
+    data, _ = AutomaticTranslationReviewer._validated_review_request(
+        client, "prompt", [source(6)], 6., 7., lambda: None,
+        AutomaticTranslationReviewer._require_semantic_fields)
+    assert client.translate.call_count == 2
+    audit = data["segments"][0]
+    assert audit["address_uses"] == [{"term": "con", "role": "self"}]
+    assert _clean({"address_uses": audit["address_uses"]}) == {"address_uses": audit["address_uses"]}
+
+
+@pytest.mark.parametrize("field,value", [("address_verified", "true"), ("address_applicable", 1),
+    ("address_neutral_faithful", None), ("address_reason", []), ("address_reason", "bad\x00")])
+def test_present_address_fields_must_obey_the_provider_storage_contract(field, value):
+    row = {**source(), "semantic_verified": True, "verification_reason": "Đã rà.", field: value}
+    with pytest.raises(VideoIntelligenceError):
+        AutomaticTranslationReviewer._require_semantic_fields({"segments": [row]})

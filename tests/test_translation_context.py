@@ -187,7 +187,7 @@ def test_ocr_semantic_success_cannot_clear_uncertain_or_failed_address_review():
         {"semantic_verified": True, "address_verified": False, "address_reason": "Chưa biết ai đang nói."})
 
 
-@pytest.mark.parametrize("address_verified", [True, False, None])
+@pytest.mark.parametrize("address_verified", [True, False])
 def test_actual_reviewer_keeps_ocr_and_address_decisions_separate(monkeypatch, address_verified):
     monkeypatch.setattr(settings, "LLM_PROVIDER", "opencode")
     rows = [source(0, "妈妈我回来了", "Mẹ ơi, con về rồi."), source(1, "我饿了", "Con đói rồi.")]

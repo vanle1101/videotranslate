@@ -191,6 +191,35 @@ class AutomaticTranslationReviewer:
                 raise VideoIntelligenceError("Kết luận ngữ nghĩa không hợp lệ.")
             if not isinstance(row.get("verification_reason"), str):
                 raise VideoIntelligenceError("Lý do kiểm định không hợp lệ.")
+            AutomaticTranslationReviewer._require_address_fields(row)
+            if "address_uses" in row:
+                row["address_uses"] = [{"term": use["term"], "role": use["role"]}
+                                       for use in row["address_uses"]]
+
+    @staticmethod
+    def _require_address_fields(row):
+        """Validate provider metadata before it can reach the durable project.
+
+        These fields are optional for older replies, but a present malformed
+        value must enter the bounded schema retry rather than be accepted by
+        the address gate and fail only when session_store writes the result.
+        """
+        for key in ("address_applicable", "address_neutral_faithful", "address_verified"):
+            if key in row and type(row[key]) is not bool:
+                raise VideoIntelligenceError("Kết luận xưng hô không hợp lệ.")
+        if "address_reason" in row and (not isinstance(row["address_reason"], str)
+                or len(row["address_reason"]) > 100_000 or "\x00" in row["address_reason"]):
+            raise VideoIntelligenceError("Lý do xưng hô không hợp lệ.")
+        if "address_uses" not in row:
+            return
+        uses = row["address_uses"]
+        if not isinstance(uses, list) or len(uses) > 10000:
+            raise VideoIntelligenceError("Các cách xưng hô đã dùng không hợp lệ.")
+        for use in uses:
+            if (not isinstance(use, dict) or not isinstance(use.get("term"), str)
+                    or not use["term"].strip() or len(use["term"]) > 100 or "\x00" in use["term"]
+                    or use.get("role") not in ("self", "listener")):
+                raise VideoIntelligenceError("Cách xưng hô đã dùng thiếu từ hoặc vai hợp lệ.")
 
     @staticmethod
     def _require_ocr_semantic_fields(data):
@@ -249,6 +278,10 @@ class AutomaticTranslationReviewer:
 
     @staticmethod
     def _address_verified(reading, sid, audit, candidate=None):
+        try:
+            AutomaticTranslationReviewer._require_address_fields(audit)
+        except VideoIntelligenceError:
+            return False
         if sid not in reading:
             # A positive provider field cannot replace the independent source
             # reading. Callers that need a relation verdict must have a row in
@@ -296,6 +329,10 @@ class AutomaticTranslationReviewer:
 
     @classmethod
     def _address_gate(cls, reading, sid, audit, source, candidate):
+        try:
+            cls._require_address_fields(audit)
+        except VideoIntelligenceError:
+            return True
         if not cls._address_applicable(audit, source, candidate):
             if sid in reading and reading[sid]["uncertain"]:
                 return not (audit.get("address_applicable") is False
