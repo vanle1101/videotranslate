@@ -17,6 +17,7 @@ def caption_session(tmp_path, monkeypatch):
         monkeypatch.setattr(settings, key, tmp_path)
     session = StreamingPipelineSession("caption-test", tmp_path / "source.mp4")
     session.initialized = True
+    session.total_duration = 3
     session.video_size = (1920, 1080)
     segment = SegmentItem(0, 0, 3, 3)
     segment.status = "READY"
@@ -78,6 +79,29 @@ def test_style_change_invalidates_completed_export_polling(caption_session):
     main.active_export_tasks[export_id] = {"status": "COMPLETED", "video_url": "/api/outputs/old.mp4"}
     assert request(caption_session, {"position": "top"}).status_code == 200
     assert export_id not in main.active_export_tasks
+
+
+def test_style_disk_failure_is_not_acknowledged_and_retains_previous_result(caption_session, monkeypatch):
+    session = caption_session
+    session.total_duration = 3
+    manifest = session.persist()
+    durable = manifest.read_bytes()
+    export_id = f"export_{session.task_id}"
+    completed = {"status": "COMPLETED", "video_url": "/api/outputs/old.mp4"}
+    main.active_export_tasks[export_id] = completed
+    session.auto_export_signature = "previous-result-signature"
+    monkeypatch.setattr(session, "persist", Mock(side_effect=OSError("disk full")))
+
+    response = request(session, {"position": "top"})
+
+    assert response.status_code == 507, response.text
+    assert "dung lượng" in response.json()["detail"]
+    assert session.caption_style == {} and session.caption_style_revision == 0
+    assert session.caption_output_outdated is False
+    assert session.output_filename == "old.mp4" and session.output_video_url == "/api/outputs/old.mp4"
+    assert session.auto_export_signature == "previous-result-signature"
+    assert main.active_export_tasks[export_id] is completed
+    assert manifest.read_bytes() == durable
 
 
 @pytest.mark.parametrize("position", ["auto", "top", "middle", "bottom"])

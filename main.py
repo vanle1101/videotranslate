@@ -37,6 +37,7 @@ from core.streaming.pipeline import (
     get_streaming_session,
     active_streaming_sessions,
     SegmentEditConflict,
+    ProjectEditSaveError,
 )
 from core.streaming.export import HQExporter
 from core.streaming.session_store import list_saved_sessions, restore_saved_session
@@ -1073,14 +1074,28 @@ async def update_caption_style(task_id: str, req: CaptionStyleRequest):
     if style["blur_original"] and not previous["has_subtitle_regions"]:
         raise HTTPException(status_code=422, detail="Chưa xác định được vùng phụ đề gốc đủ rõ để làm mờ.")
     if style != previous["caption_style"]:
+        fields = ("caption_style", "caption_style_revision", "caption_output_outdated",
+                  "output_video_url", "output_filename", "output_review_url", "auto_export_signature")
+        prior = {key: getattr(session, key) for key in fields if hasattr(session, key)}
         session.caption_style = style
         session.caption_style_revision = previous["caption_style_revision"] + 1
         session.caption_output_outdated = True
         session._invalidate_output()
+        try:
+            # A style update acknowledged by the UI must survive a full exit.
+            session.persist()
+        except (OSError, ValueError, TypeError) as error:
+            for key, value in prior.items():
+                setattr(session, key, value)
+            for key in set(fields) - prior.keys():
+                session.__dict__.pop(key, None)
+            logging.getLogger("errors").error(
+                "CAPTION_STYLE_SAVE_FAILED run_id=%s error_type=%s", task_id, type(error).__name__)
+            raise HTTPException(status_code=507, detail="Chưa lưu được phụ đề xuống ổ đĩa. "
+                "Cấu hình và video trước đó được giữ; kiểm tra dung lượng/quyền ghi rồi thử lại.") from None
         # A previous export is valid only for its old style. Drop its published
         # task entry so task polling cannot present it as the new result.
         active_export_tasks.pop(f"export_{task_id}", None)
-        persist_session(session)
     payload = {**caption_style_details(session), **session_output_details(session),
                "segments": [session.segment_snapshot(s) for s in session.segments.values()]}
     await broadcast_session_event(task_id, "caption_style", payload)
@@ -1141,6 +1156,8 @@ async def edit_streaming_segment(task_id: str, segment_id: int, req: SegmentEdit
         raise HTTPException(status_code=409, detail="Video đang được xuất. Hãy chờ xuất xong trước khi sửa lời thoại.")
     try:
         segment = await session.edit_segment(segment_id, req.final_vi, confirm_silence=req.confirm_silence)
+    except ProjectEditSaveError as error:
+        raise HTTPException(status_code=507, detail=str(error)) from None
     except KeyError:
         raise HTTPException(status_code=404, detail="Không tìm thấy câu thoại.") from None
     except SegmentEditConflict as error:

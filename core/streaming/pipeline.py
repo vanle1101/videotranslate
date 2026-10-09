@@ -1,5 +1,6 @@
 import asyncio
 import contextvars
+from contextlib import contextmanager
 import time
 import subprocess
 import functools
@@ -34,6 +35,10 @@ from core.engines.alignment.dub_timing import available_reflow_duration, plan_re
 
 class SegmentEditConflict(RuntimeError):
     """Editing would conflict with the current session state."""
+
+
+class ProjectEditSaveError(RuntimeError):
+    """An edit was not durably committed; its prior text and media remain."""
 
 
 REVIEW_FAILURE_WARNINGS = frozenset((
@@ -630,40 +635,76 @@ class StreamingPipelineSession:
                 tts_duration, ratio, boundaries = spoken["tts_duration"], spoken["speed_ratio"], spoken["boundaries"]
             if self.is_stopped:
                 raise asyncio.CancelledError
-            final_path = self.segments_dir / f"seg_{seg.id}.wav"
+            # A persistent edit must never overwrite the WAV referenced by the
+            # previous manifest before its new text/reference is durable.
+            final_path = self.segments_dir / (f"seg_{seg.id}_{uuid.uuid4().hex}.wav"
+                if self._persistence_enabled else f"seg_{seg.id}.wav")
             # No await between atomic file replacement and metadata publication.
-            if without_audio:
+            if without_audio and not self._persistence_enabled:
                 # Remove stale speech before publishing silence or an uncertain
                 # empty review. A locked file leaves the previous state intact.
                 final_path.unlink(missing_ok=True)
-            else:
+            elif not without_audio:
                 fitted_path.replace(final_path)
-            self._publish_dub_plan(dub_plan, seg.id)
-            old_text = seg.final_vi
-            seg.final_vi = text
-            seg.confirmed_silence = confirm_silence
-            if confirm_silence:
-                seg.literal_vi = seg.natural_vi = ""
-            seg.tts_duration = tts_duration
-            seg.speed_ratio = round(ratio, 2)
-            seg.audio_path = None if without_audio else str(final_path.resolve())
-            for key, value in timing.items():
-                setattr(seg, key, value)
-            seg.revision += 1
-            seg.audio_url = None if without_audio else f"/api/streaming/audio/{self.task_id}/{seg.id}?rev={seg.revision}"
-            if was_review:
-                seg.needs_review = False
-                seg.review_reason = None
-                seg.error = None
-                seg.status = "READY"
-                if not was_playable:
-                    self.total_processed_duration += seg.duration
-                if was_review_error:
-                    self.error = None
-            if review_result is not None:
-                self._apply_review_metadata(seg, review_result)
-            else:
-                seg.verification = {"status": "manual", "reason": "Người dùng đã lưu lời thoại."}
+            with self._durable_edit_publication(seg, dub_plan, final_path):
+                self._publish_dub_plan(dub_plan, seg.id)
+                old_text = seg.final_vi
+                seg.final_vi = text
+                seg.confirmed_silence = confirm_silence
+                if confirm_silence:
+                    seg.literal_vi = seg.natural_vi = ""
+                seg.tts_duration = tts_duration
+                seg.speed_ratio = round(ratio, 2)
+                seg.audio_path = None if without_audio else str(final_path.resolve())
+                for key, value in timing.items():
+                    setattr(seg, key, value)
+                seg.revision += 1
+                seg.audio_url = None if without_audio else f"/api/streaming/audio/{self.task_id}/{seg.id}?rev={seg.revision}"
+                if was_review:
+                    seg.needs_review = False
+                    seg.review_reason = None
+                    seg.error = None
+                    seg.status = "READY"
+                    if not was_playable:
+                        self.total_processed_duration += seg.duration
+                    if was_review_error:
+                        self.error = None
+                if review_result is not None:
+                    self._apply_review_metadata(seg, review_result)
+                else:
+                    seg.verification = {"status": "manual", "reason": "Người dùng đã lưu lời thoại."}
+                if self.review_summary.get("status") == "completed":
+                    self._refresh_review_counts()
+                # The file belongs to the old text/audio revision. Keep it on disk,
+                # but never expose it as this session's current final result.
+                self._invalidate_output()
+                if self.visual_translation and not without_audio:
+                    updated_screens = []
+                    for screen in self.screen_texts:
+                        if (screen.get("kind") == "subtitle" and screen.get("start", 0) < seg.end
+                                and screen.get("end", 0) > seg.start):
+                            box = screen.get("bbox")
+                            box_ok = (isinstance(box, (list, tuple)) and len(box) == 4
+                                      and all(isinstance(value, (int, float)) and math.isfinite(value) for value in box)
+                                      and 0 < box[2] <= 1 and 0 < box[3] <= 0.35 and box[2] * box[3] <= 0.30
+                                      and 0 <= box[0] <= 1 and 0 <= box[1] <= 1
+                                      and box[0] + box[2] <= 1 and box[1] + box[3] <= 1)
+                            screen_review = screen.get("needs_review", False) or not box_ok
+                            screen_reason = screen.get("review_reason") or ("Vị trí phụ đề chưa đủ chắc chắn." if not box_ok else "")
+                            if screen["start"] < seg.start:
+                                updated_screens.append({**screen, "end": seg.start})
+                            updated_screens.append({**screen, "start": max(screen["start"], seg.start),
+                                                    "end": min(screen["end"], seg.end), "text_vi": "", "mask_only": True,
+                                                    "needs_review": screen_review, "review_reason": screen_reason})
+                            if screen["end"] > seg.end:
+                                updated_screens.append({**screen, "start": seg.end})
+                        else:
+                            updated_screens.append(screen)
+                    self.screen_texts = updated_screens
+                for context in self.rolling_context:
+                    if context.get("zh") == old_source and context.get("vi") == old_text:
+                        context["zh"] = seg.text_zh
+                        context["vi"] = text
             # Neighbor rescue publishes versioned WAVs.  A later manual edit
             # must retire the superseded version after the new metadata is
             # durable, otherwise repeated edits accumulate orphan audio.
@@ -675,38 +716,6 @@ class StreamingPipelineSession:
                         old_audio.unlink(missing_ok=True)
                     except OSError:
                         pass
-            if self.review_summary.get("status") == "completed":
-                self._refresh_review_counts()
-            # The file belongs to the old text/audio revision. Keep it on disk,
-            # but never expose it as this session's current final result.
-            self._invalidate_output()
-            if self.visual_translation and not without_audio:
-                updated_screens = []
-                for screen in self.screen_texts:
-                    if (screen.get("kind") == "subtitle" and screen.get("start", 0) < seg.end
-                            and screen.get("end", 0) > seg.start):
-                        box = screen.get("bbox")
-                        box_ok = (isinstance(box, (list, tuple)) and len(box) == 4
-                                  and all(isinstance(value, (int, float)) and math.isfinite(value) for value in box)
-                                  and 0 < box[2] <= 1 and 0 < box[3] <= 0.35 and box[2] * box[3] <= 0.30
-                                  and 0 <= box[0] <= 1 and 0 <= box[1] <= 1
-                                  and box[0] + box[2] <= 1 and box[1] + box[3] <= 1)
-                        screen_review = screen.get("needs_review", False) or not box_ok
-                        screen_reason = screen.get("review_reason") or ("Vị trí phụ đề chưa đủ chắc chắn." if not box_ok else "")
-                        if screen["start"] < seg.start:
-                            updated_screens.append({**screen, "end": seg.start})
-                        updated_screens.append({**screen, "start": max(screen["start"], seg.start),
-                                                "end": min(screen["end"], seg.end), "text_vi": "", "mask_only": True,
-                                                "needs_review": screen_review, "review_reason": screen_reason})
-                        if screen["end"] > seg.end:
-                            updated_screens.append({**screen, "start": seg.end})
-                    else:
-                        updated_screens.append(screen)
-                self.screen_texts = updated_screens
-            for context in self.rolling_context:
-                if context.get("zh") == old_source and context.get("vi") == old_text:
-                    context["zh"] = seg.text_zh
-                    context["vi"] = text
             snapshot = seg.to_dict()
             try:
                 await self.emit("result_invalidated", {"reason": "transcript_changed",
@@ -735,6 +744,43 @@ class StreamingPipelineSession:
             self.edit_tasks.discard(task)
             if self.is_stopped or not self.is_running:
                 self._release_runtime()
+
+    @contextmanager
+    def _durable_edit_publication(self, segment, plan, staged_audio):
+        """Commit edit metadata before any event or retirement of old media."""
+        owners = {sid: self.segments[sid] for sid in {*plan, segment.id}}
+        old_rows = {sid: deepcopy(vars(row)) for sid, row in owners.items()}
+        fields = ("screen_texts", "rolling_context", "review_summary", "error", "total_processed_duration",
+                  "output_video_url", "output_filename", "output_review_url", "auto_export_signature")
+        old_fields = {name: deepcopy(getattr(self, name)) for name in fields if hasattr(self, name)}
+        try:
+            yield
+            if self._persistence_enabled:
+                # The ordinary progress-save helper deliberately tolerates an
+                # idle save failure. User edits must report it to the caller.
+                self.persist()
+        except BaseException as error:
+            for sid, values in old_rows.items():
+                owners[sid].__dict__.clear()
+                owners[sid].__dict__.update(values)
+            for name, value in old_fields.items():
+                setattr(self, name, value)
+            for name in set(fields) - old_fields.keys():
+                self.__dict__.pop(name, None)
+            if self._persistence_enabled:
+                staged_audio.unlink(missing_ok=True)
+            for bounds in plan.values():
+                path = bounds.get("_audio_update", {}).get("audio_path")
+                if path:
+                    Path(path).unlink(missing_ok=True)
+            if isinstance(error, (OSError, ValueError, TypeError)):
+                logging.getLogger("errors").error(
+                    "PROJECT_EDIT_SAVE_FAILED run_id=%s segment_id=%s error_type=%s",
+                    self.task_id, segment.id, type(error).__name__)
+                raise ProjectEditSaveError(
+                    "Chưa lưu được lời thoại xuống ổ đĩa. Nội dung và giọng cũ được giữ; "
+                    "kiểm tra dung lượng/quyền ghi rồi thử lưu lại.") from None
+            raise
 
     @staticmethod
     def _apply_review_metadata(segment, row):

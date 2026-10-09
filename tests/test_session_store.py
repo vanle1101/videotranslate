@@ -89,6 +89,63 @@ def test_active_chunked_save_failure_blocks_runtime_and_keeps_durable_checkpoint
     assert failing_save.call_count == 1
 
 
+def test_persistent_edit_survives_restart_with_its_own_wav_and_retires_only_old_audio(persisted, monkeypatch):
+    import core.streaming.session_store as store
+    before = Path(persisted.segments[0].audio_path)
+    old_content = before.read_bytes()
+
+    def synthesis(**kwargs):
+        with wave.open(str(kwargs["output_path"]), "wb") as audio:
+            audio.setparams((1, 2, 24000, 0, "NONE", "not compressed"))
+            audio.writeframes(b"\x10\x27" * 24000)
+        return {"text": kwargs["text"], "tts_duration": 1, "speed_ratio": 1, "boundaries": []}
+
+    monkeypatch.setattr("core.streaming.pipeline.synthesize_natural_speech", synthesis)
+    edited = asyncio.run(persisted.edit_segment(0, "Lời do người dùng sửa."))
+    record = store._read(persisted.task_id)
+    assert record["segments"][0]["final_vi"] == edited["final_vi"]
+    assert record["segments"][0]["revision"] == edited["revision"] == 1
+    saved_audio = Path(record["segments"][0]["audio_path"])
+    assert saved_audio != before and saved_audio.read_bytes() != old_content
+    assert not before.exists()
+    restored = restore_saved_session(persisted.task_id)
+    assert restored.segments[0].final_vi == edited["final_vi"]
+    assert Path(restored.segments[0].audio_path) == saved_audio
+    assert restored.segments[0].status == "READY"
+
+
+def test_real_manifest_replace_failure_rolls_back_edit_and_retry_can_commit(persisted, monkeypatch):
+    import core.streaming.session_store as store
+    from core.streaming.pipeline import ProjectEditSaveError
+    from copy import deepcopy
+    manifest = store._project_path(persisted.task_id)
+    durable = manifest.read_bytes()
+    prior = deepcopy(persisted.segments[0].to_dict())
+    before = Path(persisted.segments[0].audio_path)
+    original_replace = store._replace_project_with_retry
+
+    def synthesis(**kwargs):
+        with wave.open(str(kwargs["output_path"]), "wb") as audio:
+            audio.setparams((1, 2, 24000, 0, "NONE", "not compressed"))
+            audio.writeframes(b"\x10\x27" * 24000)
+        return {"text": kwargs["text"], "tts_duration": 1, "speed_ratio": 1, "boundaries": []}
+
+    monkeypatch.setattr("core.streaming.pipeline.synthesize_natural_speech", synthesis)
+    monkeypatch.setattr(store, "_replace_project_with_retry", Mock(side_effect=PermissionError("locked manifest")))
+    with pytest.raises(ProjectEditSaveError, match="Nội dung và giọng cũ"):
+        asyncio.run(persisted.edit_segment(0, "Lời vừa sửa."))
+    assert manifest.read_bytes() == durable and persisted.segments[0].to_dict() == prior
+    assert before.exists() and list(persisted.segments_dir.iterdir()) == [before]
+    assert not list(manifest.parent.glob("*.tmp"))
+
+    monkeypatch.setattr(store, "_replace_project_with_retry", original_replace)
+    asyncio.run(persisted.edit_segment(0, "Lời vừa sửa."))
+    record = store._read(persisted.task_id)
+    assert record["segments"][0]["final_vi"] == "Lời vừa sửa."
+    assert Path(record["segments"][0]["audio_path"]).is_file()
+    assert not before.exists()
+
+
 @pytest.fixture
 def persisted(tmp_path, monkeypatch):
     for name, value in {

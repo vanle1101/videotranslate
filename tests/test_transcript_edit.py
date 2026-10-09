@@ -96,6 +96,40 @@ def test_manual_speech_failure_is_traceable_without_logging_secret_or_losing_old
     assert old_audio.read_bytes() == b'old audio'
 
 
+@pytest.mark.parametrize("silence", [False, True])
+def test_edit_disk_failure_preserves_durable_text_audio_and_result(session, monkeypatch, silence):
+    seg = session.segments[0]
+    seg.needs_review = silence
+    session.output_filename = "old.mp4"
+    session.output_video_url = "/api/outputs/old.mp4"
+    session.auto_export_signature = "original-signature"
+    manifest = session.persist()
+    durable = manifest.read_bytes()
+    before = deepcopy(seg.to_dict())
+    context = deepcopy(session.rolling_context)
+    old_audio = Path(seg.audio_path)
+    content = old_audio.read_bytes()
+    monkeypatch.setattr(session, "persist", Mock(side_effect=OSError("disk full")))
+
+    async def run():
+        async with client() as api:
+            response = await api.patch(route(session), json={"final_vi": "" if silence else "Lời mới",
+                **({"confirm_silence": True} if silence else {})})
+            assert response.status_code == 507, response.text
+            assert "dung lượng" in response.json()["detail"]
+    asyncio.run(run())
+
+    assert seg.to_dict() == before
+    assert old_audio.read_bytes() == content
+    assert session.rolling_context == context
+    assert session.output_video_url == "/api/outputs/old.mp4" and session.output_filename == "old.mp4"
+    assert session.auto_export_signature == "original-signature"
+    assert manifest.read_bytes() == durable
+    assert [path.name for path in session.segments_dir.iterdir()] == [old_audio.name]
+    assert not session.edit_tasks
+    assert not any(kind in {"segment_update", "result_invalidated"} for kind, _ in session.events)
+
+
 def route(session, segment_id=0):
     return f"/api/streaming/{session.task_id}/segments/{segment_id}"
 
