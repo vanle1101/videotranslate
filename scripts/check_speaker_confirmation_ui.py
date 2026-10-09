@@ -84,6 +84,8 @@ def main():
         changed = next(r for r in saved["segments"] if r["id"] == ROW_ID)
         assert changed["final_vi"] == words and changed["verification"] == verdict
         if args.mode == "review-export":
+            prior_output = ROOT / "workspace/outputs" / f"douyin_translated_{TASK_ID}_hq.mp4"
+            prior_stamp = prior_output.stat().st_mtime_ns if prior_output.is_file() else None
             assert not changed["tts_voice_outdated"] and old_hashes == audio_hashes(saved)
             targets = [r["id"] for r in saved["segments"] if r.get("speaker_review_pending")]
             assert targets and ROW_ID not in targets, "The unchanged manual words must never enter AI review"
@@ -113,7 +115,15 @@ def main():
             # already published fresh output, inspect it; otherwise run the
             # real export control explicitly. Never bypass a content gate.
             from check_production_ui import check_playback
+            # The final review event schedules automatic export asynchronously.
+            # PREPARED is not an export result; wait for the real page to expose
+            # a validated result or an idle manual-export action.
+            until(page, "!document.getElementById('task-result-link').classList.contains('hidden') || !document.getElementById('btn-export-hq').disabled", timeout=180)
+            current = backend(base, f"/api/streaming/{TASK_ID}")
             if current.get("output_filename") and not current.get("output_outdated"):
+                output = (ROOT / "workspace/outputs" / current["output_filename"]).resolve()
+                assert output.is_file() and output.stat().st_size > 0
+                assert output != prior_output.resolve() or output.stat().st_mtime_ns != prior_stamp
                 check_playback(page)
             else:
                 export_through_ui(page, base, TASK_ID)

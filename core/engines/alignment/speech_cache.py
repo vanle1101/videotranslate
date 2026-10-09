@@ -26,6 +26,11 @@ _LOCK = threading.RLock()
 _OWNED_NAME = re.compile(r"[0-9a-f]{64}\.speech\Z")
 _SECRET_FIELDS = {"api_key", "apikey", "api-key", "authorization", "password",
                   "secret", "access_token", "refresh_token", "token", "credentials"}
+_TTS_ADAPTERS = {
+    ("core.engines.tts.edge_fallback", "EdgeTTSFallbackEngine"): "edge-tts",
+    ("core.engines.tts.piper_engine", "PiperEngine"): "piper-tts",
+    ("core.engines.tts.vieneu_engine", "VieNeuEngine"): "vieneu-tts",
+}
 
 
 @dataclass(frozen=True)
@@ -34,6 +39,12 @@ class SpeechCacheIdentity:
     text: str
     duration: float
     max_speed: float
+
+
+@dataclass(frozen=True)
+class RawSpeechCacheIdentity:
+    key: str
+    text: str
 
 
 def _json(value):
@@ -137,13 +148,8 @@ def synthesis_cache_identity(*, source, text, duration, voice, engine, aligner,
     from core.voice_catalog import resolve_voice
     from core.voice_preview import VoicePreviewManager
     from core.engines.translation.semantic_translator import SemanticTranslator
-    adapters = {
-        ("core.engines.tts.edge_fallback", "EdgeTTSFallbackEngine"): "edge-tts",
-        ("core.engines.tts.piper_engine", "PiperEngine"): "piper-tts",
-        ("core.engines.tts.vieneu_engine", "VieNeuEngine"): "vieneu-tts",
-    }
     kind = type(engine)
-    engine_name = adapters.get((kind.__module__, kind.__name__))
+    engine_name = _TTS_ADAPTERS.get((kind.__module__, kind.__name__))
     if engine_name is None:
         return None
     if translator is not None and type(translator) is not SemanticTranslator:
@@ -166,6 +172,53 @@ def synthesis_cache_identity(*, source, text, duration, voice, engine, aligner,
         engine_revision=VoicePreviewManager._engine_revision(engine_name),
         provider=provider, model=models.get(provider), context=context,
         ref_audio=ref_audio, max_speed=aligner.max_speed)
+
+
+def build_raw_speech_cache_identity(*, text, voice, engine, engine_revision, ref_audio=None):
+    """Identity of untouched normal-rate PCM, independent of translation/fitting.
+
+    The source, Muse model, context and available slot do not affect the TTS
+    request. They still belong to the finalized speech cache and every fit is
+    measured again. Never reuse a shortened sentence's PCM for a different text.
+    """
+    if (not isinstance(text, str) or not text.strip() or len(text) > 100_000
+            or not isinstance(engine, str) or not engine or not engine_revision):
+        raise ValueError("Incomplete raw speech cache identity.")
+    loaded = _loaded_code_revision()
+    adapter = {"edge-tts": "edge_fallback.py", "piper-tts": "piper_engine.py",
+               "vieneu-tts": "vieneu_engine.py"}.get(engine)
+    implementation = {name: loaded[name] for name in ("speech_cache.py", "voice_preview.py", adapter)
+                      if name is not None}
+    inputs = {"schema": SCHEMA, "stage": "raw-normal-rate-tts", "text": text.strip(),
+              "voice": voice, "engine": engine, "engine_revision": engine_revision,
+              "speed": 1.0, "reference_audio": _file_hash(ref_audio) if ref_audio else None,
+              "implementation": implementation}
+    _reject_secrets(inputs)
+    encoded = _json(inputs)
+    if len(encoded) > 1024 * 1024:
+        raise ValueError("Raw speech cache identity is too large.")
+    return RawSpeechCacheIdentity(hashlib.sha256(encoded).hexdigest(), text.strip())
+
+
+def raw_synthesis_cache_identity(*, text, voice, engine, ref_audio=None):
+    """Only configured production adapters can publish reusable raw audio."""
+    from core.voice_catalog import resolve_voice
+    from core.voice_preview import VoicePreviewManager
+    kind = type(engine)
+    name = _TTS_ADAPTERS.get((kind.__module__, kind.__name__))
+    if name is None:
+        return None
+    actual_voice = (voice if isinstance(voice, str) and voice.startswith("vi-VN-") else engine.voice) if name == "edge-tts" else voice
+    _, chosen_voice = resolve_voice(actual_voice, name)
+    revision = VoicePreviewManager._engine_revision(name)
+    # Keep the adapter revision tied to code loaded by this process. An old
+    # Studio may still be running while files on disk receive a new patch.
+    if isinstance(revision, dict) and "adapter" in revision:
+        adapter = {"edge-tts": "edge_fallback.py", "piper-tts": "piper_engine.py",
+                   "vieneu-tts": "vieneu_engine.py"}[name]
+        revision = {**revision, "adapter": _loaded_code_revision()[adapter]}
+    return build_raw_speech_cache_identity(text=text, voice=chosen_voice, engine=name,
+        engine_revision=revision, ref_audio=ref_audio)
 
 
 def _cache_dir(directory):
@@ -356,6 +409,161 @@ def load_speech_cache(identity, output_path, *, cancel_check=None, cache_dir=Non
             output = Path(output_path)
             output.parent.mkdir(parents=True, exist_ok=True)
             with tempfile.NamedTemporaryFile(prefix="speech-cache-", suffix=".tmp", dir=output.parent, delete=False) as stream:
+                temporary = Path(stream.name)
+                try:
+                    stream.write(data)
+                except BaseException:
+                    stream.close()
+                    temporary.unlink(missing_ok=True)
+                    raise
+            try:
+                _cancelled(cancel_check)
+                temporary.replace(output)
+            finally:
+                temporary.unlink(missing_ok=True)
+            try:
+                path.touch()
+            except OSError:
+                pass
+            return result
+    except (OSError, EOFError, ValueError, KeyError, zipfile.BadZipFile):
+        return None
+
+
+def _raw_cache_dir(directory):
+    # The finalized capsule has a different validator and namespace. A raw
+    # cache hit is not a READY output, pacing approval or translation verdict.
+    if directory is None:
+        from config import settings
+        directory = settings.WORKSPACE_DIR / "cache" / "speech_raw"
+    return Path(directory)
+
+
+def _validate_raw_identity(identity):
+    if not isinstance(identity, RawSpeechCacheIdentity) or not re.fullmatch(r"[0-9a-f]{64}", identity.key):
+        raise ValueError("Invalid raw speech cache identity.")
+
+
+def _raw_result(data, result, identity):
+    """Read complete PCM and original word timing before trimming or tempo."""
+    if (not 44 < len(data) < MAX_CACHE_BYTES or not isinstance(result, dict)
+            or set(result) != {"text", "audio_duration", "boundaries"}
+            or result["text"] != identity.text):
+        return None
+    duration = result["audio_duration"]
+    if type(duration) not in (int, float) or not math.isfinite(duration) or duration <= 0:
+        return None
+    try:
+        with wave.open(io.BytesIO(data), "rb") as audio:
+            channels, width, rate, count = (audio.getnchannels(), audio.getsampwidth(),
+                                          audio.getframerate(), audio.getnframes())
+            if (audio.getcomptype() != "NONE" or channels not in (1, 2) or width != 2
+                    or not 8000 <= rate <= 96000 or count <= 0
+                    or abs(count / rate - duration) > 1 / rate):
+                return None
+            frames = audio.readframes(count)
+            if len(frames) != count * channels * width or not any(frames):
+                return None
+        boundaries = result["boundaries"]
+        if not isinstance(boundaries, list) or len(boundaries) > 10000:
+            return None
+        previous = -1.
+        for boundary in boundaries:
+            if not isinstance(boundary, dict) or set(boundary) != {"text", "start", "end"} or not isinstance(boundary["text"], str):
+                return None
+            start, end = boundary["start"], boundary["end"]
+            if (any(type(value) not in (int, float) or not math.isfinite(value) for value in (start, end))
+                    or not 0 <= start <= end <= duration + 1 or start < previous):
+                return None
+            previous = start
+        _reject_secrets(result)
+        encoded = _json(result)
+        return json.loads(encoded) if len(encoded) < MAX_RECORD_BYTES else None
+    except (OSError, EOFError, wave.Error, TypeError, ValueError):
+        return None
+
+
+def store_raw_speech_cache(identity, audio_path, boundaries, *, cancel_check=None, cache_dir=None):
+    """Atomically retain untouched valid PCM even when its later timing fails."""
+    _validate_raw_identity(identity)
+    _cancelled(cancel_check)
+    directory = _raw_cache_dir(cache_dir)
+    try:
+        audio_path = Path(audio_path)
+        if audio_path.is_symlink() or audio_path.stat().st_size >= MAX_CACHE_BYTES:
+            return False
+        data = audio_path.read_bytes()
+        with wave.open(io.BytesIO(data), "rb") as audio:
+            duration = audio.getnframes() / audio.getframerate()
+        result = _raw_result(data, {"text": identity.text, "audio_duration": duration,
+                                   "boundaries": boundaries}, identity)
+        if result is None:
+            return False
+        manifest = _json({"schema": SCHEMA, "stage": "raw-normal-rate-tts", "identity": identity.key,
+                          "audio_sha256": hashlib.sha256(data).hexdigest(), "result": result})
+        record = io.BytesIO()
+        with zipfile.ZipFile(record, "w", compression=zipfile.ZIP_STORED) as archive:
+            archive.writestr("manifest.json", manifest)
+            archive.writestr("speech.wav", data)
+        payload = record.getvalue()
+        if len(payload) > MAX_CACHE_BYTES:
+            return False
+        with _LOCK:
+            _cancelled(cancel_check)
+            directory.mkdir(parents=True, exist_ok=True)
+            destination = directory / f"{identity.key}.speech"
+            with tempfile.NamedTemporaryFile(prefix="raw-speech-cache-", suffix=".tmp", dir=directory, delete=False) as stream:
+                temporary = Path(stream.name)
+                try:
+                    stream.write(payload)
+                    stream.flush()
+                    os.fsync(stream.fileno())
+                except BaseException:
+                    stream.close()
+                    temporary.unlink(missing_ok=True)
+                    raise
+            try:
+                _cancelled(cancel_check)
+                if not _prune(directory, len(payload), keep=destination):
+                    return False
+                _cancelled(cancel_check)
+                temporary.replace(destination)
+            finally:
+                temporary.unlink(missing_ok=True)
+        return True
+    except (OSError, EOFError, wave.Error, ValueError, ZeroDivisionError):
+        return False
+
+
+def load_raw_speech_cache(identity, output_path, *, cancel_check=None, cache_dir=None):
+    """Restore exact raw PCM; every timing/semantic gate still runs afterward."""
+    _validate_raw_identity(identity)
+    _cancelled(cancel_check)
+    path = _raw_cache_dir(cache_dir) / f"{identity.key}.speech"
+    try:
+        with _LOCK:
+            if path.is_symlink() or not path.is_file() or path.stat().st_size > MAX_CACHE_BYTES:
+                return None
+            with zipfile.ZipFile(path) as archive:
+                if sorted(archive.namelist()) != ["manifest.json", "speech.wav"] or any(
+                        item.compress_type != zipfile.ZIP_STORED or item.flag_bits & 1 for item in archive.infolist()):
+                    return None
+                if (archive.getinfo("manifest.json").file_size > MAX_RECORD_BYTES
+                        or archive.getinfo("speech.wav").file_size >= MAX_CACHE_BYTES):
+                    return None
+                manifest = json.loads(archive.read("manifest.json"))
+                data = archive.read("speech.wav")
+            if (not isinstance(manifest, dict) or manifest.get("schema") != SCHEMA
+                    or manifest.get("stage") != "raw-normal-rate-tts" or manifest.get("identity") != identity.key
+                    or manifest.get("audio_sha256") != hashlib.sha256(data).hexdigest()):
+                return None
+            result = _raw_result(data, manifest.get("result"), identity)
+            if result is None:
+                return None
+            _cancelled(cancel_check)
+            output = Path(output_path)
+            output.parent.mkdir(parents=True, exist_ok=True)
+            with tempfile.NamedTemporaryFile(prefix="raw-speech-cache-", suffix=".tmp", dir=output.parent, delete=False) as stream:
                 temporary = Path(stream.name)
                 try:
                     stream.write(data)

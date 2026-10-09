@@ -14,6 +14,7 @@ from core.engines.alignment.timing_aligner import SpeechBudgetError
 from core.engines.translation.semantic_translator import PacingReviewRejected, pacing_candidate_key
 from core.engines.alignment.speech_cache import (
     synthesis_cache_identity, load_speech_cache, store_speech_cache,
+    raw_synthesis_cache_identity, load_raw_speech_cache, store_raw_speech_cache,
 )
 
 
@@ -87,8 +88,28 @@ def synthesize_natural_speech(*, text, source, duration, output_path, engine, al
                 raise asyncio.CancelledError
             if on_stage:
                 on_stage("TTS")
-            engine.synthesize(text=current, output_path=raw, voice=voice, ref_audio=ref_audio)
-            boundaries = take_tts_word_boundaries(engine, raw)
+            # A failed acoustic-only first pass still owns useful normal-rate
+            # speech. Reuse that untouched PCM across pacing/model/slot changes,
+            # never an already trimmed/accelerated or independently rewritten
+            # result. The final fit and semantic checks below remain mandatory.
+            raw_identity = None
+            try:
+                raw_identity = raw_synthesis_cache_identity(text=current, voice=voice,
+                    engine=engine, ref_audio=ref_audio)
+            except (OSError, ValueError, TypeError, KeyError):
+                logger.warning("TTS_RAW_CACHE_UNAVAILABLE run_id=%s speech_id=%s", execution.run_id, speech_id)
+            raw_cached = (load_raw_speech_cache(raw_identity, raw, cancel_check=execution.cancel_check)
+                          if raw_identity is not None else None)
+            if raw_cached is None:
+                engine.synthesize(text=current, output_path=raw, voice=voice, ref_audio=ref_audio)
+                boundaries = take_tts_word_boundaries(engine, raw)
+                if raw_identity is not None:
+                    saved = store_raw_speech_cache(raw_identity, raw, boundaries,
+                        cancel_check=execution.cancel_check)
+                    logger.info("TTS_RAW_CACHE_STORED run_id=%s speech_id=%s saved=%s", execution.run_id, speech_id, saved)
+            else:
+                boundaries = raw_cached["boundaries"]
+                logger.info("TTS_RAW_CACHE_HIT run_id=%s speech_id=%s", execution.run_id, speech_id)
             trim_offset = trim_tts_padding(raw)
             activity = audio_activity_span(raw)
             boundaries = retime_tts_word_boundaries(boundaries, trim_offset=trim_offset,

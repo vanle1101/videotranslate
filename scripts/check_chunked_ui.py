@@ -106,7 +106,10 @@ def wait_for_idle(page, base, task_id, timeout=3600):
                 **{key: queue.get(key, 0) - initial_queue.get(key, 0)
                    for key in ("requests", "cache_hits", "retry_requests")}})
             return snapshot
-        wait(200)
+        # Production receives live progress through its WebSocket. Rebuilding
+        # the full, caption-enriched long transcript five times per second is
+        # unnecessary QA pressure and distorts recovery timings.
+        wait(1500)
     raise AssertionError("Real runtime did not reach a terminal state within the acceptance deadline")
 
 

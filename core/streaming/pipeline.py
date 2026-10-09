@@ -1006,13 +1006,15 @@ class StreamingPipelineSession:
         await self.emit("review_complete", {"review_summary": self.review_summary,
             "warnings": list(self.warnings), "screen_texts": self.screen_texts})
 
-    async def _resume_speech_rows(self, rows):
+    async def _resume_speech_rows(self, rows, *, defer_pacing=False):
         """Publish simple fits before admitting slower semantic pacing requests.
 
         The first pass measures real TTS and performs only acoustic/timeline
         fitting. Overlong rows retain their checkpoint for a second pass; a
         slow rewrite cannot delay every independent missing WAV behind it.
-        Both passes share one owner and the existing TTS lock/cache.
+        Both passes share one owner and the existing TTS lock/cache. Recovery
+        can collect the second pass across review groups, so a difficult early
+        sentence cannot delay all later groups' independent speech.
         """
         deferred = []
         ordered = sorted(rows, key=lambda item: (item.start, item.id))
@@ -1052,7 +1054,17 @@ class StreamingPipelineSession:
                     self.task_id, row.id, row.failed_stage, type(error).__name__)
                 await self.emit("segment_update", row.to_dict())
                 self._persist_if_enabled()
+        if not defer_pacing:
+            await self._resume_deferred_speech_rows(deferred)
+        return deferred
+
+    async def _resume_deferred_speech_rows(self, deferred):
+        """Run bounded pacing only after independent recovery has published."""
+        seen = set()
         for row, revision in deferred:
+            if (row.id, revision) in seen:
+                continue
+            seen.add((row.id, revision))
             if row.revision != revision or row.status != "WAITING" or not self._published_row(row):
                 continue
             await self.pause_event.wait()
@@ -1096,6 +1108,7 @@ class StreamingPipelineSession:
         if (settings.LLM_PROVIDER != "opencode" or
                 (not (self._chunked_source_started and self.visual_translation) and not pending_speaker_review)):
             return
+        deferred_speech = []
         if synthesize_pending:
             from core.streaming.speaker_source import recover_speaker_evidence
             await recover_speaker_evidence(self)
@@ -1158,8 +1171,8 @@ class StreamingPipelineSession:
             # missing WAV must not wait behind unrelated slow Muse requests.
             # No second speech worker runs until this recovery owner finishes.
             reserved = {row.id for row in pending}
-            await self._resume_speech_rows(
-                row for row in self.segments.values() if row.id not in reserved)
+            deferred_speech.extend(await self._resume_speech_rows(
+                (row for row in self.segments.values() if row.id not in reserved), defer_pacing=True))
         for offset in range(0, len(pending), self.VISUAL_REVIEW_GROUP_SIZE):
             await self.pause_event.wait()
             if self.is_stopped:
@@ -1211,7 +1224,9 @@ class StreamingPipelineSession:
                 # valid WAVs before admitting the next semantic request. A
                 # failed row stays FAILED and is not retried twice by the later
                 # queue in the same run. Its siblings continue independently.
-                await self._resume_speech_rows(group)
+                deferred_speech.extend(await self._resume_speech_rows(group, defer_pacing=True))
+        if synthesize_pending:
+            await self._resume_deferred_speech_rows(deferred_speech)
 
     async def start_automatic_review(self):
         if (not self.initialized or self.is_running or self.is_stopped or self.is_editing or self.error

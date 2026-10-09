@@ -1372,3 +1372,79 @@ def test_resume_does_not_overwrite_manual_revision_while_pacing_deferred(preview
     assert calls == [(1, False), (2, False), (3, False)]
     assert session.segments[1].final_vi == "Lời người dùng vừa lưu."
     assert session.segments[1].verification["status"] == "manual"
+
+
+def test_slow_pacing_waits_for_all_review_groups_independent_speech(preview, monkeypatch):
+    from core.engines.alignment.timing_aligner import SpeechBudgetError
+    session, _, _, speech, _ = preview
+    saved_full_queue(session)
+    session.segments = {}
+    for sid in range(7):
+        row = SegmentItem(sid, sid * 4, sid * 4 + 2, 2)
+        row.source_method, row.translation_provider = "text-ai", "opencode"
+        row.status, row.final_vi, row.failed_stage = "WAITING", f"Lời {sid}.", "TTS"
+        row._retry_synthesis = True
+        row.verification = {"status": "verified" if sid == 0 else "incomplete",
+                            "semantic_verified": sid == 0}
+        session.segments[sid] = row
+    session._visual_completed_seconds = session.total_duration = 28
+    session.error, session.is_running = None, True
+    original = session._synthesize_segment
+    calls, groups = [], []
+
+    async def synthesize(row, *, allow_pacing=True):
+        calls.append((row.id, allow_pacing))
+        if row.id in {0, 1}:
+            row.status = "ALIGNING"
+            if not allow_pacing:
+                raise SpeechBudgetError("Measured complete waveform is overlong")
+            assert groups == [{1, 2, 3, 4}, {5, 6}]
+            assert speech == [2, 3, 4, 5, 6], "Later easy speech was delayed by early pacing"
+            raise RuntimeError("Bounded provider failure")
+        await original(row)
+
+    async def review(**options):
+        ids = options["segment_ids"]
+        if groups:
+            assert speech == [2, 3, 4]
+        groups.append(ids)
+        for sid in ids:
+            session.segments[sid].verification = {"status": "verified", "semantic_verified": True}
+
+    monkeypatch.setattr(session, "_synthesize_segment", synthesize)
+    monkeypatch.setattr(session, "_review_translations", review)
+    asyncio.run(session._resume_pending_chunk_reviews(synthesize_pending=True))
+    assert calls == [(0, False), (1, False), (2, False), (3, False), (4, False),
+                     (5, False), (6, False), (0, True), (1, True)]
+    assert session.segments[0].status == session.segments[1].status == "FAILED"
+    assert all(session.segments[sid].status == "READY" for sid in range(2, 7))
+
+
+def test_collected_pacing_skips_duplicate_and_newer_manual_revision(preview, monkeypatch):
+    from core.engines.alignment.timing_aligner import SpeechBudgetError
+    session, *_ = preview
+    saved_full_queue(session)
+    session.error, session.is_running = None, True
+    session.segments[1].status = "WAITING"
+    original = session._synthesize_segment
+    calls = []
+
+    async def synthesize(row, *, allow_pacing=True):
+        calls.append((row.id, allow_pacing))
+        if not allow_pacing and row.id in {1, 2}:
+            row.status = "ALIGNING"
+            raise SpeechBudgetError("Measured overlong candidate")
+        await original(row)
+
+    monkeypatch.setattr(session, "_synthesize_segment", synthesize)
+    async def run():
+        deferred = await session._resume_speech_rows(session.segments.values(), defer_pacing=True)
+        manual = session.segments[1]
+        manual.revision += 1
+        manual.final_vi, manual.status = "Lời vừa sửa tay.", "READY"
+        manual.verification = {"status": "manual"}
+        await session._resume_deferred_speech_rows(deferred + deferred)
+    asyncio.run(run())
+    assert calls == [(1, False), (2, False), (3, False), (2, True)]
+    assert session.segments[1].final_vi == "Lời vừa sửa tay."
+    assert session.segments[1].verification["status"] == "manual"
