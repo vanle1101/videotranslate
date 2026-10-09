@@ -69,7 +69,7 @@ SEGMENT_FIELDS = frozenset((
     "audio_path failed_stage error revision source_method translation_provider translation_model evidence_mode "
     "needs_review review_reason asr_text verification confirmed_silence subtitle_cues subtitle_timing_source "
     "speech_start speech_end asr_pretranscribed dub_start dub_end dub_tail_limit timing_issue"
-    " speaker_id speaker_evidence utterance_id utterance_evidence source_asr_row_id source_asr_start source_asr_end source_piece_index source_piece_count"
+    " speaker_id speaker_evidence speaker_diagnostics utterance_id utterance_evidence source_asr_row_id source_asr_start source_asr_end source_piece_index source_piece_count"
 ).split())
 SESSION_FIELDS = frozenset((
     "initial_buffer_seconds voice tts_engine_name asr_engine_name visual_translation total_duration video_size "
@@ -280,7 +280,48 @@ def _clean_segment_field(key, value):
         return _clean_timing_issue(value)
     if key in {"speaker_evidence", "utterance_evidence"}:
         return _clean_identity_evidence(value, key.split("_", 1)[0])
+    if key == "speaker_diagnostics":
+        return _clean_speaker_diagnostics(value)
     return _clean(value)
+
+
+def _clean_speaker_diagnostics(value):
+    """Uncalibrated audio scores stay separate from identity/relationship proof."""
+    if value is None:
+        return None
+    if (not isinstance(value, dict) or value.get("status") not in {"PROVISIONAL", "UNKNOWN"}
+            or value.get("calibrated") is not False or value.get("review_required") is not True
+            or not isinstance(value.get("request_key"), str)
+            or not re.fullmatch(r"[a-f0-9]{64}", value["request_key"])):
+        raise ValueError("Thông tin phân biệt giọng chưa được xác minh không hợp lệ.")
+    scores, matches = value.get("silhouette"), value.get("matches")
+    if not isinstance(scores, list) or not isinstance(matches, list) or len(scores) > 4096 or len(matches) > 4096:
+        raise ValueError("Dẫn chứng giọng nói vượt giới hạn.")
+    if any(score is not None and (type(score) not in (int, float) or not math.isfinite(score)
+                                 or not -1 <= score <= 1) for score in scores):
+        raise ValueError("Điểm silhouette giọng nói không hợp lệ.")
+    cleaned = []
+    for match in matches:
+        if not isinstance(match, dict) or match.get("calibrated") is not False or match.get("review_required") is not True:
+            raise ValueError("Kết quả ghép giọng tự động không hợp lệ.")
+        record = {}
+        for key in ("status", "reason"):
+            if not isinstance(match.get(key), str) or not match[key].strip() or len(match[key]) > 200:
+                raise ValueError("Lý do ghép giọng tự động không hợp lệ.")
+            record[key] = _clean(match[key])
+        for key, lower, upper in (("cosine", -1, 1), ("margin", 0, 2)):
+            score = match.get(key)
+            if score is not None and (type(score) not in (int, float) or not math.isfinite(score)
+                                      or not lower <= score <= upper):
+                raise ValueError("Điểm ghép giọng tự động không hợp lệ.")
+            record[key] = score
+        candidates = match.get("candidate_ids", [])
+        if not isinstance(candidates, list) or len(candidates) > 3 or any(
+                not isinstance(sid, str) or not re.fullmatch(r"voice-\d{6}", sid) for sid in candidates):
+            raise ValueError("Danh tính giọng ứng viên không hợp lệ.")
+        cleaned.append({**record, "candidate_ids": candidates, "calibrated": False, "review_required": True})
+    return {"status": value["status"], "calibrated": False, "review_required": True,
+            "request_key": value["request_key"], "silhouette": scores, "matches": cleaned}
 
 
 def _validate_source_metadata(row):

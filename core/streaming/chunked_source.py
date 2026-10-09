@@ -172,6 +172,8 @@ async def prepare_interval(session, start, nominal_end):
             shifted.append(row)
         # Long utterances already contain measured word timestamps. No uniform
         # source-time splitting is introduced by this bounded path.
+        from core.streaming.speaker_source import annotate_source_rows
+        shifted = await annotate_source_rows(session, shifted, start, scan_end)
         rows = await session._run_blocking(session._grounded_visual_segments, shifted)
         end = owned_boundary(rows, start, scan_end, session.total_duration)
         if end > start + .05:

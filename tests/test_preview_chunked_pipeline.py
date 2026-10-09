@@ -31,6 +31,7 @@ def wav(path, seconds=.5):
 def preview(tmp_path, monkeypatch):
     monkeypatch.setattr(settings, "BASE_DIR", tmp_path)
     monkeypatch.setattr(settings, "LLM_PROVIDER", "opencode")
+    monkeypatch.setattr(settings, "DIARIZATION_ENABLED", False)
     source = tmp_path / "source.mp4"
     source.write_bytes(b"isolated source identity")
     session = StreamingPipelineSession("preview-owned", source, visual_translation=True,

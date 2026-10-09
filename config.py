@@ -80,6 +80,9 @@ class Settings(BaseSettings):
     PORT: int = 0  # 0 indicates dynamic ephemeral port allocation
     DEBUG: bool = False
     PREWARM_MODELS: bool = False
+    DIARIZATION_ENABLED: bool = True
+    DIARIZATION_CPU_THREADS: int = Field(default=2, ge=1, le=8)
+    DIARIZATION_PROCESS_TIMEOUT: float = Field(default=120., gt=0, le=600)
 
     # Directories
     BASE_DIR: Path = BASE_DIR

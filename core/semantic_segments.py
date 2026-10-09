@@ -29,6 +29,9 @@ Các semantic_units là đơn vị đọc nghĩa, KHÔNG phải mốc phụ đ�
 - kind=contextual_exchange chỉ yêu cầu xét các cách đọc nối lời hoặc đổi lượt;
   same_speaker_confirmed=false KHÔNG chứng minh cùng/khác người. Không gộp
   giọng, tự gán nhân vật, giới tính, quan hệ hoặc xưng hô từ grouping.
+- speaker_evidence.verified=false là nhãn giọng dự đoán. Silhouette/cosine
+  chưa hiệu chuẩn không phải xác suất đúng và không xác nhận nhân vật hay
+  người nghe; không dùng nhãn dự đoán để tự xác nhận xưng hô hoặc gộp giọng.
 - Chỉ xuất đúng ID được yêu cầu. Giữ nghĩa toàn unit, không mất từ hoặc lặp
   nghĩa ở ranh giới; không chép cả câu đầy đủ vào từng ID. Nếu không thể phân
   chia lời Việt giữ nghĩa theo mốc riêng, báo needs_review=true với lý do

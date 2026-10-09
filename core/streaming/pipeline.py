@@ -50,7 +50,7 @@ REVIEW_FAILURE_WARNINGS = frozenset((
 
 PROJECT_SAVE_FAILURE_WARNING = "Không lưu được dự án xuống đĩa; giữ cửa sổ mở và kiểm tra dung lượng/quyền ghi."
 
-SOURCE_METADATA_FIELDS = ("speaker_id", "speaker_evidence", "utterance_id", "utterance_evidence",
+SOURCE_METADATA_FIELDS = ("speaker_id", "speaker_evidence", "speaker_diagnostics", "utterance_id", "utterance_evidence",
                           "source_asr_row_id", "source_asr_start", "source_asr_end",
                           "source_piece_index", "source_piece_count")
 
@@ -1001,6 +1001,9 @@ class StreamingPipelineSession:
         if not (self._chunked_source_started and self.visual_translation
                 and settings.LLM_PROVIDER == "opencode"):
             return
+        if synthesize_pending:
+            from core.streaming.speaker_source import recover_speaker_evidence
+            await recover_speaker_evidence(self)
         from core.translation_review import AutomaticTranslationReviewer
         def needs_source_scope_recheck(row):
             # A saved OCR correction may have imported the next utterance's
