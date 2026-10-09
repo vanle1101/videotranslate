@@ -163,6 +163,9 @@ async def prepare_interval(session, start, nominal_end):
                     or not 0 <= value["start"] < value["end"] <= scan_end - start + .05):
                 raise ValueError("Nhận diện trả mốc nằm ngoài đoạn âm thanh đã gửi.")
             row = {**value, "start": round(value["start"] + start, 3), "end": round(value["end"] + start, 3)}
+            for key in ("source_asr_start", "source_asr_end"):
+                if _number(value.get(key)):
+                    row[key] = round(value[key] + start, 3)
             if isinstance(value.get("words"), list):
                 row["words"] = [{**word, "start": round(word["start"] + start, 3), "end": round(word["end"] + start, 3)}
                                 for word in value["words"]]

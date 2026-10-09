@@ -1242,6 +1242,21 @@ document.addEventListener("DOMContentLoaded", () => {
       : currentProgress.phase === "visual" ? visualProgressDetail(currentProgress)
       : pct !== null ? "Tiến độ xử lý câu thoại: số câu hoàn tất / tổng số câu."
       : "Bước này chưa có số liệu phần trăm. Trạng thái sẽ cập nhật khi có kết quả.";
+    const states = currentProgress.segment_states;
+    if (states && typeof states === "object") {
+      const count = key => Number.isInteger(states[key]) && states[key] >= 0 ? states[key] : 0;
+      const counters = [`${count("COMPLETED")} câu đã xử lý`, `${count("REVIEW_REQUIRED")} cần rà`,
+        `${count("FAILED")} lỗi`, `${count("RETRY_PENDING")} chờ thử lại`];
+      if (Number.isInteger(currentProgress.completed_chunks) && Number.isInteger(currentProgress.total_chunks)) {
+        counters.push(`${currentProgress.completed_chunks}/${currentProgress.total_chunks} đoạn đã tiếp nhận`);
+      }
+      if (currentProgress.ai_queue && Number.isInteger(currentProgress.ai_queue.active_requests)) {
+        counters.push(`Muse: ${currentProgress.ai_queue.active_requests} đang chạy, ${currentProgress.ai_queue.queued_requests || 0} chờ`);
+      }
+      const eta = formatEta(currentProgress.eta_seconds);
+      if (eta) counters.push(`ước tính còn ${eta}`);
+      taskProgressDetail.textContent += ` ${counters.join(" · ")}.`;
+    }
     btnPauseWorker.classList.toggle("hidden", !currentProgress.can_pause || terminal);
     btnResumeWorker.classList.toggle("hidden", !currentProgress.can_resume || terminal);
     btnRetryWorker?.classList.toggle("hidden", !currentProgress.can_retry);
@@ -1414,7 +1429,9 @@ document.addEventListener("DOMContentLoaded", () => {
     if (!Number.isFinite(prepared) || prepared <= 0) return null;
     const total = Number(currentProgress?.total_seconds || totalVideoDuration);
     const bounded = Number.isFinite(total) && total > 0 ? Math.min(prepared, total) : prepared;
-    return Math.min(COMPATIBILITY_MAX_SECONDS, bounded);
+    // Reopening a prepared multi-hour project should not transcode its
+    // maximum window before the first picture can appear.
+    return Math.min(24, COMPATIBILITY_MAX_SECONDS, bounded);
   }
 
   function compatibilityPreparedSeconds() {
@@ -1468,7 +1485,7 @@ document.addEventListener("DOMContentLoaded", () => {
     const target = Math.max(0, Math.min(Number(targetTime) || 0, prepared));
     const currentEnd = Number(previewCompatibilityEnd);
     if (!initial && compatibilityWindowContains(target) && target < currentEnd - 1.5) return null;
-    const windowSize = initial ? Math.min(COMPATIBILITY_MAX_SECONDS, prepared) : COMPATIBILITY_MAX_SECONDS;
+    const windowSize = initial ? Math.min(24, COMPATIBILITY_MAX_SECONDS, prepared) : COMPATIBILITY_MAX_SECONDS;
     const lead = initial ? 0 : Math.min(12, windowSize * .2);
     let start = initial ? 0 : Math.max(0, target - lead);
     if (prepared - start < 4 && start > 0) start = Math.max(0, prepared - windowSize);

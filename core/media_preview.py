@@ -179,7 +179,7 @@ class PreviewManager:
         try:
             probe = json.loads(run_media([
                 "ffprobe", "-v", "error", "-show_entries", "format=duration", "-of", "json", str(source),
-            ], cancel_check=job["cancel"].is_set, capture_output=True))
+            ], cancel_check=job["cancel"].is_set, capture_output=True, timeout=30))
             duration = float(probe.get("format", {}).get("duration", 0))
             if duration <= 0:
                 raise RuntimeError("Không đọc được thời lượng video")
@@ -219,7 +219,7 @@ class PreviewManager:
             if partial:
                 command.extend(["-t", f"{effective_duration:.3f}"])
             command.extend(["-fs", str(MAX_PREVIEW_BYTES), str(output)])
-            run_media(command, cancel_check=job["cancel"].is_set)
+            run_media(command, cancel_check=job["cancel"].is_set, timeout=150)
             if not output.is_file() or output.stat().st_size <= 0:
                 raise RuntimeError("Bản xem trước không tạo được tệp hợp lệ")
             if output.stat().st_size >= MAX_PREVIEW_BYTES:

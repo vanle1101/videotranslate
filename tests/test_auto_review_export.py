@@ -55,6 +55,7 @@ def session(monkeypatch, tmp_path):
         bgm_url=None, translation_sources=[], warnings=[], source_processing_label=lambda: "OpenCode",
         vocal_suppressor=SimpleNamespace(name="DSP", suppression_level_db=-20), suppression_stats={},
         start=AsyncMock(), start_from_url=AsyncMock(), start_automatic_review=AsyncMock(return_value={}),
+        report_progress=AsyncMock(),
     )
     monkeypatch.setattr(main, "active_streaming_sessions", {item.task_id: item})
     # The pipeline accessor references its own registry, so use this session explicitly.

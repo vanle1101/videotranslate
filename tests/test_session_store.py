@@ -16,6 +16,173 @@ from core.streaming.pipeline import SegmentItem, StreamingPipelineSession, activ
 from core.streaming.session_store import list_saved_sessions, restore_saved_session, _project_path
 
 
+def timing_issue():
+    return {"code": "TIMING_CONFLICT", "required_seconds": 1.59, "available_seconds": 1.25,
+        "max_speed": 1.15, "remedy": "Chọn cách diễn đạt/giọng phù hợp; không cắt từ hoặc chồng tiếng."}
+
+
+def test_measured_timing_conflict_and_real_failure_reason_survive_repeated_restore(persisted):
+    segment = persisted.segments[0]
+    segment.status, segment.failed_stage = "FAILED", "ALIGNING"
+    segment.error = "Giọng còn quá dài sau khi tăng tốc tự nhiên; cần giữ nguyên nghĩa."
+    segment.timing_issue = timing_issue()
+    persisted.persist()
+    for _ in range(2):
+        restored = restore_saved_session(persisted.task_id)
+        actual = restored.segments[0]
+        assert actual.timing_issue == segment.timing_issue
+        assert actual.failed_stage == "ALIGNING" and actual.error == segment.error
+        assert actual.status == "FAILED"  # A readable WAV cannot approve a failed timing gate.
+        restored.persist()
+        active_streaming_sessions.pop(persisted.task_id)
+
+
+@pytest.mark.parametrize("field,value", [
+    ("code", "DONE"), ("required_seconds", "1.59"), ("required_seconds", True),
+    ("required_seconds", 0), ("required_seconds", float("inf")),
+    ("available_seconds", -1), ("available_seconds", True),
+    ("max_speed", 0), ("max_speed", 100), ("max_speed", float("nan")),
+    ("remedy", ""), ("remedy", {"text": "do something"}),
+    ("unknown_authority", True),
+])
+def test_malformed_timing_conflict_never_enters_durable_project(persisted, field, value):
+    from core.streaming import session_store as store
+    old = _project_path(persisted.task_id).read_bytes()
+    issue = timing_issue()
+    issue[field] = value
+    persisted.segments[0].timing_issue = issue
+    with pytest.raises(ValueError):
+        store.save_session(persisted)
+    assert _project_path(persisted.task_id).read_bytes() == old
+
+
+def source_proof(kind, identity, *, method="audio_diarization", verified=True):
+    return {kind + "_id": identity, "verified": verified, "method": method,
+        "confidence": .94, "model": "upstream-audio-model", "scope_id": "video-scope-1"}
+
+
+def test_source_identity_evidence_and_asr_provenance_roundtrip_without_inventing_certainty(persisted):
+    segment = persisted.segments[0]
+    segment.speaker_id, segment.utterance_id = "voice-a", 17
+    segment.speaker_evidence = source_proof("speaker", "voice-a")
+    segment.utterance_evidence = {"utterance_id": 17, "method": "user_confirmation", "verified": True,
+        "scope_id": "video-scope-1", "confirmation_id": "actual-recorded-action"}
+    segment.source_asr_row_id = 18
+    segment.source_asr_start, segment.source_asr_end = 0., 2.2
+    segment.source_piece_index, segment.source_piece_count = 0, 2
+    persisted.persist()
+    for _ in range(2):
+        restored = restore_saved_session(persisted.task_id)
+        actual = restored.segments[0]
+        for key in ("speaker_id", "speaker_evidence", "utterance_id", "utterance_evidence",
+            "source_asr_row_id", "source_asr_start", "source_asr_end", "source_piece_index", "source_piece_count"):
+            assert getattr(actual, key) == getattr(segment, key)
+        assert actual.status == "READY"
+        restored.persist()
+        active_streaming_sessions.pop(persisted.task_id)
+
+
+@pytest.mark.parametrize("kind", ["speaker", "utterance"])
+def test_partial_unverified_identity_evidence_is_retained_without_adding_missing_proof(persisted, kind):
+    segment = persisted.segments[0]
+    setattr(segment, kind + "_id", "unproven-label")
+    evidence = {kind + "_id": "unproven-label", "verified": False, "method": "ocr",
+        "reason": "Chưa có bằng chứng từ âm thanh hoặc người dùng.", "api_key": "must-not-persist"}
+    setattr(segment, kind + "_evidence", evidence)
+    persisted.persist()
+    restored = restore_saved_session(persisted.task_id)
+    actual = getattr(restored.segments[0], kind + "_evidence")
+    assert actual == {key: value for key, value in evidence.items() if key != "api_key"}
+    assert "scope_id" not in actual and actual["verified"] is False
+
+
+@pytest.mark.parametrize("kind", ["speaker", "utterance"])
+@pytest.mark.parametrize("field,value", [
+    ("verified", "true"), ("method", "ocr"), ("scope_id", None),
+    ("confidence", True), ("confidence", 1.1), ("model", ""),
+    ("identity", "another-label"),
+])
+def test_invalid_or_invented_identity_authority_cannot_be_saved(persisted, kind, field, value):
+    from core.streaming import session_store as store
+    segment = persisted.segments[0]
+    setattr(segment, kind + "_id", "voice-a")
+    proof = source_proof(kind, "voice-a")
+    proof[kind + "_id" if field == "identity" else field] = value
+    setattr(segment, kind + "_evidence", proof)
+    old = _project_path(persisted.task_id).read_bytes()
+    with pytest.raises(ValueError):
+        store.save_session(persisted)
+    assert _project_path(persisted.task_id).read_bytes() == old
+
+
+@pytest.mark.parametrize("field,value", [
+    ("speaker_id", True), ("utterance_id", -1), ("speaker_id", ""),
+    ("source_asr_row_id", {}), ("source_asr_start", "0"),
+    ("source_asr_end", float("nan")), ("source_piece_index", True),
+    ("source_piece_count", 0), ("source_piece_index", -1),
+])
+def test_source_metadata_types_are_not_coerced_into_valid_identity_or_provenance(persisted, field, value):
+    from core.streaming import session_store as store
+    setattr(persisted.segments[0], field, value)
+    with pytest.raises(ValueError):
+        store.save_session(persisted)
+
+
+@pytest.mark.parametrize("start,end,index,count", [(1, 3, 0, 2), (0, 1, 0, 2), (0, 3, 2, 2)])
+def test_asr_container_and_piece_indices_must_cover_saved_fragment(persisted, start, end, index, count):
+    from core.streaming import session_store as store
+    segment = persisted.segments[0]
+    segment.source_asr_start, segment.source_asr_end = start, end
+    segment.source_piece_index, segment.source_piece_count = index, count
+    with pytest.raises(ValueError):
+        store.save_session(persisted)
+
+
+def test_stop_recovery_is_distinct_from_corrupt_or_over_budget_audio(persisted):
+    segment = persisted.segments[0]
+    segment.status, segment.audio_path = "TTS", None
+    persisted.is_running = True
+    persisted.stop()
+    restored = restore_saved_session(persisted.task_id)
+    assert restored.segments[0].status == "FAILED" and restored.segments[0].failed_stage == "TTS"
+    assert "khi tác vụ dừng" in restored.segments[0].error
+    assert restored.get_progress()["status"] == "STOPPED"
+
+
+def test_over_budget_wav_restore_keeps_file_and_reports_alignment_not_provider_failure(persisted):
+    segment = persisted.segments[0]
+    path = Path(segment.audio_path)
+    with wave.open(str(path), "wb") as audio:
+        audio.setparams((1, 2, 24000, 0, "NONE", "not compressed"))
+        audio.writeframes(b"\x01\x00" * (3 * 24000))
+    restored = restore_saved_session(persisted.task_id)
+    actual = restored.segments[0]
+    assert actual.status == "FAILED" and actual.failed_stage == "ALIGNING"
+    assert "3.000" in actual.error and "2.000" in actual.error
+    assert actual.audio_path is None and path.is_file()
+
+
+def test_malformed_and_missing_wav_restore_keep_distinct_actionable_reasons(persisted):
+    segment = persisted.segments[0]
+    path = Path(segment.audio_path)
+    path.write_bytes(b"invalid wav")
+    invalid = restore_saved_session(persisted.task_id).segments[0]
+    assert invalid.status == "FAILED" and "bị hỏng" in invalid.error
+    active_streaming_sessions.pop(persisted.task_id)
+    path.unlink()  # This fixture's own WAV, never user media.
+    missing = restore_saved_session(persisted.task_id).segments[0]
+    assert missing.status == "FAILED" and "Thiếu tệp giọng" in missing.error
+
+
+def test_readable_wav_from_interrupted_tts_is_not_promoted_without_a_successful_commit(persisted):
+    persisted.segments[0].status = "TTS"
+    persisted.is_running = True
+    persisted.stop()
+    restored = restore_saved_session(persisted.task_id)
+    assert restored.segments[0].status == "FAILED"
+    assert restored.get_progress()["status"] == "STOPPED"
+
+
 def test_large_project_compression_roundtrip_and_tamper_detection():
     from core.streaming.session_store import _encode_project, _decode_project
     payload = {"segments": [{"id": sid, "source": "字幕" * 200, "audit": "Bằng chứng nguồn. " * 100}
@@ -1159,7 +1326,9 @@ def test_real_failure_shape_resumes_tts_with_completed_review_and_auto_export(pe
     assert not restored.is_running and not restored.error and restored.auto_export_result
     active_streaming_sessions.clear()
     again = restore_saved_session(restored.task_id)
-    assert again.auto_export_result and again.get_progress()["status"] == "COMPLETED"
+    assert again.auto_export_result and again.get_progress()["status"] == "STOPPED"
+    assert again.get_progress()["progress_pct"] is None
+    assert "chưa có MP4" in again.get_progress()["stage"]
 
 
 @pytest.mark.parametrize("explicit", [False, True])

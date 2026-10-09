@@ -685,7 +685,8 @@ async def stop_task(task_id: str):
     sess = get_streaming_session(task_id)
     if sess:
         workers = [worker for worker in (getattr(sess, "start_task", None), getattr(sess, "worker_task", None),
-                                        getattr(sess, "review_task", None), getattr(sess, "auto_export_task", None))
+                                        getattr(sess, "review_task", None), getattr(sess, "auto_export_task", None),
+                                        getattr(sess, "_chunk_followup_task", None))
                    if worker is not None and not worker.done()]
         workers.extend(task for task in getattr(sess, "edit_tasks", ()) if not task.done())
         progress = sess.get_progress() if hasattr(sess, "get_progress") else {}
@@ -1351,6 +1352,7 @@ async def export_hq(req: ExportHQRequest):
         session.output_filename = result["output_filename"]
         session.output_review_url = review_url
         session.caption_output_outdated = False
+        await session.report_progress("complete", "MP4 đã xuất và giải mã kiểm tra thành công.", 100)
         warnings_before_save = list(session.warnings)
         persist_session(session)
         save_warnings = [warning for warning in session.warnings if warning not in warnings_before_save]

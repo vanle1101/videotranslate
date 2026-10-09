@@ -113,6 +113,111 @@ def test_hours_source_preview_only_prepares_one_bounded_window(preview):
     assert not any(event == "progress" and payload["status"] == "COMPLETED" for event, payload in events)
 
 
+def test_provider_hole_does_not_block_later_intervals_and_resume_reuses_success(preview, monkeypatch):
+    session, prepared, analyzed, speech, _ = preview
+    session.translation_mode = "full"
+    session._chunked_source_started = True
+    original = session.video_intelligence.prepass
+    requests = []
+    broken = True
+    def prepass(path, rows, **options):
+        requests.append(options["start_time"])
+        if broken and options["start_time"] == 0:
+            raise TimeoutError("injected provider timeout")
+        return original(path, rows, **options)
+    monkeypatch.setattr(session.video_intelligence, "prepass", prepass)
+    async def run():
+        nonlocal broken
+        await session.start()
+        await session.worker_task
+        assert requests == [0, 24, 48, 0]
+        assert session._visual_scanned_seconds == 64 and session._visual_completed_seconds == 0
+        assert session.get_progress()["retry_chunks"] == 1
+        assert session.get_progress()["status"] == "FAILED" and session.can_retry
+        assert all(session.segments[sid].status == "READY" for sid in range(3, 8))
+        healthy = {sid: Path(session.segments[sid].audio_path).read_bytes() for sid in range(3, 8)}
+        broken = False
+        await session.retry_failed_synthesis()
+        await session.start_task
+        await session.worker_task
+        assert requests == [0, 24, 48, 0, 0], "Completed intervals must not call the provider again"
+        assert session._visual_completed_seconds == 64
+        assert all(row.status == "READY" for row in session.segments.values())
+        assert all(Path(session.segments[sid].audio_path).read_bytes() == data for sid, data in healthy.items())
+    asyncio.run(run())
+
+
+def test_new_full_visual_request_uses_bounded_source_pipeline(preview):
+    session, prepared, analyzed, speech, _ = preview
+    session.translation_mode = "full"
+    assert not session._chunked_source_started
+    async def run():
+        await session.start()
+        await session.worker_task
+    asyncio.run(run())
+    assert session._chunked_source_started and session._visual_prepass_complete
+    assert prepared == [(0, 24), (32, 56)]
+    assert [(start, end) for start, end, *_ in analyzed] == [(0, 24), (24, 48), (48, 64)]
+    assert all(row.status == "READY" for row in session.segments.values())
+
+
+def test_stop_keeps_one_checkpoint_owner_until_followup_drains(preview):
+    from core.streaming.pipeline import active_streaming_sessions
+    session, *_ = preview
+    entered, release = threading.Event(), threading.Event()
+    def native():
+        entered.set()
+        assert release.wait(5)
+    async def run():
+        active_streaming_sessions[session.task_id] = session
+        async def consumer():
+            try:
+                await session._run_blocking(native)
+            finally:
+                session._release_runtime()
+        session._chunk_followup_task = asyncio.create_task(consumer())
+        while not entered.is_set():
+            await asyncio.sleep(.01)
+        try:
+            session.stop()
+            await asyncio.sleep(.03)
+            assert active_streaming_sessions[session.task_id] is session
+            assert not session._chunk_followup_task.done()
+        finally:
+            release.set()
+            await asyncio.gather(session._chunk_followup_task, return_exceptions=True)
+        assert session.task_id not in active_streaming_sessions
+    asyncio.run(run())
+
+
+def test_provider_result_without_published_output_is_not_completed(preview, monkeypatch):
+    session, *_ = preview
+    def invisible(path, rows, **options):
+        return {"segments": {row.id: {} for row in rows}}
+    monkeypatch.setattr(session.video_intelligence, "prepass", invisible)
+    async def run():
+        await session.start()
+        await session.worker_task
+        assert session._visual_completed_seconds == 0
+        assert session.get_progress()["status"] == "FAILED"
+        assert session._chunk_jobs[0]["state"] == "RETRY_PENDING"
+        assert session._chunk_jobs[0]["attempts"] == 2
+    asyncio.run(run())
+
+
+def test_followup_worker_failure_does_not_leave_producer_hung(preview, monkeypatch):
+    session, *_ = preview
+    async def failed(*args):
+        raise RuntimeError("injected worker crash")
+    monkeypatch.setattr(session, "_finish_visual_chunk", failed)
+    async def run():
+        with pytest.raises(RuntimeError, match="injected worker crash"):
+            await asyncio.wait_for(session.start(), 5)
+        assert session._chunk_followup_task is None
+        assert not session.is_running
+    asyncio.run(run())
+
+
 def test_full_promotion_keeps_prefix_global_ids_and_manual_audio(preview):
     session, prepared, analyzed, speech, events = preview
     async def run():
@@ -198,7 +303,10 @@ def test_interrupted_preview_does_not_prepare_translate_rest_before_full_click(p
         await session.worker_task
         assert session.get_progress()["status"] == "PREVIEW_READY"
         assert prepared == [(0, 24)], "Resume cannot silently prepare the next full interval"
-        assert analyzed[-1][0:2] == (23, 24)
+        # The validated interval ledger supersedes an obsolete prefix cursor.
+        # It must reuse the successful checkpoint rather than call AI again.
+        assert analyzed[-1][0:2] == (0, 24)
+        assert len(analyzed) == 1 and session._visual_completed_seconds == 24
         assert session.segments[3].status == "WAITING"
     asyncio.run(run())
 
