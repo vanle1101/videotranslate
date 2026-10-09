@@ -6,7 +6,8 @@ a successful request alone makes a sentence verified.
 """
 from __future__ import annotations
 
-from copy import deepcopy
+from copy import copy, deepcopy
+from functools import partial
 from difflib import SequenceMatcher
 import json
 import math
@@ -596,7 +597,7 @@ class AutomaticTranslationReviewer:
             return self._summarize(result)
         if str(getattr(settings, "LLM_PROVIDER", "")).strip().lower() != "opencode":
             raise VideoIntelligenceError("Kiểm tra lại miễn phí dùng OpenCode; hãy chọn OpenCode trong Cài đặt.")
-        client = self.client or OpenCodeZenClient(model=settings.OPENCODE_MODEL, timeout=120, max_retries=1)
+        client = self._review_client(force_review)
         if not client.has_credentials:
             raise VideoIntelligenceError("Chưa kết nối OpenCode để AI kiểm tra lại bản dịch.")
         model = getattr(client, "model", settings.OPENCODE_MODEL)
@@ -1053,6 +1054,18 @@ class AutomaticTranslationReviewer:
             return accepted
         return original
 
+    def _review_client(self, force_review):
+        if self.client is None:
+            self.client = OpenCodeZenClient(model=settings.OPENCODE_MODEL, timeout=120, max_retries=1)
+        if not force_review or type(self.client) is not OpenCodeZenClient:
+            return self.client
+        # Keep the shared provider queue, credentials and schema diagnostics,
+        # but bypass the lower response cache for an explicitly fresh audit.
+        # Never mutate the base client: ordinary Resume still reuses valid work.
+        client = copy(self.client)
+        client.translate = partial(self.client.translate, use_cache=False)
+        return client
+
     def _checkpoint(self, video_path, model, check, force_review):
         if not self._checkpoint_enabled:
             return None
@@ -1113,8 +1126,7 @@ class AutomaticTranslationReviewer:
             return result
         if str(getattr(settings, "LLM_PROVIDER", "")).strip().lower() != "opencode":
             raise VideoIntelligenceError("Kiểm tra lại miễn phí dùng OpenCode; hãy chọn OpenCode trong Cài đặt.")
-        client = self.client or OpenCodeZenClient(model=settings.OPENCODE_MODEL, timeout=120, max_retries=1)
-        self.client = client
+        client = self._review_client(force_review)
         if not client.has_credentials:
             raise VideoIntelligenceError("Chưa kết nối OpenCode để AI kiểm tra lại bản dịch.")
         model = getattr(client, "model", settings.OPENCODE_MODEL)

@@ -1000,6 +1000,23 @@ def test_validated_response_cache_skips_cli_and_invalidates_changed_config(isola
     assert start.call_count == 3
 
 
+def test_forced_review_bypasses_response_cache_without_mutating_resume_client(isolated, monkeypatch):
+    from core.translation_review import AutomaticTranslationReviewer
+    start = Mock(return_value=make_process(json.dumps({"type": "text", "part": {"text": '{"text":"valid"}'}})))
+    monkeypatch.setattr(oc.subprocess, "Popen", start)
+    client = oc.OpenCodeZenClient(api_key="fixture-key")
+    reviewer = AutomaticTranslationReviewer(client=client)
+    options = {"response_validator": lambda raw: isinstance(json.loads(raw)["text"], str), "schema_id": "text-v1"}
+    reviewer._review_client(False).translate("same review", **options)
+    fresh = reviewer._review_client(True)
+    assert type(fresh) is oc.OpenCodeZenClient and fresh.execution_layer is client.execution_layer
+    fresh.translate("same review", **options)
+    assert start.call_count == 2, "Forced review must invoke the provider despite a valid cached response"
+    assert reviewer._review_client(False) is client
+    client.translate("same review", **options)
+    assert start.call_count == 2, "Ordinary unchanged Resume must retain validated caching"
+
+
 def test_malformed_response_not_cached_and_schema_error_retains_safe_cause(isolated, monkeypatch):
     start = Mock(return_value=make_process(json.dumps({"type": "text", "part": {"text": '{broken private-output'}})))
     monkeypatch.setattr(oc.subprocess, "Popen", start)
