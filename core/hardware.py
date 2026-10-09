@@ -17,7 +17,7 @@ def _system_identity():
     return platform.platform(), platform.processor()
 
 
-def detect_hardware() -> Dict[str, Any]:
+def detect_hardware(*, probe_native: bool = True) -> Dict[str, Any]:
     """Detects system hardware: CPU, RAM, GPU, VRAM, CUDA, and ONNX providers."""
     system, processor = _system_identity()
     info = {
@@ -48,21 +48,28 @@ def detect_hardware() -> Dict[str, Any]:
     except Exception:
         pass
 
+    # Display metadata must not cold-load native inference runtimes. Their
+    # capability remains unknown until an explicit engine/prewarm probe runs.
+    if not probe_native:
+        info["cuda_available"] = None
+        info["native_probe"] = "not_run"
+
     # Check CUDA with PyTorch
-    try:
-        import torch
-        info["cuda_available"] = torch.cuda.is_available()
-        if info["cuda_available"]:
-            info["cuda_backend"] = "pytorch"
-            info["gpu_name"] = torch.cuda.get_device_name(0)
-            props = torch.cuda.get_device_properties(0)
-            info["vram_total_mb"] = round(props.total_memory / (1024 * 1024), 1)
-            info["cuda_version"] = torch.version.cuda
-    except Exception:
-        pass
+    if probe_native:
+        try:
+            import torch
+            info["cuda_available"] = torch.cuda.is_available()
+            if info["cuda_available"]:
+                info["cuda_backend"] = "pytorch"
+                info["gpu_name"] = torch.cuda.get_device_name(0)
+                props = torch.cuda.get_device_properties(0)
+                info["vram_total_mb"] = round(props.total_memory / (1024 * 1024), 1)
+                info["cuda_version"] = torch.version.cuda
+        except Exception:
+            pass
 
     # Faster-Whisper uses CTranslate2 and does not require PyTorch.
-    if not info["cuda_available"]:
+    if probe_native and not info["cuda_available"]:
         try:
             import ctranslate2
             if ctranslate2.get_cuda_device_count() > 0:
@@ -78,7 +85,7 @@ def detect_hardware() -> Dict[str, Any]:
         res = subprocess.run(
             ["nvidia-smi", "--query-gpu=name,memory.total,memory.free", "--format=csv,noheader,nounits"],
             stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
-            timeout=3, creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0)
+            timeout=3 if probe_native else 1, creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0)
         )
         if res.returncode == 0 and res.stdout.strip():
             parts = [p.strip() for p in res.stdout.splitlines()[0].split(",")]
@@ -89,10 +96,11 @@ def detect_hardware() -> Dict[str, Any]:
         pass
 
     # Check ONNX providers
-    try:
-        import onnxruntime as ort
-        info["onnx_providers"] = ort.get_available_providers()
-    except Exception:
-        pass
+    if probe_native:
+        try:
+            import onnxruntime as ort
+            info["onnx_providers"] = ort.get_available_providers()
+        except Exception:
+            pass
 
     return info

@@ -295,6 +295,28 @@ class StreamingPipelineSession:
     def is_editing(self):
         return bool(self.edit_tasks) or bool(self.review_task and not self.review_task.done())
 
+    def _refresh_processed_duration(self):
+        """Credit each current ready source interval once, including silence."""
+        self.total_processed_duration = sum(row.duration for row in self.segments.values()
+                                            if row.status in {"READY", "PLAYED"})
+
+    async def _wait_for_edit_publication(self):
+        """Wait without taking ownership of an in-flight user's atomic edit.
+
+        Edit text/revision remains unchanged during synthesis. A review cannot
+        use revision equality to conclude that such a row is still unowned.
+        asyncio.wait shields the manual owner from cancellation of this review;
+        after it completes the caller must recheck revisions/manual verdicts.
+        """
+        current = asyncio.current_task()
+        while True:
+            if self.is_stopped:
+                raise asyncio.CancelledError
+            owners = {owner for owner in self.edit_tasks if owner is not current and not owner.done()}
+            if not owners:
+                return
+            await asyncio.wait(owners)
+
     def persist(self):
         """Save an atomic project snapshot without running engines or providers."""
         from core.streaming.session_store import save_session
@@ -720,8 +742,7 @@ class StreamingPipelineSession:
                     seg.review_reason = None
                     seg.error = None
                     seg.status = "READY"
-                    if not was_playable:
-                        self.total_processed_duration += seg.duration
+                    self._refresh_processed_duration()
                     if was_review_error:
                         self.error = None
                 if review_result is not None:
@@ -848,17 +869,22 @@ class StreamingPipelineSession:
 
     @contextmanager
     def _durable_speaker_review_publication(self, segment):
-        """Clear user-confirmation review ownership only with a durable verdict."""
-        pending = segment.speaker_review_pending
-        before = deepcopy(vars(segment)) if pending else None
+        """Publish review metadata atomically, including ordinary rows.
+
+        Speaker-confirmation ownership needs an extra durable marker, but every
+        deferred review changes text/verification/status. Snapshot all rows so
+        a manifest failure cannot leave an in-memory result that the next
+        checkpoint silently publishes.
+        """
+        before = deepcopy(vars(segment))
         try:
             yield
-            if pending and not segment.speaker_review_pending:
+            if vars(segment) != before:
                 self.persist()
         except BaseException as error:
-            if before is not None:
-                segment.__dict__.clear()
-                segment.__dict__.update(before)
+            segment.__dict__.clear()
+            segment.__dict__.update(before)
+            self._refresh_processed_duration()
             if isinstance(error, (OSError, ValueError, TypeError)):
                 raise ProjectEditSaveError("Chưa lưu được kết quả rà người nói xuống ổ đĩa; "
                     "giữ bằng chứng và trạng thái chờ để thử lại.") from None
@@ -940,6 +966,7 @@ class StreamingPipelineSession:
         # while each row's visible text/audio still commits transactionally.
         review_context = deepcopy(result["segments"])
         for sid, row in sorted(result["segments"].items(), key=lambda item: (self.segments[item[0]].start, item[0])):
+            await self._wait_for_edit_publication()
             segment = self.segments[sid]
             if (sid not in target_revisions or segment.revision != target_revisions[sid]
                     or (segment.verification or {}).get("status") == "manual"):
@@ -966,6 +993,7 @@ class StreamingPipelineSession:
                         segment.subtitle_timing_source = "pending"
                         segment._retry_synthesis = True
                         segment.timing_issue = None
+                        self._refresh_processed_duration()
                     self._pacing_failures.pop(sid, None)
                     self._invalidate_output()
                     logging.getLogger("pipeline").info(
@@ -998,6 +1026,7 @@ class StreamingPipelineSession:
                         segment.subtitle_timing_source = "pending"
                         segment._retry_synthesis = True
                         segment.timing_issue = None
+                        self._refresh_processed_duration()
                     if isinstance(error, (SpeechBudgetError, PacingReviewRejected)):
                         # Record the corrected text/source revision, rather than
                         # the pre-review draft which edit_segment kept atomic.
@@ -2452,8 +2481,11 @@ class StreamingPipelineSession:
         self.buffer_ahead = round(max(0.0, self.playable_until - self.current_playback_time), 2)
 
         elapsed = time.time() - self.start_wall_time
+        self._refresh_processed_duration()
         if elapsed > 0 and self.total_processed_duration > 0:
             self.realtime_factor = round(self.total_processed_duration / elapsed, 2)
+        else:
+            self.realtime_factor = 0.0
 
     def get_telemetry(self) -> Dict[str, Any]:
         output_gate = final_output_metadata(self.segments.values())
@@ -3125,7 +3157,7 @@ class StreamingPipelineSession:
                 seg.timing_issue = None
                 seg.failed_stage = None
                 seg._retry_synthesis = False
-                self.total_processed_duration += seg.duration
+                self._refresh_processed_duration()
                 await self.emit("segment_update", seg.to_dict())
                 await self._update_ready()
                 return
@@ -3152,10 +3184,11 @@ class StreamingPipelineSession:
                 context = self._dialogue_context_before(seg)
                 if pacing_recovery and not self._pacing_failure_owned(seg, pacing_recovery):
                     raise SegmentEditConflict("Lời thoại đã thay đổi trước khi tạo giọng lại; giữ bản sửa mới.")
-                # A voice override keeps the old valid WAV until its replacement
-                # and metadata commit. Never overwrite the prior manifest file.
+                # A deferred review can detach its old WAV from the active row.
+                # Version every persistent publication even without that old
+                # reference: seg_ID.wav may still hold the retained prior audio.
                 final_path = self.segments_dir / (f"seg_{seg.id}_{uuid.uuid4().hex}.wav"
-                    if seg.tts_voice_outdated and old_audio_path else f"seg_{seg.id}.wav")
+                    if self._persistence_enabled or seg.tts_voice_outdated and old_audio_path else f"seg_{seg.id}.wav")
                 spoken, timing, dub_plan = await self._fit_dub(seg,
                     text=pacing_recovery["candidate"] if pacing_recovery else seg.final_vi,
                     source=seg.text_zh, output_path=pending_path,
@@ -3174,7 +3207,7 @@ class StreamingPipelineSession:
             seg.status = "ALIGNING"
             pending_path.replace(final_path)
             publication = (self._durable_edit_publication(seg, dub_plan, final_path)
-                           if seg.tts_voice_outdated else nullcontext())
+                           if self._persistence_enabled or seg.tts_voice_outdated else nullcontext())
             with publication:
                 self._publish_dub_plan(dub_plan, seg.id)
                 if spoken["text"] != seg.final_vi:
@@ -3200,7 +3233,7 @@ class StreamingPipelineSession:
                 seg.timing_issue = None
                 seg.failed_stage = None
                 seg._retry_synthesis = False
-                self.total_processed_duration += seg.duration
+                self._refresh_processed_duration()
             for identity in dub_plan:
                 if identity != seg.id:
                     await self.emit("segment_update", self.segments[identity].to_dict())

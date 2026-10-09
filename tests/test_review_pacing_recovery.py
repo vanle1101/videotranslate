@@ -36,7 +36,7 @@ def reviewed_session(tmp_path, monkeypatch):
     monkeypatch.setattr(session, "_ensure_tts_engine", lambda: None)
     focus = SegmentItem(112, 169.9, 170.84, .94)
     focus.status, focus.text_zh, focus.final_vi = "READY", "旧文本", "Lời cũ."
-    focus.audio_path = str(session.segments_dir / "previous.wav")
+    focus.audio_path = str(session.segments_dir / "seg_112.wav")
     with wave.open(focus.audio_path, "wb") as audio:
         audio.setparams((1, 2, 24000, 0, "NONE", "not compressed"))
         audio.writeframes(b"\x10\x00" * 12000)
@@ -154,6 +154,20 @@ def test_deferred_review_disk_failure_restores_pending_assertion_and_prior_media
     assert Path(focus.audio_path).read_bytes() == old_bytes
 
 
+def test_deferred_review_disk_failure_restores_ordinary_row_metadata(reviewed_session, monkeypatch):
+    session = reviewed_session
+    focus = session.segments[112]
+    assert not focus.speaker_review_pending
+    before = deepcopy(vars(focus))
+    old_bytes = Path(focus.audio_path).read_bytes()
+    monkeypatch.setattr(AutomaticTranslationReviewer, "review", lambda *args, **kwargs: review_response())
+    monkeypatch.setattr(session, "persist", lambda: (_ for _ in ()).throw(OSError("injected disk full")))
+    with pytest.raises(pipeline.ProjectEditSaveError):
+        asyncio.run(session._review_translations(regenerate_audio=True, defer_audio=True))
+    assert vars(focus) == before
+    assert Path(focus.audio_path).read_bytes() == old_bytes
+
+
 def test_deferred_review_cannot_replace_a_newer_manual_edit(reviewed_session, monkeypatch):
     session = reviewed_session
     focus = session.segments[112]
@@ -168,3 +182,146 @@ def test_deferred_review_cannot_replace_a_newer_manual_edit(reviewed_session, mo
     assert focus.final_vi == "Lời người dùng vừa sửa." and focus.status == "READY"
     assert focus.audio_path == old_path and focus.revision == 1
     assert focus.verification["status"] == "manual"
+
+
+def write_pcm(path, *, sample=b"\x20\x00", frames=9600):
+    with wave.open(str(path), "wb") as audio:
+        audio.setparams((1, 2, 24000, 0, "NONE", "not compressed"))
+        audio.writeframes(sample * frames)
+
+
+def fitted_speech(row, text, output_path):
+    write_pcm(output_path)
+    return ({"text": text, "tts_duration": .4, "speed_ratio": 1., "boundaries": []},
+            {"speech_start": row.start, "speech_end": row.start + .4,
+             "subtitle_timing_source": "measured", "subtitle_cues": []}, {})
+
+
+@pytest.mark.parametrize("outdated_voice", [False, True])
+def test_deferred_synthesis_save_failure_never_overwrites_retained_legacy_wav(
+        reviewed_session, monkeypatch, outdated_voice):
+    session = reviewed_session
+    focus = session.segments[112]
+    legacy_path = session.segments_dir / "seg_112.wav"
+    if Path(focus.audio_path) != legacy_path:
+        Path(focus.audio_path).replace(legacy_path)
+    focus.audio_path = str(legacy_path.resolve())
+    legacy_bytes = legacy_path.read_bytes()
+    focus.tts_voice_outdated = outdated_voice
+    monkeypatch.setattr(AutomaticTranslationReviewer, "review", lambda *args, **kwargs: review_response())
+    asyncio.run(session._review_translations(regenerate_audio=True, defer_audio=True))
+    session.persist()
+    manifest_path = session.persist()
+    before = deepcopy(vars(focus))
+    async def fit(row, *, text, output_path, **kwargs):
+        return fitted_speech(row, text, output_path)
+    monkeypatch.setattr(session, "_fit_dub", fit)
+    real_persist = session.persist
+    publication_snapshot = []
+    def persist():
+        if focus.status == "READY":
+            publication_snapshot.append(manifest_path.read_bytes())
+            raise OSError("injected disk full at media publication")
+        return real_persist()
+    monkeypatch.setattr(session, "persist", persist)
+    with pytest.raises(pipeline.ProjectEditSaveError):
+        asyncio.run(session._synthesize_segment(focus, allow_pacing=False))
+    assert legacy_path.read_bytes() == legacy_bytes
+    assert publication_snapshot and manifest_path.read_bytes() == publication_snapshot[0]
+    saved = next(row for row in _read(session.task_id)["segments"] if row["id"] == focus.id)
+    assert saved["audio_path"] is None and saved["final_vi"] == before["final_vi"]
+    assert focus.audio_path is None and focus.final_vi == before["final_vi"]
+    assert focus.revision == before["revision"] and focus.tts_voice_outdated == before["tts_voice_outdated"]
+    assert list(session.segments_dir.glob("seg_112_*.wav")) == []
+    assert list(session.segments_dir.glob("pending_*.wav")) == []
+
+
+def test_deferred_synthesis_success_publishes_unique_durable_media_and_keeps_detached_old_wav(
+        reviewed_session, monkeypatch):
+    session = reviewed_session
+    focus = session.segments[112]
+    legacy_path = session.segments_dir / "seg_112.wav"
+    if Path(focus.audio_path) != legacy_path:
+        Path(focus.audio_path).replace(legacy_path)
+    focus.audio_path = str(legacy_path.resolve())
+    legacy_bytes = legacy_path.read_bytes()
+    monkeypatch.setattr(AutomaticTranslationReviewer, "review", lambda *args, **kwargs: review_response())
+    asyncio.run(session._review_translations(regenerate_audio=True, defer_audio=True))
+    session.persist()
+    async def fit(row, *, text, output_path, **kwargs):
+        return fitted_speech(row, text, output_path)
+    monkeypatch.setattr(session, "_fit_dub", fit)
+    asyncio.run(session._synthesize_segment(focus, allow_pacing=False))
+    assert Path(focus.audio_path) != legacy_path.resolve()
+    assert Path(focus.audio_path).read_bytes() != legacy_bytes
+    assert legacy_path.read_bytes() == legacy_bytes
+    saved = next(row for row in _read(session.task_id)["segments"] if row["id"] == focus.id)
+    assert saved["audio_path"] == focus.audio_path and saved["status"] == "READY"
+
+
+@pytest.mark.parametrize("cancel_review", [False, True])
+def test_deferred_review_waits_for_real_inflight_manual_edit_before_any_publication(
+        reviewed_session, monkeypatch, cancel_review):
+    session = reviewed_session
+    focus = session.segments[112]
+    focus.speaker_review_pending = True
+    started, release, review_returned = asyncio.Event(), asyncio.Event(), asyncio.Event()
+    old_path, old_source = focus.audio_path, focus.text_zh
+    async def fit(row, *, text, output_path, **kwargs):
+        started.set()
+        await release.wait()
+        return fitted_speech(row, text, output_path)
+    async def blocking(function, *args, **kwargs):
+        result = function(*args, **kwargs)
+        review_returned.set()
+        return result
+    monkeypatch.setattr(session, "_fit_dub", fit)
+    monkeypatch.setattr(session, "_run_blocking", blocking)
+    monkeypatch.setattr(AutomaticTranslationReviewer, "review", lambda *args, **kwargs: review_response())
+    async def race():
+        manual = asyncio.create_task(session.edit_segment(112, "Lời người dùng đang lưu."))
+        await started.wait()
+        review = asyncio.create_task(session._review_translations(regenerate_audio=True, defer_audio=True))
+        try:
+            await review_returned.wait()
+            await asyncio.sleep(0)
+            assert not review.done(), "Deferred review published while manual fit still owned the row"
+            assert focus.audio_path == old_path and focus.text_zh == old_source and focus.revision == 0
+            assert focus.speaker_review_pending, "Pending source review cleared before user edit completed"
+            if cancel_review:
+                review.cancel()
+                with pytest.raises(asyncio.CancelledError):
+                    await review
+            release.set()
+            await manual
+            if not cancel_review:
+                await review
+        finally:
+            release.set()
+            await asyncio.gather(manual, review, return_exceptions=True)
+    asyncio.run(race())
+    assert focus.final_vi == "Lời người dùng đang lưu." and focus.status == "READY"
+    assert focus.revision == 1 and focus.verification["status"] == "manual"
+    assert focus.speaker_review_pending  # The automatic response never owns the manual wording.
+
+
+def test_repeated_review_synthesis_credits_only_current_ready_source_duration(reviewed_session, monkeypatch):
+    session = reviewed_session
+    focus = session.segments[112]
+    session.total_processed_duration = focus.duration
+    async def fit(row, *, text, output_path, **kwargs):
+        return fitted_speech(row, text, output_path)
+    monkeypatch.setattr(session, "_fit_dub", fit)
+    for iteration in range(3):
+        response = review_response()
+        response["segments"][112]["final_vi"] += f" {iteration}."
+        monkeypatch.setattr(AutomaticTranslationReviewer, "review", lambda *args, **kwargs: deepcopy(response))
+        asyncio.run(session._review_translations(regenerate_audio=True, defer_audio=True))
+        assert session.total_processed_duration == 0, "Stale speech still received completed-duration credit"
+        asyncio.run(session._synthesize_segment(focus, allow_pacing=False))
+        assert session.total_processed_duration == focus.duration, "Rebuilding one row was counted more than once"
+    session.start_wall_time = pipeline.time.time() - 10
+    session.total_processed_duration = focus.duration * 100
+    session._recalculate_telemetry()
+    assert session.total_processed_duration == focus.duration
+    assert session.realtime_factor == round(focus.duration / 10, 2)

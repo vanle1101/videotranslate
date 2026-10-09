@@ -197,7 +197,9 @@ async def index(request: Request):
 
 @app.get("/api/hardware")
 async def get_hardware():
-    return detect_hardware()
+    # Even a bounded driver query must not block Stop/WebSocket/health on the
+    # shared backend loop. The UI only needs CPU/RAM/card display metadata.
+    return await asyncio.to_thread(detect_hardware, probe_native=False)
 
 @app.get("/api/models")
 async def get_models():

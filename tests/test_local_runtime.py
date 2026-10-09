@@ -18,6 +18,22 @@ services = importlib.import_module("core.services.service_manager")
 
 
 class HardwareTests(unittest.TestCase):
+    def test_display_inventory_skips_native_probe_and_bounds_driver_wait(self):
+        native = Mock(side_effect=AssertionError("Display initialized a native runtime"))
+        modules = {
+            "torch": SimpleNamespace(cuda=SimpleNamespace(is_available=native)),
+            "ctranslate2": SimpleNamespace(get_cuda_device_count=native),
+            "onnxruntime": SimpleNamespace(get_available_providers=native),
+        }
+        with patch.dict(sys.modules, modules), patch.object(hardware.subprocess, "run",
+                return_value=SimpleNamespace(returncode=0, stdout="GPU, 4096, 3000")) as query:
+            result = hardware.detect_hardware(probe_native=False)
+        native.assert_not_called()
+        self.assertEqual(result["gpu_name"], "GPU")
+        self.assertIsNone(result["cuda_available"])
+        self.assertEqual(result["native_probe"], "not_run")
+        self.assertEqual(query.call_args.kwargs["timeout"], 1)
+
     def test_windows_identity_does_not_enter_native_wmi(self):
         with patch.object(hardware.sys, "platform", "win32"), \
                 patch.object(hardware.sys, "getwindowsversion", create=True,

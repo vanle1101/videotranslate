@@ -1,5 +1,7 @@
 """Local API contracts using stub sessions; no AI models or external services."""
 import os
+import asyncio
+import threading
 import stat
 import tempfile
 import unittest
@@ -17,6 +19,29 @@ from core.media_process import run_media
 
 
 class LocalAPITests(unittest.TestCase):
+    def test_hardware_inventory_does_not_block_backend_loop_or_load_native_models(self):
+        entered, release = threading.Event(), threading.Event()
+        def detect(**kwargs):
+            self.assertEqual(kwargs, {"probe_native": False})
+            entered.set()
+            self.assertTrue(release.wait(5))
+            return {"gpu_name": "Real probe contract fixture", "cuda_available": None}
+        async def flow():
+            request = asyncio.create_task(main.get_hardware())
+            try:
+                for _ in range(100):
+                    if entered.is_set():
+                        break
+                    await asyncio.sleep(.01)
+                self.assertTrue(entered.is_set())
+                self.assertFalse(request.done())
+            finally:
+                release.set()
+                result = await request
+            self.assertIsNone(result["cuda_available"])
+        with patch.object(main, "detect_hardware", side_effect=detect):
+            asyncio.run(flow())
+
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory(prefix="local_api_")
         self.root = Path(self.temp.name)
