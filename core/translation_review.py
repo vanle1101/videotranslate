@@ -161,7 +161,11 @@ class AutomaticTranslationReviewer:
                     retry_prompt += ("\nPhản hồi trước không đúng JSON/ID/mốc đã yêu cầu. Chỉ trả segments cho đúng "
                         "các hàng sau, mỗi ID đúng một lần; các ID trong ngữ cảnh chỉ để đọc, không được xuất: "
                         + json.dumps([{key: row[key] for key in ("id", "start", "end")} for row in batch])
-                        + ". Không thêm lời giải thích ngoài JSON.")
+                        + ". Không thêm lời giải thích ngoài JSON. Các trường address_verified, "
+                        "address_applicable, address_neutral_faithful nếu có phải là boolean; "
+                        "address_reason phải là chuỗi. address_uses chỉ gồm term và role self/listener "
+                        "cho cách tự xưng/gọi người nghe thực sự có trong bản Việt. Không thêm vai "
+                        "reference cho người thứ ba; không có cách xưng hô thì dùng mảng rỗng.")
                 raw = client.translate(retry_prompt, max_tokens=10000)
             except Exception as error:
                 check()

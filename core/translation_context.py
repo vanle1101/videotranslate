@@ -363,6 +363,8 @@ def address_review_instruction(reading):
           "Mỗi segment phải thêm address_verified (boolean) và address_reason (lý do cụ thể) nếu áp dụng. "
           "Thêm address_uses là mảng theo thứ tự TỪNG lần xuất hiện xưng hô trong final_vi, "
           "mỗi mục {\"term\":\"chị\",\"role\":\"listener\"}; role chỉ self hoặc listener. "
+          "Không thêm danh từ chỉ người thứ ba hoặc vai reference vào address_uses; "
+          "không có tự xưng/gọi người nghe thì dùng mảng rỗng. "
           "Ghi đủ cả từ lặp, đúng từ đã dùng; 'Chị ơi, nhờ chị đấy!' có hai mục chị/listener. "
           "'Em nhờ chị' có em/self và chị/listener. Không đổi vai của từ để né kết luận chưa rõ. "
           "Giữ nguyên cả cụm 'cô gái', 'anh trai', 'chị gái', 'em gái', 'em trai', 'bố mẹ', 'ba má' "

@@ -170,6 +170,8 @@ def test_invalid_provider_address_metadata_retries_before_publication_and_preser
         AutomaticTranslationReviewer._require_semantic_fields)
     assert client.translate.call_count == 2
     audit = data["segments"][0]
+    retry_prompt = client.translate.call_args_list[1].args[0]
+    assert "role self/listener" in retry_prompt and "Không thêm vai reference" in retry_prompt
     assert audit["address_uses"] == [{"term": "con", "role": "self"}]
     assert _clean({"address_uses": audit["address_uses"]}) == {"address_uses": audit["address_uses"]}
 
