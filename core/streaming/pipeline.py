@@ -970,6 +970,7 @@ class StreamingPipelineSession:
         if not (self._chunked_source_started and self.visual_translation
                 and settings.LLM_PROVIDER == "opencode"):
             return
+        from core.translation_review import AutomaticTranslationReviewer
         def needs_source_scope_recheck(row):
             # A saved OCR correction may have imported the next utterance's
             # words. Revalidate failed speech against measured neighbouring
@@ -988,11 +989,20 @@ class StreamingPipelineSession:
             return (audit.get("status") == "unresolved"
                 and isinstance(audit.get("address_stale_source_ids"), list)
                 and bool(audit["address_stale_source_ids"]))
+        def needs_obsolete_gate_recheck(row):
+            audit = row.verification or {}
+            # Gate/schema fixes cannot repair a historical negative verdict
+            # by flipping a boolean. Re-audit each obsolete unresolved verdict
+            # once, using current evidence; a current negative stays negative.
+            return (audit.get("status") == "unresolved"
+                and audit.get("review_gate_revision") != AutomaticTranslationReviewer.REVIEW_GATE_REVISION
+                and any(key in audit for key in ("address_context", "address_applicable", "audio_evidence")))
         def include(row):
             if stale_address_only:
                 return needs_address_source_recheck(row)
             return ((row.verification or {}).get("status") in (None, "pending", "incomplete")
-                    or needs_source_scope_recheck(row) or needs_address_source_recheck(row))
+                    or needs_source_scope_recheck(row) or needs_address_source_recheck(row)
+                    or needs_obsolete_gate_recheck(row))
         pending = sorted((row for row in self.segments.values()
             if self._published_row(row)
             and row.source_method == "text-ai" and row.translation_provider == "opencode"
@@ -2012,6 +2022,10 @@ class StreamingPipelineSession:
                     self.task_id, interval["id"], interval["attempts"], type(error).__name__)
             finally:
                 active = False
+                # This source OCR owner is idle after prepass returns. Keeping
+                # its native ONNX session through the next ASR/review batch
+                # unnecessarily retains model RAM on long videos.
+                self._release_visual_runtime()
             self._visual_scanned_seconds = max(self._visual_scanned_seconds, end)
             self._visual_completed_seconds = contiguous_coverage(self._chunk_jobs, self._legacy_visual_prefix)
             self._persist_if_enabled()

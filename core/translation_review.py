@@ -114,6 +114,7 @@ class _LocalAudioEvidence:
 class AutomaticTranslationReviewer:
     BATCH_SIZE = 12
     ADDRESS_BATCH_SIZE = 4
+    REVIEW_GATE_REVISION = 1
 
     @staticmethod
     def _diagnostic(error, stage, rows):
@@ -1265,6 +1266,11 @@ class AutomaticTranslationReviewer:
             if progress_callback:
                 progress_callback(round(30 + 45 * (index + 1) / batches, 1))
         result["translation_sources"].append(provenance)
-        return self.resolve_audio_uncertainty(video_path, result, cancel_check,
+        result = self.resolve_audio_uncertainty(video_path, result, cancel_check,
             (lambda value: progress_callback(75 + .25 * value)) if progress_callback else None,
             context_segments=wider_rows.values())
+        for row in result["segments"].values():
+            audit = row.get("verification") or {}
+            if audit.get("status") in {"verified", "corrected", "unresolved"}:
+                audit["review_gate_revision"] = self.REVIEW_GATE_REVISION
+        return result

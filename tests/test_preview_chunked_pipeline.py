@@ -782,6 +782,75 @@ def test_resume_fresh_reviews_stale_address_rows_in_bounded_groups_only(preview,
         assert session.segments[sid].final_vi == "Lời giữ nguyên."
 
 
+def test_obsolete_negative_gates_are_reviewed_once_without_force_approval(preview, monkeypatch):
+    from core.translation_review import AutomaticTranslationReviewer
+    session, *_ = preview
+    session._chunked_source_started = True
+    session._visual_completed_seconds = 24
+    session.segments = {}
+    revision = AutomaticTranslationReviewer.REVIEW_GATE_REVISION
+    audits = [
+        {"status": "unresolved", "address_context": {"uncertain": True}},
+        {"status": "unresolved", "audio_evidence": [], "audio_consensus": False},
+        {"status": "unresolved", "address_context": {}, "review_gate_revision": revision},
+        {"status": "manual", "address_context": {}},
+        {"status": "verified", "address_context": {}},
+        {"status": "unresolved"},
+    ]
+    for sid, audit in enumerate(audits):
+        row = SegmentItem(sid, sid * 2, sid * 2 + 1, 1)
+        row.status, row.text_zh, row.final_vi = "READY", "我", "Lời đã lưu."
+        row.source_method, row.translation_provider = "text-ai", "opencode"
+        row.verification = deepcopy(audit)
+        session.segments[sid] = row
+    calls = []
+    async def review(**options):
+        calls.append(options)
+        for sid in options["segment_ids"]:
+            audit = session.segments[sid].verification
+            audit.update(status="unresolved", semantic_verified=False, review_gate_revision=revision)
+    monkeypatch.setattr(session, "_review_translations", review)
+    async def run():
+        await session._resume_pending_chunk_reviews()
+        await session._resume_pending_chunk_reviews()
+    asyncio.run(run())
+    assert calls == [{"regenerate_audio": True, "segment_ids": {0, 1}}]
+    assert session.segments[0].verification["semantic_verified"] is False
+    assert session.segments[1].verification["status"] == "unresolved"
+    assert all(session.segments[sid].verification == audits[sid] for sid in range(2, 6))
+    assert all(row.final_vi == "Lời đã lưu." for row in session.segments.values())
+
+
+def test_source_ocr_owner_is_released_before_next_native_interval(preview, monkeypatch):
+    import core.streaming.chunked_source as source
+    session, *_ = preview
+    session.translation_mode = "full"
+    original_prepare, original_prepass = source.prepare_interval, session.video_intelligence.prepass
+    live_ocr = False
+    closed_intervals = []
+    def prepass(*args, **options):
+        nonlocal live_ocr
+        live_ocr = True
+        return original_prepass(*args, **options)
+    def close():
+        nonlocal live_ocr
+        if live_ocr:
+            closed_intervals.append(session._visual_scanned_seconds)
+        live_ocr = False
+    async def prepare(*args):
+        assert not live_ocr, "Previous source OCR must not retain model RAM into ASR"
+        return await original_prepare(*args)
+    monkeypatch.setattr(source, "prepare_interval", prepare)
+    monkeypatch.setattr(session.video_intelligence, "prepass", prepass)
+    monkeypatch.setattr(session, "_release_visual_runtime", close)
+    async def run():
+        await session.start()
+        await session.worker_task
+    asyncio.run(run())
+    assert len(closed_intervals) == 3
+    assert not live_ocr
+
+
 def test_stale_address_resume_uses_current_context_and_keeps_unchanged_ready_audio(preview, monkeypatch):
     session, *_ = preview
     session._chunked_source_started = True

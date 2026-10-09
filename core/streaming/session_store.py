@@ -94,7 +94,7 @@ META_FIELDS = frozenset((
     "tts_seconds slot_seconds fit_ratio semantic_status acoustic_status source_region_verified "
     "reference_zh reference_vi equivalent different_source same_meaning text_preserved "
     "mode input_duration output_duration sample_rate channels elapsed_seconds rtf "
-    "diagnostic audio_evidence audio_consensus audio_audit_status"
+    "diagnostic audio_evidence audio_consensus audio_audit_status review_gate_revision"
     " state attempts input_hash error_code updated_at"
     " scope_id confirmation_id code required_seconds available_seconds max_speed remedy"
     " speaker_evidence utterance_id utterance_evidence source_asr_row_id source_asr_start source_asr_end source_piece_index source_piece_count"
