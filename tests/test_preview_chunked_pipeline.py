@@ -709,7 +709,7 @@ def test_resume_rechecks_interrupted_review_before_advancing_source(preview, mon
         await session._start_chunked_visual()
         await session.worker_task
     asyncio.run(run())
-    assert calls == [({"regenerate_audio": True, "segment_ids": {0, 1}}, 0, 0)]
+    assert calls == [({"regenerate_audio": True, "segment_ids": {0, 1}, "defer_audio": True}, 0, 0)]
     assert session.segments[2].verification["status"] == "manual"
     assert session.segments[3].verification["status"] == "verified"
     assert session.segments[4].verification["status"] == "pending"
@@ -1264,7 +1264,7 @@ def test_resume_missing_reviewed_speech_is_not_blocked_by_unrelated_review(previ
         await session.retry_failed_synthesis()
         await session.worker_task
     asyncio.run(run())
-    assert calls == [{"regenerate_audio": True, "segment_ids": {2}}]
+    assert calls == [{"regenerate_audio": True, "segment_ids": {2}, "defer_audio": True}]
     assert speech == [1, 3, 2] and all(row.status == "READY" for row in session.segments.values())
 
 

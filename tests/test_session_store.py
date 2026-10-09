@@ -1501,3 +1501,74 @@ def test_source_duration_alone_is_not_translated_ready(persisted):
     persisted.segments.clear()
     persisted._recalculate_telemetry()
     assert persisted.playable_until == 0 and persisted.buffer_ahead == 0
+
+
+@pytest.mark.parametrize("secret_values", [(), ("synthetic-project-key",)])
+def test_save_and_validate_scan_credentials_once_and_keep_redaction(persisted, monkeypatch, secret_values):
+    from core.streaming import session_store as store
+    scans = []
+    def secrets():
+        scans.append(True)
+        return secret_values
+    monkeypatch.setattr(store, "_secrets", secrets)
+    persisted.warnings = ["synthetic-project-key"] * 100
+    path = store.save_session(persisted)
+    assert len(scans) == 1, "Nested save/validation scanned settings for every string"
+    assert store._REDACTION_VALUES.get() is None
+    scans.clear()
+    actual = store._read(persisted.task_id)
+    assert len(scans) == 1
+    assert actual["session"]["warnings"] == (["[redacted]"] if secret_values else ["synthetic-project-key"]) * 100
+    assert store._REDACTION_VALUES.get() is None
+    if secret_values:
+        assert "synthetic-project-key" not in path.read_text(encoding="utf-8")
+
+
+def test_redaction_snapshot_refreshes_next_operation_and_nested_scopes_share_it(monkeypatch):
+    from core.streaming import session_store as store
+    current, scans = ["first-synthetic-key"], []
+    def secrets():
+        scans.append(True)
+        return tuple(current)
+    monkeypatch.setattr(store, "_secrets", secrets)
+    with store._redaction_scope():
+        assert store._clean("first-synthetic-key") == "[redacted]"
+        current[:] = ["second-synthetic-key"]
+        with store._redaction_scope():
+            assert store._clean("first-synthetic-key") == "[redacted]"
+    assert len(scans) == 1 and store._REDACTION_VALUES.get() is None
+    with store._redaction_scope():
+        assert store._clean("second-synthetic-key") == "[redacted]"
+    assert len(scans) == 2 and store._REDACTION_VALUES.get() is None
+
+
+def test_redaction_scope_resets_on_validation_failure(persisted, monkeypatch):
+    from core.streaming import session_store as store
+    monkeypatch.setattr(store, "_secrets", lambda: ("synthetic-failed-key",))
+    persisted.segments[0].start = float("nan")
+    with pytest.raises(ValueError):
+        store.save_session(persisted)
+    assert store._REDACTION_VALUES.get() is None
+    monkeypatch.setattr(store, "_secrets", lambda: ("synthetic-next-key",))
+    with store._redaction_scope():
+        assert store._clean("synthetic-next-key") == "[redacted]"
+
+
+def test_concurrent_redaction_operations_have_independent_snapshots(monkeypatch):
+    import threading
+    from concurrent.futures import ThreadPoolExecutor
+    from core.streaming import session_store as store
+    local, barrier = threading.local(), threading.Barrier(2)
+    monkeypatch.setattr(store, "_secrets", lambda: (local.key,))
+    def clean(key):
+        local.key = key
+        with store._redaction_scope():
+            barrier.wait(timeout=5)
+            assert store._clean(key) == "[redacted]"
+            assert store._REDACTION_VALUES.get() == (key,)
+        assert store._REDACTION_VALUES.get() is None
+        return True
+    with ThreadPoolExecutor(max_workers=2) as workers:
+        futures = [workers.submit(clean, key) for key in ("synthetic-thread-one", "synthetic-thread-two")]
+        assert all(future.result(timeout=10) for future in futures)
+    assert store._REDACTION_VALUES.get() is None

@@ -902,7 +902,8 @@ class StreamingPipelineSession:
             self.screen_texts = updated
             await self.emit("screen_update", {"screen_texts": self.screen_texts})
 
-    async def _review_translations(self, *, regenerate_audio=False, force_review=False, segment_ids=None):
+    async def _review_translations(self, *, regenerate_audio=False, force_review=False, segment_ids=None,
+                                   defer_audio=False):
         from core.translation_review import AutomaticTranslationReviewer
         self._review_scope = "chunk" if segment_ids is not None else "all"
         self._reviewing_segment_ids = sorted(segment_ids) if segment_ids is not None else sorted(self.segments)
@@ -946,6 +947,31 @@ class StreamingPipelineSession:
                 continue
             if (regenerate_audio and segment.status in ("READY", "PLAYED", "NEEDS_REVIEW")
                     and (row["final_vi"] != segment.final_vi or segment.tts_voice_outdated)):
+                if defer_audio:
+                    # Recovery publishes the complete reviewed group before
+                    # fitting it. Inline edit synthesis may ask Muse to pace
+                    # an early corrected READY row for minutes and strand all
+                    # later review groups. An old WAV is retained on disk but
+                    # must never remain served for the changed wording.
+                    reason = "wording_changed" if row["final_vi"] != segment.final_vi else "voice_changed"
+                    with self._durable_speaker_review_publication(segment):
+                        self._apply_review_metadata(segment, row)
+                        segment.revision += 1
+                        segment.status, segment.failed_stage = "WAITING", "TTS"
+                        segment.error = None
+                        segment.audio_path = segment.audio_url = None
+                        segment.tts_duration, segment.speed_ratio = 0., 1.
+                        segment.subtitle_cues = []
+                        segment.speech_start = segment.speech_end = None
+                        segment.subtitle_timing_source = "pending"
+                        segment._retry_synthesis = True
+                        segment.timing_issue = None
+                    self._pacing_failures.pop(sid, None)
+                    self._invalidate_output()
+                    logging.getLogger("pipeline").info(
+                        "REVIEW_AUDIO_QUEUED run_id=%s segment_id=%s reason=%s", self.task_id, sid, reason)
+                    await self.emit("segment_update", segment.to_dict())
+                    continue
                 try:
                     await self.edit_segment(sid, row["final_vi"], _review_result=row,
                                             _review_context=review_context)
@@ -1186,6 +1212,8 @@ class StreamingPipelineSession:
             revisions = {row.id: row.revision for row in group}
             try:
                 options = {"regenerate_audio": True, "segment_ids": {row.id for row in group}}
+                if synthesize_pending:
+                    options["defer_audio"] = True
                 if any(needs_address_source_recheck(row) or row.speaker_review_pending for row in group):
                     # Reuse source/audio files, but never reuse the address
                     # verdict made before these accepted source words changed.

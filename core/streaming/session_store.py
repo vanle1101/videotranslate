@@ -3,6 +3,8 @@ import json
 import hashlib
 import base64
 import zlib
+from contextlib import contextmanager
+from contextvars import ContextVar
 import math
 import numbers
 import os
@@ -134,6 +136,33 @@ def _secrets():
     return [value for key in model_fields
             if any(word in key.upper() for word in ("API_KEY", "TOKEN", "PASSWORD"))
             and isinstance(value := getattr(settings, key, None), str) and len(value) >= 4]
+
+
+_REDACTION_VALUES = ContextVar("project_redaction_values", default=None)
+
+
+@contextmanager
+def _redaction_scope():
+    """Capture current credentials once per operation, never across operations.
+
+    Large manifests contain thousands of strings. Rebuilding the settings
+    scan for each string consumed most validation time in real recovery.
+    Nested save/validate work shares one immutable snapshot; reset on every
+    exit so changed credentials and concurrent callers cannot reuse it.
+    """
+    if _REDACTION_VALUES.get() is not None:
+        yield
+        return
+    token = _REDACTION_VALUES.set(tuple(_secrets()))
+    try:
+        yield
+    finally:
+        _REDACTION_VALUES.reset(token)
+
+
+def _redaction_values():
+    current = _REDACTION_VALUES.get()
+    return _secrets() if current is None else current
 
 
 def _clean_diagnostic(value, *, depth):
@@ -375,7 +404,7 @@ def _clean(value, *, depth=0):
     if isinstance(value, str):
         if len(value) > 100_000 or "\x00" in value:
             raise ValueError("Nội dung dự án quá dài hoặc không hợp lệ.")
-        for secret in _secrets():
+        for secret in _redaction_values():
             value = value.replace(secret, "[redacted]")
         return value
     if isinstance(value, (list, tuple)):
@@ -475,6 +504,11 @@ def _filename(value):
 
 
 def save_session(session):
+    with _redaction_scope():
+        return _save_session(session)
+
+
+def _save_session(session):
     target = _project_path(session.task_id)
     fields = {key: _clean(getattr(session, key)) for key in SESSION_FIELDS if hasattr(session, key)}
     for key in PATH_FIELDS:
@@ -553,6 +587,11 @@ def _finite(value, minimum=0):
 
 
 def _validate(data, task_id):
+    with _redaction_scope():
+        return _validate_project(data, task_id)
+
+
+def _validate_project(data, task_id):
     if (not isinstance(data, dict) or set(data) != {"version", "task_id", "updated_at", "state", "session", "segments"}
             or data["version"] != VERSION or data["task_id"] != task_id or not _finite(data["updated_at"])
             or data["state"] not in {"STOPPED", "FAILED", "RUNNING", "READY"}):
