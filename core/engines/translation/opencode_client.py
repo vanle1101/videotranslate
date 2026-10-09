@@ -20,7 +20,11 @@ import tempfile
 import threading
 import time
 import uuid
-from typing import Any, Mapping, Optional
+from typing import Any, Callable, Mapping, Optional
+from core.ai_execution import (
+    AIExecutionLayer, AIExecutionPolicy, AIExecutionError, AIExecutionCancelledError,
+    AICircuitOpenError, AIQueueFullError, AIQueueTimeoutError,
+)
 from core.runtime_context import current_execution_context
 
 
@@ -36,6 +40,27 @@ FREE_CHAT_MODELS = frozenset({
 DEFAULT_FREE_MODEL = "muse-spark-1.3-contributor-free"
 _AGENT = "plan"
 _IS_WINDOWS = os.name == "nt"
+_EXECUTION_VERSION = "opencode-cli-isolated-v2"
+_execution_layers = {}
+_execution_layers_lock = threading.Lock()
+
+
+def _shared_execution_layer():
+    """One provider queue for independently constructed reviewer/translator clients."""
+    from config import settings
+    policy = AIExecutionPolicy(
+        concurrency=getattr(settings, "OPENCODE_CONCURRENCY", 1),
+        queue_limit=getattr(settings, "OPENCODE_QUEUE_LIMIT", 24),
+        queue_timeout=getattr(settings, "OPENCODE_QUEUE_TIMEOUT", 30.0),
+        circuit_failures=getattr(settings, "OPENCODE_CIRCUIT_FAILURES", 4),
+        circuit_cooldown=getattr(settings, "OPENCODE_CIRCUIT_COOLDOWN", 30.0),
+    )
+    cache_root = Path(settings.WORKSPACE_DIR) / "cache" / "ai_responses"
+    identity = (policy, str(cache_root.resolve()))
+    with _execution_layers_lock:
+        if identity not in _execution_layers:
+            _execution_layers[identity] = AIExecutionLayer(policy, cache_root=cache_root)
+        return _execution_layers[identity]
 
 
 class OpenCodeClientError(RuntimeError):
@@ -51,7 +76,15 @@ class OpenCodeModelError(OpenCodeClientError):
 
 
 class OpenCodeRequestError(OpenCodeClientError):
-    pass
+    def __init__(self, message, *, retryable=False, code="provider_failed"):
+        super().__init__(message)
+        self.retryable = bool(retryable)
+        self.code = code if code in {
+            "provider_failed", "provider_rate_limited", "provider_authentication",
+            "provider_model", "provider_transport", "provider_server",
+            "provider_rejected", "provider_queue_full", "provider_queue_timeout",
+            "provider_circuit_open",
+        } else "provider_failed"
 
 
 class OpenCodeTimeoutError(OpenCodeRequestError):
@@ -60,6 +93,10 @@ class OpenCodeTimeoutError(OpenCodeRequestError):
 
 class OpenCodeCancelledError(OpenCodeRequestError):
     pass
+
+
+class OpenCodeResponseValidationError(OpenCodeRequestError):
+    """A transport response exists but did not pass caller schema validation."""
 
 
 def _check_cancelled(context):
@@ -222,6 +259,25 @@ def _safe_failure(text: str) -> str:
     return "OpenCode chưa trả được bản dịch; chưa xác định được nguyên nhân từ phản hồi CLI. Hãy thử lại."
 
 
+def _provider_failure(text: str) -> OpenCodeRequestError:
+    """Classify real CLI failures; never retry auth/model/tool refusals."""
+    value = text.casefold()
+    code, retryable = "provider_failed", True
+    if "freetiererror" in value or "free tier can only be used from within opencode" in value:
+        code, retryable = "provider_rejected", False
+    elif "429" in value or "rate limit" in value or "too many requests" in value:
+        code = "provider_rate_limited"
+    elif any(marker in value for marker in ("401", "403", "unauthorized", "invalid api key", "forbidden")):
+        code, retryable = "provider_authentication", False
+    elif "model not found" in value or "providermodelnotfound" in value:
+        code, retryable = "provider_model", False
+    elif any(marker in value for marker in ("500", "502", "503", "504")):
+        code = "provider_server"
+    elif any(marker in value for marker in ("econnreset", "econnrefused", "connection", "network", "fetch failed")):
+        code = "provider_transport"
+    return OpenCodeRequestError(_safe_failure(text), retryable=retryable, code=code)
+
+
 def _managed_configuration_present() -> bool:
     """Managed settings load after inline config; do not silently override them."""
     if sys.platform == "win32":
@@ -330,13 +386,28 @@ def _terminate_process_tree(process: subprocess.Popen) -> None:
 
 class OpenCodeZenClient:
     def __init__(self, api_key: Optional[str] = None, model: str = DEFAULT_FREE_MODEL,
-                 *, timeout: float = 60.0, max_retries: int = 0):
+                 *, timeout: float = 60.0, max_retries: int = 0,
+                 execution_layer: Optional[AIExecutionLayer] = None,
+                 task_timeouts: Optional[Mapping[str, float]] = None):
         if not math.isfinite(float(timeout)) or not 0 < float(timeout) <= 300:
             raise OpenCodeConfigurationError("Thời gian chờ OpenCode phải từ 1 đến 300 giây.")
         self._api_key = resolve_api_key(api_key)
         self.model = canonical_model_id(model)
         self.timeout = float(timeout)
         self.max_retries = max(0, min(int(max_retries), 2))
+        try:
+            from config import settings
+            self.execution_layer = execution_layer or _shared_execution_layer()
+            configured = getattr(settings, "OPENCODE_TASK_TIMEOUTS", {})
+            # A stage policy may shorten existing adapter deadlines, never
+            # silently extend them as a workaround for a stalled provider.
+            self.task_timeouts = ({name: min(float(value), self.timeout) for name, value in configured.items()}
+                                  if task_timeouts is None else dict(task_timeouts))
+            if any(not isinstance(name, str) or not math.isfinite(float(value))
+                   or not 0 < float(value) <= self.timeout for name, value in self.task_timeouts.items()):
+                raise ValueError("Invalid task deadline")
+        except (ValueError, TypeError, OverflowError):
+            raise OpenCodeConfigurationError("Cấu hình hàng đợi hoặc thời gian chờ Muse không hợp lệ.") from None
 
     @property
     def has_credentials(self) -> bool:
@@ -397,7 +468,9 @@ class OpenCodeZenClient:
 
     def translate(self, prompt: str, *, system: Optional[str] = None,
                   model: Optional[str] = None, temperature: Optional[float] = None,
-                  max_tokens: Optional[int] = None) -> str:
+                  max_tokens: Optional[int] = None, task_kind: str = "request",
+                  response_validator: Optional[Callable[[str], Any]] = None,
+                  schema_id: Optional[str] = None, use_cache: bool = True) -> str:
         selected = self.validate_model(model)
         context = current_execution_context()
         request_id = uuid.uuid4().hex
@@ -410,7 +483,7 @@ class OpenCodeZenClient:
                     else "provider_cancelled" if isinstance(error, OpenCodeCancelledError)
                     else "provider_configuration" if isinstance(error, OpenCodeConfigurationError)
                     else "provider_model" if isinstance(error, OpenCodeModelError)
-                    else "provider_failed" if error is not None else "none")
+                    else getattr(error, "code", "provider_failed") if error is not None else "none")
             logging.getLogger("ai").info(
                 "%s run_id=%s request_id=%s model=%s attempt=%s elapsed_ms=%s output_chars=%s code=%s",
                 event, context.run_id, request_id, selected, trace["attempt"],
@@ -422,11 +495,64 @@ class OpenCodeZenClient:
             trace.update(attempt=attempt, started=time.monotonic())
             record("PROVIDER_REQUEST")
 
-        record("PROVIDER_REQUEST")
         try:
             _check_cancelled(context)
-            answer = self._translate(prompt, selected, system, max_tokens, context, retry)
+            if not isinstance(prompt, str) or not prompt.strip():
+                raise OpenCodeRequestError("Nội dung gửi OpenCode đang trống.")
+            if not isinstance(task_kind, str) or not task_kind.strip():
+                raise OpenCodeConfigurationError("Loại tác vụ Muse không hợp lệ.")
+            if response_validator is not None and (not callable(response_validator)
+                    or not isinstance(schema_id, str) or not schema_id.strip()):
+                raise OpenCodeConfigurationError("Bộ kiểm định Muse cần schema ID có phiên bản.")
+            request_timeout = float(self.task_timeouts.get(task_kind, self.timeout))
+            cache_hit = [False]
+
+            def validate(raw):
+                try:
+                    if response_validator(raw) is False:
+                        raise ValueError("Response validator returned false")
+                except Exception as error:
+                    raise OpenCodeResponseValidationError(
+                        "Muse trả dữ liệu chưa qua kiểm định cấu trúc; phần này cần thử lại.") from error
+                return True
+
+            def operation(attempt):
+                if attempt == 1:
+                    record("PROVIDER_REQUEST")
+                return self._translate(prompt, selected, system, max_tokens, context,
+                                       request_timeout)
+
+            answer = self.execution_layer.execute(
+                operation,
+                identity={"provider": "opencode", "model": selected, "system": system,
+                          "prompt": prompt, "max_tokens": max_tokens,
+                          "temperature": temperature, "task_kind": task_kind,
+                          "schema_id": schema_id, "adapter_version": _EXECUTION_VERSION},
+                max_retries=self.max_retries, cancel_check=context.cancel_check,
+                retryable=lambda error: isinstance(error, OpenCodeTimeoutError)
+                    or isinstance(error, OpenCodeRequestError) and error.retryable,
+                wait_retry=lambda delay: _retry_delay(delay, context), on_retry=retry,
+                validate=validate if response_validator is not None else None, use_cache=use_cache,
+                on_cache_hit=lambda: cache_hit.__setitem__(0, True),
+            )
             _check_cancelled(context)
+            if cache_hit[0]:
+                record("AI_CACHE_HIT", len(answer))
+                return answer
+        except AIExecutionCancelledError:
+            error = OpenCodeCancelledError("Đã hủy yêu cầu dịch OpenCode.")
+            record("PROVIDER_CANCELLED", error=error)
+            raise error from None
+        except AIExecutionError as failure:
+            code = ("provider_circuit_open" if isinstance(failure, AICircuitOpenError)
+                    else "provider_queue_full" if isinstance(failure, AIQueueFullError)
+                    else "provider_queue_timeout" if isinstance(failure, AIQueueTimeoutError)
+                    else "provider_failed")
+            error = OpenCodeRequestError(str(failure), retryable=True, code=code)
+            if isinstance(failure, AICircuitOpenError):
+                error.retry_after = failure.retry_after
+            record("PROVIDER_FAILED", error=error)
+            raise error from None
         except OpenCodeCancelledError as error:
             record("PROVIDER_CANCELLED", error=error)
             raise
@@ -439,7 +565,7 @@ class OpenCodeZenClient:
         record("PROVIDER_COMPLETED", len(answer))
         return answer
 
-    def _translate(self, prompt, selected, system, max_tokens, context, retry):
+    def _translate(self, prompt, selected, system, max_tokens, context, timeout):
         if not isinstance(prompt, str) or not prompt.strip():
             raise OpenCodeRequestError("Nội dung gửi OpenCode đang trống.")
         if not self._api_key:
@@ -469,7 +595,10 @@ class OpenCodeZenClient:
             argv = [executable, "run", "--pure", "--format", "json", "--model",
                     f"opencode/{selected}", "--agent", _AGENT,
                     "--title", "Video translation", "--dir", str(work)]
-            for attempt in range(self.max_retries + 1):
+            # The shared execution layer owns retries and admission. Each
+            # attempt owns one isolated directory/process and reaps it before
+            # another attempt is allowed to start.
+            for attempt in range(1):
                 _check_cancelled(context)
                 try:
                     process = subprocess.Popen(
@@ -478,16 +607,7 @@ class OpenCodeZenClient:
                         text=True, encoding="utf-8", errors="replace",
                         creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
                     )
-                    stdout, stderr = _communicate(process, request, self.timeout, context)
-                except OpenCodeTimeoutError as error:
-                    # _communicate terminates/reaps this attempt before raising;
-                    # only its typed deadline failure is eligible for a retry.
-                    # Cancellation, configuration and parsing errors propagate.
-                    if attempt >= self.max_retries:
-                        raise
-                    _retry_delay(min(2 ** attempt, 2), context)
-                    retry(attempt + 2, error)
-                    continue
+                    stdout, stderr = _communicate(process, request, timeout, context)
                 except OSError:
                     raise OpenCodeConfigurationError("Không khởi chạy được OpenCode CLI.") from None
                 events = []
@@ -503,15 +623,11 @@ class OpenCodeZenClient:
                     # attempt before considering a nonzero-exit retry.
                     raise OpenCodeRequestError("OpenCode đã gọi công cụ ngoài tác vụ dịch; Studio không chấp nhận kết quả lượt này.")
                 if process.returncode:
-                    if attempt < self.max_retries:
-                        _retry_delay(min(2 ** attempt, 2), context)
-                        retry(attempt + 2, OpenCodeRequestError("CLI request failed."))
-                        continue
-                    raise OpenCodeRequestError(_safe_failure(stdout + "\n" + stderr))
+                    raise _provider_failure(stdout + "\n" + stderr)
                 parts: list[str] = []
                 for event in events:
                     if event.get("type") == "error":
-                        raise OpenCodeRequestError(_safe_failure(json.dumps(event)))
+                        raise _provider_failure(json.dumps(event))
                     part = event.get("part", {})
                     if event.get("type") == "text" and isinstance(part, dict):
                         content = part.get("text")
@@ -519,6 +635,6 @@ class OpenCodeZenClient:
                             parts.append(content)
                 answer = "".join(parts).strip()
                 if not answer:
-                    raise OpenCodeRequestError(_safe_failure(stderr))
+                    raise _provider_failure(stderr)
                 return answer
         raise OpenCodeRequestError("OpenCode chưa trả được bản dịch.")

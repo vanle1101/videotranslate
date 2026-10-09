@@ -96,6 +96,18 @@ class Settings(BaseSettings):
     OPENCODE_API_KEY: str = "" # Optional local override; otherwise read OpenCode auth.json.
     OPENCODE_MODEL: str = "muse-spark-1.3-contributor-free"
     OPENCODE_TIMEOUT: float = 60.0
+    # A single free provider request at a time by default. Stage deadlines
+    # shorten, never extend, each adapter's existing request timeout.
+    OPENCODE_CONCURRENCY: int = Field(default=1, ge=1, le=4)
+    OPENCODE_QUEUE_LIMIT: int = Field(default=24, ge=1, le=256)
+    OPENCODE_QUEUE_TIMEOUT: float = Field(default=30.0, gt=0, le=300)
+    OPENCODE_CIRCUIT_FAILURES: int = Field(default=4, ge=1, le=20)
+    OPENCODE_CIRCUIT_COOLDOWN: float = Field(default=30.0, gt=0, le=300)
+    OPENCODE_TASK_TIMEOUTS: dict[str, float] = Field(default_factory=lambda: {
+        "translation": 60.0, "summary": 60.0, "semantic_review": 90.0,
+        "address_review": 90.0, "fluency_review": 60.0,
+    })
+    OPENCODE_SCHEMA_REPAIR_ATTEMPTS: int = Field(default=2, ge=0, le=4)
     OPENROUTER_API_KEY: str = "" # Otherwise reuse OpenRouter-Free login from OpenCode.
     OPENROUTER_MODEL: str = "inclusionai/ling-3.0-flash-sante:free"
     GEMINI_API_KEY: str = os.getenv("GEMINI_API_KEY", "")

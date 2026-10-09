@@ -19,10 +19,13 @@ from core.engines.translation import opencode_client as oc
 from config import settings
 from core.runtime_context import execution_context, current_execution_context
 from core.runtime_context import current_execution_context, execution_context, ExecutionContext
+from core.ai_execution import AIExecutionLayer, AIExecutionPolicy
 
 
 @pytest.fixture
 def isolated(monkeypatch, tmp_path):
+    layer = AIExecutionLayer(AIExecutionPolicy(retry_jitter=0), cache_root=tmp_path / "cache")
+    monkeypatch.setattr(oc, "_shared_execution_layer", lambda: layer)
     monkeypatch.setattr(settings, "OPENCODE_API_KEY", "")
     monkeypatch.delenv("OPENCODE_API_KEY", raising=False)
     monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path / "existing-data"))
@@ -840,3 +843,78 @@ def test_pipeline_blocking_context_propagates_and_cancellation_reaches_adapter()
             exited.set()
             await asyncio.gather(task, return_exceptions=True)
     asyncio.run(run())
+
+
+def test_validated_response_cache_skips_cli_and_invalidates_changed_config(isolated, monkeypatch, caplog):
+    start = Mock(return_value=make_process(json.dumps({"type": "text", "part": {"text": '{"text":"valid"}'}})))
+    monkeypatch.setattr(oc.subprocess, "Popen", start)
+    client = oc.OpenCodeZenClient(api_key="fixture-key")
+    validate = lambda raw: isinstance(json.loads(raw)["text"], str)
+    with caplog.at_level(logging.INFO, logger="ai"):
+        for _ in range(2):
+            assert client.translate("hello", response_validator=validate, schema_id="text-v1") == '{"text":"valid"}'
+    assert start.call_count == 1 and "AI_CACHE_HIT" in caplog.text
+    client.translate("hello", response_validator=validate, schema_id="text-v2")
+    client.translate("hello", response_validator=validate, schema_id="text-v2", use_cache=False)
+    assert start.call_count == 3
+
+
+def test_malformed_response_not_cached_and_schema_error_retains_safe_cause(isolated, monkeypatch):
+    start = Mock(return_value=make_process(json.dumps({"type": "text", "part": {"text": '{broken private-output'}})))
+    monkeypatch.setattr(oc.subprocess, "Popen", start)
+    client = oc.OpenCodeZenClient(api_key="fixture-key", max_retries=2)
+    for _ in range(2):
+        with pytest.raises(oc.OpenCodeResponseValidationError) as caught:
+            client.translate("hello", response_validator=json.loads, schema_id="text-v1")
+        assert isinstance(caught.value.__cause__, json.JSONDecodeError)
+        assert "private-output" not in str(caught.value)
+    assert start.call_count == 2 and not list((isolated / "cache").glob("*.json"))
+
+
+@pytest.mark.parametrize("failure, attempts, code", [
+    ("HTTP 429 rate limit", 2, "provider_rate_limited"),
+    ("HTTP 503 service unavailable", 2, "provider_server"),
+    ("ECONNRESET network failed", 2, "provider_transport"),
+    ("HTTP 401 invalid API key", 1, "provider_authentication"),
+    ("HTTP 403 forbidden", 1, "provider_authentication"),
+    ("Model not found", 1, "provider_model"),
+    ("FreeTierError", 1, "provider_rejected"),
+])
+def test_provider_failure_categories_control_retry_without_logging_raw(
+        isolated, monkeypatch, failure, attempts, code, caplog):
+    process = make_process("", failure + " private-key private-prompt", 1)
+    start = Mock(return_value=process)
+    monkeypatch.setattr(oc.subprocess, "Popen", start)
+    monkeypatch.setattr(oc, "_retry_delay", lambda seconds, context: oc._check_cancelled(context))
+    with caplog.at_level(logging.INFO, logger="ai"):
+        with pytest.raises(oc.OpenCodeRequestError) as caught:
+            oc.OpenCodeZenClient(api_key="private-key", max_retries=1).translate("private-prompt")
+    assert start.call_count == attempts and caught.value.code == code
+    assert f"code={code}" in caplog.text and "private-" not in caplog.text
+
+
+def test_stage_deadline_can_be_shorter_but_never_silently_longer(isolated, monkeypatch):
+    process = make_process()
+    monkeypatch.setattr(oc.subprocess, "Popen", Mock(return_value=process))
+    monkeypatch.setattr(oc, "_IS_WINDOWS", False)
+    client = oc.OpenCodeZenClient(api_key="test", timeout=60, task_timeouts={"address": 15})
+    client.translate("hello", task_kind="address")
+    assert process.communicate.call_args.kwargs["timeout"] == 15
+    client.translate("hello", task_kind="translation")
+    assert process.communicate.call_args.kwargs["timeout"] == 60
+    with pytest.raises(oc.OpenCodeConfigurationError):
+        oc.OpenCodeZenClient(api_key="test", timeout=60, task_timeouts={"address": 120})
+
+
+def test_circuit_breaker_is_shared_across_reconstructed_clients(isolated, monkeypatch):
+    layer = AIExecutionLayer(AIExecutionPolicy(circuit_failures=1), cache_root=isolated / "cache")
+    monkeypatch.setattr(oc, "_shared_execution_layer", lambda: layer)
+    process = make_process("", "HTTP 503", 1)
+    start = Mock(return_value=process)
+    monkeypatch.setattr(oc.subprocess, "Popen", start)
+    with pytest.raises(oc.OpenCodeRequestError):
+        oc.OpenCodeZenClient(api_key="test").translate("first")
+    with pytest.raises(oc.OpenCodeRequestError) as caught:
+        oc.OpenCodeZenClient(api_key="test").translate("next")
+    assert caught.value.code == "provider_circuit_open" and caught.value.retry_after > 0
+    start.assert_called_once()
