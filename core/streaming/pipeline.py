@@ -1188,7 +1188,8 @@ class StreamingPipelineSession:
             snapshot.update(status="PREVIEW_READY", phase="preview", stage="Bản xem trước đã sẵn sàng. Có thể sửa lời và dịch toàn bộ.")
         elif not self.is_running and self.review_summary.get("status") in {"failed", "incomplete"}:
             snapshot.update(status="FAILED", phase="review", stage=self._review_message())
-        elif not self.is_running and output_gate["final_output_blocked"]:
+        elif (not self.is_running and output_gate["final_output_blocked"]
+              and not self._reviewing_segment_ids and not self.is_editing):
             snapshot.update(status="PREPARED", phase="prepared", progress_pct=None,
                             stage=missing_speech_message(output_gate["missing_speech_ids"]))
         snapshot["can_resume"] = bool(self.initialized and self.is_running and snapshot["status"] == "PAUSED")
