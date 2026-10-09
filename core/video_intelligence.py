@@ -27,6 +27,7 @@ from core.chinese_text import comparable_chinese
 from core.media_process import run_media
 from core.screen_ocr import ScreenOCR
 from core.translation_context import VIETNAMESE_ADDRESS_POLICY, dialogue_context
+from core.semantic_segments import semantic_context, SEMANTIC_TRANSLATION_POLICY
 from core.structured_response import (
     StructuredResponseError, parse_object, validate_schema, request_structured,
     TRANSLATION_SCHEMA, SOURCE_SCHEMA, schema_attempts,
@@ -37,7 +38,7 @@ def _capture_visual_revision():
     try:
         return [hashlib.sha256(Path(__file__).with_name(name).read_bytes()).hexdigest()
                 for name in ("video_intelligence.py", "screen_ocr.py", "chinese_text.py", "translation_context.py",
-                             "structured_response.py")]
+                             "structured_response.py", "semantic_segments.py")]
     except OSError:
         return None
 
@@ -125,6 +126,34 @@ class VideoIntelligence:
     OPENCODE_SPEECH_BATCH_SIZE = 4
     OPENCODE_SCREEN_BATCH_SIZE = 8
     OPENCODE_SOURCE_EVIDENCE_LIMIT = 32
+    SOURCE_CONTEXT_FIELDS = ("speaker_id", "speaker", "diarization_speaker", "spk", "speaker_evidence",
+        "utterance_id", "utterance_evidence", "source_asr_row_id", "source_asr_start", "source_asr_end",
+        "source_piece_index", "source_piece_count", "source_needs_review", "source_truncated",
+        "addressee_id", "source_method", "evidence_mode", "translation_provider", "translation_model")
+
+    @classmethod
+    def _source_context_row(cls, segment):
+        """Retain measured source metadata without exposing a translated draft."""
+        row = {"id": cls._get(segment, "id"), "start": cls._get(segment, "start"),
+               "end": cls._get(segment, "end"), "asr_text": cls._get(segment, "text_zh", "")
+                or cls._get(segment, "asr_text", "")}
+        for name in cls.SOURCE_CONTEXT_FIELDS:
+            value = cls._get(segment, name, None)
+            if value is not None:
+                row[name] = deepcopy(value)
+        verification = cls._get(segment, "verification", {})
+        if isinstance(verification, dict) and verification.get("status") == "manual":
+            row.update(manual_edit=True, revision=cls._get(segment, "revision", 0))
+        return row
+
+    @staticmethod
+    def _semantic_context(source, focus):
+        # Silent/empty recognition rows are not semantic units. Keep their IDs
+        # explicitly missing in the payload rather than inventing source words.
+        rows = [row for row in source if isinstance(row, dict) and isinstance(
+            row.get("text_zh") or row.get("asr_text") or row.get("text"), str)
+            and (row.get("text_zh") or row.get("asr_text") or row.get("text")).strip()]
+        return semantic_context(rows, focus)
 
     @staticmethod
     def suppress_diagnostic_placeholder(row):
@@ -220,7 +249,12 @@ class VideoIntelligence:
                         "config": config, "provider": self.provider,
                         "duration": total_duration,
                         "segments": [{name: self._get(seg, name, None) for name in
-                                      ("id", "start", "end", "text_zh", "asr_text")} for seg in segments],
+                                      ("id", "start", "end", "text_zh", "asr_text",
+                                       *self.SOURCE_CONTEXT_FIELDS)} for seg in segments],
+                        "semantic_context": self._semantic_context(
+                            getattr(self, "_source_dialogue", []) or [self._source_context_row(seg) for seg in segments],
+                            [self._source_context_row(seg) for seg in segments]),
+                        "semantic_policy": SEMANTIC_TRANSLATION_POLICY,
                         "chunking": [self.MAX_CHUNK_SECONDS, self.TARGET_CHUNK_SECONDS, self.MAX_WIDTH],
                         "ocr": [ScreenOCR.FPS, ScreenOCR.MAX_DIMENSION, ScreenOCR.MIN_CONFIDENCE],
                         "code": list(_PROCESS_VISUAL_REVISION)}
@@ -566,7 +600,8 @@ class VideoIntelligence:
             "\"needs_review\":false,\"review_reason\":\"\"}]}. Every requested ID once; evidence_ids may contain only "
             "provided overlapping OCR IDs. An unchanged ASR can have no evidence IDs; changed ASR requires evidence.\n"
             f"Requested ASR: {json.dumps(payload, ensure_ascii=False)}\n"
-            f"Measured OCR: {json.dumps(observed, ensure_ascii=False)}\nContext: {context}")
+            f"Measured OCR: {json.dumps(observed, ensure_ascii=False)}\nContext: {context}\n"
+            + SEMANTIC_TRANSLATION_POLICY)
         attempts = schema_attempts(1)
         for attempt in range(attempts):
             self._check_cancelled(cancel_check)
@@ -976,6 +1011,7 @@ class VideoIntelligence:
                 context_payload = {"speech": [{"start": row["start"], "end": row["end"],
                                                 "asr_text": row.get("asr_text", "")} for row in payload],
                                    "wider_source_dialogue": dialogue_context(source_dialogue, payload),
+                                   "semantic_context": self._semantic_context(source_dialogue, batch_payload),
                                    "ocr": [{"start": row["start"], "end": row["end"],
                                              "text_zh": row["text_zh"]} for row in context_screens.values()],
                                    "ocr_context_truncated_for_ids": sorted(truncated_evidence)}
@@ -1026,6 +1062,7 @@ class VideoIntelligence:
                 # and any prior corrected turns, while the cache key above
                 # remains tied to the pre-correction request inputs.
                 context_payload["wider_source_dialogue"] = dialogue_context(source_dialogue, payload)
+                context_payload["semantic_context"] = self._semantic_context(source_dialogue, batch_payload)
                 context = json.dumps(context_payload, ensure_ascii=False)
                 corrected_payload = [{**row, "corrected_text_zh": corrections[row["id"]]["text_zh"],
                                       "source_needs_review": corrections[row["id"]]["needs_review"],
@@ -1035,7 +1072,7 @@ class VideoIntelligence:
                     "Video đính kèm gồm hình ảnh và âm thanh liên tục. Đối chiếu lời nói với phụ đề để",
                     "Chỉ có bản nhận dạng âm thanh ASR và chữ OCR tại máy. Đối chiếu hai nguồn để"
                 ).replace("nghe video và chữ OCR", "bản ASR và chữ OCR")
-                prompt = (text_prompt + "\n"
+                prompt = (text_prompt + "\n" + SEMANTIC_TRANSLATION_POLICY + "\n"
                           f"Đây là chế độ ASR + OCR miễn phí qua {label}, CHỈ VĂN BẢN, không có video/âm thanh đính kèm. "
                           "ASR KHÔNG phải bản chép chắc chắn đúng. Đối chiếu chữ OCR cùng thời điểm, câu liền kề và ngữ cảnh "
                           "để sửa ASR khi có bằng chứng rõ; không bịa cách sửa chỉ dựa vào âm gần giống. "
@@ -1223,13 +1260,17 @@ class VideoIntelligence:
         media_start, media_end = start - before, end + after
         media = self._encode_chunk(video_path, media_start, media_end, cancel_check)
         evidence = "\nOCR có thời gian/vị trí do máy đọc (không được đổi): " + json.dumps(observed, ensure_ascii=False)
+        semantics = self._semantic_context(getattr(self, '_source_dialogue', []) or payload, payload)
         prompt = (VISUAL_TRANSLATION_PROMPT + "\n"
+                  + SEMANTIC_TRANSLATION_POLICY + "\n"
                   f"Clip đính kèm bắt đầu tại {media_start:.3f}, kết thúc {media_end:.3f} giây trong video nguồn. "
                   f"CHỈ trả các ID bên dưới và screen_texts trong [{start:.3f}, {end:.3f}]. "
                   "Phần trước/sau khoảng này chỉ là ngữ cảnh để hiểu câu bị cắt; không thêm lời thoại hoặc vùng chữ ngoài khoảng. "
                   f"Các câu của đoạn này: {json.dumps(payload, ensure_ascii=False)}\n"
                   "Thoại nguồn rộng hơn, chỉ tham khảo ngữ cảnh, có thể còn lỗi ASR: "
                   f"{json.dumps(dialogue_context(getattr(self, '_source_dialogue', []) or payload, payload), ensure_ascii=False)}\n"
+                  "Semantic context (reference-only IDs): "
+                  f"{json.dumps(semantics, ensure_ascii=False)}\n"
                   f"Tóm tắt đoạn trước: {previous_summary or '(không có)'}" + evidence)
         self._check_cancelled(cancel_check)
         try:
@@ -1260,6 +1301,8 @@ class VideoIntelligence:
                         f"Chỉ xuất câu/vùng chữ trong [{start:.3f}, {end:.3f}], phần dư chỉ để đối chiếu ngữ cảnh. Mốc câu cố định: "
                         f"{json.dumps(payload, ensure_ascii=False)}\nNgữ cảnh trước: {previous_summary or '(không có)'}\n"
                         f"BẢN NHÁP CHƯA XÁC MINH: {raw}" + evidence)
+        verification += ("\n" + SEMANTIC_TRANSLATION_POLICY + "\nSemantic context (reference-only IDs): "
+            + json.dumps(semantics, ensure_ascii=False))
         contact_sheet = self._encode_contact_sheet(video_path, media_start, media_end, cancel_check)
         interval = (media_end - media_start) / 4
         frame_times = [round(media_start + index * interval, 2) for index in range(4)]
@@ -1302,8 +1345,7 @@ class VideoIntelligence:
         previous_stage_callback = getattr(self, "_stage_callback", None)
         self._stage_callback = detail_callback
         previous_dialogue = getattr(self, "_source_dialogue", [])
-        self._source_dialogue = [{"id": self._get(seg, "id"), "start": self._get(seg, "start"),
-                                  "end": self._get(seg, "end"), "asr_text": self._get(seg, "text_zh", "")}
+        self._source_dialogue = [self._source_context_row(seg)
                                  for seg in (segments if context_segments is None else context_segments)]
         self._checkpoint_context = self._checkpoint_identity(video_path, segments, total_duration)
         if self._checkpoint_context and (start_time or end_time is not None or context_segments is not None or previous_summary):
