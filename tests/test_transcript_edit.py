@@ -76,6 +76,15 @@ def test_unknown_source_rows_never_advertise_one_hundred_percent(session):
     assert progress["progress_pct"] is None and progress["status"] == "RUNNING"
 
 
+def test_finished_source_stage_cannot_publish_overall_one_hundred_before_mp4(session):
+    session.auto_export_result = True
+    asyncio.run(session.report_progress("visual", "Nguồn đã dịch hết; còn chờ giọng và MP4.", 100))
+    progress = session.get_progress()
+    assert progress["stage_progress_pct"] == 100
+    assert progress["progress_pct"] is None
+    assert progress["status"] == "RUNNING" and not getattr(session, "output_filename", "")
+
+
 def test_manual_speech_failure_is_traceable_without_logging_secret_or_losing_old_audio(session, caplog):
     original = session.segments[0].to_dict()
     old_audio = Path(session.segments[0].audio_path)
@@ -910,7 +919,9 @@ def test_automatic_review_only_regenerates_changed_audio_and_preserves_uncertain
             assert task is not None
             await task
             assert session.get_progress()["can_review"]
-            assert session.get_progress()["status"] == "COMPLETED"
+            assert session.get_progress()["status"] == "PREPARED"
+            assert not session.get_progress()["can_stop"]
+            assert not session.output_filename and session.get_progress()["progress_pct"] is None
     asyncio.run(run())
     assert segment.final_vi == row["final_vi"]
     assert segment.needs_review == unresolved

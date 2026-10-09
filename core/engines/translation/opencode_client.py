@@ -56,7 +56,10 @@ def _shared_execution_layer():
         circuit_cooldown=getattr(settings, "OPENCODE_CIRCUIT_COOLDOWN", 30.0),
     )
     cache_root = Path(settings.WORKSPACE_DIR) / "cache" / "ai_responses"
-    identity = (policy, str(cache_root.resolve()))
+    # Queue identity needs lexical normalization only. Resolving filesystem
+    # links on every progress read can itself fail under Windows memory/handle
+    # pressure, turning an otherwise readable checkpoint into HTTP 500.
+    identity = (policy, os.path.normcase(os.path.abspath(cache_root)))
     with _execution_layers_lock:
         if identity not in _execution_layers:
             _execution_layers[identity] = AIExecutionLayer(policy, cache_root=cache_root)

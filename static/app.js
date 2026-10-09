@@ -713,7 +713,7 @@ document.addEventListener("DOMContentLoaded", () => {
 
   function captionSourceReady() {
     const items = Object.values(segments);
-    return !!currentTaskId && (currentProgress?.status === "COMPLETED" ||
+    return !!currentTaskId && (["COMPLETED", "PREPARED"].includes(currentProgress?.status) ||
       (currentProgress?.phase === "export_error" && items.length > 0 &&
         items.every(segment => ["READY", "PLAYED"].includes(segment.status))));
   }
@@ -1217,7 +1217,7 @@ document.addEventListener("DOMContentLoaded", () => {
       pendingTaskAction.progressSeen = true;
       currentProgress.can_translate_full = false;
     }
-    const terminal = ["COMPLETED", "PREVIEW_READY", "FAILED", "STOPPED", "CANCELLED"].includes(status);
+    const terminal = ["COMPLETED", "PREVIEW_READY", "PREPARED", "FAILED", "STOPPED", "CANCELLED"].includes(status);
     setWorkerSourceBusy(!terminal || !!pendingTaskAction || reviewInProgress() || automaticExportActive);
     const pct = measuredProgress(currentProgress.progress_pct);
     updatePlayerDownloadProgress(currentProgress, pct, terminal);
@@ -1235,7 +1235,7 @@ document.addEventListener("DOMContentLoaded", () => {
     else taskProgressTrack.setAttribute("aria-valuenow", String(pct));
     taskProgressBar.style.width = pct === null ? "100%" : `${pct}%`;
     taskProgressDetail.textContent = terminal
-      ? (isPreviewReady(status) ? `Đã dịch đoạn xem trước đến ${formatTime(Number(currentProgress.processed_seconds) || Number(currentProgress.preview_seconds) || 0)} / ${formatTime(Number(currentProgress.total_seconds) || totalVideoDuration)}. Nghe và sửa các câu, rồi bấm Dịch toàn bộ để xử lý tiếp từng đoạn.` : currentProgress.phase === "export_error" ? "Video kết quả chưa được tạo. Bản dịch và giọng đọc vẫn được giữ; bạn có thể xuất lại." : incompleteReview ? reviewSummaryText() : status === "FAILED" ? "Mở Diagnostics để xem lỗi. Bấm Tiếp tục tác vụ để dùng lại phần đã lưu." : status === "COMPLETED" ? (reviewSummaryText() || (currentProgress.review_count ? "Bản dịch còn câu chưa chắc chắn. Bấm AI kiểm tra lại để tự đối chiếu và sửa." : "Các câu dịch đã xử lý xong. Có thể xuất video.")) : "Tác vụ đã dừng.")
+      ? (isPreviewReady(status) ? `Đã dịch đoạn xem trước đến ${formatTime(Number(currentProgress.processed_seconds) || Number(currentProgress.preview_seconds) || 0)} / ${formatTime(Number(currentProgress.total_seconds) || totalVideoDuration)}. Nghe và sửa các câu, rồi bấm Dịch toàn bộ để xử lý tiếp từng đoạn.` : currentProgress.phase === "export_error" ? "Video kết quả chưa được tạo. Bản dịch và giọng đọc vẫn được giữ; bạn có thể xuất lại." : status === "PREPARED" ? "Bản dịch và giọng đã lưu; MP4 chưa được xuất và kiểm định. Có thể chỉnh lời hoặc xuất video." : incompleteReview ? reviewSummaryText() : status === "FAILED" ? "Mở Diagnostics để xem lỗi. Bấm Tiếp tục tác vụ để dùng lại phần đã lưu." : status === "COMPLETED" ? (reviewSummaryText() || (currentProgress.review_count ? "Bản dịch còn câu chưa chắc chắn. Bấm AI kiểm tra lại để tự đối chiếu và sửa." : "Các câu dịch đã xử lý xong. Có thể xuất video.")) : "Tác vụ đã dừng.")
       : reviewInProgress() || currentProgress.phase === "review" ? (reviewSummaryText() || "AI đang đối chiếu từng câu với lời gốc và chữ trên hình, tự sửa lỗi trước khi tạo giọng.")
       : currentProgress.phase === "export" ? "Đang tạo video kết quả từ bản dịch đã được AI kiểm tra. Tiến độ xuất được cập nhật riêng."
       : currentProgress.phase === "download" ? (pct === null ? "Đang tải video; máy chủ chưa cung cấp tổng dung lượng." : "Tiến độ tải video nguồn. Bước xử lý câu thoại sẽ có tiến độ riêng.")
@@ -2495,7 +2495,7 @@ document.addEventListener("DOMContentLoaded", () => {
       if (pendingTaskAction === request) pendingTaskAction = null;
       updateExportAvailability();
       updateTranscriptReviewAvailability();
-      setWorkerSourceBusy(!!currentTaskId && !["COMPLETED", "PREVIEW_READY", "FAILED", "STOPPED", "CANCELLED"].includes(currentProgress?.status));
+      setWorkerSourceBusy(!!currentTaskId && !["COMPLETED", "PREVIEW_READY", "PREPARED", "FAILED", "STOPPED", "CANCELLED"].includes(currentProgress?.status));
     }
   }
   window.translateFullTask = translateFullTask;
@@ -2794,19 +2794,27 @@ document.addEventListener("DOMContentLoaded", () => {
       else if (msg.type === "finished") {
         if (pendingTaskAction?.kind === "review") pendingTaskAction.progressSeen = true;
         const finishedStatus = String(msg.status || msg.progress?.status || "").toUpperCase();
+        if (finishedStatus === "CANCELLING") {
+          showTaskProgress({ ...(msg.progress || {}), ...msg, status:"CANCELLING", phase:"stopping",
+            stage:"Đang dừng xử lý; chờ tác vụ đang chạy trả quyền điều khiển…",
+            progress_pct:null, can_pause:false, can_stop:false });
+          updateTasksTable();
+          return;
+        }
         const reviewFailed = ["failed", "incomplete"].includes((msg.review_summary || currentProgress?.review_summary)?.status)
           && !msg.error && !(currentProgress?.status === "FAILED" && currentProgress?.phase === "failed");
         const failed = finishedStatus === "FAILED" || currentProgress?.status === "FAILED" || reviewFailed;
         const stopped = ["CANCELLED", "STOPPED"].includes(finishedStatus);
+        const prepared = !failed && !stopped && (finishedStatus === "PREPARED" || currentProgress?.phase === "prepared");
         const previewReady = !failed && !stopped && (isPreviewReady(finishedStatus) ||
           (String(msg.translation_mode || currentProgress?.translation_mode) === "preview" &&
            (msg.can_translate_full === true || currentProgress?.can_translate_full === true)));
         showTaskProgress({ ...(msg.progress || {}), ...msg,
-          status: failed ? "FAILED" : stopped ? "STOPPED" : previewReady ? PREVIEW_READY_STATUS : "COMPLETED",
+          status: failed ? "FAILED" : stopped ? "STOPPED" : previewReady ? PREVIEW_READY_STATUS : prepared ? "PREPARED" : "COMPLETED",
           ...(msg.review_summary ? {review_summary: msg.review_summary} : {}),
-          phase: failed ? (reviewFailed ? "review" : "failed") : stopped ? "stopped" : previewReady ? "preview_ready" : "complete",
-          stage: failed ? (currentProgress?.status === "FAILED" ? currentProgress.stage : msg.message || "Xử lý video thất bại") : stopped ? "Đã dừng tác vụ" : previewReady ? "Đoạn xem trước đã sẵn sàng" : "Hoàn tất xử lý câu thoại",
-          progress_pct: failed || stopped || previewReady ? null : 100 });
+          phase: failed ? (reviewFailed ? "review" : "failed") : stopped ? "stopped" : previewReady ? "preview_ready" : prepared ? "prepared" : "complete",
+          stage: failed ? (currentProgress?.status === "FAILED" ? currentProgress.stage : msg.message || "Xử lý video thất bại") : stopped ? "Đã dừng tác vụ" : previewReady ? "Đoạn xem trước đã sẵn sàng" : prepared ? "Bản dịch và giọng đã lưu; đang chờ xuất và kiểm định MP4." : "Hoàn tất xử lý câu thoại",
+          progress_pct: failed || stopped || previewReady || prepared ? null : 100 });
         updateTasksTable();
       }
     };
@@ -3566,7 +3574,7 @@ document.addEventListener("DOMContentLoaded", () => {
       if (id === currentTaskId) {
         if (action === "stop") {
           showTaskProgress({ phase: "stopped", status: "STOPPED", stage: "Đã dừng tác vụ", progress_pct: null });
-        } else if (revision === progressRevision && !["COMPLETED", "PREVIEW_READY", "FAILED", "STOPPED", "CANCELLED"].includes(currentProgress?.status)) {
+        } else if (revision === progressRevision && !["COMPLETED", "PREVIEW_READY", "PREPARED", "FAILED", "STOPPED", "CANCELLED"].includes(currentProgress?.status)) {
           showTaskProgress({ status: action === "pause" ? "PAUSED" : "RUNNING", can_pause: action === "resume", can_resume: action === "pause" });
           btnPauseWorker.classList.toggle("hidden", action === "pause");
           btnResumeWorker.classList.toggle("hidden", action === "resume");
@@ -3627,7 +3635,7 @@ document.addEventListener("DOMContentLoaded", () => {
       return true;
     } finally {
       pendingTaskAction = null;
-      setWorkerSourceBusy(!!currentTaskId && !["COMPLETED", "PREVIEW_READY", "FAILED", "STOPPED", "CANCELLED"].includes(currentProgress?.status));
+      setWorkerSourceBusy(!!currentTaskId && !["COMPLETED", "PREVIEW_READY", "PREPARED", "FAILED", "STOPPED", "CANCELLED"].includes(currentProgress?.status));
       updateExportAvailability();
     }
   };
@@ -3655,7 +3663,7 @@ document.addEventListener("DOMContentLoaded", () => {
         currentProgress = null;
         showTaskProgress(data.progress);
       }
-      if (!["COMPLETED", "PREVIEW_READY", "FAILED", "STOPPED", "CANCELLED"].includes(currentProgress?.status)) {
+      if (!["COMPLETED", "PREVIEW_READY", "PREPARED", "FAILED", "STOPPED", "CANCELLED"].includes(currentProgress?.status)) {
         isBufferingUnderrun = true;
         bufferingText.textContent = currentProgress?.stage || "Đang tiếp tục từ phần đã lưu…";
         bufferingAlert.classList.remove("hidden");
@@ -3666,7 +3674,7 @@ document.addEventListener("DOMContentLoaded", () => {
     finally {
       pendingTaskAction = null;
       btnRetryWorker.disabled = false;
-      setWorkerSourceBusy(!!currentTaskId && !["COMPLETED", "PREVIEW_READY", "FAILED", "STOPPED", "CANCELLED"].includes(currentProgress?.status));
+      setWorkerSourceBusy(!!currentTaskId && !["COMPLETED", "PREVIEW_READY", "PREPARED", "FAILED", "STOPPED", "CANCELLED"].includes(currentProgress?.status));
     }
   };
   btnRetryWorker?.addEventListener("click", window.studioRetry);
@@ -3694,7 +3702,7 @@ document.addEventListener("DOMContentLoaded", () => {
     } catch (error) { alert(error.message); }
     finally {
       pendingTaskAction = null;
-      setWorkerSourceBusy(!!currentTaskId && (reviewInProgress() || !["COMPLETED", "PREVIEW_READY", "FAILED", "STOPPED", "CANCELLED"].includes(currentProgress?.status)));
+      setWorkerSourceBusy(!!currentTaskId && (reviewInProgress() || !["COMPLETED", "PREVIEW_READY", "PREPARED", "FAILED", "STOPPED", "CANCELLED"].includes(currentProgress?.status)));
       updateExportAvailability();
       updateTranscriptReviewAvailability();
     }
@@ -3738,7 +3746,7 @@ document.addEventListener("DOMContentLoaded", () => {
         if (activeTask && automaticExport.status === "COMPLETED") activeTask = {...activeTask,
           output_video_url: automaticExport.output_video_url || automaticExport.video_url, output_filename: automaticExport.output_filename};
       }
-      if (automaticExportActive && !automaticExport && activeTask && ["COMPLETED", "PREVIEW_READY", "FAILED", "STOPPED", "CANCELLED"].includes(activeTask.status)) automaticExportActive = false;
+      if (automaticExportActive && !automaticExport && activeTask && ["COMPLETED", "PREVIEW_READY", "PREPARED", "FAILED", "STOPPED", "CANCELLED"].includes(activeTask.status)) automaticExportActive = false;
       if (activeTask?.status === "COMPLETED" && automaticExport && ["FAILED", "CANCELLED"].includes(automaticExport.status)) {
         showExportFailure(automaticExport.stage, automaticExport.status);
         activeTask = {...activeTask, status: "FAILED", phase: "export_error", stage: automaticExport.stage || "Chưa xuất được video kết quả", progress_pct: null};
@@ -3750,14 +3758,14 @@ document.addEventListener("DOMContentLoaded", () => {
           (activeTask.review_summary !== undefined && JSON.stringify(activeTask.review_summary) !== JSON.stringify(currentProgress?.review_summary));
         if (taskPollWarning || streamDisconnected || statusChanged || progressChanged) {
           showTaskProgress(activeTask);
-          if (streamDisconnected && !["COMPLETED", "PREVIEW_READY", "FAILED", "STOPPED", "CANCELLED"].includes(activeTask.status)) {
+          if (streamDisconnected && !["COMPLETED", "PREVIEW_READY", "PREPARED", "FAILED", "STOPPED", "CANCELLED"].includes(activeTask.status)) {
             taskConnectionStatus.textContent = "Kết nối realtime bị gián đoạn. Đang lấy tiến độ mới mỗi 2 giây.";
             taskConnectionStatus.classList.remove("hidden");
           } else if (!streamDisconnected) {
             taskConnectionStatus.classList.add("hidden");
           }
         }
-      } else if (currentTaskId && !["COMPLETED", "PREVIEW_READY", "FAILED", "STOPPED", "CANCELLED"].includes(currentProgress?.status)) {
+      } else if (currentTaskId && !["COMPLETED", "PREVIEW_READY", "PREPARED", "FAILED", "STOPPED", "CANCELLED"].includes(currentProgress?.status)) {
         taskPollWarning = true;
         bufferingAlert.classList.add("hidden");
         playerDownloadProgress?.classList.add("hidden");
@@ -3771,7 +3779,7 @@ document.addEventListener("DOMContentLoaded", () => {
       }
 
       if (tasks.length === 0) {
-        tbody.innerHTML = `<tr><td colspan="6" class="p-8 text-center text-gray-500 font-sans">${pendingStart ? "Đang gửi yêu cầu tạo tác vụ…" : currentTaskId && !["COMPLETED", "PREVIEW_READY", "FAILED", "STOPPED", "CANCELLED"].includes(currentProgress?.status) ? "Chưa nhận được trạng thái tác vụ từ máy chủ. Đang kiểm tra lại…" : "Không có tác vụ nào đang hoạt động."}</td></tr>`;
+        tbody.innerHTML = `<tr><td colspan="6" class="p-8 text-center text-gray-500 font-sans">${pendingStart ? "Đang gửi yêu cầu tạo tác vụ…" : currentTaskId && !["COMPLETED", "PREVIEW_READY", "PREPARED", "FAILED", "STOPPED", "CANCELLED"].includes(currentProgress?.status) ? "Chưa nhận được trạng thái tác vụ từ máy chủ. Đang kiểm tra lại…" : "Không có tác vụ nào đang hoạt động."}</td></tr>`;
         return;
       }
 
@@ -3780,7 +3788,7 @@ document.addEventListener("DOMContentLoaded", () => {
         const tr = document.createElement("tr");
         tr.className = "hover:bg-gray-800/40 transition";
         const pct = measuredProgress(t.progress_pct);
-        const terminalWithoutProgress = pct === null && ["COMPLETED", "PREVIEW_READY", "FAILED", "STOPPED", "CANCELLED"].includes(t.status);
+        const terminalWithoutProgress = pct === null && ["COMPLETED", "PREVIEW_READY", "PREPARED", "FAILED", "STOPPED", "CANCELLED"].includes(t.status);
         const progressLabel = pct === null ? "Chưa có số liệu %" : formatProgressPercent(pct);
 
         let statusBadge = "";
@@ -3790,6 +3798,8 @@ document.addEventListener("DOMContentLoaded", () => {
           statusBadge = `<span class="px-2 py-0.5 rounded bg-amber-950 text-amber-400 border border-amber-800 text-[10px]">${t.status === "CANCELLING" ? "ĐANG DỪNG" : "TẠM DỪNG"}</span>`;
         } else if (t.status === "PREVIEW_READY") {
           statusBadge = `<span class="px-2 py-0.5 rounded bg-violet-950 text-violet-300 border border-violet-800 text-[10px]">XEM TRƯỚC SẴN SÀNG</span>`;
+        } else if (t.status === "PREPARED") {
+          statusBadge = `<span class="px-2 py-0.5 rounded bg-violet-950 text-violet-300 border border-violet-800 text-[10px]">CHỜ XUẤT MP4</span>`;
         } else if (t.status === "COMPLETED") {
           const resultAvailable = !!(t.output_video_url || t.video_url);
           statusBadge = `<span class="px-2 py-0.5 rounded bg-blue-950 text-blue-400 border border-blue-800 text-[10px]">${resultAvailable ? "ĐÃ XUẤT VIDEO" : "ĐÃ DỊCH · CHƯA XUẤT"}</span>`;
@@ -3837,7 +3847,7 @@ document.addEventListener("DOMContentLoaded", () => {
       if (taskIdAtRequest !== currentTaskId || revisionAtRequest !== progressRevision) return;
       console.error("Error loading tasks:", e);
       tbody.innerHTML = '<tr><td colspan="6" class="p-6 text-center text-rose-300">Không thể tải danh sách tác vụ. Bấm Làm mới để thử lại.</td></tr>';
-      if (currentTaskId && !["COMPLETED", "PREVIEW_READY", "FAILED", "STOPPED", "CANCELLED"].includes(currentProgress?.status)) {
+      if (currentTaskId && !["COMPLETED", "PREVIEW_READY", "PREPARED", "FAILED", "STOPPED", "CANCELLED"].includes(currentProgress?.status)) {
         taskPollWarning = true;
         bufferingAlert.dataset.state = "disconnected";
         taskConnectionStatus.textContent = "Không kết nối được máy chủ. Tiến độ hiển thị là trạng thái cuối đã nhận.";

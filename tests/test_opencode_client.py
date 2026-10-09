@@ -22,6 +22,17 @@ from core.runtime_context import current_execution_context, execution_context, E
 from core.ai_execution import AIExecutionLayer, AIExecutionPolicy
 
 
+def test_shared_queue_diagnostics_never_resolve_filesystem_paths(monkeypatch, tmp_path):
+    monkeypatch.setattr(settings, "WORKSPACE_DIR", tmp_path)
+    monkeypatch.setattr(oc, "_execution_layers", {})
+    def exhausted(*args, **kwargs):
+        raise OSError(1450, "Insufficient system resources")
+    monkeypatch.setattr(Path, "resolve", exhausted)
+    first = oc._shared_execution_layer()
+    assert oc._shared_execution_layer() is first
+    assert first.snapshot()["active_requests"] == 0
+
+
 @pytest.fixture
 def isolated(monkeypatch, tmp_path):
     layer = AIExecutionLayer(AIExecutionPolicy(retry_jitter=0), cache_root=tmp_path / "cache")

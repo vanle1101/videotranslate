@@ -7,6 +7,28 @@ const source = readFileSync(new URL('../static/app.js', import.meta.url), 'utf8'
 const template = readFileSync(new URL('../templates/index.html', import.meta.url), 'utf8');
 const stylesheet = readFileSync(new URL('../static/style.css', import.meta.url), 'utf8');
 
+test('prepared speech remains idle without declaring a validated MP4 completed', async () => {
+  const ui = studio(); await ui.start();
+  const socket = ui.sockets.at(-1);
+  socket.receive({type:'progress', status:'PREPARED', phase:'prepared', progress_pct:null,
+    stage:'Bản dịch và giọng đã lưu; đang chờ xuất MP4.', can_stop:false});
+  socket.receive({type:'finished',status:'prepared'});
+  assert.equal(ui.el('task-progress').dataset.status, 'PREPARED');
+  assert.equal(ui.el('task-progress-value').textContent, '');
+  assert.match(ui.el('task-progress-detail').textContent, /MP4 chưa được xuất/);
+  assert.equal(ui.el('task-result-link').classList.contains('hidden'), true);
+});
+
+test('draining native work cannot become Completed from a finished event', async () => {
+  const ui = studio(); await ui.start();
+  ui.sockets.at(-1).receive({type:'finished', status:'cancelling'});
+  assert.equal(ui.el('task-progress').dataset.status, 'CANCELLING');
+  assert.notEqual(ui.el('task-progress-value').textContent, '100%');
+  assert.equal(ui.el('task-result-link').classList.contains('hidden'), true);
+  ui.sockets.at(-1).receive({type:'progress',status:'STOPPED',phase:'stopped',progress_pct:null});
+  assert.equal(ui.el('task-progress').dataset.status, 'STOPPED');
+});
+
 test('speech-free visual chunk updates committed captions and duration without restarting playback or claiming completion', async () => {
   const ui = studio(); await ui.start();
   const socket = ui.sockets.at(-1);
@@ -216,6 +238,8 @@ async function compatibleLongStudio() {
   ui.replies.set('/api/preview',{preview_id:'prefix',status:'READY',video_url:'/api/preview/prefix/media',
     start_seconds:0,end_seconds:120,coverage_seconds:120,source_duration:1300});
   video.error={code:4}; await video.emit('error'); await ui.flush();
+  assert.equal(JSON.parse(ui.requests.findLast(r => r.url === '/api/preview').options.body).coverage_seconds, 24,
+    'A restored long task must open a short first window before larger seek conversions');
   video.error=null; video.currentSrc=video.src; video.duration=120;
   await video.emit('loadedmetadata'); await video.emit('canplay');
   return ui;

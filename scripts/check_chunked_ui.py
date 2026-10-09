@@ -62,7 +62,7 @@ def trace_real_rejections():
 
 
 def wait_for_idle(page, base, task_id, timeout=3600):
-    deadline, previous = time.monotonic() + timeout, None
+    deadline, previous, prepared_at = time.monotonic() + timeout, None, None
     while time.monotonic() < deadline:
         snapshot = backend(base, f"/api/streaming/{task_id}")
         progress = snapshot["progress"]
@@ -71,6 +71,12 @@ def wait_for_idle(page, base, task_id, timeout=3600):
         if current != previous:
             event("PROGRESS", {"status": current[0], "stage": current[1], "processed": current[2], "ready": current[3]})
             previous = current
+        if progress["status"] == "PREPARED":
+            prepared_at = prepared_at or time.monotonic()
+            if time.monotonic() - prepared_at > 30:
+                raise AssertionError("Speech is prepared but no validated MP4/export worker became available")
+        else:
+            prepared_at = None
         if progress["status"] in {"FAILED", "STOPPED", "PREVIEW_READY", "COMPLETED"}:
             until(page, "document.getElementById('task-progress').dataset.status===" + json.dumps(progress["status"]), timeout=30)
             return snapshot

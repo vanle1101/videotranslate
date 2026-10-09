@@ -20,6 +20,7 @@ from core.engines.alignment.natural_speech import synthesize_natural_speech
 from core.engines.alignment.timing_aligner import SpeechBudgetError, TimingBudgetAligner
 from core.engines.translation.semantic_translator import SemanticTranslator, PacingReviewRejected
 from core.runtime_context import execution_context
+from core.structured_response import StructuredResponseError
 
 
 class RecordedSynthesizer:
@@ -696,6 +697,7 @@ def test_contextual_question_function_is_explained_without_dropping_emphasis_or_
 @pytest.mark.parametrize("field", ["equivalent", "natural", "address_preserved"])
 @pytest.mark.parametrize("value", [False, None, "true"])
 def test_neutral_ellipsis_does_not_bypass_any_independent_gate(monkeypatch, field, value):
+    monkeypatch.setattr(settings, "OPENCODE_SCHEMA_REPAIR_ATTEMPTS", 0)
     translator = SemanticTranslator(provider="opencode")
     candidate = "Hỏi mấy tuổi rồi, nói mau!"
     verdict = {"equivalent": True, "natural": True, "address_preserved": True,
@@ -704,7 +706,8 @@ def test_neutral_ellipsis_does_not_bypass_any_independent_gate(monkeypatch, fiel
     request = Mock(side_effect=[rewrite_response(candidate), json.dumps(verdict)])
     monkeypatch.setattr(translator, "_opencode_request", request)
 
-    with pytest.raises(PacingReviewRejected):
+    expected = PacingReviewRejected if type(value) is bool else StructuredResponseError
+    with pytest.raises(expected):
         translator.rewrite_for_pacing("我问你几岁了快说", "Tôi hỏi bạn mấy tuổi rồi, nói mau!", 1.5)
 
     assert request.call_count == 2
@@ -817,11 +820,15 @@ def test_role_changing_pacing_candidate_is_rejected_by_address_gate(monkeypatch)
     {"status": "verified"}, None, [],
 ])
 def test_independent_review_must_confirm_both_meaning_and_naturalness(monkeypatch, verdict):
+    monkeypatch.setattr(settings, "OPENCODE_SCHEMA_REPAIR_ATTEMPTS", 0)
     translator = SemanticTranslator(provider="opencode")
     request = Mock(side_effect=[candidate_response(), json.dumps(verdict)])
     monkeypatch.setattr(translator, "_opencode_request", request)
 
-    with pytest.raises(RuntimeError, match="chưa vượt qua kiểm tra"):
+    malformed = (not isinstance(verdict, dict) or any(type(verdict.get(k)) is not bool
+        for k in ("equivalent", "natural")) or not str(verdict.get("reason", "")).strip())
+    expected = StructuredResponseError if malformed else PacingReviewRejected
+    with pytest.raises(expected):
         translator.rewrite_for_pacing("我还没做。", "Tôi vẫn chưa làm việc đó.", 1.5)
     assert request.call_count == 2
 

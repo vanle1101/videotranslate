@@ -310,7 +310,8 @@ class StreamingPipelineSession:
             message = PROJECT_SAVE_FAILURE_WARNING
             if message not in self.warnings:
                 self.warnings.append(message)
-            logging.getLogger("errors").error("[%s] PROJECT_SAVE_FAILED error_type=%s", self.task_id, type(exc).__name__)
+            logging.getLogger("errors").error("[%s] PROJECT_SAVE_FAILED error_type=%s detail=%s",
+                self.task_id, type(exc).__name__, redacted_detail(exc))
             # A bounded session must never keep advancing after its latest
             # durable checkpoint can no longer be written.  Otherwise a
             # multi-hour run can appear to continue successfully in memory,
@@ -1141,7 +1142,10 @@ class StreamingPipelineSession:
                                       and all(s.status in ("READY", "PLAYED") for s in self.segments.values()))
         snapshot["can_pause"] = bool(self.initialized and self.is_running and not self.is_paused and not self.is_stopped and not self.error
                                     and not (self.review_task and not self.review_task.done()))
-        if self.is_stopped:
+        if getattr(self, "_stop_draining", False):
+            snapshot.update(status="CANCELLING", phase="stopping",
+                stage="Đang dừng xử lý; chờ tác vụ đang chạy trả quyền điều khiển…", can_pause=False)
+        elif self.is_stopped:
             snapshot.update(status="STOPPED", phase="stopped", stage="Đã dừng bởi người dùng")
         elif self.error:
             if getattr(self, "_restored_interrupted", False):
@@ -1163,10 +1167,17 @@ class StreamingPipelineSession:
                 and (not getattr(self, "output_filename", "") or self.caption_output_outdated)):
             phase, stage = "prepared", "Lời dịch và giọng đã xử lý; đang chờ xuất và kiểm định MP4."
             progress_pct = None
+        if (phase != "complete" and getattr(self, "auto_export_result", False)
+                and progress_pct is not None and progress_pct >= 100):
+            # A measured stage may finish while review, speech or final media
+            # validation is still pending. Preserve that stage measurement,
+            # but never publish overall 100% for an unvalidated result.
+            details["stage_progress_pct"] = progress_pct
+            progress_pct = None
         phase_changed = self.progress.get("phase") != phase
         self.progress = {
             "phase": phase, "stage": stage, "progress_pct": progress_pct,
-            "status": "COMPLETED" if phase == "complete" else "PREVIEW_READY" if phase == "preview" else "RUNNING", **details,
+            "status": "COMPLETED" if phase == "complete" else "PREVIEW_READY" if phase == "preview" else "PREPARED" if phase == "prepared" else "RUNNING", **details,
         }
         logging.getLogger("pipeline").info("[%s] %s%s", self.task_id, stage,
                                            "" if progress_pct is None else f" ({progress_pct:g}%)")
@@ -1497,9 +1508,13 @@ class StreamingPipelineSession:
         self._ensure_tts_engine()
 
         if (self.translation_mode == "preview" or self._chunked_source_started
-                or (self.visual_translation and not self._prepared and not self.segments)):
+                or (not getattr(self, "_force_legacy_visual", False)
+                    and self.visual_translation and not self._prepared and not self.segments)):
             return await self._start_chunked_visual()
+        return await self._start_legacy_source()
 
+    async def _start_legacy_source(self):
+        """Retain preparation/execution for existing whole-source checkpoints."""
         if not self._prepared:
             from core.streaming.preparation_checkpoint import load
             saved = await self._run_blocking(load, self)
@@ -2174,7 +2189,7 @@ class StreamingPipelineSession:
             "realtime_factor": self.realtime_factor,
             "time_to_first_play": self.time_to_first_play,
             "ready_to_play": self.first_play_emitted,
-            "status": "cancelled" if self.is_stopped else ("failed" if self.error else ("running" if self.is_running else "finished")),
+            "status": "cancelling" if getattr(self, "_stop_draining", False) else "cancelled" if self.is_stopped else ("failed" if self.error else ("running" if self.is_running else "prepared" if self.progress.get("phase") == "prepared" else "finished")),
             "error": self.error,
             "warnings": list(self.warnings),
             "review_summary": dict(self.review_summary),

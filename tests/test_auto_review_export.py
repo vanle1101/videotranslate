@@ -55,7 +55,7 @@ def session(monkeypatch, tmp_path):
         bgm_url=None, translation_sources=[], warnings=[], source_processing_label=lambda: "OpenCode",
         vocal_suppressor=SimpleNamespace(name="DSP", suppression_level_db=-20), suppression_stats={},
         start=AsyncMock(), start_from_url=AsyncMock(), start_automatic_review=AsyncMock(return_value={}),
-        report_progress=AsyncMock(),
+        report_progress=AsyncMock(), emit=AsyncMock(),
     )
     monkeypatch.setattr(main, "active_streaming_sessions", {item.task_id: item})
     # The pipeline accessor references its own registry, so use this session explicitly.
@@ -398,6 +398,8 @@ def test_stop_waits_for_review_cleanup_before_acknowledging(session):
         result = await main.stop_task(item.task_id)
         assert result["action"] == "stopped"
         assert cleaned.is_set() and item.review_task.done()
+        assert not item._stop_draining
+        item.emit.assert_awaited_once()
 
     asyncio.run(run())
 
@@ -430,6 +432,8 @@ def test_stop_also_cancels_and_drains_automatic_export(session):
             await main.stop_task(item.task_id)
             assert item.auto_export_task.done()
             assert main.active_export_tasks[f"export_{item.task_id}"]["status"] == "CANCELLED"
+            assert not item._stop_draining
+            item.emit.assert_awaited_once()
         finally:
             release.set()
             await item.auto_export_task

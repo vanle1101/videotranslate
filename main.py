@@ -704,11 +704,14 @@ async def stop_task(task_id: str):
             "video_url": "", "can_pause": False, "can_resume": False, "can_stop": False,
         }
         task_history.append(stopping)
+        sess._stop_draining = True
         sess.stop()
         # A Python download thread must acknowledge cancellation before this
         # endpoint reports a completed stop or any owned files are removed.
         if workers:
             await asyncio.gather(*workers, return_exceptions=True)
+        sess._stop_draining = False
+        await sess.emit("progress", sess.get_progress())
         stopping.update({
             "task_id": task_id,
             "task_type": "Realtime Dubbing",

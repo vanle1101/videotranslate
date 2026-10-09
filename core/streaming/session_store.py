@@ -854,7 +854,7 @@ def _availability(data):
     output_warning = OUTPUT_FAILURE_WARNING if current_output and not valid_output else ""
     review_incomplete = fields.get("review_summary", {}).get("status") in {"failed", "incomplete", "running"}
     waiting_export = bool(ready and fields.get("auto_export_result") and not valid_output)
-    status = ("FAILED" if output_warning else "PREVIEW_READY" if preview_ready else "STOPPED" if waiting_export else "COMPLETED" if ready else
+    status = ("FAILED" if output_warning else "PREVIEW_READY" if preview_ready else "PREPARED" if waiting_export else "COMPLETED" if ready else
               "STOPPED" if data["state"] == "STOPPED" and not missing else
               "FAILED" if missing or data["state"] == "FAILED" or review_incomplete else "STOPPED")
     message = " ".join(missing)
@@ -1025,7 +1025,7 @@ def _restore_saved_session_owned(task_id, event_callback=None):
         session.warnings[:] = [warning for warning in session.warnings if warning != OUTPUT_FAILURE_WARNING]
         if available["output_warning"]:
             session.warnings.append(available["output_warning"])
-    session.progress = {"phase": "complete" if available["ready"] else "restored",
+    session.progress = {"phase": "prepared" if available["status"] == "PREPARED" else "complete" if available["ready"] else "restored",
         "stage": available["missing_media"] or "Đã khôi phục bản dịch và giọng đọc đã lưu.",
         "progress_pct": 100 if available["status"] == "COMPLETED" else None, "status": available["status"]}
     # Fully prepared translations can retry TTS without ASR or a provider request.

@@ -1321,12 +1321,12 @@ def test_real_failure_shape_resumes_tts_with_completed_review_and_auto_export(pe
 
     asyncio.run(resume())
     assert calls == [(0, first.final_vi), (1, later.final_vi)]
-    assert events[-1][0] == "finished" and events[-1][1]["status"] == "finished"
+    assert events[-1][0] == "finished" and events[-1][1]["status"] == "prepared"
     assert events[-1][1]["review_summary"] == persisted.review_summary
     assert not restored.is_running and not restored.error and restored.auto_export_result
     active_streaming_sessions.clear()
     again = restore_saved_session(restored.task_id)
-    assert again.auto_export_result and again.get_progress()["status"] == "STOPPED"
+    assert again.auto_export_result and again.get_progress()["status"] == "PREPARED"
     assert again.get_progress()["progress_pct"] is None
     assert "chưa có MP4" in again.get_progress()["stage"]
 
