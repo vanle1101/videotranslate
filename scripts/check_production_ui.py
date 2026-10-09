@@ -177,13 +177,20 @@ def save_edit(page, base, task_id, sid, text):
     return row
 
 
-def export_through_ui(page, base, task_id):
+def export_through_ui(page, base, task_id, *, fresh_after=None):
     """Wait for actual fresh bytes, then verify the production result player."""
     prior = ROOT / 'workspace/outputs' / f'douyin_translated_{task_id}_hq.mp4'
-    stamp = prior.stat().st_mtime_ns if prior.is_file() else None
-    assert click(page, 'btn-export-hq')
-    until(page, "!document.getElementById('export-modal').classList.contains('hidden')")
-    assert click(page, 'btn-confirm-export')
+    stamp = (prior.stat().st_mtime_ns if prior.is_file() else None) if fresh_after is None else fresh_after
+    if click(page, 'btn-export-hq'):
+        until(page, "!document.getElementById('export-modal').classList.contains('hidden')")
+        assert click(page, 'btn-confirm-export')
+    else:
+        # Review can schedule automatic export between the idle UI read and
+        # this click. Observe that real worker instead of submitting twice or
+        # treating its correctly disabled button as a production failure.
+        state = backend(base, f'/api/streaming/export-hq/status/{task_id}')
+        assert state.get('status') in {'QUEUED', 'RUNNING', 'COMPLETED'}, state
+        event('AUTOMATIC_EXPORT_OWNED', {'task_id': task_id, 'status': state['status']})
     deadline = time.monotonic() + 300
     while time.monotonic() < deadline:
         try:

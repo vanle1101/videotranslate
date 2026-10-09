@@ -134,7 +134,7 @@ def main():
                 assert output != prior_output.resolve() or output.stat().st_mtime_ns != prior_stamp
                 check_playback(page)
             else:
-                export_through_ui(page, base, TASK_ID)
+                export_through_ui(page, base, TASK_ID, fresh_after=prior_stamp)
             event("PASS", {"mode": args.mode, "task_id": TASK_ID, "offscreen": True, "muted": page.isAudioMuted()})
             return
         assert changed["voice_id"] == voice and changed["tts_voice_outdated"]
