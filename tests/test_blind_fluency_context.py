@@ -50,5 +50,44 @@ def test_actual_blind_request_contains_no_focus_draft_or_chinese(monkeypatch):
     ])
     blind = json.loads(requests[-1][1])
     assert blind == {"candidate": "Lời mới.",
-                     "nearby_vietnamese_dialogue": ["Câu trước.", "Câu sau."]}
+                     "nearby_vietnamese_dialogue": {"before": ["Câu trước."], "after": ["Câu sau."]}}
     assert result["pacing_verification"]["fluency"]["natural"] is True
+
+
+def test_positioned_blind_context_retains_real_repeated_neighbor_without_focus_draft():
+    rows = [
+        {"id": 1, "vi": "Không nói đâu."},
+        {"id": 2, "is_focus": True, "vi": "Bản cũ."},
+        {"id": 3, "vi": "Không nói đâu."},
+    ]
+    result = fluency_dialogue_context(rows, target={"id": 2}, draft="Bản cũ.",
+                                      candidate="Không nói đâu.", positioned=True)
+    assert result == {"before": ["Không nói đâu."], "after": ["Không nói đâu."]}
+
+
+def test_unknown_focus_position_does_not_label_legacy_turns_as_preceding():
+    result = fluency_dialogue_context([{"vi": "Câu chưa rõ vị trí."}], target={},
+        draft="Bản cũ.", candidate="Vậy", positioned=True)
+    assert result == {"before": [], "after": [], "unpositioned": ["Câu chưa rõ vị trí."]}
+
+
+def test_connector_review_receives_exact_position_and_still_requires_all_three_real_verdicts(monkeypatch):
+    from unittest.mock import Mock
+    translator = SemanticTranslator(provider="opencode")
+    requests = Mock(side_effect=[
+        '{"literal_vi":"Vậy","natural_vi":"Vậy","final_vi":"Vậy"}',
+        '{"equivalent":true,"natural":true,"address_preserved":true,"reason":"Giữ quan hệ kết quả."}',
+        '{"natural":true,"reason":"Từ nối nối vào mệnh đề liền sau."}',
+    ])
+    monkeypatch.setattr(translator, "_opencode_request", requests)
+    translator.rewrite_for_pacing("所以", "Nên...", .62, [
+        {"id": 151, "text_zh": "我十九", "vi": "Mười chín tuổi."},
+        {"id": 152, "text_zh": "所以", "vi": "Nên...", "is_focus": True},
+        {"id": 153, "text_zh": "你十八", "vi": "Bố mười tám tuổi."},
+    ])
+    assert requests.call_count == 3
+    blind = json.loads(requests.call_args_list[-1].args[1])
+    assert blind["nearby_vietnamese_dialogue"] == {"before": ["Mười chín tuổi."], "after": ["Bố mười tám tuổi."]}
+    assert '每' not in json.dumps(blind) and 'Nên...' not in json.dumps(blind, ensure_ascii=False)
+    assert 'không tự thêm/bỏ ý hay nối hai người nói' in requests.call_args_list[1].args[0]
+    assert 'unpositioned không chứng minh' in requests.call_args_list[-1].args[0]

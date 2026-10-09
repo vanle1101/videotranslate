@@ -73,7 +73,7 @@ def pacing_candidate_key(text):
     return " ".join(unicodedata.normalize("NFC", str(text)).casefold().split())
 
 
-def fluency_dialogue_context(rows, *, target, draft, candidate):
+def fluency_dialogue_context(rows, *, target, draft, candidate, positioned=False):
     """Select nearby Vietnamese turns without leaking the focus's old draft.
 
     Source context may retain distant kinship evidence. Its last six entries
@@ -96,11 +96,18 @@ def fluency_dialogue_context(rows, *, target, draft, candidate):
             continue
         line = " ".join(line.split())
         if (not line or re.search(r"[\u3400-\u9fff]", line)
-                or not focus and line == " ".join(str(draft).split())
-                or line == " ".join(str(candidate).split())):
+                or not focus and line in {" ".join(str(draft).split()), " ".join(str(candidate).split())}):
             continue
         candidates.append((index, line[:500]))
     selected = sorted(candidates, key=lambda item: (abs(item[0] - anchor), item[0]))[:6]
+    if positioned:
+        # Without this boundary the blind reviewer could not tell which turn
+        # follows a connector, and judged an ASR fragment as an isolated sentence.
+        # Unknown focus positions remain explicit rather than invented.
+        if not focus:
+            return {"before": [], "after": [], "unpositioned": [line for _, line in sorted(selected)]}
+        return {"before": [line for index, line in sorted(selected) if index < anchor],
+                "after": [line for index, line in sorted(selected) if index > anchor]}
     return [line for _, line in sorted(selected)]
 
 
@@ -561,8 +568,11 @@ không thay một chi tiết cụ thể bằng cảm giác chung mà người ng
 Không rút thuật ngữ thành cụm sai nghĩa, không bỏ động từ hoặc quan hệ ngữ pháp
 thành danh sách từ khóa. Số và đơn vị phải đọc được đầy đủ, không dùng viết tắt
 để giả vờ đã rút ngắn thời lượng.
-Xét câu như một lượt trong mạch hỏi–đáp nguồn, không như câu đứng riêng. Ngữ cảnh
-được xác định người/đối tượng và chức năng hội thoại: câu hỏi lý do, hỏi có–không,
+Xét câu như một lượt trong mạch hỏi–đáp nguồn, không như câu đứng riêng.
+Mốc ASR có thể chia một lời nói thành nhiều mảnh, kể cả một từ nối. Khi nguồn
+thực sự là mảnh nối sang câu kế, đánh giá cách nối trong chính mạch thoại ấy;
+không bắt mỗi mảnh phải thành câu hoàn chỉnh và không tự thêm hay bỏ ý để nối.
+Ngữ cảnh được xác định người/đối tượng và chức năng hội thoại: câu hỏi lý do, hỏi có–không,
 lời từ chối, lời đáp. Câu đáp Việt có thể tỉnh lược phần đã có trong câu hỏi khi
 vẫn giữ rõ đúng hành vi hội thoại, không đổi lời từ chối thành phủ định một sự việc.
 Không bác một câu chỉ vì nó có nhiều nghĩa khi đứng riêng: xác định nghĩa đang
@@ -635,8 +645,11 @@ Trả duy nhất JSON: {{"literal_vi":"...","natural_vi":"...","final_vi":"...",
               'Không tự đổi em thành chị hoặc con thành tôi chỉ để rút nhịp; false nếu còn nghi ngờ. '
               'Cho phép tỉnh lược đại từ theo ngữ pháp hội thoại Việt khi nguồn/ngữ cảnh xác định '
               'người làm và người nhận mà candidate vẫn giữ đủ hành động, thái độ và nghĩa. '
-              'Dùng các câu nguồn lân cận để xác định chức năng hỏi–đáp và tỉnh lược có căn cứ, '
-              'không để bù sự kiện, phủ định khẳng định, số, mức độ, đối lập hoặc nhấn mạnh bị bỏ. '
+              'Dùng các câu nguồn lân cận để xác định chức năng hỏi–đáp và tỉnh lược có căn cứ. '
+              'Mốc ASR có thể là mảnh của một lời nói, như từ nối nối sang câu kế. '
+              'Nếu nguồn chứng minh cách nối đó, xét ngữ pháp trong mạch ấy thay vì bắt '
+              'mỗi mốc thành một câu hoàn chỉnh; không tự thêm/bỏ ý hay nối hai người nói. '
+              'Không dùng ngữ cảnh để bù sự kiện, phủ định khẳng định, số, mức độ, đối lập hoặc nhấn mạnh bị bỏ. '
               'Đánh giá câu hỏi ngắn theo chức năng thực có trong cuộc thoại; không đòi một từ Việt '
               'cố định cho mỗi chữ Trung. Cấu trúc hỏi A不A không khẳng định phủ định. '
               'Đa nghĩa ngoài ngữ cảnh không tự chứng minh sai nghĩa: xác định chức năng từ '
@@ -670,12 +683,17 @@ Trả duy nhất JSON: {{"literal_vi":"...","natural_vi":"...","final_vi":"...",
         # only the exact candidate and bounded Vietnamese neighbors, never the
         # source, old draft, timing budget, or first verdict.
         nearby_vi = fluency_dialogue_context(rolling_context, target=target,
-                                             draft=draft, candidate=candidate["final_vi"])
+                                             draft=draft, candidate=candidate["final_vi"], positioned=True)
         fluency_system = (
             "Bạn là biên tập viên tiếng Việt bản ngữ. Không biết và không được suy đoán "
             "nguồn ngoại ngữ, người nói, quan hệ nhân vật, hay lý do câu được viết. "
             "Chỉ đánh giá câu ứng viên tiếng Việt như lời thoại nói tự nhiên: ngữ pháp, "
-            "cụm từ kết hợp, nghĩa rõ ràng và nhịp khẩu ngữ. Câu tỉnh lược đại từ vẫn có "
+            "cụm từ kết hợp, nghĩa rõ ràng và nhịp khẩu ngữ. Mốc thoại có thể là một "
+            "mảnh lời nói: before là lời ngay trước, after là lời ngay sau "
+            "ứng viên. Đánh giá ứng viên ở đúng vị trí đó; một từ nối, lời gọi hay thán từ "
+            "không phải từ khóa rời nếu lời Việt thực có tạo thành mạch nói tự nhiên. "
+            "Không tự tưởng tượng lời nối, người nói, hoặc phần ngữ cảnh chưa được cung cấp; "
+            "unpositioned không chứng minh lời trước hay lời sau. Câu tỉnh lược đại từ vẫn có "
             "thể tự nhiên nếu tiếng Việt tự xác định được vai; từ khóa rời, cụm danh từ "
             "ghép sai, hoặc câu khiến người nghe phải đoán quan hệ ngữ pháp là không tự nhiên. "
             "Không sửa câu và không chấm theo độ dài. Trả duy nhất JSON "
