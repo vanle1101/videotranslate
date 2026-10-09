@@ -18,21 +18,21 @@
 
 </div>
 
-**Douyin2TikTok AI Studio** is a standalone Windows desktop application designed for **real-time / near-realtime** Chinese-to-Vietnamese video translation, Chinese vocal suppression, background music/SFX retention, emotional Vietnamese dubbing, and 9:16 vertical video rendering for TikTok, Reels, and Shorts.
+**Douyin2TikTok AI Studio** is a Windows application for Chinese-to-Vietnamese video translation, dubbing and subtitles. The configured defaults use Whisper Small, OpenCode Muse, Edge-TTS and DSP vocal suppression. Recognition, translation and separation quality depend on the source and provider.
 
-Simply paste a video URL or drag-and-drop an MP4 file. After buffering for just a few seconds, playback begins immediately with synchronized Vietnamese subtitles and voiceover, while the backend continuously processes upcoming segments ahead of playback.
+Paste shared text containing a video URL or select an MP4 to prepare a short preview. Choose full translation to process subsequent chunks; earlier completed rows remain editable. Recognition and independent Muse checks can take minutes. Failed or uncertain rows remain visible for retry, and full export requires valid data. The [current runtime QA report](docs/RUNTIME_QA_REPORT.md) records verified scenarios and remaining failures.
 
 ---
 
 ## ⚡ Key Highlights
 
-| Realtime Streaming Buffer | Chinese Vocal Removal & BGM Retention | Vietnamese AI Dubbing (VieNeu-TTS) |
+| Incremental preview | Original voice suppression and BGM | Vietnamese dubbing |
 |---|---|---|
-| **Zero waiting for full renders:** Watch and listen while upcoming segments process ahead (+45s buffer). | **Up to -26dB suppression:** Realtime DSP center-cancellation + BS-RoFormer HQ export, preserving 100% of BGM & SFX. | **Natural human prosody:** 8B-parameter VieNeu-TTS v3 Turbo with automated atempo time-stretching. |
+| Play completed speech and subtitle chunks; saved checkpoints allow retry after failure. | DSP reduces the original voice. Optional BS-RoFormer requires separate installation; neither guarantees complete voice removal or unchanged SFX. | Edge-TTS is the default. Local engines are optional. Actual WAV measurements govern fitting, with a 1.15× speed ceiling and no speech truncation. |
 
-| Ultra-fast Chinese ASR (SenseVoice) | 3-Tier Semantic Translation (Gemini) | 9:16 Vertical Video & Hardcoded Sub Masking |
+| Chinese speech recognition | Muse translation and review | MP4 export and subtitle controls |
 |---|---|---|
-| **FunAudioLLM SenseVoice:** High-accuracy ASR in <0.3s with speaker emotion classification. | **VideoLingo Duration Budgeting:** 3-tier translation (*Literal ➔ Natural ➔ Time-Budget*) tailored for TikTok pacing. | **Frosted glass blur:** Elegantly masks Chinese burned subtitles and overlays stylized high-contrast ASS captions. |
+| Whisper Small runs on CPU; optional SenseVoice requires its model. Source ASR timing remains available for evidence review. | Muse translates with surrounding dialogue and independently checks meaning. Pacing rewrites also require a separate Vietnamese fluency check. | Preserve source dimensions; edit subtitle colors and placement, and optionally blur recognized original subtitle regions. |
 
 ---
 

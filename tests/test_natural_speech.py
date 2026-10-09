@@ -395,6 +395,44 @@ def test_rewrites_are_bounded_and_never_replace_output_when_nothing_fits(tmp_pat
     assert_no_scratch(output)
 
 
+def test_failure_keeps_shortest_measured_verified_candidate_for_rescue(tmp_path, aligner):
+    original, first, shortest = "Tôi vẫn chưa làm việc đó.", "Tôi vẫn chưa làm.", "Tôi chưa làm."
+    proof = verified_candidate(shortest)["pacing_verification"]
+    engine = RecordedSynthesizer({original: 2.0, first: 1.8, shortest: 1.3})
+    translator = Mock(rewrite_for_pacing=Mock(side_effect=[
+        verified_candidate(first), verified_candidate(shortest)]))
+    with pytest.raises(SpeechBudgetError) as raised:
+        synthesize_natural_speech(text=original, source="我还没做。", duration=1,
+            output_path=tmp_path / "voice.wav", engine=engine, aligner=aligner,
+            translator=translator)
+
+    error = raised.value
+    assert error.required_dub_duration == pytest.approx(1.3 / aligner.max_speed + .012)
+    assert error.candidate_text == shortest
+    assert error.pacing_verification == proof
+
+
+def test_later_rejection_keeps_earlier_measured_verified_candidate(tmp_path, aligner):
+    original, shorter = "Tôi vẫn chưa làm việc đó.", "Tôi chưa làm."
+    proof = verified_candidate(shorter)["pacing_verification"]
+    engine = RecordedSynthesizer({original: 2.0, shorter: 1.3})
+    rejected = PacingReviewRejected("Không giữ đủ nghĩa.", candidate="Đã làm.", code="semantic_mismatch")
+    translator = Mock(rewrite_for_pacing=Mock(side_effect=[
+        verified_candidate(shorter), rejected, rejected, rejected]))
+    output = tmp_path / "voice.wav"
+    output.write_bytes(b"retained output")
+    with pytest.raises(PacingReviewRejected) as raised:
+        synthesize_natural_speech(text=original, source="我还没做。", duration=1,
+            output_path=output, engine=engine, aligner=aligner, translator=translator)
+
+    assert raised.value.required_dub_duration == pytest.approx(1.3 / aligner.max_speed + .012)
+    assert raised.value.candidate_text == shorter
+    assert raised.value.pacing_verification == proof
+    assert engine.calls == [original, shorter]
+    assert output.read_bytes() == b"retained output"
+    assert_no_scratch(output)
+
+
 def test_measured_overshoot_tightens_next_request_instead_of_repeating_the_same_budget(tmp_path, aligner):
     original, long_draft, fits = "Tôi vẫn chưa làm việc đó.", "Tôi vẫn chưa làm.", "Tôi chưa làm."
     engine = RecordedSynthesizer({original: 2.0, long_draft: 1.5, fits: .85})

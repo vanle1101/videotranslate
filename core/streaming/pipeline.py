@@ -2311,6 +2311,7 @@ class StreamingPipelineSession:
         # safely fit 2.0 s, yet pacing was told its limit was only 1.65 s).
         staged = {}
         returned = False
+        retry_text, retry_proof, retry_translator = text, None, translator
         try:
             try:
                 spoken = await self._run_blocking(synthesize_natural_speech,
@@ -2329,12 +2330,27 @@ class StreamingPipelineSession:
                 capacity = available_reflow_duration(rows, seg.id, total_duration=known_duration)
                 if capacity < required or not staged:
                     raise
+                # If the failed focus attempt actually measured a shorter,
+                # independently verified rewrite, retry that exact wording.
+                # Neighbor rescue must never trigger a second semantic rewrite
+                # that silently replaces the candidate which was measured.
+                candidate = getattr(exc, "candidate_text", None)
+                proof = getattr(exc, "pacing_verification", None)
+                if (isinstance(candidate, str) and candidate.strip()
+                        and isinstance(proof, dict)
+                        and proof.get("status") == "verified"
+                        and proof.get("text") == candidate):
+                    retry_text, retry_proof, retry_translator = candidate.strip(), proof, None
+                retry_kwargs = {}
+                if retry_proof is not None:
+                    retry_kwargs["pacing_verification"] = retry_proof
                 spoken = await self._run_blocking(synthesize_natural_speech,
-                    text=text, source=source, duration=duration, max_duration=capacity,
+                    text=retry_text, source=source, duration=duration, max_duration=capacity,
                     output_path=output_path, engine=self.tts_engine, aligner=self.aligner,
-                    translator=translator, voice=self.voice, ref_audio=self.ref_audio,
+                    translator=retry_translator, voice=self.voice, ref_audio=self.ref_audio,
                     context=context, on_stage=on_stage, allow_bidirectional_reflow=True,
-                    **({"max_duration_limit": capacity} if tail_limit is not None else {}))
+                    **({"max_duration_limit": capacity} if tail_limit is not None else {}),
+                    **retry_kwargs)
             measured = self._dub_audio_duration(output_path)
             plan = {}
             if measured > duration + 1e-9:

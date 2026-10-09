@@ -20,9 +20,9 @@
 
 </div>
 
-**Douyin2TikTok AI Studio** là ứng dụng desktop độc lập (Standalone Windows Desktop App) chuyên dịch thuật, khử giọng tiếng Trung, giữ nguyên nhạc nền/tiếng động môi trường (BGM/SFX) và lồng tiếng Việt tự động cho video ngắn (Douyin, TikTok, Kuaishou, Reels, Shorts) theo **thời gian thực (Realtime / Near-Realtime Streaming)**.
+**Douyin2TikTok AI Studio** là ứng dụng Windows dịch video Trung sang Việt, tạo giọng đọc và phụ đề. Cấu hình trên máy này dùng Whisper Small, OpenCode Muse, Edge-TTS và DSP để giảm giọng gốc. Chất lượng nhận diện, dịch và tách thoại phụ thuộc video và nhà cung cấp.
 
-Người dùng dán link video hoặc kéo thả file MP4, chỉ cần chờ bộ nhớ đệm (buffer) vài giây là video bắt đầu phát ngay với phụ đề và giọng lồng tiếng Việt, trong khi hệ thống ngầm tiếp tục xử lý các đoạn tiếp theo phía trước.
+Dán nội dung chia sẻ có link hoặc chọn file MP4 để xử lý một đoạn xem trước. Bấm **Dịch toàn bộ** để tiếp tục từng đoạn; có thể sửa phần đã xử lý trong khi chờ. Thời gian chờ phụ thuộc nhận diện và các lượt Muse kiểm định, không có cam kết hoàn tất trong vài giây. Các câu lỗi hoặc chưa đủ bằng chứng vẫn được hiển thị để thử lại; chỉ xuất bản đầy đủ khi dữ liệu cần thiết đã hợp lệ. Xem [báo cáo kiểm thử runtime hiện tại](docs/RUNTIME_QA_REPORT.md) để biết các luồng đã kiểm tra và lỗi còn lại.
 
 Tài liệu: [Cài đặt và vận hành](docs/windows-guide.md) · [Chức năng giao diện](docs/ui-reference.md) · [Báo cáo kiểm thử](docs/reports/).
 
@@ -32,13 +32,13 @@ Tài liệu: [Cài đặt và vận hành](docs/windows-guide.md) · [Chức nă
 
 ## ⚡ Tính Năng Nổi Bật
 
-| Gom nhóm & Xử lý Realtime (Streaming Buffer) | Tách Thoại & Giữ Nhạc Nền (BGM Retention) | Giọng Lồng Tiếng Việt AI (VieNeu-TTS) |
+| Xử lý và xem trước từng đoạn | Giảm giọng gốc và trộn nhạc nền | Giọng đọc tiếng Việt |
 |---|---|---|
-| **Xem ngay không cần đợi xuất file:** Vừa phát video vừa xử lý cuốn chiếu phía trước. Thanh buffer hiển thị chính xác độ an toàn phát sóng (+45s ahead). | **Triệt tiêu giọng Trung tới -26dB:** Kết hợp DSP Center-Cancellation thời gian thực và BS-RoFormer HQ khi xuất file, giữ trọn 100% tiếng cười, tiếng xe cộ và nhạc nền gốc. | **Giọng đọc tự nhiên, truyền cảm:** Tích hợp VieNeu-TTS v3 Turbo với nhiều chất giọng nam/nữ bản xứ (Trúc Ly, Nam Minh), tự động căn chỉnh thời lượng (Time-Stretching). |
+| Phát phần đã có giọng đọc và phụ đề; lưu tiến độ để tiếp tục khi tác vụ lỗi. | DSP giảm giọng gốc; BS-RoFormer là tùy chọn cần cài riêng. Không bảo đảm giữ nguyên mọi âm thanh hoặc loại sạch giọng gốc. | Edge-TTS là mặc định; các engine local là tùy chọn. Đo WAV thật, căn nhịp tối đa 1,15× và từ chối cắt lời để ép vừa câu. |
 
-| ASR Tiếng Trung Siêu Tốc (SenseVoice) | Dịch Thuật Phản Chiếu 3 Cấp Độ (Gemini) | Render Chuẩn TikTok 9:16 & Che Sub Gốc |
+| Nhận diện lời tiếng Trung | Dịch và kiểm định bằng Muse | Xuất MP4 và tùy chỉnh phụ đề |
 |---|---|---|
-| **Nhận diện giọng nói FunAudioLLM:** Phân tích ASR trong 0.2s–0.4s/câu, phát hiện cảm xúc (Neutral, Happy, Angry) và chia câu chính xác theo dấu chấm ngắt thoại. | **VideoLingo Time-Budgeting:** 3 cấp độ dịch (*Literal ➔ Natural ➔ Final Duration Budget*), ép số lượng từ khớp từng tích tắc khuôn miệng mà không bị nói dồn dập. | **Định dạng tối ưu hóa cho màn hình dọc:** Tạo hiệu ứng kính mờ (Frosted Glass Blur) che phụ đề cứng tiếng Trung và gắn phụ đề ASS viền tương phản sắc nét. |
+| Whisper Small nhận diện trên CPU; SenseVoice cần model riêng. Mốc ASR được giữ để đối chiếu nguồn. | Muse dịch và kiểm định riêng với ngữ cảnh trước–sau. Bản rút gọn phải qua kiểm tra nghĩa và văn nói rồi mới tạo giọng. | Giữ kích thước video gốc, tùy chỉnh màu/vị trí phụ đề và bật hoặc tắt làm mờ vùng sub gốc đã nhận diện. |
 
 ---
 
@@ -78,11 +78,11 @@ flowchart TD
     subgraph RealtimePipeline ["2. Pipeline Streaming Thời Gian Thực"]
         B --> C["DSP Center-Vocal Cancellation"]
         C --> D["Audio BGM & SFX (Đã khử thoại Trung)"]
-        B --> E["Bộ Nhận Dạng Giọng Nói FunAudioLLM SenseVoice"]
-        E --> F["Phân đoạn & Bóc tách cảm xúc (Emotion)"]
-        F --> G["Gemini 2.0 Flash / VideoLingo (3-Tier Translation)"]
-        G --> H["Khống chế độ dài (Time-Budgeting)"]
-        H --> I["VieNeu-TTS v3 Turbo (Tổng hợp giọng đọc tiếng Việt)"]
+        B --> E["Whisper Small / SenseVoice tùy chọn"]
+        E --> F["Phân đoạn lời thoại và OCR"]
+        F --> G["Muse: dịch và kiểm định với ngữ cảnh"]
+        G --> H["Rút gọn có kiểm định khi lời đọc không vừa"]
+        H --> I["Edge-TTS / engine được chọn"]
         I --> J["Căn chỉnh tốc độ (atempo Time-Stretching)"]
     end
 
@@ -93,11 +93,11 @@ flowchart TD
     end
 
     subgraph FinalExport ["4. Xuất Bản Thành Phẩm HQ"]
-        A --> M["BS-RoFormer HQ Deep Separation"]
-        M --> N["Ducking Sidechain Compressor (-14dB)"]
-        N --> O["Che phụ đề cứng tiếng Trung (Glass Blur)"]
-        O --> P["Burn Phụ Đề ASS Động 9:16"]
-        P --> Q["Video TikTok Triệu View (.MP4)"]
+        A --> M["DSP / BS-RoFormer nếu đã cài"]
+        M --> N["Trộn nhạc nền và lời Việt"]
+        N --> O["Làm mờ sub gốc nếu được chọn"]
+        O --> P["Phụ đề ASS theo vị trí và màu đã lưu"]
+        P --> Q["MP4 được kiểm tra trước khi công bố"]
     end
 ```
 
@@ -105,13 +105,13 @@ flowchart TD
 
 ## 📊 Bảng So Sánh Các Engine Công Nghệ
 
-| Thành phần | Engine Mặc định (Premium) | Engine Dự phòng (Fallback) | Ưu điểm & Đột phá kỹ thuật |
+| Thành phần | Mặc định | Tùy chọn | Hành vi |
 |---|---|---|---|
-| **Chinese ASR** | **FunAudioLLM SenseVoice** | Faster-Whisper Small | Tốc độ giải mã siêu tốc (<0.3s/câu), trích xuất cảm xúc người nói, không lỗi tràn bộ nhớ VRAM. |
-| **Dịch thuật** | **Google Gemini 2.0 Flash + VideoLingo** | DeepSeek-V3 / MyMemory | Prompt phản chiếu 3 tầng, dịch thoát ý theo phong cách TikTok, khống chế số lượng từ khớp slot nói. |
-| **Lồng tiếng** | **VieNeu-TTS v3 Turbo** | Edge-TTS Neural | Giọng đọc truyền cảm, chuẩn ngữ điệu bản xứ Việt Nam, hỗ trợ clone giọng từ mẫu audio 3 giây. |
-| **Tách thoại** | **DSP Realtime + BS-RoFormer HQ** | Mute toàn phần | Khử sạch thoại Trung đến -26dB, bảo toàn 100% tiếng bước chân, tiếng cười, âm thanh môi trường và BGM. |
-| **Giao diện** | **PySide6 Native Desktop Shell** | Trình duyệt Web Localhost | 100% giao diện phần mềm Windows chuyên nghiệp, kéo thả video, khay hệ thống (System Tray), zero terminal. |
+| **Chinese ASR** | Faster-Whisper Small CPU int8 | SenseVoice khi có model | Nhận diện từng khoảng nguồn, giữ mốc câu để tiếp tục và đối chiếu. |
+| **Dịch thuật** | OpenCode Muse | Các provider trong Cài đặt | Dịch và kiểm định độc lập; lỗi provider được hiển thị, không tự đổi sang model trả phí. |
+| **Lồng tiếng** | Edge-TTS Neural | Piper, VieNeu và engine đã cài | Chỉ cho chọn giọng sẵn sàng, đo thời lượng thực sau tổng hợp. |
+| **Tách thoại** | DSP | BS-RoFormer khi đã cài | Giảm giọng gốc và trộn lời Việt; mức tách phụ thuộc nội dung. |
+| **Giao diện** | PySide6 và Qt WebEngine | Trang localhost | Transcript, lịch sử dự án, kéo thả và khay hệ thống. |
 
 ---
 
@@ -135,7 +135,7 @@ Không cần mở dòng lệnh PowerShell hay mở trình duyệt web. Chỉ c�
 ### 2. Sử Dụng Nhanh
 1. **Nạp video:** Kéo thả video MP4 từ Windows Explorer vào cửa sổ Studio hoặc nhấn **"Chọn Video MP4"**.
 2. **Chọn giọng lồng tiếng:** Chọn giọng đọc yêu thích (*Trúc Ly, Nam Minh, Mai Phương*).
-3. **Bấm "Dịch & Phát Realtime":** Sau 3-5 giây đệm ban đầu, video sẽ phát kèm phụ đề và giọng đọc tiếng Việt.
+3. **Bấm Bắt đầu:** Chờ nhận diện, dịch và kiểm định đoạn xem trước. Các bước chờ AI có thể mất vài phút.
 4. **Tua thông minh (Smart Seek):** Click vào bất kỳ mốc thời gian nào trên thanh tiến trình, hệ thống tự động ưu tiên dịch ngay đoạn bạn muốn xem.
 5. **Xuất bản TikTok 9:16:** Nhấn **"Xuất Bản Video (HQ)"** để render video với chất lượng âm thanh BS-RoFormer cao cấp nhất.
 

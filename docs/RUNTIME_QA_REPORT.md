@@ -26,6 +26,14 @@ Row 85 also remained unresolved because the local address selector interpreted t
 
 Focused source-scope/address/reviewer validation: **141 passed**. These changes were made after the active process loaded its code; the real-source retry with freshly loaded code remains pending.
 
+### Measured pacing candidate retention
+
+Existing real logs for row 108 showed a verified later candidate requiring about 1.3891s, but rescue still reported the original candidate's 1.5913s requirement. `natural_speech.py` previously attached only `measurements[0]` after exhaustion or a later rejected rewrite. It now retains the shortest actually measured text and its exact proof on the failure. `pipeline.py` retries that exact verified wording after a successful bounded neighbor plan, with further rewriting disabled; it does not mark overlong speech successful. Publication/revision/Stop guards and the 1.15× ceiling remain unchanged.
+
+Focused natural-speech, pipeline and speech-cache regressions: **151 passed**, including a later rejection retaining the earlier verified candidate without replacing the previous output. The broader run excluding native Qt/lifecycle files while production QA was active: **1891 passed, 1 skipped, 127 subtests**, six upstream WebSocket deprecation warnings. The omitted native tests still need a sequential final run. JavaScript: **223 passed**; installed-runtime preflight passed with the selected Muse model and existing dependencies. No dependencies were installed.
+
+README examples were corrected to match the configured engines and measured workflow. Unsupported few-second latency, fixed suppression, complete SFX preservation and guaranteed vertical-output claims were removed. These documentation edits do not establish runtime acceptance.
+
 ### Continued runtime audit — 02:50–03:15
 
 **FAILED baseline / fixes under real retest.** Original Douyin `7692745161054506290`, task `76f5aa6b`, 320.040635s, configured real OpenCode Muse and Edge-TTS. Fresh production Qt Start reached 15 READY speech rows in the 24.48s preview, but IDs 7 and 13 failed pacing. Fresh History → Retry reproduced both failures and retained all 15 prior WAVs. No complete 320s export is claimed.

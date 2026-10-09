@@ -20,7 +20,7 @@ from core.engines.alignment.speech_cache import (
 def synthesize_natural_speech(*, text, source, duration, output_path, engine, aligner,
                               translator=None, voice=None, ref_audio=None, context=None, on_stage=None,
                               max_duration=None, allow_bidirectional_reflow=False,
-                              max_duration_limit=None):
+                              max_duration_limit=None, pacing_verification=None):
     """Never publish chopped or excessively accelerated speech.
 
     A rewrite is allowed only for automatic translation, with independent
@@ -46,7 +46,12 @@ def synthesize_natural_speech(*, text, source, duration, output_path, engine, al
     current = str(text).strip()
     output_path = Path(output_path)
     output_path.parent.mkdir(parents=True, exist_ok=True)
-    verification = None
+    # A rescue retry may supply an independently verified rewrite from a
+    # previous, measured attempt. Carry that proof through fitting without
+    # asking the semantic translator for a different sentence.
+    verification = (pacing_verification if isinstance(pacing_verification, dict)
+                    and pacing_verification.get("status") == "verified"
+                    and pacing_verification.get("text") == current else None)
     logger = logging.getLogger("pipeline")
     speech_id = uuid.uuid4().hex[:8]
     execution = current_execution_context()
@@ -68,6 +73,7 @@ def synthesize_natural_speech(*, text, source, duration, output_path, engine, al
     raw_budget = duration * aligner.max_speed
     request_budget = raw_budget * .98
     measurements = []
+    measured_candidates = []
     seen_candidates = set()
     original_duration = duration
     with tempfile.TemporaryDirectory(prefix="speech-fit-", dir=output_path.parent) as temporary:
@@ -92,6 +98,8 @@ def synthesize_natural_speech(*, text, source, duration, output_path, engine, al
                 raise RuntimeError("Không đọc được âm thanh từ TTS.")
             ratio = max(1.0, measured / duration)
             measurements.append({"text": current, "measured_seconds": round(measured, 4)})
+            measured_candidates.append({"text": current, "measured_seconds": measured,
+                                        "pacing_verification": verification})
             seen_candidates.add(pacing_candidate_key(current))
             logger.info("PACING_MEASURED run_id=%s speech_id=%s attempt=%d measured_seconds=%.4f slot_seconds=%.4f raw_budget_seconds=%.4f required_speed=%.4f max_speed=%.4f",
                         execution.run_id, speech_id, attempt + 1, measured, duration, raw_budget, ratio, aligner.max_speed)
@@ -144,6 +152,7 @@ def synthesize_natural_speech(*, text, source, duration, output_path, engine, al
                             raise RuntimeError("Không đọc được âm thanh từ TTS.")
                         ratio = max(1.0, measured / duration)
                         measurements[-1]["measured_seconds"] = round(measured, 4)
+                        measured_candidates[-1]["measured_seconds"] = measured
                         logger.info("PACING_COMPACTED run_id=%s speech_id=%s attempt=%d before_seconds=%.4f measured_seconds=%.4f removed_seconds=%.4f pauses=%d",
                                     execution.run_id, speech_id, attempt + 1, before, measured,
                                     sum(right - left for left, right in cuts + edge_cuts), len(cuts) + len(edge_cuts))
@@ -155,7 +164,13 @@ def synthesize_natural_speech(*, text, source, duration, output_path, engine, al
                         "Lời Việt vẫn quá dài để đọc tự nhiên trong câu này. "
                         "Hãy rút gọn lời hoặc chọn giọng khác; âm thanh chưa bị cắt hay ép tốc độ."
                     )
-                    failure.required_dub_duration = measurements[0]["measured_seconds"] / aligner.max_speed + .012
+                    best = min(measured_candidates, key=lambda item: item["measured_seconds"])
+                    failure.required_dub_duration = best["measured_seconds"] / aligner.max_speed + .012
+                    failure.candidate_text = best["text"]
+                    failure.pacing_verification = best["pacing_verification"]
+                    # Keep the complete candidate record available to callers
+                    # that need to explain or retry this measured attempt.
+                    failure.measured_candidate = dict(best)
                     raise failure from None
                 # Leave a little room for encoder/atempo block rounding.
                 if on_stage:
@@ -201,7 +216,11 @@ def synthesize_natural_speech(*, text, source, duration, output_path, engine, al
                                        execution.run_id, speech_id, attempt + 1, review_attempt + 1, error.code)
                         seen_candidates.add(pacing_candidate_key(error.feedback["rejected_candidate"]))
                         if review_attempt == 2:
-                            error.required_dub_duration = measurements[0]["measured_seconds"] / aligner.max_speed + .012
+                            best = min(measured_candidates, key=lambda item: item["measured_seconds"])
+                            error.required_dub_duration = best["measured_seconds"] / aligner.max_speed + .012
+                            error.candidate_text = best["text"]
+                            error.pacing_verification = best["pacing_verification"]
+                            error.measured_candidate = dict(best)
                             raise
                         review_feedback = {**timing_feedback, **error.feedback}
                 current, verification = candidate.strip(), proof

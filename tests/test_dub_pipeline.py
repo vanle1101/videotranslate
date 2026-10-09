@@ -500,6 +500,43 @@ def test_dense_failure_can_stage_verified_neighbor_without_exceeding_bounds(sess
     assert not list(session.segments_dir.glob("pending_*.wav"))
 
 
+def test_dense_rescue_retries_shortest_verified_focus_candidate_without_rewrite(session, monkeypatch):
+    focus = prepare_dense_rescue(session)
+    shorter = "Năm nay mười chín."
+    proof = {"status": "verified", "text": shorter, "provider": "opencode",
+             "address_preserved": True, "reason": "Giữ đủ nghĩa."}
+    session.translator.rewrite_for_pacing.return_value = {
+        "final_vi": shorter, "pacing_verification": proof}
+    calls = []
+
+    def synthesize(**kwargs):
+        calls.append(kwargs)
+        if len(calls) == 1:
+            error = pipeline.SpeechBudgetError("Focus candidate needs neighbor space")
+            error.required_dub_duration = 1.48
+            error.candidate_text = shorter
+            error.pacing_verification = proof
+            raise error
+        measured = 1.0515 if kwargs["text"] == shorter else 1.465
+        write_pcm(kwargs["output_path"], measured)
+        return {"text": kwargs["text"], "tts_duration": measured * 1.15,
+                "speed_ratio": 1.15, "boundaries": [],
+                "pacing_verification": kwargs.get("pacing_verification")}
+
+    monkeypatch.setattr(pipeline, "synthesize_natural_speech", synthesize)
+    asyncio.run(session._synthesize_segment(focus))
+
+    # Neighbor staging may synthesize first; the final call is the focus retry.
+    retry = calls[-1]
+    assert retry["text"] == shorter
+    assert retry["translator"] is None
+    assert retry["pacing_verification"] == proof
+    assert focus.final_vi == shorter
+    assert focus.verification["pacing"] == proof
+    assert session.translator.rewrite_for_pacing.call_count == 1
+    assert not list(session.segments_dir.glob("pending_*.wav"))
+
+
 @pytest.mark.parametrize("failure", ["manual", "rejected", "cancelled", "stale"])
 def test_uncommitted_dense_rescue_preserves_neighbors(session, monkeypatch, failure):
     focus = prepare_dense_rescue(session)
