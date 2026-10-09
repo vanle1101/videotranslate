@@ -154,6 +154,7 @@ class AutomaticTranslationReviewer:
     def _validated_review_request(client, prompt, batch, lo, hi, check, extra_validate=None):
         # Retry malformed structured replies without repeating the local OCR.
         # Authentication/transport errors propagate; invalid data never passes.
+        syntax_location = None
         for attempt in range(3):
             check()
             try:
@@ -167,6 +168,12 @@ class AutomaticTranslationReviewer:
                         "address_reason phải là chuỗi. address_uses chỉ gồm term và role self/listener "
                         "cho cách tự xưng/gọi người nghe thực sự có trong bản Việt. Không thêm vai "
                         "reference cho người thứ ba; không có cách xưng hô thì dùng mảng rỗng.")
+                    if syntax_location is not None:
+                        retry_prompt += (f" JSON trước sai cú pháp tại dòng {syntax_location[0]}, "
+                            f"cột {syntax_location[1]}. Kiểm tra dấu đóng đối tượng/mảng, đặc biệt "
+                            "sau address_uses: đóng mảng cách gọi, đóng đúng một segment, rồi mới "
+                            "đến segment tiếp hoặc đóng mảng segments. Escape đúng mọi chuỗi. "
+                            "Trả một đối tượng JSON mới đầy đủ; không trả bản vá hoặc lời giải thích.")
                 raw = client.translate(retry_prompt, max_tokens=10000)
             except Exception as error:
                 check()
@@ -180,10 +187,14 @@ class AutomaticTranslationReviewer:
                     extra_validate(data)
                 return data, validated
             except VideoIntelligenceError as error:
+                syntax = error.__cause__ if isinstance(error.__cause__, json.JSONDecodeError) else None
+                syntax_location = (syntax.lineno, syntax.colno) if syntax else None
                 logging.getLogger("ai").warning(
-                    "REVIEW_RESPONSE_INVALID run_id=%s attempt=%s response_chars=%s error_type=%s requested_ids=%s",
+                    "REVIEW_RESPONSE_INVALID run_id=%s attempt=%s response_chars=%s error_type=%s requested_ids=%s code=%s line=%s column=%s",
                     current_execution_context().run_id, attempt + 1, len(raw) if isinstance(raw, str) else 0,
-                    type(error).__name__, [row["id"] for row in batch])
+                    type(error).__name__, [row["id"] for row in batch],
+                    "invalid_json" if syntax else "invalid_schema",
+                    syntax.lineno if syntax else None, syntax.colno if syntax else None)
                 if attempt == 2:
                     AutomaticTranslationReviewer._diagnostic(error, "semantic_schema", batch)
                     raise

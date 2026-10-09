@@ -36,6 +36,31 @@ def components():
     return client, scanner, prompts
 
 
+def test_nested_review_json_retry_has_exact_location_without_repair_or_secret_leak(caplog):
+    row = source()
+    valid = {'segments': [{**row, 'semantic_verified': True,
+        'verification_reason': 'Đối chiếu nguồn.'}], 'screen_texts': [], 'summary': ''}
+    malformed = '{"segments":[{"address_uses":[]}}],"secret-do-not-log":"private"}'
+    client = Mock(translate=Mock(side_effect=[malformed, valid]))
+    data, checked = AutomaticTranslationReviewer._validated_review_request(
+        client, 'Rà đúng schema.', [row], 0, 1, lambda: None,
+        AutomaticTranslationReviewer._require_semantic_fields)
+    assert data == valid and set(checked['segments']) == {0}
+    assert client.translate.call_count == 2
+    retry = client.translate.call_args_list[1].args[0]
+    assert 'cú pháp tại dòng 1' in retry and 'đóng đúng một segment' in retry
+    assert 'code=invalid_json' in caplog.text and 'line=1' in caplog.text
+    assert 'secret-do-not-log' not in retry + caplog.text
+
+
+def test_repeated_nested_review_json_failure_cannot_become_validated_output():
+    client = Mock(translate=Mock(return_value='{"segments":[{]'))
+    with pytest.raises(VideoIntelligenceError):
+        AutomaticTranslationReviewer._validated_review_request(
+            client, 'Rà đúng schema.', [source()], 0, 1, lambda: None)
+    assert client.translate.call_count == 3
+
+
 @pytest.fixture(autouse=True)
 def provider(monkeypatch):
     monkeypatch.setattr(settings, "LLM_PROVIDER", "opencode")
