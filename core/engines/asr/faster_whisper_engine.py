@@ -29,8 +29,8 @@ class FasterWhisperFallbackEngine(ASREngine):
 
     def _ensure_loaded(self):
         if self.model is None:
-            from core.asr import load_whisper_model
-            self.model = load_whisper_model(self.model_size)
+            from core.engines.asr.whisper_process import SubprocessWhisperModel
+            self.model = SubprocessWhisperModel(self.model_size)
 
     def get_info(self) -> Dict[str, Any]:
         return {
@@ -63,32 +63,37 @@ class FasterWhisperFallbackEngine(ASREngine):
         )
 
         results = []
-        for idx, seg in enumerate(segments_gen):
-            check_cancelled()
-            words = []
-            for word in (getattr(seg, "words", None) or []):
-                word_text = getattr(word, "word", "")
-                word_start = getattr(word, "start", None)
-                word_end = getattr(word, "end", None)
-                if not isinstance(word_text, str):
-                    continue
-                if not isinstance(word_start, (int, float)) or not isinstance(word_end, (int, float)):
-                    continue
-                words.append({"word": word_text, "start": round(float(word_start), 3),
-                              "end": round(float(word_end), 3)})
-            results.append({
-                "id": idx,
-                "start": round(seg.start, 2),
-                "end": round(seg.end, 2),
-                "duration": round(seg.end - seg.start, 2),
-                "text_zh": seg.text.strip(),
-                "text": seg.text.strip(),
-                "words": words,
-                "emotion": "<|NEUTRAL|>",
-                "speaker": getattr(seg, "speaker", None)
-            })
-            if progress_callback:
-                progress_callback(float(seg.end))
+        try:
+            for idx, seg in enumerate(segments_gen):
+                check_cancelled()
+                words = []
+                for word in (getattr(seg, "words", None) or []):
+                    word_text = getattr(word, "word", "")
+                    word_start = getattr(word, "start", None)
+                    word_end = getattr(word, "end", None)
+                    if not isinstance(word_text, str):
+                        continue
+                    if not isinstance(word_start, (int, float)) or not isinstance(word_end, (int, float)):
+                        continue
+                    words.append({"word": word_text, "start": round(float(word_start), 3),
+                                  "end": round(float(word_end), 3)})
+                results.append({
+                    "id": idx,
+                    "start": round(seg.start, 2),
+                    "end": round(seg.end, 2),
+                    "duration": round(seg.end - seg.start, 2),
+                    "text_zh": seg.text.strip(),
+                    "text": seg.text.strip(),
+                    "words": words,
+                    "emotion": "<|NEUTRAL|>",
+                    "speaker": getattr(seg, "speaker", None)
+                })
+                if progress_callback:
+                    progress_callback(float(seg.end))
+        finally:
+            close = getattr(segments_gen, "close", None)
+            if callable(close):
+                close()
         check_cancelled()
         # Return complete utterances instead of Whisper's sometimes long VAD
         # chunks.  The helper uses only measured word timestamps and leaves a
