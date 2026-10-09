@@ -4,7 +4,23 @@
 
 **PARTIAL: runtime recovery and media checks passed; complete semantic and long-video acceptance remain pending.** Target: Douyin2TikTok AI Studio using the configured OpenCode Muse model. Seedream/Seedance graph tests do not apply to this application. Tests honor background-only operation through the actual production Qt/WebEngine page offscreen and muted. HTTP, Muse, Edge-TTS and exported media are real. Physical desktop clicks/native file-picker and tray interaction are not claimed.
 
-### Current continuation — 08:25
+### Latest continuation — real review/export retest
+
+**Full acceptance remains FAILED.** Fresh production History → AI review → real Muse → export → result playback for task `38680e43` passed its runtime/media checks. The owned process PID 14084/backend 53887 exited. This rerun did not reproduce the preceding JSON syntax error, but it retained **4 unresolved source/address rows out of 14**. It is not a semantic PASS.
+
+The new MP4 `workspace/outputs/douyin_translated_38680e43_hq.mp4` is 12,002,744 bytes, 15.016667s, H.264 1920×1080 plus AAC. Actual production preview reached readyState 4, advanced to 0.450487s, decoded a 640×360 compatibility picture, and reported no media or JavaScript error. A separate complete FFmpeg video/audio decode exited 0 without decoder errors. The full-resolution MP4 is distinct from the compatibility preview.
+
+The preceding process PID 4680/backend 55688 **FAILED**, contrary to its earlier in-progress checkpoint below: two real source-only address responses for IDs 0–11 (8,042 and 7,565 characters) were invalid JSON; review became FAILED and no new MP4 was produced. A larger response succeeded in the new run, so truncation is **not** established. Malformed nested JSON has also occurred with four rows; smaller batches cannot guarantee a valid provider response.
+
+New corrections after that reproduction:
+
+- `core/translation_review.py`, `core/video_intelligence.py`: address responses are bounded to four target IDs while every group retains the identical full source dialogue. Strict parsing, citations, competing-turn checks and two bounded attempts remain. Exhausted groups cannot return partial success. Syntax diagnostics supply numeric location and response length without raw text; the retry explicitly places `reason`/`evidence` inside `turn_check`. Commit `e3e59be`.
+- The real audio evidence for row 6 was `19。` versus `十九`, incorrectly classified as disagreement. `core/chinese_text.py` now recognizes exact spelling variants of a standalone 0–99 integer in audio consensus. It does not normalize names, phrases, units, signs, decimals or OCR scope. Semantic review remains required. Commit `e3e59be`.
+- Actual pacing rejected a connective solely because it was judged as an isolated full sentence. Blind review also lacked the focused candidate's position among neighbors and discarded legitimate repeated neighboring lines. `semantic_translator.py` now supplies separate before/after Vietnamese turns, explicitly marks unknown positions, retains genuine repeats, and evaluates source fragments in their actual dialogue. Independent fidelity/address/fluency verdicts and waveform limits remain mandatory. Commit `77e17b6`.
+
+Validation after these corrections: **298 focused regressions passed**. Real provider/UI acceptance of the newest corrections is pending. The long production task `76f5aa6b` continues on its previously loaded code, preserves its row-0 edit and healthy WAVs, and has not produced a complete accepted MP4. A separate audit is investigating idle edit/style persistence failure; no resolution is claimed here.
+
+### Earlier continuation — 08:25
 
 **Full acceptance remains FAILED / real retests are running.** The production UI task `76f5aa6b` now retains 138 READY/PLAYED rows and has processed 222.07 of 320.040635 source seconds. It still has measured speech failures and unresolved source/address evidence. The active run predates the newest fixes; it is being preserved until it reaches a genuine terminal state. No complete MP4 from this long task is claimed.
 
