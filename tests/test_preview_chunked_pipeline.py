@@ -1448,3 +1448,116 @@ def test_collected_pacing_skips_duplicate_and_newer_manual_revision(preview, mon
     assert calls == [(1, False), (2, False), (3, False), (2, True)]
     assert session.segments[1].final_vi == "Lời vừa sửa tay."
     assert session.segments[1].verification["status"] == "manual"
+
+
+def test_transient_tts_exhaustion_retries_late_after_independent_siblings(preview, monkeypatch):
+    from core.engines.tts.edge_fallback import EdgeTTSRequestError
+    session, _, _, speech, events = preview
+    saved_full_queue(session)
+    session.error, session.is_running = None, True
+    session.segments[1].status = "WAITING"
+    original = session._synthesize_segment
+    calls = []
+    async def synthesize(row, *, allow_pacing=True):
+        calls.append((row.id, allow_pacing))
+        if row.id == 1 and not allow_pacing:
+            row.status = "TTS"
+            raise EdgeTTSRequestError("Safe empty audio after 3 attempts", code="tts_empty_audio", retryable=True)
+        if row.id == 1:
+            assert speech == [2, 3], "Transient row retried before independent audio was published"
+        await original(row)
+    monkeypatch.setattr(session, "_synthesize_segment", synthesize)
+    asyncio.run(session._resume_speech_rows(session.segments.values()))
+    assert calls == [(1, False), (2, False), (3, False), (1, True)]
+    pending = [payload for event, payload in events if event == "segment_update" and payload.get("id") == 1
+               and payload.get("status") == "WAITING"]
+    assert pending and pending[0]["processing_state"] == "RETRY_PENDING"
+    assert session.segments[1].status == "READY" and session.segments[1].error is None
+    assert all("Câu 2 chưa tạo" not in warning for warning in session.warnings)
+    assert session.get_progress()["segment_states"]["RETRY_PENDING"] == 0
+
+
+@pytest.mark.parametrize("permanent", ["auth", "tls", "configuration", "untyped"])
+def test_permanent_tts_errors_never_enter_late_retry_but_siblings_continue(preview, monkeypatch, permanent):
+    from core.engines.tts.edge_fallback import EdgeTTSRequestError
+    session, _, _, speech, _ = preview
+    saved_full_queue(session)
+    session.error, session.is_running = None, True
+    session.segments[1].status = "WAITING"
+    original = session._synthesize_segment
+    calls = []
+    errors = {"auth": EdgeTTSRequestError("Unauthorized", code="tts_http_error", status=401),
+        "tls": EdgeTTSRequestError("TLS unavailable", code="tts_tls_certificate"),
+        "configuration": ValueError("Unsupported configuration"), "untyped": RuntimeError("Unknown provider failure")}
+    async def synthesize(row, *, allow_pacing=True):
+        calls.append((row.id, allow_pacing))
+        if row.id == 1:
+            row.status = "TTS"
+            raise errors[permanent]
+        await original(row)
+    monkeypatch.setattr(session, "_synthesize_segment", synthesize)
+    asyncio.run(session._resume_speech_rows(session.segments.values()))
+    assert calls == [(1, False), (2, False), (3, False)] and speech == [2, 3]
+    assert session.segments[1].status == "FAILED" and session.segments[1].failed_stage == "TTS"
+
+
+def test_repeated_transient_tts_failure_is_one_extra_round_without_recursion(preview, monkeypatch):
+    from core.engines.tts.edge_fallback import EdgeTTSRequestError
+    session, _, _, speech, _ = preview
+    saved_full_queue(session)
+    session.error, session.is_running = None, True
+    session.segments[1].status = "WAITING"
+    original = session._synthesize_segment
+    calls = []
+    async def synthesize(row, *, allow_pacing=True):
+        calls.append((row.id, allow_pacing))
+        if row.id == 1:
+            row.status = "TTS"
+            raise EdgeTTSRequestError("Safe rate limit", code="tts_rate_limited", status=429, retryable=True)
+        await original(row)
+    monkeypatch.setattr(session, "_synthesize_segment", synthesize)
+    async def run():
+        deferred = await session._resume_speech_rows(session.segments.values(), defer_pacing=True)
+        assert session.segments[1].to_dict()["processing_state"] == "RETRY_PENDING"
+        await session._resume_deferred_speech_rows(deferred + deferred)
+    asyncio.run(run())
+    assert calls == [(1, False), (2, False), (3, False), (1, True)] and speech == [2, 3]
+    assert session.segments[1].status == "FAILED" and session.segments[1].error == "Safe rate limit"
+    assert session.get_progress()["segment_states"]["RETRY_PENDING"] == 0
+    assert any("Câu 2 chưa tạo" in warning for warning in session.warnings)
+
+
+@pytest.mark.parametrize("change", ["stop", "manual"])
+def test_transient_late_retry_preserves_stop_and_newer_manual_revision(preview, monkeypatch, change):
+    from core.engines.tts.edge_fallback import EdgeTTSRequestError
+    session, *_ = preview
+    saved_full_queue(session)
+    session.error, session.is_running = None, True
+    session.segments[1].status = "WAITING"
+    original = session._synthesize_segment
+    calls = []
+    async def synthesize(row, *, allow_pacing=True):
+        calls.append((row.id, allow_pacing))
+        if row.id == 1:
+            row.status = "TTS"
+            raise EdgeTTSRequestError("Safe temporary failure", code="tts_timeout", retryable=True)
+        if row.id == 2:
+            if change == "stop":
+                session.is_stopped = True
+            else:
+                focus = session.segments[1]
+                focus.revision += 1
+                focus.status, focus.final_vi = "READY", "Lời vừa sửa tay."
+                focus.verification = {"status": "manual"}
+        await original(row)
+    monkeypatch.setattr(session, "_synthesize_segment", synthesize)
+    if change == "stop":
+        with pytest.raises(asyncio.CancelledError):
+            asyncio.run(session._resume_speech_rows(session.segments.values()))
+        assert calls == [(1, False), (2, False)]
+        assert session.segments[1].status == "WAITING" and session.segments[3].status == "WAITING"
+    else:
+        asyncio.run(session._resume_speech_rows(session.segments.values()))
+        assert calls == [(1, False), (2, False), (3, False)]
+        assert session.segments[1].final_vi == "Lời vừa sửa tay."
+        assert session.segments[1].verification["status"] == "manual"

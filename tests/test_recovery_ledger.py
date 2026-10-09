@@ -4,9 +4,23 @@ import time
 
 import pytest
 
-from core.streaming.recovery import (reserve, transition, contiguous_coverage,
+from core.streaming.recovery import (reserve, transition, contiguous_coverage, segment_state,
                                      recover_interrupted, validate_records, input_hash)
 from core.streaming.pipeline import SegmentItem
+
+
+def test_late_tts_retry_telemetry_requires_exact_waiting_failure_ownership():
+    row = SegmentItem(1, 0, 1, 1)
+    row.failed_stage, row.error, row._retry_synthesis = "TTS", "Safe transient request failure", True
+    assert segment_state(row) == "RETRY_PENDING"
+    row.failed_stage = "ALIGNING"
+    assert segment_state(row) == "PENDING"
+    row.failed_stage, row.error = "TTS", None
+    assert segment_state(row) == "PENDING"
+    row.error, row._retry_synthesis = "Safe failure", False
+    assert segment_state(row) == "PENDING"
+    row.status, row._retry_synthesis = "FAILED", True
+    assert segment_state(row) == "FAILED"
 
 
 def test_crash_preserves_completed_intervals_and_recovers_only_running():

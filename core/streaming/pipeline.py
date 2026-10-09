@@ -24,7 +24,7 @@ from core.engines.asr.sensevoice_engine import SenseVoiceEngine
 from core.engines.asr.faster_whisper_engine import FasterWhisperFallbackEngine
 from core.engines.translation.semantic_translator import SemanticTranslator, PacingReviewRejected
 from core.engines.tts.vieneu_engine import VieNeuEngine
-from core.engines.tts.edge_fallback import EdgeTTSFallbackEngine
+from core.engines.tts.edge_fallback import EdgeTTSFallbackEngine, EdgeTTSRequestError
 from core.voice_catalog import resolve_voice
 from core.engines.alignment.timing_aligner import TimingBudgetAligner, SpeechBudgetError
 from core.engines.alignment.natural_speech import synthesize_natural_speech
@@ -1099,6 +1099,22 @@ class StreamingPipelineSession:
                     raise
                 if row.revision != revision:
                     continue
+                if isinstance(error, EdgeTTSRequestError) and error.retryable:
+                    # Three fresh service attempts have already failed. Defer
+                    # one additional round until independent sibling/review
+                    # work is published, rather than retrying here recursively.
+                    row.status, row.error, row.failed_stage = "WAITING", str(error), "TTS"
+                    row._retry_synthesis = True
+                    deferred.append((row, revision))
+                    warning = f"Câu {row.id + 1} chưa tạo được giọng; giữ phần đã xong và tiếp tục các câu sau."
+                    if warning not in self.warnings:
+                        self.warnings.append(warning)
+                    logging.getLogger("pipeline").warning(
+                        "RECOVERY_SPEECH_RETRY_PENDING run_id=%s segment_id=%s code=%s status=%s retryable=true",
+                        self.task_id, row.id, error.code, error.status)
+                    await self.emit("segment_update", row.to_dict())
+                    self._persist_if_enabled()
+                    continue
                 row.failed_stage = row.status if row.status in {"TTS", "ALIGNING"} else "TTS"
                 row.status, row.error = "FAILED", str(error)
                 warning = f"Câu {row.id + 1} chưa tạo được giọng; giữ phần đã xong và tiếp tục các câu sau."
@@ -1127,6 +1143,12 @@ class StreamingPipelineSession:
                 raise asyncio.CancelledError
             try:
                 await self._synthesize_segment(row)
+                if row.status in {"READY", "PLAYED"}:
+                    row.error = None
+                    warning = f"Câu {row.id + 1} chưa tạo được giọng; giữ phần đã xong và tiếp tục các câu sau."
+                    self.warnings[:] = [value for value in self.warnings if value != warning]
+                    await self.emit("segment_update", row.to_dict())
+                    self._persist_if_enabled()
             except asyncio.CancelledError:
                 raise
             except Exception as error:

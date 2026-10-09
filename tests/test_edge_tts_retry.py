@@ -47,8 +47,9 @@ def test_repeated_empty_responses_fail_cleanly_and_preserve_previous_output(tmp_
     response = Mock(save=AsyncMock(side_effect=NoAudioReceived("empty service response")))
     with patch("core.engines.tts.edge_fallback.edge_tts.Communicate", return_value=response) as factory, \
             patch("core.engines.tts.edge_fallback.asyncio.sleep", new_callable=AsyncMock):
-        with pytest.raises(RuntimeError, match="sau 3 lần thử"):
+        with pytest.raises(EdgeTTSRequestError, match="sau 3 lần thử") as caught:
             EdgeTTSFallbackEngine().synthesize("Xin chào", output)
+    assert caught.value.code == "tts_empty_audio" and caught.value.retryable and caught.value.status is None
     assert factory.call_count == 3
     assert output.read_bytes() == b"existing user audio"
     assert not list(tmp_path.glob("edge_tts_*"))
@@ -94,8 +95,9 @@ def test_transient_transport_failures_retry_and_log_safe_request_identity(tmp_pa
 def test_nontransient_http_errors_are_not_retried(tmp_path, status):
     error = aiohttp.ClientResponseError(None, (), status=status)
     with patch("core.engines.tts.edge_fallback.edge_tts.Communicate", side_effect=error) as factory:
-        with pytest.raises(RuntimeError, match="Edge-TTS"):
+        with pytest.raises(EdgeTTSRequestError, match="Edge-TTS") as caught:
             EdgeTTSFallbackEngine().synthesize("Xin chào", tmp_path / "speech.mp3")
+    assert caught.value.status == status and not caught.value.retryable
     factory.assert_called_once()
 
 
@@ -115,6 +117,7 @@ def test_certificate_failure_has_precise_safe_diagnostic_and_never_disables_veri
         with pytest.raises(EdgeTTSRequestError, match=expected) as caught:
             EdgeTTSFallbackEngine().synthesize("Private dialogue", output)
     assert caught.value.code == "tts_tls_certificate" and caught.value.status is None
+    assert not caught.value.retryable
     assert caught.value.tls_verify_code == verify_code
     assert "TLS" in str(caught.value) and "Kiểm tra mạng" not in str(caught.value)
     assert f"code=tts_tls_certificate tls_verify_code={verify_code}" in caplog.text
@@ -134,6 +137,7 @@ def test_tls_handshake_failure_is_distinct_from_http_and_transport(tmp_path, cap
         with pytest.raises(EdgeTTSRequestError, match="TLS") as caught:
             EdgeTTSFallbackEngine().synthesize("Xin chào", tmp_path / "speech.mp3")
     assert caught.value.code == "tts_tls_handshake" and caught.value.status is None
+    assert not caught.value.retryable
     assert "code=tts_tls_handshake tls_verify_code=none" in caplog.text
     assert "private-sensitive-host" not in caplog.text + str(caught.value)
     factory.assert_called_once()
@@ -175,6 +179,25 @@ def test_total_service_timeout_is_bounded_and_drains_each_attempt(tmp_path):
             EdgeTTSFallbackEngine().synthesize("Xin chào", tmp_path / "speech.mp3")
     assert factory.call_count == 3 and len(drained) == 3
     assert not list(tmp_path.iterdir())
+
+
+@pytest.mark.parametrize("kind,code,status", [("disconnect", "tts_transport", None),
+    ("timeout", "tts_timeout", None), ("429", "tts_rate_limited", 429),
+    ("500", "tts_http_error", 500), ("503", "tts_http_error", 503)])
+def test_exhausted_transient_failures_keep_safe_type_for_late_recovery(tmp_path, kind, code, status):
+    errors = {"disconnect": aiohttp.ServerDisconnectedError("private-url private-auth"),
+              "timeout": asyncio.TimeoutError("private-url private-auth"),
+              **{str(number): aiohttp.ClientResponseError(None, (), status=number,
+                    message="private-url private-auth") for number in (429, 500, 503)}}
+    output = tmp_path / "speech.mp3"
+    output.write_bytes(b"previous accepted audio")
+    with patch("core.engines.tts.edge_fallback.edge_tts.Communicate", side_effect=errors[kind]) as factory, \
+            patch("core.engines.tts.edge_fallback.asyncio.sleep", new_callable=AsyncMock):
+        with pytest.raises(EdgeTTSRequestError) as caught:
+            EdgeTTSFallbackEngine().synthesize("Xin chào", output)
+    assert caught.value.code == code and caught.value.status == status and caught.value.retryable is True
+    assert factory.call_count == 3 and "private-" not in str(caught.value)
+    assert output.read_bytes() == b"previous accepted audio" and not list(tmp_path.glob("edge_tts_*"))
 
 
 def test_conversion_failure_does_not_truncate_previous_wav(tmp_path):

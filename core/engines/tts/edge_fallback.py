@@ -22,11 +22,12 @@ EDGE_REQUEST_TIMEOUT = 45.0
 class EdgeTTSRequestError(RuntimeError):
     """Safe provider category retained by runtime/recovery diagnostics."""
 
-    def __init__(self, message, *, code, status=None, tls_verify_code=None):
+    def __init__(self, message, *, code, status=None, tls_verify_code=None, retryable=False):
         super().__init__(message)
         self.code = code
         self.status = status
         self.tls_verify_code = tls_verify_code
+        self.retryable = retryable is True
 
 
 def _tls_verify_code(error):
@@ -57,7 +58,7 @@ def _retryable(error):
                               aiohttp.ClientConnectionError, asyncio.TimeoutError))
 
 
-def _provider_error(error):
+def _provider_error(error, *, exhausted=False):
     """Keep URLs, headers and SDK response bodies out of the user-facing task."""
     if isinstance(error, aiohttp.ClientConnectorCertificateError):
         verify_code = _tls_verify_code(error)
@@ -75,14 +76,25 @@ def _provider_error(error):
     if isinstance(error, aiohttp.ClientResponseError):
         status = error.status
         if status in {401, 403}:
-            return RuntimeError("Edge-TTS từ chối yêu cầu. Kiểm tra mạng hoặc thử lại sau.")
-        if status == 429:
-            return RuntimeError("Edge-TTS đang giới hạn lượt yêu cầu. Hãy thử lại sau.")
-        return RuntimeError("Edge-TTS tạm thời không phản hồi đúng. Hãy thử lại sau.")
-    if isinstance(error, aiohttp.ClientError):
-        return RuntimeError("Không kết nối được tới Edge-TTS. Kiểm tra mạng rồi thử lại.")
-    if isinstance(error, asyncio.TimeoutError):
-        return RuntimeError("Edge-TTS hết thời gian chờ. Hãy thử lại câu này.")
+            message = "Edge-TTS từ chối yêu cầu. Kiểm tra mạng hoặc thử lại sau."
+        elif status == 429:
+            message = "Edge-TTS đang giới hạn lượt yêu cầu. Hãy thử lại sau."
+        else:
+            message = "Edge-TTS không phản hồi đúng. Hãy thử lại sau."
+        if exhausted:
+            message = "Không kết nối ổn định tới Edge-TTS sau 3 lần thử. " + message
+        return EdgeTTSRequestError(message, code=_failure_category(error), status=status,
+                                   retryable=_retryable(error))
+    if isinstance(error, edge_tts.exceptions.NoAudioReceived):
+        return EdgeTTSRequestError("Edge-TTS chưa trả về âm thanh" + (" sau 3 lần thử" if exhausted else "")
+            + ". Bản dịch được giữ; sẽ thử lại riêng câu này sau các câu khác.",
+            code="tts_empty_audio", retryable=True)
+    if isinstance(error, (aiohttp.ClientError, asyncio.TimeoutError)):
+        message = ("Edge-TTS hết thời gian chờ. Hãy thử lại câu này." if isinstance(error, asyncio.TimeoutError)
+                   else "Không kết nối được tới Edge-TTS. Kiểm tra mạng rồi thử lại.")
+        if exhausted:
+            message = "Không kết nối ổn định tới Edge-TTS sau 3 lần thử. " + message
+        return EdgeTTSRequestError(message, code=_failure_category(error), retryable=_retryable(error))
     if isinstance(error, (TypeError, ValueError)):
         return ValueError("Cấu hình giọng Edge-TTS không hợp lệ; kiểm tra giọng và tốc độ đọc.")
     if isinstance(error, OSError):
@@ -213,13 +225,7 @@ class EdgeTTSFallbackEngine(TTSEngine):
                         mp3_path.unlink(missing_ok=True)
                         metadata_path.unlink(missing_ok=True)
                         if attempt == 2:
-                            if not isinstance(error, edge_tts.exceptions.NoAudioReceived):
-                                raise RuntimeError("Không kết nối ổn định tới Edge-TTS sau 3 lần thử. "
-                                                   "Bản dịch được giữ; bấm Tiếp tục để tạo lại giọng.") from None
-                            raise RuntimeError(
-                                "Edge-TTS chưa trả về âm thanh sau 3 lần thử. "
-                                "Hãy thử lại hoặc chọn giọng đọc khác."
-                            ) from None
+                            raise _provider_error(error, exhausted=True) from None
                         await _await_cancellable(asyncio.sleep((3.0, 8.0)[attempt]),
                                                  execution.cancel_check, 10.0)
 

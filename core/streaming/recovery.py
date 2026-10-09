@@ -97,4 +97,6 @@ def segment_state(row):
         return "FAILED"
     if row.status == "NEEDS_REVIEW":
         return "REVIEW_REQUIRED"
+    if row.status == "WAITING" and row.failed_stage == "TTS" and row.error and row._retry_synthesis:
+        return "RETRY_PENDING"
     return "PENDING" if row.status == "WAITING" else "RUNNING"
