@@ -1,5 +1,6 @@
 """Offline regression tests for actual user-proof transactions, not provider acceptance."""
 import asyncio
+import time
 from copy import deepcopy
 from pathlib import Path
 from types import SimpleNamespace
@@ -331,7 +332,11 @@ def test_explicit_review_targets_only_pending_confirmation_and_retains_full_cont
         return reviewed_rows(targets)
     monkeypatch.setattr(AutomaticTranslationReviewer, "review", review)
     async def run():
+        before = time.monotonic()
         await session.start_automatic_review()
+        assert before <= session._run_started_at <= time.monotonic()
+        assert session.get_progress()['elapsed_seconds'] is not None
+        assert session.get_progress()['eta_seconds'] is None
         await session.review_task
     asyncio.run(run())
     assert calls == [([0, 4], list(range(5)), True)]

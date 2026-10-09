@@ -465,6 +465,8 @@ class StreamingPipelineSession:
         if (not self.can_retry or (self.worker_task and not self.worker_task.done())
                 or (self.start_task and not self.start_task.done())):
             raise SegmentEditConflict("Chỉ tiếp tục khi tác vụ đã dừng do lỗi và không có thao tác khác đang chạy.")
+        self._run_started_at = time.monotonic()
+        self._run_ready_baseline = sum(row.status in ("READY", "PLAYED") for row in self.segments.values())
         if self._startup_failed:
             # Resume may advance source analysis from its durable cursor while
             # earlier speech failed. Explicit Retry must also schedule those
@@ -1217,6 +1219,8 @@ class StreamingPipelineSession:
             raise SegmentEditConflict("Hãy chờ xử lý xong trước khi AI kiểm tra lại.")
         if settings.LLM_PROVIDER != "opencode":
             raise SegmentEditConflict("Kiểm tra lại miễn phí hiện dùng OpenCode trong Cài đặt.")
+        self._run_started_at = time.monotonic()
+        self._run_ready_baseline = sum(row.status in ("READY", "PLAYED") for row in self.segments.values())
         self.is_running = True
         self.review_summary = {"status": "running"}
         self._invalidate_output()

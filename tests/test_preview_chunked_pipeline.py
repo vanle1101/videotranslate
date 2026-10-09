@@ -5,6 +5,7 @@ separately by the real UI harness, never inferred from these tests.
 """
 import asyncio
 import threading
+import time
 import subprocess
 import json
 import wave
@@ -1135,6 +1136,22 @@ def saved_full_queue(session):
         if status == "FAILED":
             row.failed_stage = "TTS"
         session.segments[sid] = row
+
+
+def test_retry_resets_real_elapsed_clock_and_measured_throughput_baseline(preview):
+    session, *_ = preview
+    saved_full_queue(session)
+    session._run_started_at, session._run_ready_baseline = 1.0, 999
+    async def run():
+        before = time.monotonic()
+        progress = await session.retry_failed_synthesis()
+        after = time.monotonic()
+        assert before <= session._run_started_at <= after
+        assert session._run_ready_baseline == 1
+        assert progress['elapsed_seconds'] is not None and 0 <= progress['elapsed_seconds'] <= after - before
+        assert progress['eta_seconds'] is None, 'No fresh throughput was measured yet'
+        await session.worker_task
+    asyncio.run(run())
 
 
 def test_saved_full_retry_continues_later_rows_after_real_queue_failure(preview, monkeypatch):
