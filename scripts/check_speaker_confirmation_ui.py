@@ -39,13 +39,16 @@ def audio_hashes(snapshot):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("mode", choices=["trial", "reopen-restore", "review-export"])
+    parser.add_argument("--backend-port", type=int,
+                        help="Reuse an already-owned loopback QA backend; do not start/stop another provider queue.")
     args = parser.parse_args()
+    assert args.backend_port is None or 1024 < args.backend_port <= 65535
     app = QApplication.instance() or QApplication([])
     assert app.platformName() == "offscreen"
     app.setQuitOnLastWindowClosed(False)
     window = None
     try:
-        port = service_manager.start_backend(timeout=30)
+        port = args.backend_port or service_manager.start_backend(timeout=30)
         base = f"http://127.0.0.1:{port}"
         event("BACKEND", {"pid": os.getpid(), "port": port, "mode": args.mode})
         window = StudioMainWindow(port)
@@ -176,8 +179,11 @@ def main():
                 QCoreApplication.sendPostedEvents(None, QEvent.Type.DeferredDelete)
                 app.processEvents()
         finally:
-            service_manager.shutdown_all()
-            event("BACKEND_STOPPED", True)
+            if args.backend_port is None:
+                service_manager.shutdown_all()
+                event("BACKEND_STOPPED", True)
+            else:
+                event("SHARED_BACKEND_UI_DETACHED", {"port": args.backend_port})
 
 
 if __name__ == "__main__":
