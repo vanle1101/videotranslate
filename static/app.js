@@ -660,7 +660,11 @@ document.addEventListener("DOMContentLoaded", () => {
   function updateExportAvailability() {
     syncCaptionStyleTask();
     const items = Object.values(segments);
+    const missingSpeech = currentProgress?.final_output_blocked === true || items.some(segment =>
+      !String(segment.final_vi ?? segment.text_vi ?? "").trim() && segment.confirmed_silence !== true &&
+      (String(segment.text_zh || segment.asr_text || "").trim() || segment.needs_review));
     btnExportHQ.disabled = !currentTaskId || !items.length ||
+      missingSpeech ||
       (currentProgress?.translation_mode === "preview" && currentProgress?.status !== "COMPLETED") || isPreviewReady(currentProgress?.status) ||
       captionStyleDirty || !!captionStyleRequest ||
       reviewInProgress() || pendingTaskAction?.kind === "review" || automaticExportActive ||
@@ -669,6 +673,7 @@ document.addEventListener("DOMContentLoaded", () => {
       items.some(segment => (segment.needs_review && !(currentProgress?.review_summary?.status === "completed" && segment.verification?.status === "unresolved")) || !["READY", "PLAYED"].includes(segment.status)) ||
       (["FAILED", "STOPPED", "CANCELLED", "CANCELLING"].includes(currentProgress?.status)
         && currentProgress?.phase !== "export_error");
+    btnExportHQ.title = missingSpeech ? "Còn câu có lời gốc nhưng chưa có lời Việt; kiểm tra lời trước khi xuất đầy đủ." : "";
     if (btnReviewWorker) btnReviewWorker.disabled = !!pendingTaskAction || reviewInProgress() || automaticExportActive ||
       !!exportingTaskId || captionStyleDirty || !!captionStyleRequest || transcriptDrafts.size > 0 || pendingTranscriptSaves > 0;
     updateFullTranslationAvailability();

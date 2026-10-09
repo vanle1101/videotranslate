@@ -3782,6 +3782,25 @@ test('an intentionally empty reviewed translation does not revive a discarded dr
     final_vi:'',natural_vi:'nghe chưa rõ',literal_vi:'bản nháp cũ',text_zh:'原文',needs_review:true,
     verification:{status:'unresolved'},audio_url:null,revision:1});
   assert.equal(ui.el('seg-vi-0').textContent, 'Chưa đủ căn cứ để dịch câu này.');
+  ui.sockets.at(-1).receive({type:'progress', status:'PREPARED', phase:'prepared',
+    review_summary:{status:'completed', checked:1, unresolved:1}, can_review:true});
+  assert.equal(ui.el('btn-export-hq').disabled, true);
+  assert.match(ui.el('btn-export-hq').title, /chưa có lời Việt/);
+  assert.equal(ui.el('btn-review-worker').disabled, false);
+});
+
+test('the durable missing-speech gate disables full export until explicitly cleared', async () => {
+  const ui = studio(); await ui.start();
+  const socket = ui.sockets.at(-1);
+  socket.receive({type:'progress', status:'PREPARED', phase:'prepared', final_output_blocked:true,
+    missing_speech_ids:[120,121], content_review_state:'REVIEW_REQUIRED', can_review:true});
+  assert.equal(ui.el('btn-export-hq').disabled, true);
+  const modalWasHidden = ui.el('export-modal').classList.contains('hidden');
+  await ui.el('btn-export-hq').click();
+  assert.equal(ui.el('export-modal').classList.contains('hidden'), modalWasHidden);
+  socket.receive({type:'progress', status:'COMPLETED', phase:'complete', final_output_blocked:false,
+    missing_speech_ids:[], content_review_state:'NO_PENDING_REVIEW'});
+  assert.equal(ui.el('btn-export-hq').disabled, false);
 });
 
 test('a new run clears previous warnings and playable duration while resolving its source', async () => {
