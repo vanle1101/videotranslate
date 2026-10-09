@@ -1053,9 +1053,12 @@ def test_review_audio_uses_complete_reviewed_exchange_before_future_rows_commit(
     assert rows == untouched
     assert [row["id"] for row in received[0]] == [0, 1]
     if fail_first:
-        assert session.review_summary["status"] == "failed"
-        assert {sid: seg.to_dict() for sid, seg in session.segments.items()} == before
-        assert len(received) == 1
+        assert session.review_summary["status"] == "completed"
+        assert session.get_progress()["status"] == "FAILED" and not session.output_filename
+        assert first.status == "FAILED" and first.audio_path is None
+        assert first.final_vi == rows[0]["final_vi"] and first.text_zh == rows[0]["text_zh"]
+        assert later.status == "READY" and later.final_vi == rows[1]["final_vi"]
+        assert len(received) == 2, "One speech failure must not abort its independent sibling"
     else:
         assert session.review_summary["status"] == "completed"
         # The reviewed exchange is stable, while the focused ID is allowed to

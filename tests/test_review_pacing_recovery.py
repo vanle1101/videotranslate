@@ -486,9 +486,11 @@ def test_retirement_never_deletes_a_foreign_source_path(reviewed_session):
 
 
 @pytest.mark.parametrize("failure_kind", ["budget", "rejected_rewrite", "unmeasured_rewrite", "provider"])
+@pytest.mark.parametrize("chunked", [True, False])
 def test_review_audio_failure_retains_corrected_revision_and_only_measured_timing(
-        reviewed_session, monkeypatch, failure_kind):
+        reviewed_session, monkeypatch, failure_kind, chunked):
     session = reviewed_session
+    session._chunked_source_started = chunked
     focus = session.segments[112]
     old_path, old_bytes = focus.audio_path, Path(focus.audio_path).read_bytes()
     response = review_response()
@@ -519,17 +521,18 @@ def test_review_audio_failure_retains_corrected_revision_and_only_measured_timin
     assert focus.audio_path is None and focus.subtitle_cues == []
     assert Path(old_path).read_bytes() == old_bytes
     assert focus.error == str(error)
-    assert 112 in session._pacing_failures if measured else not session._pacing_failures
+    assert 112 in session._pacing_failures if measured and chunked else not session._pacing_failures
     if measured:
         assert focus.timing_issue["code"] == "TIMING_CONFLICT"
         assert focus.timing_issue["required_seconds"] == 1.398
-        record = session._pacing_failures[112]
-        assert record["candidate"] == focus.final_vi and record["revision"] == focus.revision
-        assert {row["id"]: row["text_zh"] for row in record["context"]} == {
-            112: "我真的不是回来", 113: "跟你开玩笑的"}
-        assert session._pacing_failure_owned(focus, record)
-        session.segments[113].text_zh = "A later independent source correction"
-        assert not session._pacing_failure_owned(focus, record)
+        if chunked:
+            record = session._pacing_failures[112]
+            assert record["candidate"] == focus.final_vi and record["revision"] == focus.revision
+            assert {row["id"]: row["text_zh"] for row in record["context"]} == {
+                112: "我真的不是回来", 113: "跟你开玩笑的"}
+            assert session._pacing_failure_owned(focus, record)
+            session.segments[113].text_zh = "A later independent source correction"
+            assert not session._pacing_failure_owned(focus, record)
     else:
         assert focus.timing_issue is None
     session.persist()

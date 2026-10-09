@@ -1144,7 +1144,7 @@ class StreamingPipelineSession:
                 except asyncio.CancelledError:
                     raise
                 except Exception as error:
-                    if not self._chunked_source_started or getattr(self, "_persistence_capacity_failed", False):
+                    if getattr(self, "_persistence_capacity_failed", False):
                         raise
                     if segment.revision != target_revisions[sid]:
                         continue
