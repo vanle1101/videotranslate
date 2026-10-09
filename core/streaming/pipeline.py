@@ -4,6 +4,7 @@ import time
 import subprocess
 import functools
 import logging
+import hashlib
 import math
 import uuid
 import os
@@ -2501,6 +2502,19 @@ class StreamingPipelineSession:
                                                "source_needs_review", "source_truncated")}
                 for row in (context or []) if isinstance(row, dict) and "id" in row]
 
+    @staticmethod
+    def _pacing_following_audio_identity(rows, source_end):
+        # Long retries may already have thousands of following WAVs. Retaining
+        # their whole set for every failure grows quadratically; only their
+        # measured identity needs to be compared before the finite recovery.
+        digest, count = hashlib.sha256(), 0
+        for row in rows:
+            if row["start"] >= source_end and row.get("audio_duration"):
+                identity = (row["id"], row["revision"], row.get("audio_path"), row["audio_duration"])
+                digest.update(repr(identity).encode("utf-8"))
+                count += 1
+        return count, digest.hexdigest()
+
     def _remember_pacing_failure(self, seg, error, context):
         """Keep measured, independently checked evidence for one later retry."""
         required = getattr(error, "required_dub_duration", None)
@@ -2520,8 +2534,7 @@ class StreamingPipelineSession:
             "context": self._pacing_source_context(context), "voice": self.voice,
             "engine": self.tts_engine, "tts_engine_name": self.tts_engine_name,
             "aligner": self.aligner, "max_speed": self.aligner.max_speed, "ref_audio": self.ref_audio,
-            "following_audio": {(row["id"], row["revision"], row.get("audio_path"), row["audio_duration"])
-                                for row in rows if row["start"] >= seg.end and row.get("audio_duration")},
+            "following_audio": self._pacing_following_audio_identity(rows, seg.end),
         }
 
     def _pacing_failure_owned(self, seg, record):
@@ -2554,10 +2567,9 @@ class StreamingPipelineSession:
                     or seg.audio_path or not self._pacing_failure_owned(seg, record)):
                 continue
             rows, _, capacity, known, _ = self._dub_fit_window(seg, self._dub_rows())
-            following = {(row["id"], row["revision"], row.get("audio_path"), row["audio_duration"])
-                         for row in rows if row["start"] >= seg.end and row.get("audio_duration")}
+            following = self._pacing_following_audio_identity(rows, seg.end)
             plan = plan_reflow(rows, sid, record["required"], total_duration=known)
-            if (not following - record["following_audio"] or capacity <= record["capacity"] + .001
+            if (not following[0] or following == record["following_audio"] or capacity <= record["capacity"] + .001
                     or capacity + 1e-9 < record["required"] or plan is None
                     or any((self.segments[identity].verification or {}).get("status") == "manual"
                            and (bounds["dub_start"], bounds["dub_end"]) != resolve_dub_timing(self.segments[identity].to_dict())

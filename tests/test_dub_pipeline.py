@@ -680,9 +680,8 @@ def test_final_pacing_recovery_keeps_ineligible_or_changed_rows(session, monkeyp
     elif change == "not_full_source":
         session._visual_prepass_complete = False
     elif change == "no_new_audio":
-        session._pacing_failures[1]["following_audio"] = {
-            (row["id"], row["revision"], row.get("audio_path"), row["audio_duration"])
-            for row in session._dub_rows() if row["start"] >= focus.end and row.get("audio_duration")}
+        session._pacing_failures[1]["following_audio"] = session._pacing_following_audio_identity(
+            session._dub_rows(), focus.end)
     else:
         write_pcm(successor.audio_path, .98)
     before = snapshot(session)
@@ -692,6 +691,17 @@ def test_final_pacing_recovery_keeps_ineligible_or_changed_rows(session, monkeyp
         assert vars(row) == before["segments"][sid]
         if row.audio_path:
             assert Path(row.audio_path).read_bytes() == before["audio"][row.audio_path]
+
+
+def test_long_retry_audio_identity_stays_bounded_and_detects_changed_waveforms(session):
+    def rows(revision=0):
+        return ({"id": sid, "start": float(sid), "revision": revision if sid == 9999 else 0,
+                 "audio_path": f"seg_{sid}.wav", "audio_duration": .4} for sid in range(10000))
+    identity = session._pacing_following_audio_identity(rows(), 1.)
+    assert identity[0] == 9999 and len(identity[1]) == 64
+    assert identity == session._pacing_following_audio_identity(rows(), 1.)
+    assert identity != session._pacing_following_audio_identity(rows(1), 1.)
+    assert session._pacing_following_audio_identity(rows(), 10000.)[0] == 0
 
 
 def test_final_pacing_recovery_keeps_manual_successor_timing(session, monkeypatch):
