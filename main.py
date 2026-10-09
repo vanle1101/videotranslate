@@ -14,7 +14,8 @@ from pathlib import Path
 from urllib.parse import quote
 from typing import Dict, Any, Optional, List, Literal
 from fastapi import FastAPI, UploadFile, File, Form, WebSocket, WebSocketDisconnect, HTTPException
-from fastapi.responses import HTMLResponse, FileResponse, Response
+from fastapi.responses import HTMLResponse, Response
+from core.services.file_response import FileResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from fastapi.requests import Request
