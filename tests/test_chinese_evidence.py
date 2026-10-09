@@ -84,9 +84,46 @@ def test_age_year_spelling_remains_audio_only_and_preserves_chinese_signs():
     assert not VideoIntelligence._ocr_supports_text('12岁', [{'text_zh': '十二岁'}])
 
 
+@pytest.mark.parametrize('a,b', [
+    ('90%。', '百分之九十'),  # Retained row107's actual two independent readings.
+    ('百分之零', '0%'), ('百分之〇', '0%'), ('百分之一', '1%'),
+    ('百分之十', '10%'), ('百分之一十', '10%'), ('百分之九十九', '99%'),
+    ('百分之百', '100%'), ('百分之一百', '100%'), ('百分之90', '90%'),
+    ('“百分之九十。”', '９０％.'),
+])
+def test_standalone_audio_percentage_spelling_is_exact(a, b):
+    assert comparable_audio_chinese(a) == comparable_audio_chinese(b)
+    assert AutomaticTranslationReviewer._audio_text(a) == AutomaticTranslationReviewer._audio_text(b)
+
+
+@pytest.mark.parametrize('a,b', [
+    ('百分之九十', '91%'), ('百分之九十', '90'), ('百分之九十', '090%'),
+    ('百分之九十', '-90%'), ('百分之九十', '+90%'), ('百分之九十', '−90%'),
+    ('-百分之九十', '90%'), ('+百分之九十', '90%'), ('负百分之九十', '90%'),
+    ('百分之九十', '90.0%'), ('百分之九十', '.90%'), ('百分之九十', '.90%.'),
+    ('百分之零', '.0%'), ('百分之九十点五', '90.5%'),
+    ('百分之一百零一', '101%'), ('百分之一千', '1000%'),
+    ('百分之九零', '90%'), ('百分之零九十', '90%'), ('百分之十十', '20%'),
+    ('百分之九十/一百', '90%'), ('百分之九十米', '90%'),
+    ('百分之九十的人', '90%的人'), ('增长百分之九十', '增长90%'),
+    ('王百分之九十', '王90%'), ('百分之九十王', '90%王'),
+    ('百，分之九十', '90%'), ('百分之九十', 'percentage90'),
+])
+def test_audio_percentage_equivalence_preserves_facts_format_and_name_boundaries(a, b):
+    assert comparable_audio_chinese(a) != comparable_audio_chinese(b)
+
+
+def test_percentage_spelling_equivalence_never_expands_ocr_scope():
+    assert comparable_chinese('百分之九十') == '百分之九十'
+    assert comparable_chinese('90%。') == '90%'
+    assert not VideoIntelligence._ocr_supports_text('百分之九十', [{'text_zh': '90%'}])
+    assert not VideoIntelligence._ocr_supports_text('90%', [{'text_zh': '百分之九十'}])
+
+
 @pytest.mark.parametrize('first,second,translation', [
     ('12岁在院子里洗澡。', '十二岁在院子里洗澡', 'Hồi mười hai tuổi tắm trong sân.'),
     ('25年以后。', '二十五年以后', 'Hai mươi lăm năm sau.'),
+    ('90%。', '百分之九十', 'Chín mươi phần trăm.'),
 ])
 def test_saved_actual_numeric_readings_reach_review_without_faking_a_source_disagreement(
         monkeypatch, first, second, translation):
@@ -113,6 +150,39 @@ def test_saved_actual_numeric_readings_reach_review_without_faking_a_source_disa
     assert result['text_zh'] == first  # Comparison never rewrites stored raw recognition.
     assert [item['text_zh'] for item in result['verification']['audio_evidence']] == [first, second]
     assert not result['needs_review']
+
+
+def test_equivalent_audio_percentage_still_requires_both_semantic_review_gates(monkeypatch):
+    from unittest.mock import Mock
+    from config import settings
+    monkeypatch.setattr(settings, 'LLM_PROVIDER', 'opencode')
+    row = {'id': 107, 'start': 165.0, 'end': 166.0, 'text_zh': '百分之九十',
+           'final_vi': 'Tất cả.', 'literal_vi': 'Tất cả.', 'natural_vi': 'Tất cả.',
+           'needs_review': True, 'review_reason': 'Two percentage spellings',
+           'verification': {'status': 'unresolved', 'source_supported': False}}
+    client = Mock(has_credentials=True, model='offline-percentage-review')
+    client.translate.side_effect = [
+        {'segments': [{**row, 'text_zh': '90%。', 'needs_review': False, 'review_reason': '',
+            'semantic_verified': True, 'verification_reason': 'First review candidate.'}],
+            'screen_texts': [], 'summary': ''},
+        {'segments': [{**row, 'text_zh': '90%。', 'needs_review': True,
+            'review_reason': 'Tất cả changes ninety percent into an absolute quantifier.',
+            'semantic_verified': False, 'verification_reason': 'Second review rejected the meaning.'}],
+            'screen_texts': [], 'summary': ''}]
+    evidence = Mock(collect=Mock(return_value={107: {
+        'sensevoice': '90%。', 'faster-whisper-small': '百分之九十'}}))
+    evidence.last_error = None
+    reviewer = AutomaticTranslationReviewer(client, Mock(), audio_evidence=evidence)
+    result = reviewer.resolve_audio_uncertainty('unused', {'segments': {107: row},
+        'screen_texts': [], 'translation_sources': [], 'summary': {}})['segments'][107]
+    assert client.translate.call_count == 2
+    assert result['verification']['audio_consensus'] is True
+    assert result['verification']['source_supported'] is True
+    assert result['verification']['semantic_verified'] is False
+    assert result['verification']['status'] == 'unresolved'
+    assert result['needs_review']
+    assert [item['text_zh'] for item in result['verification']['audio_evidence']] == [
+        '90%。', '百分之九十']
 
 
 def test_conflicting_actual_year_recognitions_do_not_reach_semantic_approval(monkeypatch):

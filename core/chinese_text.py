@@ -72,6 +72,26 @@ def _small_chinese_integer(text):
     return None
 
 
+def _standalone_audio_percentage(raw):
+    """Match an entire ordinary whole 0–100 percentage, never a name/token suffix."""
+    match = re.fullmatch(
+        r"[\s「『“‘\"'(（]*"
+        r"(?:百分之(?P<spoken>[0-9零〇一二三四五六七八九十百]+)|(?P<numeral>[0-9]+)%)"
+        r"[\s。！？，,；;!?\"'”’」』)）.]*", raw)
+    if match is None:
+        return None
+    value = match.group("spoken") or match.group("numeral")
+    if re.fullmatch(r"(?:0|[1-9][0-9]?|100)", value):
+        number = value
+    elif value in ("百", "一百"):
+        number = "100"
+    else:
+        number = _small_chinese_integer(value)
+    # A marked comparison key cannot collide with punctuation stripped from
+    # ineligible input such as '.90%' or a name. Raw recognition is untouched.
+    return f"percentage[{number}]" if number is not None else None
+
+
 def comparable_audio_chinese(value):
     """Allow exact numeric spellings without deciding what ASR meant.
 
@@ -80,8 +100,10 @@ def comparable_audio_chinese(value):
     normalize a whole bounded numeral immediately before 岁/年. Only an
     utterance start or an explicit text boundary is eligible; a numeral inside
     a name or adjoining Chinese word is left untouched. Larger numerals,
-    dates, decimals, signs and other units remain distinct. OCR substring
-    ownership deliberately continues using comparable_chinese.
+    dates, decimals, signs and other units remain distinct. Whole standalone
+    percentages also allow exact 百分之九十/90% spelling over 0–100; this does
+    not extend to embedded words, decimals, signs or unbounded numerals. OCR
+    substring ownership deliberately continues using comparable_chinese.
     """
     text = comparable_chinese(value)
     standalone = _small_chinese_integer(text)
@@ -90,6 +112,9 @@ def comparable_audio_chinese(value):
     if not isinstance(value, str):
         return text
     raw = simplified_text(value).replace("−", "-")
+    percentage = _standalone_audio_percentage(raw)
+    if percentage is not None:
+        return percentage
 
     def normalize(match):
         number = _small_chinese_integer(match.group(0))
