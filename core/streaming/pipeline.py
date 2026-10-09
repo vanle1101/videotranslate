@@ -2028,19 +2028,13 @@ class StreamingPipelineSession:
         }
 
     async def _run_ffmpeg(self, cmd):
-        proc = await asyncio.create_subprocess_exec(
-            *cmd, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
-            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
-        )
-        try:
-            _, stderr = await proc.communicate()
-        except asyncio.CancelledError:
-            if proc.returncode is None:
-                proc.kill()
-            await proc.wait()
-            raise
-        if proc.returncode:
-            raise RuntimeError(stderr.decode("utf-8", errors="replace")[-1500:])
+        from core.media_process import run_media
+        def prepare_media():
+            # The cancellation context covers both session Stop and direct
+            # cancellation of this waiter. _run_blocking drains the worker;
+            # run_media kills/reaps its child before temporary files can go.
+            run_media(cmd, current_execution_context().cancel_check)
+        await self._run_blocking(prepare_media)
 
     async def _run_blocking(self, function, *args, **kwargs):
         """Cancellation cannot kill a Python worker thread; wait before removing its files."""

@@ -121,6 +121,7 @@ class ServiceManager:
 
         import uvicorn
         from main import app
+        from core.services.backend_runtime import run_backend_server
 
         config = uvicorn.Config(
             app=app,
@@ -129,7 +130,7 @@ class ServiceManager:
             log_level="warning",
             access_log=False,
             log_config=None,
-            loop="asyncio",
+            loop="none",
             timeout_graceful_shutdown=3,
         )
         self.uvicorn_server = uvicorn.Server(config)
@@ -137,7 +138,7 @@ class ServiceManager:
         def _run_server():
             logger.info("Internal uvicorn server thread started.")
             try:
-                self.uvicorn_server.run()
+                run_backend_server(self.uvicorn_server)
             except Exception as e:
                 logging.getLogger("errors").error(f"Uvicorn server crashed: {e}")
             logger.info("Internal uvicorn server thread terminated.")
