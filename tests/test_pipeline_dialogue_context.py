@@ -74,6 +74,32 @@ def test_asr_only_future_source_stays_marked_uncertain():
     assert context[1]["source_needs_review"] is True
 
 
+def test_source_context_identity_changes_when_owned_speaker_proof_changes():
+    current = _segment(0, 0, "我不是回来开玩笑的", "Không phải về để đùa.")
+    session = _session(current)
+    original = session._visual_source_context_identity()
+    current.speaker_id = "measured-speaker-a"
+    current.speaker_evidence = {"method": "audio", "confidence": .9}
+    grounded = session._visual_source_context_identity()
+    assert original != grounded
+    current.speaker_evidence["confidence"] = .5
+    assert session._visual_source_context_identity() != grounded
+    current.speaker_evidence["confidence"] = .9
+    assert session._visual_source_context_identity() == grounded
+
+
+def test_deferred_pacing_context_keeps_detached_speaker_and_utterance_proof():
+    row = {"id": 0, "start": 0., "end": 1., "text_zh": "我",
+           "speaker_id": "a", "speaker_evidence": {"method": "audio", "confidence": .9},
+           "utterance_id": "turn-0", "source_asr_start": 0., "source_asr_end": 1.}
+    saved = StreamingPipelineSession._pacing_source_context([row])
+    assert saved[0]["speaker_id"] == "a" and saved[0]["utterance_id"] == "turn-0"
+    assert saved[0]["source_asr_end"] == 1.
+    row["speaker_evidence"]["confidence"] = .2
+    assert saved[0]["speaker_evidence"]["confidence"] == .9
+    assert saved != StreamingPipelineSession._pacing_source_context([row])
+
+
 def test_review_snapshot_keeps_session_timeline_and_does_not_publish_future_source():
     current = _segment(0, 0, "这话应该我来问吧", "Bản cũ")
     later = _segment(1, 1, "错误识别", "Câu sau cũ")

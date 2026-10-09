@@ -920,6 +920,15 @@ class StreamingPipelineSession:
                     segment.speech_start = segment.speech_end = None
                     segment.subtitle_timing_source = "pending"
                     segment._retry_synthesis = True
+                    segment.timing_issue = None
+                    if isinstance(error, (SpeechBudgetError, PacingReviewRejected)):
+                        # Record the corrected text/source revision, rather than
+                        # the pre-review draft which edit_segment kept atomic.
+                        # The frozen reviewed exchange includes later source
+                        # corrections that are not yet published in this loop.
+                        self._remember_pacing_failure(segment, error,
+                            self._dialogue_context_before(segment,
+                                _review_context=review_context))
                     self._invalidate_output()
                     logging.getLogger("errors").error(
                         "[%s] REVIEW_AUDIO_DEFERRED segment_id=%s error_type=%s",
@@ -1292,7 +1301,9 @@ class StreamingPipelineSession:
         from core.video_intelligence import VideoIntelligence
         return VideoIntelligence._checkpoint_digest([
             {"id": item.id, "start": item.start, "end": item.end,
-             "text_zh": item.text_zh, "asr_text": item.asr_text}
+             "text_zh": item.text_zh, "asr_text": item.asr_text,
+             **{name: deepcopy(value) for name in SOURCE_METADATA_FIELDS
+                if (value := getattr(item, name, None)) is not None}}
             for item in sorted(self.segments.values(), key=lambda value: (value.start, value.id))])
 
     async def _publish_visual_chunk(self, result, start, end):
@@ -2754,8 +2765,9 @@ class StreamingPipelineSession:
 
     @staticmethod
     def _pacing_source_context(context):
-        return [{key: row.get(key) for key in ("id", "start", "end", "text_zh", "asr_text",
-                                               "source_needs_review", "source_truncated")}
+        return [{**{key: row.get(key) for key in ("id", "start", "end", "text_zh", "asr_text",
+                                               "source_needs_review", "source_truncated")},
+                 **{name: deepcopy(row[name]) for name in SOURCE_METADATA_FIELDS if name in row}}
                 for row in (context or []) if isinstance(row, dict) and "id" in row]
 
     @staticmethod
