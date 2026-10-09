@@ -23,6 +23,9 @@ from core.video_intelligence import VideoIntelligence, VideoIntelligenceError
 from core.runtime_context import current_execution_context
 from core.review_checkpoint import ReviewCheckpoint
 from core.chinese_text import comparable_chinese, comparable_audio_chinese
+from core.structured_response import (
+    validate_schema, request_structured, TRANSLATION_SCHEMA, ADDRESS_SCHEMA, schema_attempts,
+)
 from core.translation_context import (
     VIETNAMESE_ADDRESS_POLICY, dialogue_context, needs_address_audit, contains_address_expression,
     address_expressions,
@@ -155,7 +158,20 @@ class AutomaticTranslationReviewer:
         # Retry malformed structured replies without repeating the local OCR.
         # Authentication/transport errors propagate; invalid data never passes.
         syntax_location = None
-        for attempt in range(3):
+
+        def validate(raw):
+            data = VideoIntelligence._parse_json(raw)
+            validate_schema(data, TRANSLATION_SCHEMA, error_type=VideoIntelligenceError)
+            validated = VideoIntelligence.validate_result(data, batch, lo, hi, [])
+            if extra_validate is not None:
+                extra_validate(data)
+            return data, validated
+
+        attempts = schema_attempts(2)
+        schema_id = ("semantic-review-ocr-v1"
+            if extra_validate is AutomaticTranslationReviewer._require_ocr_semantic_fields
+            else "semantic-review-v1" if extra_validate else "timed-translation-v1")
+        for attempt in range(attempts):
             check()
             try:
                 retry_prompt = prompt
@@ -167,46 +183,50 @@ class AutomaticTranslationReviewer:
                         "address_applicable, address_neutral_faithful nếu có phải là boolean; "
                         "address_reason phải là chuỗi. address_uses chỉ gồm term và role self/listener "
                         "cho cách tự xưng/gọi người nghe thực sự có trong bản Việt. Không thêm vai "
-                        "reference cho người thứ ba; không có cách xưng hô thì dùng mảng rỗng.")
+                        "reference cho người thứ ba; không có cách xưng hô thì dùng mảng rỗng. "
+                        "Không đánh address_applicable=true khi không dùng cách tự xưng/gọi người nghe nào. "
+                        "Bản Việt trung tính vẫn phải giữ đầy đủ nghĩa; nếu bỏ chủ thể hoặc quan hệ quan trọng "
+                        "thì address_neutral_faithful=false, semantic_verified=false và needs_review=true.")
                     if syntax_location is not None:
                         retry_prompt += (f" JSON trước sai cú pháp tại dòng {syntax_location[0]}, "
                             f"cột {syntax_location[1]}. Kiểm tra dấu đóng đối tượng/mảng, đặc biệt "
                             "sau address_uses: đóng mảng cách gọi, đóng đúng một segment, rồi mới "
                             "đến segment tiếp hoặc đóng mảng segments. Escape đúng mọi chuỗi. "
                             "Trả một đối tượng JSON mới đầy đủ; không trả bản vá hoặc lời giải thích.")
-                raw = client.translate(retry_prompt, max_tokens=10000)
-            except Exception as error:
+                raw, (data, validated) = request_structured(client, retry_prompt, validate,
+                    schema_id=schema_id,
+                    task_kind="semantic_review", max_tokens=10000, attempt=attempt + 1)
                 check()
-                AutomaticTranslationReviewer._diagnostic(error, "semantic_request", batch)
-                raise
-            check()
-            try:
-                data = VideoIntelligence._parse_json(raw)
-                validated = VideoIntelligence.validate_result(data, batch, lo, hi, [])
-                if extra_validate is not None:
-                    extra_validate(data)
                 return data, validated
             except VideoIntelligenceError as error:
+                check()
+                raw = getattr(error, "raw_response", None)
                 syntax = error.__cause__ if isinstance(error.__cause__, json.JSONDecodeError) else None
                 syntax_location = (syntax.lineno, syntax.colno) if syntax else None
                 logging.getLogger("ai").warning(
                     "REVIEW_RESPONSE_INVALID run_id=%s attempt=%s response_chars=%s error_type=%s requested_ids=%s code=%s line=%s column=%s",
                     current_execution_context().run_id, attempt + 1, len(raw) if isinstance(raw, str) else 0,
                     type(error).__name__, [row["id"] for row in batch],
-                    "invalid_json" if syntax else "invalid_schema",
+                    error.code,
                     syntax.lineno if syntax else None, syntax.colno if syntax else None)
-                if attempt == 2:
+                if attempt == attempts - 1:
                     AutomaticTranslationReviewer._diagnostic(error, "semantic_schema", batch)
                     raise
+            except Exception as error:
+                check()
+                AutomaticTranslationReviewer._diagnostic(error, "semantic_request", batch)
+                raise
 
     @staticmethod
     def _require_semantic_fields(data):
         """Keep required audit fields inside the bounded schema retry."""
         for row in data.get("segments", []):
             if not isinstance(row.get("semantic_verified"), bool):
-                raise VideoIntelligenceError("Kết luận ngữ nghĩa không hợp lệ.")
+                raise VideoIntelligenceError("Kết luận ngữ nghĩa không hợp lệ.",
+                    code="missing_field" if "semantic_verified" not in row else "invalid_type")
             if not isinstance(row.get("verification_reason"), str):
-                raise VideoIntelligenceError("Lý do kiểm định không hợp lệ.")
+                raise VideoIntelligenceError("Lý do kiểm định không hợp lệ.",
+                    code="missing_field" if "verification_reason" not in row else "invalid_type")
             AutomaticTranslationReviewer._require_address_fields(row)
             if "address_uses" in row:
                 row["address_uses"] = [{"term": use["term"], "role": use["role"]}
@@ -222,20 +242,29 @@ class AutomaticTranslationReviewer:
         """
         for key in ("address_applicable", "address_neutral_faithful", "address_verified"):
             if key in row and type(row[key]) is not bool:
-                raise VideoIntelligenceError("Kết luận xưng hô không hợp lệ.")
+                raise VideoIntelligenceError("Kết luận xưng hô không hợp lệ.", code="invalid_type")
         if "address_reason" in row and (not isinstance(row["address_reason"], str)
                 or len(row["address_reason"]) > 100_000 or "\x00" in row["address_reason"]):
-            raise VideoIntelligenceError("Lý do xưng hô không hợp lệ.")
+            raise VideoIntelligenceError("Lý do xưng hô không hợp lệ.",
+                code="invalid_type" if not isinstance(row["address_reason"], str) else "invalid_content")
         if "address_uses" not in row:
             return
         uses = row["address_uses"]
         if not isinstance(uses, list) or len(uses) > 10000:
-            raise VideoIntelligenceError("Các cách xưng hô đã dùng không hợp lệ.")
+            raise VideoIntelligenceError("Các cách xưng hô đã dùng không hợp lệ.",
+                code="invalid_type" if not isinstance(uses, list) else "invalid_content")
         for use in uses:
             if (not isinstance(use, dict) or not isinstance(use.get("term"), str)
                     or not use["term"].strip() or len(use["term"]) > 100 or "\x00" in use["term"]
                     or use.get("role") not in ("self", "listener")):
                 raise VideoIntelligenceError("Cách xưng hô đã dùng thiếu từ hoặc vai hợp lệ.")
+        if (row.get("address_applicable") is True and not uses
+                and isinstance(row.get("final_vi"), str) and not address_expressions(row["final_vi"])):
+            # An empty declared usage list and neutral wording contradict a
+            # positive applicability claim. Request a fresh verdict; do not
+            # flip the claim or use OCR agreement to settle a relationship.
+            raise VideoIntelligenceError(
+                "address_applicable=true mâu thuẫn với address_uses rỗng và lời Việt không có cách xưng hô.")
 
     @staticmethod
     def _require_ocr_semantic_fields(data):
@@ -244,7 +273,9 @@ class AutomaticTranslationReviewer:
             refs = row.get("source_evidence_ids")
             if (not isinstance(refs, list) or len(refs) > 100
                     or any(not isinstance(ref, str) for ref in refs)):
-                raise VideoIntelligenceError("Danh sách dẫn chứng kiểm định không hợp lệ.")
+                raise VideoIntelligenceError("Danh sách dẫn chứng kiểm định không hợp lệ.",
+                    code="missing_field" if "source_evidence_ids" not in row else
+                         "invalid_type" if not isinstance(refs, list) else "invalid_content")
 
     @staticmethod
     def _address_reading(client, batch, context, check, checkpoint=None):
@@ -273,16 +304,28 @@ class AutomaticTranslationReviewer:
             except ValueError:
                 pass
         prompt = address_reading_prompt(batch, context)
-        for attempt in range(2):
+
+        def validate(raw):
+            data = VideoIntelligence._parse_json(raw)
+            validate_schema(data, ADDRESS_SCHEMA, error_type=VideoIntelligenceError)
+            try:
+                reading = validate_address_reading(data, batch, context, require_turn_check=True)
+            except ValueError as error:
+                raise VideoIntelligenceError(str(error), code="invalid_content") from error
+            return data, reading
+
+        attempts = schema_attempts(1)
+        for attempt in range(attempts):
             check()
             logging.getLogger("ai").info("ADDRESS_CONTEXT_REQUEST run_id=%s segment_ids=%s attempt=%s",
                 current_execution_context().run_id, [row["id"] for row in batch], attempt + 1)
-            raw = client.translate(prompt, max_tokens=7000)
-            check()
             try:
-                data = VideoIntelligence._parse_json(raw)
-                reading = validate_address_reading(data, batch, context, require_turn_check=True)
+                raw, (data, reading) = request_structured(client, prompt, validate,
+                    schema_id="address-evidence-v1", task_kind="address_review", max_tokens=7000, attempt=attempt + 1)
+                check()
             except (ValueError, VideoIntelligenceError) as error:
+                check()
+                raw = getattr(error, "raw_response", None)
                 # The validator's fixed messages contain no provider response
                 # or credentials. Preserve the actual rejection instead of
                 # retrying the identical request with no diagnostic.
@@ -290,9 +333,9 @@ class AutomaticTranslationReviewer:
                 logging.getLogger("ai").warning(
                     "ADDRESS_CONTEXT_INVALID run_id=%s segment_ids=%s attempt=%s code=%s output_chars=%s line=%s column=%s validation=%s",
                     current_execution_context().run_id, [row["id"] for row in batch], attempt + 1,
-                    "invalid_json" if syntax else "invalid_schema", len(raw) if isinstance(raw, str) else 0,
+                    getattr(error, "code", "invalid_content"), len(raw) if isinstance(raw, str) else 0,
                     syntax.lineno if syntax else None, syntax.colno if syntax else None, str(error))
-                if attempt:
+                if attempt == attempts - 1:
                     raise VideoIntelligenceError("AI chưa trả kết luận ngữ cảnh xưng hô có dẫn chứng hợp lệ.") from error
                 prompt += ("\nLƯỢT TRƯỚC KHÔNG QUA KIỂM TRA CẤU TRÚC: " + str(error)
                     + ". Hãy trả lại toàn bộ đúng schema, mỗi ID cần kiểm định đúng một lần. "
@@ -947,6 +990,7 @@ class AutomaticTranslationReviewer:
         try:
             for raw in (record["first"], record["second"]):
                 parsed = VideoIntelligence._parse_json(raw)
+                validate_schema(parsed, TRANSLATION_SCHEMA, error_type=VideoIntelligenceError)
                 validated = VideoIntelligence.validate_result(parsed, batch, lo, hi, [])
                 AutomaticTranslationReviewer._require_ocr_semantic_fields(parsed)
             return parsed, validated
