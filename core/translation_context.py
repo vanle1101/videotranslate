@@ -10,7 +10,7 @@ import json
 import re
 
 
-ADDRESS_POLICY_REVISION = 6
+ADDRESS_POLICY_REVISION = 7
 
 VIETNAMESE_ADDRESS_POLICY = """
 QUY TẮC XƯNG HÔ THEO NGỮ CẢNH (áp dụng cả dịch, kiểm định và rút gọn lời đọc):
@@ -174,7 +174,20 @@ def address_expressions(candidate):
     Selection and verification must use the same vocabulary. Remove ordinary
     noun/third-person spans only, preserving any other pronoun in the sentence.
     """
-    text = re.sub(r"\b(?:cô ấy|anh ấy|chị ấy|ông ấy|bà ấy|cậu ấy)\b", "", str(candidate or ""), flags=re.I)
+    text = str(candidate or "")
+    # An explicitly possessed kinship noun is a reference, not self/listener
+    # address. Remove only the noun head before ``của``; the owner's pronoun
+    # still needs its own audit. An unambiguous third-person owner also allows
+    # the ordinary Vietnamese form without ``của`` (``con gái cậu ấy``).
+    # Direct calls and bare/ambiguous kinship words remain selected. This is
+    # grammatical selection only: independent semantic review must still
+    # verify the source relationship and the faithful neutral wording.
+    kinship = r"(?:con\s+(?:gái|trai)|anh\s+trai|chị\s+gái|em\s+(?:gái|trai)|bố|ba|mẹ|má)"
+    third_person = r"(?:cô|anh|chị|ông|bà|cậu)\s+ấy"
+    text = re.sub(r"(?<!\w)" + kinship + r"\s+(?:của\s+)?" + third_person + r"(?!\w)",
+                  "", text, flags=re.I)
+    text = re.sub(r"(?<!\w)" + kinship + r"(?=\s+của\s)", "", text, flags=re.I)
+    text = re.sub(r"\b(?:cô ấy|anh ấy|chị ấy|ông ấy|bà ấy|cậu ấy)\b", "", text, flags=re.I)
     text = re.sub(r"\bcon\s+(?:mèo|vật|số|đường|người)\b", "", text, flags=re.I)
     text = re.sub(r"\bmột\s+mình\b", "", text, flags=re.I)
     # A small set of unambiguous numeric-unit spans is not an address. Keep

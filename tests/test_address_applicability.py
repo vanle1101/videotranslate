@@ -353,9 +353,38 @@ def test_kinship_references_cannot_bypass_source_grounded_role_schema():
     reading = {10: {"uncertain": True}}
     audit = {"address_applicable": False, "address_neutral_faithful": True,
         "semantic_verified": True, "address_reason": "Provider gọi đây là lời kể."}
-    for candidate in ("Con gái cậu ấy.", "Mẹ của cô ấy.", "Anh Dã là bạn trên mạng."):
+    for candidate in ("Con gái!", "Mẹ!", "Anh Dã là bạn trên mạng."):
         assert contains_address_expression(candidate)
         assert AutomaticTranslationReviewer._address_gate(reading, 10, audit, "他女儿", candidate)
+
+
+@pytest.mark.parametrize("candidate,terms", [
+    ("Đúng là con gái cậu ấy à?", []),
+    ("Mẹ của cô ấy rất xinh.", []),
+    ("Bố anh ấy đến rồi.", []),
+    ("Chị gái của cậu ấy đến rồi.", []),
+    ("Con gái của tôi đến rồi.", ["tôi"]),
+    ("Mẹ của em gọi chị.", ["em", "chị"]),
+    ("Mẹ ơi, con gái cậu ấy về rồi.", ["Mẹ"]),
+    ("Con gái, cậu ấy gọi con.", ["Con", "con"]),
+    ("Mẹ em đến rồi.", ["Mẹ", "em"]),
+])
+def test_explicit_possessive_reference_does_not_invent_self_or_listener(candidate, terms):
+    assert address_expressions(candidate) == terms
+
+
+def test_actual_third_person_kinship_still_requires_independent_neutral_semantic_verdict():
+    reading = {74: {"uncertain": True}}
+    audit = {"address_applicable": False, "address_neutral_faithful": True,
+        "semantic_verified": True,
+        "address_reason": "你真是他女儿 hỏi đúng người nghe có phải con gái người thứ ba; không chọn cách gọi người nghe."}
+    assert not AutomaticTranslationReviewer._address_gate(
+        reading, 74, audit, "你真是他女儿", "Đúng là con gái cậu ấy à?")
+    for key in ("address_neutral_faithful", "semantic_verified"):
+        assert AutomaticTranslationReviewer._address_gate(
+            reading, 74, {**audit, key: False}, "你真是他女儿", "Đúng là con gái cậu ấy à?")
+    assert AutomaticTranslationReviewer._address_gate(
+        reading, 74, audit, "你真是他女儿", "Em đúng là con gái cậu ấy à?")
 
 
 def test_full_review_recovers_actual_grounded_cogai_phrase(monkeypatch):
