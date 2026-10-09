@@ -352,6 +352,54 @@ def test_corrupt_manifest_is_listed_but_cannot_open(persisted):
         restore_saved_session(persisted.task_id)
 
 
+def test_history_excluded_manifest_is_never_read_or_media_validated(persisted, monkeypatch):
+    from core.streaming import session_store as store
+    original_read = store._read
+    read_ids = []
+    audio_checks = Mock(wraps=store._valid_row_audio)
+    def read(task_id):
+        read_ids.append(task_id)
+        assert task_id != persisted.task_id
+        return original_read(task_id)
+    monkeypatch.setattr(store, "_read", read)
+    monkeypatch.setattr(store, "_valid_row_audio", audio_checks)
+    store._project_path("inactive-corrupt").write_text("{", encoding="utf-8")
+
+    rows = list_saved_sessions(excluded_task_ids={persisted.task_id})
+    assert read_ids == ["inactive-corrupt"]
+    assert audio_checks.call_count == 0
+    assert len(rows) == 1
+    assert rows[0]["task_id"] == "inactive-corrupt" and rows[0]["status"] == "FAILED"
+
+
+@pytest.mark.parametrize("damage", ["missing", "corrupt"])
+def test_exclusion_preserves_inactive_saved_audio_validation(persisted, damage):
+    from core.streaming import session_store as store
+    audio = Path(persisted.segments[0].audio_path)
+    if damage == "missing":
+        audio.unlink()
+    else:
+        audio.write_bytes(b"not audio")
+    store._project_path("already-listed").write_text("{", encoding="utf-8")
+
+    row, = list_saved_sessions(excluded_task_ids={"already-listed"})
+    assert row["task_id"] == persisted.task_id
+    assert row["status"] != "COMPLETED" and not row["output_video_url"]
+    assert "Thiếu âm thanh của 1 câu" in row["missing_media"]
+
+
+def test_history_freezes_exclusion_before_filesystem_iteration(persisted, monkeypatch):
+    excluded = {persisted.task_id}
+    original_glob = Path.glob
+    def glob(path, pattern):
+        excluded.clear()
+        return original_glob(path, pattern)
+    monkeypatch.setattr(Path, "glob", glob)
+
+    assert list_saved_sessions(excluded_task_ids=excluded) == []
+    assert excluded == set()
+
+
 def test_concurrent_history_restore_returns_one_registered_owner(persisted, monkeypatch):
     from concurrent.futures import ThreadPoolExecutor
     import threading

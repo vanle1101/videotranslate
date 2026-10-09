@@ -662,8 +662,8 @@ async def list_tasks():
         if not any(t["task_id"] == hist["task_id"] for t in tasks):
             tasks.append(hist)
 
-    existing = {task["task_id"] for task in tasks}
-    saved_sessions = await asyncio.to_thread(list_saved_sessions)
+    existing = frozenset(task["task_id"] for task in tasks)
+    saved_sessions = await asyncio.to_thread(list_saved_sessions, excluded_task_ids=existing)
     for saved in saved_sessions:
         if saved["task_id"] not in existing:
             tasks.append({**saved, "saved": True, "task_type": "Phiên đã lưu",

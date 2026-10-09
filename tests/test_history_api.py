@@ -81,7 +81,7 @@ def test_removed_source_is_reported_in_history(saved_project):
 
 def test_history_media_probe_runs_off_event_loop(saved_project, monkeypatch):
     entered, release = threading.Event(), threading.Event()
-    def blocked_history():
+    def blocked_history(*, excluded_task_ids=()):
         entered.set()
         release.wait(3)
         return []
@@ -107,6 +107,40 @@ def test_history_media_probe_runs_off_event_loop(saved_project, monkeypatch):
         assert isinstance((await listing)["tasks"], list)
 
     asyncio.run(run())
+
+
+def test_task_listing_excludes_live_ids_before_reading_saved_manifest(saved_project, monkeypatch):
+    import core.streaming.session_store as store
+    session = saved_project
+    active_streaming_sessions[session.task_id] = session
+    original_read = store._read
+    read_ids = []
+    def read(task_id):
+        read_ids.append(task_id)
+        return original_read(task_id)
+    monkeypatch.setattr(store, "_read", read)
+
+    rows = asyncio.run(main.list_tasks())["tasks"]
+    assert [row["task_id"] for row in rows] == [session.task_id]
+    assert session.task_id not in read_ids
+    assert rows[0]["task_type"] == "Realtime Dubbing"
+
+
+def test_task_listing_passes_frozen_ids_already_present_in_snapshot(saved_project, monkeypatch):
+    session = saved_project
+    active_streaming_sessions[session.task_id] = session
+    main.active_export_tasks["export-fixture"] = {"status": "RUNNING"}
+    main.task_history.append({"task_id": "history-fixture", "status": "STOPPED"})
+    observed = []
+    def saved_rows(*, excluded_task_ids):
+        observed.append(excluded_task_ids)
+        assert isinstance(excluded_task_ids, frozenset)
+        return []
+    monkeypatch.setattr(main, "list_saved_sessions", saved_rows)
+
+    result = asyncio.run(main.list_tasks())["tasks"]
+    assert observed == [frozenset({session.task_id, "export-fixture", "history-fixture"})]
+    assert {row["task_id"] for row in result} == set(observed[0])
 
 
 @pytest.mark.parametrize("damage", ["missing", "corrupt", "foreign"])

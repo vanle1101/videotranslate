@@ -955,13 +955,17 @@ def _availability(data):
             "missing_audio_ids": absent_audio, "output_filename": output if valid_output and ready else ""}
 
 
-def list_saved_sessions():
+def list_saved_sessions(*, excluded_task_ids=()):
+    # The task list already has live/runtime rows for these IDs. Skip their
+    # manifests before decompression, schema validation and WAV inspection.
+    # Freeze the caller's snapshot before iterating on the history thread.
+    excluded = frozenset(excluded_task_ids)
     root = _project_path("index").parent
     result = []
     if not root.exists():
         return result
     for path in root.glob("*.json"):
-        if not ID_PATTERN.fullmatch(path.stem):
+        if path.stem in excluded or not ID_PATTERN.fullmatch(path.stem):
             continue
         try:
             data = _read(path.stem)
