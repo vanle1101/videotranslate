@@ -561,6 +561,14 @@ không thay một chi tiết cụ thể bằng cảm giác chung mà người ng
 Không rút thuật ngữ thành cụm sai nghĩa, không bỏ động từ hoặc quan hệ ngữ pháp
 thành danh sách từ khóa. Số và đơn vị phải đọc được đầy đủ, không dùng viết tắt
 để giả vờ đã rút ngắn thời lượng.
+Xét câu như một lượt trong mạch hỏi–đáp nguồn, không như câu đứng riêng. Ngữ cảnh
+được xác định người/đối tượng và chức năng hội thoại: câu hỏi lý do, hỏi có–không,
+lời từ chối, lời đáp. Câu đáp Việt có thể tỉnh lược phần đã có trong câu hỏi khi
+vẫn giữ rõ đúng hành vi hội thoại, không đổi lời từ chối thành phủ định một sự việc.
+Cấu trúc hỏi A不A của tiếng Trung là câu hỏi có–không, không phải một khẳng định
+phủ định; giữ chức năng hỏi và sắc thái, không bắt buộc một từ Việt cho từng chữ.
+Không dùng ngữ cảnh để bù mất một sự kiện, phủ định khẳng định, số, mức độ,
+đối lập chủ thể, nhấn mạnh, lời gọi hoặc mức lịch sự có riêng trong câu đang xét.
 Nếu không thể rút mà vẫn đúng nghĩa, trả lại câu nháp và needs_review=true.
 {VIETNAMESE_ADDRESS_POLICY}
 needs_review ở bước này đánh giá chính câu đề xuất: chưa biết quan hệ nhân vật
@@ -622,6 +630,12 @@ Trả duy nhất JSON: {{"literal_vi":"...","natural_vi":"...","final_vi":"...",
               'Không tự đổi em thành chị hoặc con thành tôi chỉ để rút nhịp; false nếu còn nghi ngờ. '
               'Cho phép tỉnh lược đại từ theo ngữ pháp hội thoại Việt khi nguồn/ngữ cảnh xác định '
               'người làm và người nhận mà candidate vẫn giữ đủ hành động, thái độ và nghĩa. '
+              'Dùng các câu nguồn lân cận để xác định chức năng hỏi–đáp và tỉnh lược có căn cứ, '
+              'không để bù sự kiện, phủ định khẳng định, số, mức độ, đối lập hoặc nhấn mạnh bị bỏ. '
+              'Đánh giá câu hỏi ngắn theo chức năng thực có trong cuộc thoại; không đòi một từ Việt '
+              'cố định cho mỗi chữ Trung. Cấu trúc hỏi A不A không khẳng định phủ định. '
+              'Một lời từ chối có thể lược động từ đã rõ trong câu hỏi nếu vẫn rõ hành vi từ chối, '
+              'không biến thành câu phủ định sự việc hay mất một hành động riêng. '
               'Phải giải thích rõ vai nào được lược và vì sao không đổi nghĩa; không yêu cầu '
               'mỗi đại từ Trung có một từ Việt tương ứng. Không cho phép lược chủ thể được '
               'nhấn mạnh/đối lập, người thứ ba hoặc lời gọi. Chưa biết quan hệ xã hội không '

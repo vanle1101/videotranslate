@@ -670,6 +670,28 @@ def test_neutral_ellipsis_passes_only_after_independent_address_safe_verdict(mon
     assert review_input["candidate"] == candidate
 
 
+def test_contextual_question_function_is_explained_without_dropping_emphasis_or_fact_guards(monkeypatch):
+    translator = SemanticTranslator(provider="opencode")
+    context = [
+        {"id": 135, "start": 1., "end": 2., "text_zh": "今天晚上他哪都不能去", "final_vi": "Tối nay anh ấy không được đi đâu hết."},
+        {"id": 136, "start": 2., "end": 2.62, "text_zh": "为什么", "final_vi": "Sao thế?", "is_focus": True},
+        {"id": 137, "start": 2.62, "end": 5., "text_zh": "因为他会犯错误", "final_vi": "Vì anh ấy sẽ phạm sai lầm."},
+    ]
+    request = Mock(side_effect=[rewrite_response("Sao?"),
+        json.dumps({"equivalent": True, "natural": True, "address_preserved": True,
+            "reason": "Câu hỏi sau lời cấm và trước 因为 vẫn hỏi lý do, không thêm xưng hô."}),
+        json.dumps({"natural": True, "reason": "Lượt hỏi ngắn vẫn rõ trong lời đáp liền sau."})])
+    monkeypatch.setattr(translator, "_opencode_request", request)
+    result = translator.rewrite_for_pacing("为什么", "Sao thế?", .62, context)
+    assert result["final_vi"] == "Sao?" and request.call_count == 3
+    system = request.call_args_list[1].args[0]
+    assert "chức năng hỏi–đáp" in system and "A不A không khẳng định phủ định" in system
+    assert "nhấn mạnh bị bỏ" in system and "Không dùng previous" in system
+    payload = json.loads(request.call_args_list[1].args[1])
+    assert payload["target"]["id"] == 136
+    assert "今天晚上他哪都不能去" in payload["context"] and "因为他会犯错误" in payload["context"]
+
+
 @pytest.mark.parametrize("field", ["equivalent", "natural", "address_preserved"])
 @pytest.mark.parametrize("value", [False, None, "true"])
 def test_neutral_ellipsis_does_not_bypass_any_independent_gate(monkeypatch, field, value):
