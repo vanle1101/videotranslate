@@ -128,6 +128,55 @@ def test_corrupt_manifest_is_listed_but_cannot_open(persisted):
         restore_saved_session(persisted.task_id)
 
 
+def test_concurrent_history_restore_returns_one_registered_owner(persisted, monkeypatch):
+    from concurrent.futures import ThreadPoolExecutor
+    import threading
+    import core.streaming.session_store as store
+    original_read = store._read
+    entered, second_entered, second_started, release = (threading.Event() for _ in range(4))
+    count_lock = threading.Lock()
+    reads = []
+    def delayed_read(task_id):
+        with count_lock:
+            reads.append(task_id)
+            (entered if len(reads) == 1 else second_entered).set()
+        assert release.wait(5)
+        return original_read(task_id)
+    monkeypatch.setattr(store, "_read", delayed_read)
+    def second_restore():
+        second_started.set()
+        return store.restore_saved_session(persisted.task_id)
+    with ThreadPoolExecutor(max_workers=2) as workers:
+        first = workers.submit(store.restore_saved_session, persisted.task_id)
+        assert entered.wait(3)
+        second = workers.submit(second_restore)
+        assert second_started.wait(3)
+        second_entered.wait(.1)
+        release.set()
+        first_owner, second_owner = first.result(5), second.result(5)
+    assert first_owner is second_owner
+    assert active_streaming_sessions[persisted.task_id] is first_owner
+    assert reads == [persisted.task_id]
+
+
+def test_restore_failure_releases_ownership_for_a_real_retry(persisted, monkeypatch):
+    import core.streaming.session_store as store
+    original_read = store._read
+    attempts = []
+    def retryable_read(task_id):
+        attempts.append(task_id)
+        if len(attempts) == 1:
+            raise OSError("Controlled file-sharing failure")
+        return original_read(task_id)
+    monkeypatch.setattr(store, "_read", retryable_read)
+    with pytest.raises(OSError):
+        store.restore_saved_session(persisted.task_id)
+    restored = store.restore_saved_session(persisted.task_id)
+    assert active_streaming_sessions[persisted.task_id] is restored
+    assert restored.segments[0].final_vi == persisted.segments[0].final_vi
+    assert attempts == [persisted.task_id, persisted.task_id]
+
+
 def test_saved_ready_wav_longer_than_dub_window_is_missing_audio_not_completed(persisted):
     segment = persisted.segments[0]
     with wave.open(segment.audio_path, "wb") as audio:

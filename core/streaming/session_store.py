@@ -12,6 +12,7 @@ import tempfile
 import threading
 import time
 import wave
+import weakref
 from collections import OrderedDict
 from pathlib import Path
 from urllib.parse import quote, urlsplit, urlunsplit, parse_qsl, urlencode
@@ -103,6 +104,8 @@ DIAGNOSTIC_CODES = frozenset((
 _OUTPUT_CHECKS = OrderedDict()
 _OUTPUT_CHECK_LOCK = threading.Lock()
 _SAVE_REPLACE_LOCK = threading.RLock()
+_RESTORE_LOCKS_GUARD = threading.Lock()
+_RESTORE_LOCKS = weakref.WeakValueDictionary()
 OUTPUT_FAILURE_WARNING = ("Chưa xác minh được video đã xuất (có thể thiếu, hỏng hoặc kiểm tra hết thời gian); "
                           "bản dịch và giọng đọc vẫn được giữ. Hãy xuất MP4 lại.")
 PERSISTENCE_FAILURE_WARNINGS = frozenset((
@@ -785,6 +788,20 @@ def list_saved_sessions():
 
 
 def restore_saved_session(task_id, event_callback=None):
+    # History snapshots and editing endpoints restore off the backend loop.
+    # Concurrent readers must share one owner for all later Retry/edit work.
+    # A local reference retains the lock for both its holder and waiters; idle
+    # locks disappear instead of accumulating for every project ever opened.
+    with _RESTORE_LOCKS_GUARD:
+        owner_lock = _RESTORE_LOCKS.get(task_id)
+        if owner_lock is None:
+            owner_lock = threading.Lock()
+            _RESTORE_LOCKS[task_id] = owner_lock
+    with owner_lock:
+        return _restore_saved_session_owned(task_id, event_callback)
+
+
+def _restore_saved_session_owned(task_id, event_callback=None):
     from core.streaming.pipeline import StreamingPipelineSession, SegmentItem, active_streaming_sessions
     if task_id in active_streaming_sessions:
         return active_streaming_sessions[task_id]
@@ -897,8 +914,8 @@ def restore_saved_session(task_id, event_callback=None):
     # that recovery marker is not a provider/runtime failure. Preserve the saved
     # stop state across snapshots and subsequent reopen cycles until retry starts.
     session._restored_interrupted = available["status"] == "STOPPED"
-    active_streaming_sessions[task_id] = session
-    return session
+    # A separately created live owner must also win over a slow disk restore.
+    return active_streaming_sessions.setdefault(task_id, session)
 
 
 class _SavedSourceDownloader:
