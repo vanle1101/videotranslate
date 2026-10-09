@@ -620,6 +620,7 @@ async def list_tasks():
             "progress_pct": pct, "status": status_str,
             "stage": sess.error or f"Đã dịch {ready_cnt}/{tot_cnt} câu ({pct}%)",
             "can_pause": status_str == "RUNNING",
+            "elapsed_seconds": round(time.time() - sess.start_wall_time, 1) if sess.start_wall_time else 0,
         }
         status_str = progress["status"]
         tasks.append({
@@ -628,7 +629,6 @@ async def list_tasks():
             "status": status_str,
             **progress,
             "duration": sess.total_duration,
-            "elapsed_seconds": round(time.time() - sess.start_wall_time, 1) if sess.start_wall_time else 0,
             "video_url": session_output_details(sess)["output_video_url"],
             **session_output_details(sess),
             "can_resume": status_str == "PAUSED",

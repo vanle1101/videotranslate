@@ -143,6 +143,18 @@ def test_task_listing_passes_frozen_ids_already_present_in_snapshot(saved_projec
     assert {row["task_id"] for row in result} == set(observed[0])
 
 
+@pytest.mark.parametrize("elapsed", [None, 3.25])
+def test_task_listing_preserves_measured_runtime_elapsed_instead_of_project_age(saved_project, monkeypatch, elapsed):
+    session = saved_project
+    active_streaming_sessions[session.task_id] = session
+    session.start_wall_time = time.time() - 3600
+    original = session.get_progress
+    monkeypatch.setattr(session, "get_progress", lambda: {**original(), "elapsed_seconds": elapsed})
+    result = asyncio.run(main.list_tasks())["tasks"]
+    current = next(row for row in result if row["task_id"] == session.task_id)
+    assert current["elapsed_seconds"] == elapsed
+
+
 @pytest.mark.parametrize("damage", ["missing", "corrupt", "foreign"])
 def test_live_result_links_are_invalidated_and_reexport_remains_available(saved_project, damage):
     session = saved_project

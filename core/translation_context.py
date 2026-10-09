@@ -10,8 +10,10 @@ import json
 import re
 from copy import deepcopy
 
+from core.semantic_segments import source_speaker_confirmation
 
-ADDRESS_POLICY_REVISION = 8
+
+ADDRESS_POLICY_REVISION = 9
 
 VIETNAMESE_ADDRESS_POLICY = """
 QUY TẮC XƯNG HÔ THEO NGỮ CẢNH (áp dụng cả dịch, kiểm định và rút gọn lời đọc):
@@ -60,6 +62,8 @@ QUY TẮC XƯNG HÔ THEO NGỮ CẢNH (áp dụng cả dịch, kiểm định v�
   giữ needs_review=true; không dùng đại từ của bản Việt cũ để tự xác nhận.
 - Bản Việt cũ và tóm tắt AI chỉ là bản nháp có thể sai, không phải bằng chứng.
   speaker_confirmation là xác nhận trực tiếp của người dùng cho đúng affected_ids.
+  Chỉ dùng xác nhận còn khớp ID câu, người nói và phạm vi giọng hiện tại; không
+  tái dùng cách xưng hô cũ khi nhận dạng người nói hoặc phạm vi nguồn đã thay đổi.
   Dùng label để phân biệt người nói; self_address/listener_address chỉ áp dụng các
   câu đã chọn, không suy quan hệ ruột thịt/giới tính hay người nghe các lượt khác.
   Xác nhận này không tự chứng minh chữ nguồn hoặc toàn bộ nghĩa bản dịch.
@@ -100,14 +104,22 @@ def dialogue_context(rows, focus=(), *, max_rows=64, max_chars=18000):
         source = row.get("text_zh") or row.get("asr_text") or row.get("zh", "")
         if not isinstance(source, str) or not source.strip():
             continue
-        item = {key: row[key] for key in ("id", "start", "end", "speaker_id", "addressee_id")
+        item = {key: row[key] for key in ("id", "start", "end", "speaker_id", "speaker",
+                "diarization_speaker", "spk", "addressee_id")
                 if key in row and isinstance(row[key], (str, int, float))}
         # Reformatting a prepared context must not drop the independently
         # measured speaker/utterance proof or the ASR fragment's provenance.
-        for key in ("speaker_evidence", "speaker_confirmation", "utterance_id", "utterance_evidence", "source_asr_row_id",
+        for key in ("speaker_evidence", "utterance_id", "utterance_evidence", "source_asr_row_id",
                 "source_asr_start", "source_asr_end", "source_piece_index", "source_piece_count"):
             if key in row:
                 item[key] = deepcopy(row[key])
+        # The independent address pass and semantic grouping must read the
+        # same owned assertion. A later diarization pass can change the voice
+        # behind a saved row; retain the original action on disk for review,
+        # but do not promote that stale role claim into fresh source evidence.
+        confirmation = source_speaker_confirmation(row)
+        if confirmation is not None:
+            item["speaker_confirmation"] = confirmation
         item["text_zh"] = source[:1500]
         if row.get("is_focus") is True:
             item["is_focus"] = True
@@ -257,13 +269,19 @@ def needs_address_audit(rows, context=()):
 
 def source_dialogue(rows):
     """Retain owned source proof, never Vietnamese drafts or AI role verdicts."""
-    return [{key: deepcopy(value) for key, value in row.items()
+    projected = []
+    for row in rows:
+        item = {key: deepcopy(value) for key, value in row.items()
              if key in {"id", "start", "end", "text_zh", "asr_text", "speaker_id", "addressee_id",
-                        "speaker_evidence", "speaker_confirmation", "utterance_id", "utterance_evidence",
+                        "speaker", "diarization_speaker", "spk", "speaker_evidence", "utterance_id", "utterance_evidence",
                         "source_asr_row_id", "source_asr_start", "source_asr_end",
                         "source_piece_index", "source_piece_count",
                         "source_needs_review", "source_truncated"}}
-            for row in rows]
+        confirmation = source_speaker_confirmation(row)
+        if confirmation is not None:
+            item["speaker_confirmation"] = confirmation
+        projected.append(item)
+    return projected
 
 
 def address_reading_prompt(rows, context):

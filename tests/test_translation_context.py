@@ -13,12 +13,91 @@ from core.translation_context import (
 )
 from core.translation_review import AutomaticTranslationReviewer
 from core.video_intelligence import VISUAL_TRANSLATION_PROMPT, VideoIntelligenceError
+from core.semantic_segments import source_speaker_confirmation
 
 
 def source(index, text, vi="Lời nháp"):
     return {"id": index, "start": float(index * 3), "end": float(index * 3 + 2),
             "text_zh": text, "literal_vi": vi, "natural_vi": vi, "final_vi": vi,
             "needs_review": False, "review_reason": ""}
+
+
+def confirmed_source(*, unknown=False, selection="scoped_voice"):
+    row = source(12, "我真的不是回来", "Bản nháp Việt không phải bằng chứng.")
+    speaker = None if unknown else "voice-a"
+    row.update(speaker_id=speaker,
+        speaker_evidence={"speaker_id": speaker, "verified": False,
+            "method": "audio_diarization", "scope_id": "source-video", "model": "measured-model"},
+        speaker_confirmation={"confirmation_id": "a" * 32, "method": "user_confirmation",
+            "anchor_segment_id": 12, "affected_ids": [12], "speaker_id": speaker,
+            "scope_id": "source-video", "label": "Nhân vật đã xác nhận", "self_address": "con",
+            "listener_address": "bố", "voice_id": None, "created_at": 100., "selection": selection})
+    return row
+
+
+@pytest.mark.parametrize("mutation", ["unknown_becomes_known", "different_voice", "different_scope",
+    "unselected_row", "conflicting_alias", "malformed_claim"])
+def test_address_projections_reject_same_stale_confirmation_as_semantic_context(mutation):
+    row = confirmed_source(unknown=mutation == "unknown_becomes_known",
+                           selection="anchor" if mutation == "unknown_becomes_known" else "scoped_voice")
+    if mutation in {"unknown_becomes_known", "different_voice"}:
+        row["speaker_id"] = row["speaker_evidence"]["speaker_id"] = "newly-measured-voice"
+    elif mutation == "different_scope":
+        row["speaker_evidence"]["scope_id"] = "another-source-video"
+    elif mutation == "unselected_row":
+        row["id"] = 13
+    elif mutation == "conflicting_alias":
+        row["speaker"] = "another-voice"
+    else:
+        row["speaker_confirmation"] = {"label": "Forged or damaged role", "verified": True}
+    before = deepcopy(row)
+    assert source_speaker_confirmation(row) is None
+    context = dialogue_context([row], [row])
+    assert "speaker_confirmation" not in context[0]
+    assert "speaker_confirmation" not in source_dialogue([row])[0]
+    assert "speaker_confirmation" not in source_dialogue(context)[0]
+    prompt_payload = json.loads(address_reading_prompt([row], [row]).split("Nguồn thoại theo thời gian: ", 1)[1])
+    assert "speaker_confirmation" not in prompt_payload[0]
+    assert row == before  # Persisted user action is kept for review, not erased.
+
+
+@pytest.mark.parametrize("unknown,selection", [(False, "scoped_voice"), (False, "anchor"), (True, "anchor")])
+def test_address_projections_preserve_valid_scoped_or_unknown_anchor_claim_without_aliasing(unknown, selection):
+    row = confirmed_source(unknown=unknown, selection=selection)
+    before = deepcopy(row)
+    assert source_speaker_confirmation(row) == row["speaker_confirmation"]
+    context = dialogue_context([row], [row])
+    projected = source_dialogue(context)
+    direct = source_dialogue([row])
+    assert context[0]["speaker_confirmation"] == before["speaker_confirmation"]
+    assert projected[0]["speaker_confirmation"] == direct[0]["speaker_confirmation"] == before["speaker_confirmation"]
+    assert "final_vi" not in projected[0] and "verification" not in projected[0]
+    projected[0]["speaker_confirmation"]["self_address"] = "Changed projected copy"
+    context[0]["speaker_confirmation"]["label"] = "Changed context copy"
+    direct[0]["speaker_confirmation"]["affected_ids"].append(99)
+    assert row == before
+
+
+@pytest.mark.parametrize("speaker_key", ["speaker", "diarization_speaker", "spk"])
+def test_valid_voice_alias_confirmation_survives_reformatted_address_context(speaker_key):
+    row = confirmed_source()
+    row[speaker_key] = row.pop("speaker_id")
+    context = dialogue_context([row], [row])
+    projected = source_dialogue(context)
+    repeated = dialogue_context(projected, projected)
+    assert all(payload[0]["speaker_confirmation"] == row["speaker_confirmation"]
+               for payload in (context, projected, repeated))
+    assert all(payload[0][speaker_key] == "voice-a" for payload in (context, projected, repeated))
+
+
+def test_unknown_anchor_without_diarization_remains_a_row_scoped_user_assertion():
+    row = confirmed_source(unknown=True, selection="anchor")
+    row.pop("speaker_evidence")
+    row["speaker_confirmation"]["scope_id"] = None
+    projected = source_dialogue(dialogue_context([row], [row]))
+    assert projected[0]["speaker_confirmation"] == row["speaker_confirmation"]
+    assert projected[0]["speaker_confirmation"]["affected_ids"] == [12]
+    assert "speaker_id" not in projected[0]  # No invented diarization identity.
 
 
 def test_batch_summary_preserves_turn_boundaries_and_timestamps(monkeypatch):

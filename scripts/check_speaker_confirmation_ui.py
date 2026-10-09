@@ -68,7 +68,12 @@ def main():
             event("FRESH_PROCESS_CONFIRMATION_RESTORED", {"id": ROW_ID, "revision": row["revision"], "voice": row["voice_id"]})
         old_hashes = audio_hashes(before)
         voice = "edge:vi-VN-NamMinhNeural" if args.mode == "trial" else "edge:vi-VN-HoaiMyNeural"
-        label = LABEL if args.mode != "review-export" else LABEL + " · kiểm thử"
+        label = LABEL
+        if args.mode == "review-export":
+            # A genuine repeated acceptance run must create a new assertion;
+            # saving identical choices correctly performs no semantic API work.
+            prior_label = (row.get("speaker_confirmation") or {}).get("label")
+            label = LABEL if prior_label == LABEL + " · kiểm thử" else LABEL + " · kiểm thử"
         assert click(page, f"seg-speaker-{ROW_ID}")
         expression = """(() => {const id=""" + str(ROW_ID) + "; const voice=" + json.dumps(voice) + ";" + """
             document.getElementById(`seg-speaker-name-${id}`).value=""" + json.dumps(label) + ";" + """
