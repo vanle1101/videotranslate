@@ -4,6 +4,20 @@
 
 **PARTIAL: runtime recovery and media checks passed; complete semantic and long-video acceptance remain pending.** Target: Douyin2TikTok AI Studio using the configured OpenCode Muse model. Seedream/Seedance graph tests do not apply to this application. Tests honor background-only operation through the actual production Qt/WebEngine page offscreen and muted. HTTP, Muse, Edge-TTS and exported media are real. Physical desktop clicks/native file-picker and tray interaction are not claimed.
 
+### Latest checkpoint — 10:17
+
+**Full audit acceptance is not achieved.** The long QA continuation `76f5aa6b` remains RUNNING at translated source 246.07/320.040635s, with 149 READY/PLAYED rows and no full MP4. Some newer review requests succeed while others exhaust bounded deadlines; no blanket network outage or complete semantic acceptance is claimed.
+
+Frozen-code production retests on `5bf2265`:
+
+- PID 26164/backend 53214: fresh process → actual History `38680e43` → actual result button/player. All 14 saved rows restored. Playback advanced to 0.515434s, readyState 4, decoded 640×360 compatibility picture, no media/JavaScript error. **PASS reopen/playback**, not a fresh semantic-generation pass. The owned backend exited cleanly.
+- PID 33488/backend 63955: fresh process → actual History `e978c201` → Retry → RUNNING → Stop. Stop took 1.500s. UI/backend STOPPED, four healthy WAV hashes identical, no late write after five seconds, retry available. **PASS Stop/retry ownership**. The owned backend exited cleanly.
+- Final automated rerun: **2,021 Python passed, one explicit skip, 127 subtests**, 221.15s; separate **45 desktop/lifecycle/local-runtime passed**; **223 JavaScript passed**. Existing-runtime readiness passed. Three broad-suite and two native-suite upstream WebSocket deprecation warnings remain. The same historical standalone exclusions apply; tests do not replace real-provider/UI acceptance.
+
+`f8f02d2` now scopes the Selector loop to the Windows desktop backend and routes preparation through the existing cancellable media worker. The global provider policy is unchanged. Controlled real HTTP peer resets, WebSocket echo, real FFmpeg PCM/cancellation and worker/loop draining passed; fresh UI reopen/playback/Stop/shutdown above passed with the final standard-Runner implementation. Full clean-start source preparation through UI and complete long-video export on this newest runtime remain unverified.
+
+The existing independently decoded 15s QA MP4 remains `workspace/outputs/douyin_translated_38680e43_hq.mp4` (12,002,983 bytes). Its saved transcript has three unresolved source/address verdicts. Current lexical corrections require new real review before those stored verdicts can change. User originals and projects are retained. The authorized long QA harness is still active; all short UI/test/readiness processes from this checkpoint exited.
+
 ### Status requested by user — 10:02
 
 Additional real checks at 10:03–10:05: new backend-loop implementation opened History `38680e43`, restored all 14 rows and played the actual result to 0.540497s/readyState 4, with decoded 640×360 picture and no media/JavaScript error. New process PID 4924/backend 57456 performed History `e978c201` → Retry → RUNNING → Stop in 2.281s; all four healthy WAV hashes stayed identical, no late row change after five seconds, Retry remained available. Both owned backends closed cleanly. These runs used the explicit-loop teardown before its final standard-Runner refinement; final frozen-code retests remain required.
