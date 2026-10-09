@@ -57,3 +57,22 @@ def comparable_chinese(value):
         elif char in "/:" and index > 0 and index + 1 < len(text) and text[index - 1].isalnum() and text[index + 1].isalnum():
             kept.append(char)
     return "".join(kept)
+
+
+def comparable_audio_chinese(value):
+    """Allow exact spelling variants of a standalone 0–99 spoken integer.
+
+    Actual independent ASR returned '19。' and '十九' for the same age. Only a
+    whole numeric utterance is normalized: names, dates, units, signs, decimals
+    and longer phrases keep their original comparison, without fuzzy matching.
+    OCR substring ownership deliberately continues using comparable_chinese.
+    """
+    text = comparable_chinese(value)
+    digits = {char: index for index, char in enumerate('零一二三四五六七八九')}
+    digits['〇'] = 0
+    if len(text) == 1 and text in digits:
+        return str(digits[text])
+    if re.fullmatch(r'[一二三四五六七八九]?十[一二三四五六七八九]?', text):
+        tens, ones = text.split('十')
+        return str((digits[tens] if tens else 1) * 10 + (digits[ones] if ones else 0))
+    return text

@@ -368,8 +368,13 @@ class VideoIntelligence:
                 text = text.split("\n", 1)[-1].rsplit("```", 1)[0].strip()
             try:
                 data = json.loads(text)
-            except (TypeError, json.JSONDecodeError) as exc:
-                raise VideoIntelligenceError("Bộ dịch trả về JSON hình ảnh không hợp lệ.") from exc
+            except json.JSONDecodeError as exc:
+                # Supply the syntax location to the bounded provider retry,
+                # without exposing response text or silently repairing it.
+                raise VideoIntelligenceError(
+                    f"AI trả về JSON không hợp lệ tại dòng {exc.lineno}, cột {exc.colno}.") from exc
+            except TypeError as exc:
+                raise VideoIntelligenceError("AI trả về JSON không hợp lệ.") from exc
         if not isinstance(data, dict):
             raise VideoIntelligenceError("Bộ dịch phải trả về một đối tượng JSON.")
         return data

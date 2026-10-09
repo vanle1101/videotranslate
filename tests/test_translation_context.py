@@ -151,8 +151,10 @@ def test_reviewer_receives_early_source_context_in_both_passes(monkeypatch):
         if row["start"] < end and row["end"] > start]
     reviewer = AutomaticTranslationReviewer(client, scanner, audio_evidence=False)
     reviewer.review("unused", rows, [])
-    assert len(prompts) == 6
-    for prompt in prompts[4:]:
+    assert len(prompts) == 8
+    review_prompts = [prompt for prompt in prompts if 'Câu cần kiểm định: ' in prompt]
+    assert len(review_prompts) == 4
+    for prompt in review_prompts[-2:]:
         assert VIETNAMESE_ADDRESS_POLICY in prompt
         context_text = prompt.split("Ngữ cảnh lân cận (không tạo thêm ID): ", 1)[1].split("\nĐã có lượt", 1)[0]
         context = json.loads(context_text)
@@ -368,3 +370,83 @@ def test_invalid_source_citation_retry_explains_rejection_without_loosening_the_
     assert 'Dẫn chứng phân lượt không khớp lời nguồn.' in second_prompt
     assert 'Không đoán vai để sửa schema.' in second_prompt
     assert 'ADDRESS_CONTEXT_INVALID' in caplog.text
+
+
+def address_reply(ids, rows):
+    by_id = {row['id']: row for row in rows}
+    return {'address_context': [{
+        'id': sid, 'self_address': '', 'listener_address': '',
+        'self_uncertain': True, 'listener_uncertain': True, 'uncertain': True,
+        'reason': 'Chưa đủ căn cứ phân vai.',
+        'evidence': [{'id': sid, 'quote': by_id[sid]['text_zh']}],
+        'turn_check': {'ambiguous_roles': ['self', 'listener'],
+            'reason': 'Còn nhiều cách phân lượt.',
+            'evidence': [{'id': sid, 'quote': by_id[sid]['text_zh']}]},
+    } for sid in ids]}
+
+
+def address_prompt_ids(prompt):
+    return json.loads(prompt.split('ID cần kiểm định: ', 1)[1].split('\n', 1)[0])
+
+
+def test_address_subbatches_keep_identical_full_source_context_without_drafts():
+    rows = [source(i, '我问你') for i in range(12)]
+    context = [source(-8, '爸爸我回来了'), *rows, source(40, '你是我女儿')]
+    requests = []
+    def reply(prompt, **kwargs):
+        requests.append((prompt, kwargs))
+        return address_reply(address_prompt_ids(prompt), rows)
+    client = Mock(translate=Mock(side_effect=reply))
+    result = AutomaticTranslationReviewer._address_reading(client, rows, context, lambda: None)
+    assert set(result) == set(range(12))
+    assert [address_prompt_ids(prompt) for prompt, _ in requests] == [list(range(i, i + 4)) for i in (0, 4, 8)]
+    sources = [json.loads(prompt.split('Nguồn thoại theo thời gian: ', 1)[1]) for prompt, _ in requests]
+    assert sources[0] == sources[1] == sources[2]
+    assert [row['id'] for row in sources[0]] == [-8, *range(12), 40]
+    assert all('final_vi' not in row and 'literal_vi' not in row for row in sources[0])
+    assert all(kwargs == {'max_tokens': 7000} for _, kwargs in requests)
+
+
+def test_exhausted_subread_never_returns_partial_success_and_resume_reuses_only_valid_reads():
+    rows = [source(i, '爸我问你') for i in range(9)]
+    saved = {}
+    checkpoint = Mock()
+    checkpoint.load.side_effect = lambda stage: deepcopy(saved.get(json.dumps(stage, sort_keys=True)))
+    checkpoint.store.side_effect = lambda stage, data: saved.update({json.dumps(stage, sort_keys=True): deepcopy(data)})
+    client = Mock(translate=Mock(side_effect=[address_reply(range(4), rows), '{bad', '{bad']))
+    with pytest.raises(VideoIntelligenceError):
+        AutomaticTranslationReviewer._address_reading(client, rows, rows, lambda: None, checkpoint)
+    assert client.translate.call_count == 3 and len(saved) == 1
+    assert set(next(iter(saved.values()))['address_context'][i]['id'] for i in range(4)) == set(range(4))
+    client.translate.side_effect = lambda prompt, **kwargs: address_reply(address_prompt_ids(prompt), rows)
+    result = AutomaticTranslationReviewer._address_reading(client, rows, rows, lambda: None, checkpoint)
+    assert set(result) == set(range(9)) and client.translate.call_count == 5
+    assert len(saved) == 3
+
+
+def test_address_syntax_retry_has_location_and_nesting_guidance_without_raw_response(caplog):
+    rows = [source(0, '爸我问你')]
+    client = Mock(translate=Mock(side_effect=['{"secret-do-not-log": "unterminated', address_reply([0], rows)]))
+    result = AutomaticTranslationReviewer._address_reading(client, rows, rows, lambda: None)
+    assert set(result) == {0}
+    retry = client.translate.call_args_list[1].args[0]
+    assert 'dòng 1, cột' in retry and 'BÊN TRONG đối tượng turn_check' in retry
+    assert 'code=invalid_json' in caplog.text and 'line=1' in caplog.text
+    assert 'secret-do-not-log' not in retry + caplog.text
+
+
+def test_cancellation_between_address_subbatches_prevents_next_request():
+    rows = [source(i, '爸我问你') for i in range(8)]
+    cancelled = False
+    def reply(prompt, **kwargs):
+        nonlocal cancelled
+        cancelled = True
+        return address_reply(address_prompt_ids(prompt), rows)
+    def check():
+        if cancelled:
+            raise RuntimeError('cancelled')
+    client = Mock(translate=Mock(side_effect=reply))
+    checkpoint = Mock(load=Mock(return_value=None))
+    with pytest.raises(RuntimeError, match='cancelled'):
+        AutomaticTranslationReviewer._address_reading(client, rows, rows, check, checkpoint)
+    assert client.translate.call_count == 1 and not checkpoint.store.called

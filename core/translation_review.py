@@ -22,7 +22,7 @@ from core.media_process import run_media
 from core.video_intelligence import VideoIntelligence, VideoIntelligenceError
 from core.runtime_context import current_execution_context
 from core.review_checkpoint import ReviewCheckpoint
-from core.chinese_text import comparable_chinese
+from core.chinese_text import comparable_chinese, comparable_audio_chinese
 from core.translation_context import (
     VIETNAMESE_ADDRESS_POLICY, dialogue_context, needs_address_audit, contains_address_expression,
     address_expressions,
@@ -109,6 +109,7 @@ class _LocalAudioEvidence:
 
 class AutomaticTranslationReviewer:
     BATCH_SIZE = 12
+    ADDRESS_BATCH_SIZE = 4
 
     @staticmethod
     def _diagnostic(error, stage, rows):
@@ -238,6 +239,19 @@ class AutomaticTranslationReviewer:
     def _address_reading(client, batch, context, check, checkpoint=None):
         if not needs_address_audit(batch, context):
             return {}
+        # Real provider replies occasionally broke the nested turn_check JSON
+        # twice for a twelve-row reading. Keep each response bounded without
+        # narrowing the source dialogue used to decide who is addressing whom.
+        # Completed subreads may be checkpointed, but a failed subread must not
+        # return a partial reading as success to the semantic review.
+        limit = AutomaticTranslationReviewer.ADDRESS_BATCH_SIZE
+        if len(batch) > limit:
+            combined = {}
+            for offset in range(0, len(batch), limit):
+                check()
+                combined.update(AutomaticTranslationReviewer._address_reading(
+                    client, batch[offset:offset + limit], context, check, checkpoint))
+            return combined
         from core.translation_context import source_dialogue
         stage = {"kind": "address_context", "ids": [row["id"] for row in batch],
                  "source": source_dialogue(context)}
@@ -261,14 +275,19 @@ class AutomaticTranslationReviewer:
                 # The validator's fixed messages contain no provider response
                 # or credentials. Preserve the actual rejection instead of
                 # retrying the identical request with no diagnostic.
+                syntax = error.__cause__ if isinstance(error.__cause__, json.JSONDecodeError) else None
                 logging.getLogger("ai").warning(
-                    "ADDRESS_CONTEXT_INVALID run_id=%s segment_ids=%s attempt=%s validation=%s",
-                    current_execution_context().run_id, [row["id"] for row in batch], attempt + 1, str(error))
+                    "ADDRESS_CONTEXT_INVALID run_id=%s segment_ids=%s attempt=%s code=%s output_chars=%s line=%s column=%s validation=%s",
+                    current_execution_context().run_id, [row["id"] for row in batch], attempt + 1,
+                    "invalid_json" if syntax else "invalid_schema", len(raw) if isinstance(raw, str) else 0,
+                    syntax.lineno if syntax else None, syntax.colno if syntax else None, str(error))
                 if attempt:
                     raise VideoIntelligenceError("AI chưa trả kết luận ngữ cảnh xưng hô có dẫn chứng hợp lệ.") from error
                 prompt += ("\nLƯỢT TRƯỚC KHÔNG QUA KIỂM TRA CẤU TRÚC: " + str(error)
                     + ". Hãy trả lại toàn bộ đúng schema, mỗi ID cần kiểm định đúng một lần. "
                     "quote phải sao chép nguyên văn text_zh của đúng ID nguồn, không đổi chữ số/tuổi. "
+                    "reason và evidence của turn_check phải nằm BÊN TRONG đối tượng turn_check; "
+                    "không đóng đối tượng đó trước reason. Mọi chuỗi phải được escape đúng JSON. "
                     "turn_check.evidence phải dẫn chính ID đang xét. "
                     "Vai đã xác định (*_uncertain=false) phải có cách gọi không rỗng và dẫn chứng; "
                     "vai chưa rõ phải *_uncertain=true và uncertain=true. Không đoán vai để sửa schema. "
@@ -395,7 +414,7 @@ class AutomaticTranslationReviewer:
     @staticmethod
     def _audio_text(value):
         """Ignore orthographic variants, retaining negation, numbers and units."""
-        return comparable_chinese(value)
+        return comparable_audio_chinese(value)
 
     @staticmethod
     def _summarize(result):

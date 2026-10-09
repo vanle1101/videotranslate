@@ -2,7 +2,7 @@ import os
 
 import pytest
 
-from core.chinese_text import comparable_chinese
+from core.chinese_text import comparable_chinese, comparable_audio_chinese
 from core.translation_review import AutomaticTranslationReviewer
 from core.video_intelligence import VideoIntelligence
 
@@ -28,6 +28,28 @@ def test_real_source_script_and_metre_spelling_match(asr, ocr):
 def test_comparison_never_erases_meaningful_distinctions(a, b):
     assert comparable_chinese(a) != comparable_chinese(b)
     assert not VideoIntelligence._ocr_supports_text(a, [{"text_zh": b}])
+
+
+@pytest.mark.parametrize('a,b', [('19。', '十九'), ('零', '0'), ('〇', '0'),
+    ('一', '1'), ('十', '10'), ('二十', '20'), ('九十九', '99')])
+def test_independent_audio_numeric_spelling_is_exact(a, b):
+    assert comparable_audio_chinese(a) == comparable_audio_chinese(b)
+    assert AutomaticTranslationReviewer._audio_text(a) == AutomaticTranslationReviewer._audio_text(b)
+
+
+@pytest.mark.parametrize('a,b', [('十九', '18'), ('十九', '九十'), ('十九', '019'),
+    ('19', '1.9'), ('19', '-19'), ('19', '19%'), ('19', '十九岁'),
+    ('乔一', '乔1'), ('今年十九', '今年19'), ('一九', '19'), ('十十', '20'),
+    ('百', '100'), ('一/九', '19')])
+def test_audio_numeric_equivalence_does_not_change_facts_units_or_names(a, b):
+    assert comparable_audio_chinese(a) != comparable_audio_chinese(b)
+
+
+def test_audio_number_normalization_does_not_change_ocr_scope_substrings():
+    assert comparable_chinese('十九') == '十九'
+    assert VideoIntelligence._ocr_supports_text('十九', [{'text_zh': '十九'}])
+    assert not VideoIntelligence._ocr_supports_text('十九', [{'text_zh': '今年十九岁'}])
+    assert not VideoIntelligence._ocr_supports_text('19', [{'text_zh': '十九'}])
 
 
 def screen(index=0, **changes):
