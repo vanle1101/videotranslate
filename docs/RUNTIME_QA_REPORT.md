@@ -1,5 +1,34 @@
 # Runtime QA report
 
+## Current preview failure audit — October 11, 2026
+
+**IN PROGRESS; complete-video translation acceptance remains incomplete.** This continuation addresses the actual empty-preview and forward-seek failures in project `94f80114`, source Douyin ID `7692745161054506290`, retained source duration 320.040635 s. The user expects a genuinely translated and dubbed short sample before explicitly starting full translation. The current player uses original video with synchronized Vietnamese speech and captions; the sample is not a full-video MP4 export.
+
+### Reproduced causes and corrections
+
+1. At 13:21:06 source preparation failed before Muse was called. The original log retained only `ValueError`, so the precise exception was reproduced with the actual retained source, actual Whisper and actual diarization. `prepare_interval` raised at its final identity check: “Video nguồn đã thay đổi khi đang nhận diện”. The video and code were unchanged. `marshal.dumps(code)` encodes reference flags that change when ASR/progress rows retain function constants. The real reproduction changed only the `speaker_annotation` loaded-code digest. Reference-free marshal v2 and source runtime revision 2 now identify executable code consistently, while genuine code/model/media changes still invalidate recognition caches.
+2. The empty worker accepted zero unfinished rows and advertised `PREVIEW_READY`, despite zero source preparation, zero translated rows and zero playable Vietnamese speech. Durable restoration trusted the stale flag; the frontend invented a 24-second translated label from the configured sample duration. Source coverage now gates backend readiness, restoration, full promotion and frontend labels. Preparation failures stay retryable. Source exceptions now include a bounded redacted message and stack trace.
+3. Qt's compatible original-video windows were clamped to the ASR/preparation cursor. With source preparation at zero or a short translated prefix, forward seeks into the retained original were rejected. Original windows are now bounded by the actual source duration and the existing 120-second window limit. Explicit seeks into untranslated positions play original sound with a visible source-only label; returning into the translated prefix restores dubbing. Ordinary translated-sample playback still stops at its measured boundary.
+
+### Real runtime evidence so far
+
+| Test / exact actions | Actual result |
+| --- | --- |
+| Actual retained source → real Whisper/diarization/source preparation, before correction | **FAIL reproduced:** identity `ValueError` after healthy ASR/BGM; no Muse request. |
+| Same retained source and real engines, after correction | **PASS source stage:** prepared through 30.94 s, 21 measured Chinese rows; before/after runtime identity identical. This is not a translation PASS. |
+| Original production window → Ctrl+Q | **PASS:** normal clean shutdown at 13:32:21; no active job cancelled and no unrelated process killed. |
+| Fresh production `StudioMainWindow`/real backend, offscreen and muted as requested → History `94f80114` | **PASS recovery status:** UI/backend FAILED, 0 rows, processed/prepared 0, Retry enabled, full translation disabled; no claimed 24-second translation. PID 7256, port 57160, code `14cecb4`. |
+| Actual player timeline halfway → Play → pause → keyboard Home | **PASS source seek/playback:** 02:39→02:40, readyState 4, original audio mode, visible untranslated-position label; Home returned 00:00. Uses real compatible source media, not a fake player/provider. |
+| Same history project → actual “Tiếp tục tác vụ” button | **RUNNING:** retained original reused, source preparation completed; real Muse translation/review requests observed. Vietnamese sample playback is not yet accepted. |
+
+### Forward-seek production UI retest on the latest frontend
+
+Fresh offscreen production `StudioMainWindow`, connected to the still-active backend on port 57160, loaded frontend commit `3555f79` and opened project `94f80114` through History. No provider, media route or player was mocked. Clicking the actual timeline at 50% and 95%, then Play, reached **02:40** and **05:04** respectively: real video `readyState=4`, playback advancing, source audio unmuted, visible original/untranslated label and no Vietnamese caption at those positions. Keyboard Home returned **00:00**, `readyState=4`, source audio muted. Play then loaded the real segment-0 WAV: `readyState=4`, duration **0.735458 s**, audio clock **0.092422 s**, visible caption **“Bố ơi!”**. No JavaScript error or unhandled rejection was captured. **PASS forward seek → original playback → backward seek → Vietnamese audio/caption playback.** The additional QA window closed normally; it did not cancel the active translation.
+
+Latest frontend regressions: **246 passed, 0 failed/skipped** (213 interaction tests plus 33 Muse/Chrome adapter tests). This establishes the reported seeking fix, not semantic acceptance of every preview sentence or completion of the 320-second translation. The active backend predates the stronger preview gate in `3555f79`; a fresh-backend readiness retest remains required after its current task finishes.
+
+Automated checks at the first correction: 252 source/preview/store/output regressions passed; 42 preview API/media tests passed including real FFmpeg windows/decode/Range reads; 243 JavaScript regressions passed; installed dependency, FFmpeg/ffprobe and configured OpenCode/Muse readiness passed. These isolated checks are not real semantic/provider acceptance. Commits `14cecb4` and `d5a9c7a` were pushed to `origin/main`. A stronger audible-preview gate and the final real preview/reopen retest are in progress.
+
 ## Current audit — October 9, 2026
 
 ### Latest acceptance, including follow-up production code `0d58450`
