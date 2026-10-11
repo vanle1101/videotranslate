@@ -1173,8 +1173,10 @@ def test_pending_review_cannot_be_hidden_by_a_later_completed_group(preview):
 
 def test_recovered_review_updates_waiting_text_without_editing_missing_audio(preview, monkeypatch):
     session, *_ = preview
-    # Exercise the actual review publication path, with provider isolation.
-    monkeypatch.undo()
+    # Exercise real publication without undoing the fixture's storage isolation.
+    # Review commits are durable and must never save this test in user history.
+    monkeypatch.setattr(session, "_review_translations",
+                        StreamingPipelineSession._review_translations.__get__(session))
     row = SegmentItem(0, 0, 2, 2)
     row.final_vi, row.status = "Bản nháp.", "WAITING"
     row.verification = {"status": "pending"}
@@ -1186,9 +1188,11 @@ def test_recovered_review_updates_waiting_text_without_editing_missing_audio(pre
     async def no_missing_audio_edit(*args, **kwargs):
         raise AssertionError("Missing audio must be synthesized by the resumed worker, not the transcript editor")
     monkeypatch.setattr(session, "edit_segment", no_missing_audio_edit)
+    assert settings.BASE_DIR == session.video_path.parent, "Durable review tests must retain isolated storage"
     asyncio.run(session._review_translations(regenerate_audio=True, segment_ids={0}))
     assert row.final_vi == "Lời đã sửa." and row.status == "WAITING"
     assert row.verification["semantic_verified"] is True
+    assert (settings.BASE_DIR / "workspace/projects/preview-owned.json").is_file()
 
 
 def test_failed_recovery_response_cannot_overwrite_newer_manual_edit(preview, monkeypatch):

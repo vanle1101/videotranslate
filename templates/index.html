@@ -20,7 +20,7 @@
     </div>
     <nav class="app-navigation" aria-label="Điều hướng ứng dụng">
       <button id="tab-studio" class="nav-btn text-white bg-pink-600/80"><i class="fa-solid fa-house" aria-hidden="true"></i> Studio</button>
-      <button id="tab-tasks" class="nav-btn text-gray-400"><i class="fa-solid fa-list-check" aria-hidden="true"></i> Tác vụ &amp; Lịch sử</button>
+      <button id="tab-tasks" class="nav-btn text-gray-400"><i class="fa-solid fa-list-check" aria-hidden="true"></i> Lịch sử video</button>
       <button id="tab-models" class="nav-btn text-gray-400"><i class="fa-solid fa-layer-group" aria-hidden="true"></i> Models</button>
       <button id="tab-diagnostics" class="nav-btn text-gray-400"><i class="fa-solid fa-wave-square" aria-hidden="true"></i> Diagnostics</button>
       <button id="tab-settings" class="nav-btn text-gray-400"><i class="fa-solid fa-gear" aria-hidden="true"></i> Cài đặt</button>
@@ -208,9 +208,9 @@
     <div class="flex items-center justify-between pb-3 border-b border-gray-800">
       <div>
         <h2 class="text-base font-bold text-white flex items-center gap-2">
-          <i class="fa-solid fa-list-check text-teal-400"></i> Tác vụ &amp; Lịch sử
+          <i class="fa-solid fa-list-check text-teal-400"></i> Lịch sử video
         </h2>
-        <p class="text-xs text-gray-400">Phiên đã lưu vẫn còn khi thoát ứng dụng. Chọn Mở lại để chỉnh lời, màu phụ đề và xuất tiếp.</p>
+        <p class="text-xs text-gray-400">Mỗi video hiện một lần cùng tiến độ mới nhất. Các bản dịch đã lưu vẫn mở lại được để chỉnh và xuất tiếp.</p>
       </div>
       <button id="btn-refresh-tasks" class="px-3 py-1.5 rounded-lg border border-gray-700 bg-gray-800 hover:bg-gray-700 text-xs text-gray-200 flex items-center gap-1.5">
         <i class="fa-solid fa-rotate-right"></i> Làm mới
@@ -218,23 +218,21 @@
     </div>
 
     <!-- Active Tasks Table -->
-    <div class="bg-[#12151f] border border-gray-800 rounded-2xl overflow-hidden shadow-xl">
-      <table class="w-full text-left text-xs text-gray-300">
+    <div class="history-table-container bg-[#12151f] border border-gray-800 rounded-2xl shadow-xl">
+      <table class="history-table w-full text-left text-xs text-gray-300">
         <thead class="bg-gray-900/80 text-gray-400 uppercase text-[10px] border-b border-gray-800">
           <tr>
-            <th class="p-3.5">Mã Tác Vụ</th>
-            <th class="p-3.5">Loại Tác Vụ</th>
-            <th class="p-3.5">Tiến Trình</th>
+            <th class="p-3.5">Video</th>
+            <th class="p-3.5">Trạng thái &amp; Tiến độ</th>
             <th class="p-3.5">Thời Lượng</th>
-            <th class="p-3.5">Trạng Thái</th>
-            <th class="p-3.5 text-right">Điều Khiển</th>
+            <th class="p-3.5 text-right">Thao tác</th>
           </tr>
         </thead>
-        <tbody id="tasks-table-body" class="divide-y divide-gray-800/60 font-mono">
+        <tbody id="tasks-table-body" class="divide-y divide-gray-800/60">
           <!-- Dynamic Task Row -->
           <tr>
-            <td colspan="6" class="p-8 text-center text-gray-500 font-sans">
-              Không có tác vụ nào đang hoạt động.
+            <td colspan="4" class="p-8 text-center text-gray-500 font-sans">
+              Chưa có video trong lịch sử.
             </td>
           </tr>
         </tbody>

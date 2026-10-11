@@ -561,6 +561,7 @@ def _save_session(session):
         # errors, while serializing in-process replacements so two saves from
         # the same runtime cannot contend for the destination.
         _replace_project_with_retry(temporary, target)
+        session._history_updated_at = payload["updated_at"]
         # Only a committed atomic save clears the live disk-failure warning.
         # A failed write must retain it; unrelated review/media warnings stay.
         session.warnings[:] = [warning for warning in session.warnings
@@ -1070,6 +1071,8 @@ def list_saved_sessions(*, excluded_task_ids=()):
             fields = data["session"]
             title = Path(fields["video_path"]).name if fields.get("video_path") else fields.get("source_url") or path.stem
             result.append({"task_id": path.stem, "title": title, "updated_at": data["updated_at"],
+                "video_path": fields.get("video_path") or "", "source_url": fields.get("source_url") or "",
+                "source_video_url": f"/api/local-file?path={quote(fields['video_path'], safe='')}" if available["source_exists"] else "",
                 "status": available["status"], "can_open": available["source_exists"] or available["pending_download"], "duration": fields.get("total_duration", 0),
                 "saved": True, "task_type": "Phiên đã lưu", "progress_pct": 100 if available["status"] == "COMPLETED" else None,
                 **{key: available[key] for key in ("missing_speech_ids", "final_output_blocked", "content_review_state")},
@@ -1111,6 +1114,7 @@ def _restore_saved_session_owned(task_id, event_callback=None):
     session = StreamingPipelineSession(task_id, Path(fields["video_path"]) if fields.get("video_path") else None,
         voice=fields["voice"], tts_engine_name=fields["tts_engine_name"], asr_engine_name=fields["asr_engine_name"],
         visual_translation=fields.get("visual_translation", False), event_callback=event_callback, _restoring=True)
+    session._history_updated_at = data["updated_at"]
     for key in SESSION_FIELDS:
         if key in fields:
             setattr(session, key, fields[key])

@@ -3,6 +3,7 @@ import asyncio
 import wave
 import threading
 import time
+from fastapi import HTTPException
 from pathlib import Path
 from unittest.mock import Mock
 
@@ -58,7 +59,8 @@ def test_history_then_attach_restores_exact_edits_without_provider(saved_project
         snapshot = await main.streaming_snapshot(saved_project.task_id)
         assert snapshot["segments"][0]["final_vi"] == "Lời đã sửa."
         assert snapshot["segments"][0]["revision"] == 3
-        assert snapshot["caption_style"] == saved_project.caption_style
+        from core.subtitle_cues import normalize_caption_style
+        assert snapshot["caption_style"] == normalize_caption_style(saved_project.caption_style)
         assert snapshot["voice"] == saved_project.voice
         assert snapshot["tts_engine"] == saved_project.tts_engine_name
         assert snapshot["output_outdated"] is True
@@ -66,6 +68,132 @@ def test_history_then_attach_restores_exact_edits_without_provider(saved_project
         restored = active_streaming_sessions[saved_project.task_id]
         assert restored.worker_task is None and restored.start_task is None
         assert Path(restored.segments[0].audio_path).read_bytes() == Path(saved_project.segments[0].audio_path).read_bytes()
+    asyncio.run(run())
+
+
+def test_live_saved_and_export_are_one_video_without_changing_raw_tasks(saved_project, monkeypatch):
+    session = saved_project
+    active_streaming_sessions[session.task_id] = session
+    source_url = "https://www.douyin.com/video/7692745161054506290"
+    session.source_url = source_url
+    session.source_video_url = "/api/inputs/source.mp4"
+    session.progress.update(status="RUNNING", stage="Đang dịch", progress_pct=22.9)
+    session.is_running = True
+    main.active_export_tasks[f"export_{session.task_id}"] = {
+        "parent_session_id": session.task_id, "status": "RUNNING", "progress": 47.5,
+        "stage": "Đang dựng video", "start_time": time.time(), "duration": 2,
+    }
+    def saved_rows(*, excluded_task_ids):
+        return [{"task_id": "older-version", "video_path": str(session.video_path),
+            "source_url": "", "title": "source.mp4", "updated_at": 1,
+            "status": "STOPPED", "can_open": True, "saved": True}]
+    monkeypatch.setattr(main, "list_saved_sessions", saved_rows)
+    result = asyncio.run(main.list_tasks())
+    assert len(result["tasks"]) == 3
+    assert len(result["videos"]) == 1
+    video = result["videos"][0]
+    assert video["task_id"] == f"export_{session.task_id}"
+    assert video["session_id"] == session.task_id
+    assert video["is_export"] and video["can_stop"] and video["can_open"]
+    assert video["progress_pct"] == 47.5 and video["stage"] == "Đang dựng video"
+    assert video["source_video_url"] == session.source_video_url
+    assert video["version_count"] == 2
+    assert {row["task_id"] for row in video["versions"]} == {session.task_id, "older-version"}
+    raw_session = next(row for row in result["tasks"] if row["task_id"] == session.task_id)
+    assert raw_session["stage"] == "Đang dịch" and raw_session["progress_pct"] == 22.9
+
+
+def test_saved_history_exposes_source_identity_without_restoring_or_starting(saved_project, monkeypatch):
+    monkeypatch.setattr(StreamingPipelineSession, "start", Mock(side_effect=AssertionError("must not start")))
+    result = asyncio.run(main.list_tasks())
+    task = result["tasks"][0]
+    assert task["video_path"] == str(saved_project.video_path.resolve())
+    assert task["source_video_url"].startswith("/api/local-file?path=")
+    assert result["videos"][0]["session_id"] == saved_project.task_id
+    assert result["videos"][0]["version_count"] == 1
+    assert not active_streaming_sessions
+
+
+@pytest.mark.parametrize("cancel", [False, True])
+def test_real_export_failure_or_cancel_stays_visible_after_owner_checkpoint(saved_project, monkeypatch, cancel):
+    session = saved_project
+    active_streaming_sessions[session.task_id] = session
+    session.is_running = False
+    session.progress.update(status="COMPLETED", phase="complete", progress_pct=100)
+    checkpoint_times = []
+    persist = session.persist
+
+    def save():
+        persist()
+        checkpoint_times.append(session._history_updated_at)
+
+    monkeypatch.setattr(session, "persist", save)
+
+    def failed_render(self, **kwargs):
+        if cancel:
+            main.active_export_tasks[f"export_{session.task_id}"]["cancelled"] = True
+        raise RuntimeError("test render failure")
+
+    monkeypatch.setattr(main.HQExporter, "export", failed_render)
+
+    async def run():
+        with pytest.raises(HTTPException) as failure:
+            await main.export_hq(main.ExportHQRequest(task_id=session.task_id))
+        assert failure.value.status_code == (409 if cancel else 500)
+        export = main.active_export_tasks[f"export_{session.task_id}"]
+        assert checkpoint_times and export["start_time"] <= checkpoint_times[-1] <= export["updated_at"]
+        video = (await main.list_tasks())["videos"][0]
+        assert video["task_id"] == f"export_{session.task_id}"
+        assert video["status"] == ("CANCELLED" if cancel else "FAILED")
+        assert video["can_open"] and video["session_id"] == session.task_id
+        # A genuine later edit/save supersedes that completed failed attempt.
+        session.caption_style_revision += 1
+        session.persist()
+        if session._history_updated_at <= export["updated_at"]:
+            await asyncio.sleep(.002)
+            session.persist()
+        newer = (await main.list_tasks())["videos"][0]
+        assert newer["task_id"] == session.task_id
+
+    asyncio.run(run())
+
+
+def test_cancelled_export_coroutine_checkpoints_before_terminal_history_time(saved_project, monkeypatch):
+    session = saved_project
+    active_streaming_sessions[session.task_id] = session
+    session.is_running = False
+    session.progress.update(status="COMPLETED", phase="complete", progress_pct=100)
+    started = threading.Event()
+    release = threading.Event()
+
+    def cancellable_render(self, **kwargs):
+        started.set()
+        assert release.wait(5)
+        assert kwargs["cancel_check"]()
+        raise RuntimeError("cancel acknowledged")
+
+    monkeypatch.setattr(main.HQExporter, "export", cancellable_render)
+
+    async def run():
+        task = asyncio.create_task(main.export_hq(main.ExportHQRequest(task_id=session.task_id)))
+        try:
+            for _ in range(100):
+                if started.is_set():
+                    break
+                await asyncio.sleep(.005)
+            assert started.is_set()
+            task.cancel()
+            await asyncio.sleep(.005)
+        finally:
+            release.set()
+            with pytest.raises(asyncio.CancelledError):
+                await task
+        export = main.active_export_tasks[f"export_{session.task_id}"]
+        assert export["start_time"] <= session._history_updated_at <= export["updated_at"]
+        row = (await main.list_tasks())["videos"][0]
+        assert row["status"] == "CANCELLED" and row["task_id"] == f"export_{session.task_id}"
+        assert session.export_task is None
+
     asyncio.run(run())
 
 
@@ -174,6 +302,7 @@ def test_live_result_links_are_invalidated_and_reexport_remains_available(saved_
         assert any("hãy xuất video lại" in text for text in session.warnings)
         job = await main.get_export_hq_status(session.task_id)
         assert job["status"] == "FAILED" and not job["video_url"]
+        assert job["updated_at"] >= session._history_updated_at
     asyncio.run(run())
 
 

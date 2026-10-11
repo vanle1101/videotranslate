@@ -1006,3 +1006,37 @@ The current15s result `142bb90d` is retained with its review sidecar; original s
 
 Automatic policy review rejected cleanup of the superseded task-generated `f8500b88` MP4/sidecar and task-created pytest temporary directories220–222, returning only “blocked by policy”. The cleanup command did not execute; those files remain. No alternative deletion route was attempted. No backup repository or dependency reinstall was created.
 
+## One history entry per source video — October 11, 2026
+
+**PASS for read-only real production history grouping and backend/UI regression coverage.** This acceptance covers the reported duplicate entries, not translation quality or a new full-video export. Work ran offscreen/muted with no desktop input or visible browser. The user's running translation was not interrupted.
+
+### Root causes and changes
+
+1. `/api/tasks` returned streaming sessions, rendering operations and persisted sessions as separate rows. Their only exclusion key was the execution ID, so one source appeared repeatedly. The API now adds `videos`, a read-only grouping of source identities, while retaining `tasks` for exact runtime polling/control. Full normalized local paths and canonical Douyin post IDs supply identity; filename and duration alone never merge projects.
+2. History displayed task type and task ID. It now uses four columns: video, status/stage/measured progress, duration and actions. Existing versions stay behind a closed disclosure with their original reopen IDs. Nothing is deleted or merged in the saved projects. Export Stop targets the export task; reopening targets its owner session.
+3. A prior successful project could obscure the latest failed attempt. Active work wins; otherwise the latest attempt is shown, including a missing-source failure. A running export takes precedence over its own owner; terminal export timestamps are captured after persistence so a fresh failure/cancellation cannot be hidden by the owner's post-export checkpoint.
+4. A test had globally undone its monkeypatches to call the real review method, inadvertently restoring production `BASE_DIR`. It wrote the `preview-owned` test manifest into real history. The test now restores only that method, asserts isolated storage and verifies its checkpoint stays under the test directory. Existing manifests were retained.
+
+### Real production UI acceptance
+
+`scripts/check_video_history_ui.py` starts the actual production FastAPI service and `StudioMainWindow` offscreen, loads production JavaScript, selects History and reads the actual retained project manifests. It does not mock HTTP, media or provider responses, restore an actively running project, start translation or change captions/transcripts.
+
+| Exact steps | Expected | Actual / retest |
+| --- | --- | --- |
+| Fresh QA backend/UI → History → inspect real saved source projects `94f80114`, `d5820a71`, `76f5aa6b`, `5a7b66a9` | One source row; all four sessions retained | **PASS**, 12 actual project/task records became 5 source rows. All four projects for the 320.040635-second video occupy one row; three older sessions remain in its disclosure with correct reopen IDs. |
+| Expand older versions → click the real Refresh button | Expanded disclosure preserved; no duplicate top-level rows | **PASS**, one matching row, four columns, preserved disclosure and zero JavaScript errors. Screenshot was visually inspected; this did not send input to the user's desktop. |
+| Close only QA backend/UI → launch fresh → History again | Same canonical group survives restart without rewriting projects | **PASS**, identical source identity; all 12 manifest SHA256 hashes unchanged. Both QA backends shut down cleanly. No translation or TTS invocation. |
+| Read normal application `/api/tasks` while QA runs | Existing processing continues | **PASS observation**, normal port 54483 still reported `94f80114` running at 30.4%, stage “Đang đọc chữ trong khung hình”. That old instance has not loaded this new backend contract. |
+
+Regression scenarios include URL aliases/local sessions, distinct same-name files, conflicting known post IDs, saved/live/export joins, latest missing-source failure, failed/cancelled render state after the real export-handler persistence path, exact controls, unknown percentages, preview validity and raw-task polling isolation. Provider fault fixtures are regression evidence, not real generation acceptance.
+
+Validation: **419 Python tests passed in 40.90 s** for grouping/history/storage/chunked preview/progress/export/output gates, followed by **167 targeted tests passed in 11.87 s** after the final export-timestamp and alias corrections. **240 JavaScript UI tests passed**. Python compilation, JavaScript syntax and `git diff --check` passed. The final offscreen production history/restart retest also passed with all 12 manifests unchanged. These test sets overlap and are not added together. This Python/Qt application has no TypeScript or npm production build.
+
+Changed files: `main.py`, `core/streaming/{session_store,video_history}.py`, `static/{app.js,style.css}`, `templates/index.html`, `tests/test_{video_history,history_api,preview_chunked_pipeline}.py`, `tests/test_ui_interactions.mjs`, `scripts/check_video_history_ui.py` and this report.
+
+**Loading limitation:** the normal application started at 22:06 remains processing on the previous backend code. No restart or native window activation was attempted. The fresh offscreen backend/UI passed the changed code; the normal application loads it after its next full exit/start. Do not claim the retained normal process is updated.
+
+**Identity scope:** identical browser uploads stored under different owned paths cannot yet be deduplicated by content hash; unresolved short links are grouped only by exact URL. The screenshot's repeated projects share a known source path/post ID and are covered. The existing leaked `preview-owned` manifest was not deleted or hidden; its missing-source state remains truthful.
+
+**Cleanup limitation:** automatic approval review rejected the single verified-root cleanup command with “blocked by policy”. The task's `workspace/temp/video-history-ui.png`, new history-module/test/harness bytecode and `%TEMP%/pytest-of-acer/pytest-1089`, `pytest-1090`, `pytest-1091` remain. No alternate deletion route was attempted and no previously rejected cleanup target was retried. The harness now writes a screenshot only when explicitly requested; all QA backends and processes exited normally.
+

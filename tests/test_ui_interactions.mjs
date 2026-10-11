@@ -2119,6 +2119,129 @@ test('history distinguishes a translated project from a published video', async 
   assert.match(ui.el('tasks-table-body').children[1].innerHTML,/ĐÃ XUẤT VIDEO/);
 });
 
+test('video history renders one source row while raw live, saved and export tasks still reconcile Studio', async () => {
+  const ui = studio(); await ui.start();
+  const raw = {task_id: 'fixture', status: 'RUNNING', phase: 'review', stage: 'Đang rà lời thoại',
+    progress_pct: null, processing_progress_pct: 50, processing_completed_segments: 2,
+    processing_total_segments: 4, processing_total_known: true, processing_scope: 'preview', can_pause: true, can_stop: true};
+  const saved = {task_id: 'older_edit', title: 'Clip đã lưu', saved: true, status: 'STOPPED', can_open: true};
+  const exportTask = {task_id: 'export_fixture', status: 'COMPLETED', output_video_url: '/api/outputs/previous.mp4'};
+  ui.replies.set('/api/tasks', {tasks: [raw, saved, exportTask], videos: [{...raw,
+    video_id: 'one-source', session_id: 'fixture', title: 'Một video', duration: 320,
+    source_url: 'https://www.douyin.com/jingxuan?modal_id=7692745161054506290',
+    versions: [raw, saved], version_count: 2}]});
+  await ui.el('btn-refresh-tasks').click();
+  const rows = ui.el('tasks-table-body').children;
+  assert.equal(rows.length, 1);
+  assert.equal(rows[0].dataset.videoId, 'one-source');
+  assert.match(rows[0].innerHTML, /Một video/);
+  assert.match(rows[0].innerHTML, /Douyin · 7692745161054506290/);
+  assert.match(rows[0].innerHTML, /50% giọng mẫu · Đang rà lời thoại/);
+  assert.match(rows[0].innerHTML, /aria-valuenow="50"/);
+  assert.doesNotMatch(rows[0].innerHTML, /Phiên đã lưu|Realtime Dubbing|HQ Export|<div[^>]*>fixture<\/div>/);
+  assert.equal(ui.el('task-progress-value').textContent, '50% giọng mẫu');
+});
+
+test('video history pause and stop retain the actual representative task id', async () => {
+  const ui = studio(); await ui.flush();
+  const task = {task_id: 'active_variant', session_id: 'active_variant', video_id: 'source-a', title: 'Video A',
+    status: 'RUNNING', progress_pct: 22.9, stage: 'Đang đối chiếu lời nguồn', can_pause: true, can_stop: true};
+  ui.replies.set('/api/tasks', {tasks: [task], videos: [task]});
+  ui.replies.set('/api/tasks/active_variant/pause', {status: 'PAUSED'});
+  ui.replies.set('/api/tasks/active_variant/stop', {status: 'STOPPED'});
+  await ui.el('btn-refresh-tasks').click();
+  const row = ui.el('tasks-table-body').children[0].innerHTML;
+  assert.match(row, /window.pauseTask\('active_variant'\)/);
+  assert.match(row, /window.stopTask\('active_variant'\)/);
+  assert.doesNotMatch(row, /pauseTask\('source-a'\)|stopTask\('source-a'\)/);
+  await ui.window.pauseTask('active_variant');
+  await ui.window.stopTask('active_variant');
+  assert.equal(ui.requests.filter(request => request.url === '/api/tasks/active_variant/pause' && request.options.method === 'POST').length, 1);
+  assert.equal(ui.requests.filter(request => request.url === '/api/tasks/active_variant/stop' && request.options.method === 'POST').length, 1);
+});
+
+test('export is shown in the existing video row but opens its owning session and stops the export job', async () => {
+  const ui = studio(); await ui.start();
+  const raw = {task_id: 'fixture', saved: true, status: 'COMPLETED', progress_pct: 100};
+  const exporter = {task_id: 'export_fixture', status: 'RUNNING', phase: 'export', stage: 'Đang xuất MP4', progress_pct: 37, can_stop: true};
+  ui.replies.set('/api/tasks', {tasks: [raw, exporter], videos: [{...exporter,
+    video_id: 'source-a', session_id: 'fixture', is_export: true, can_open: true, title: 'Video A', versions: [raw]}]});
+  await ui.el('btn-refresh-tasks').click();
+  const rows = ui.el('tasks-table-body').children;
+  assert.equal(rows.length, 1);
+  assert.match(rows[0].innerHTML, /window.openTaskInStudio\('fixture'\)/);
+  assert.match(rows[0].innerHTML, /window.stopTask\('export_fixture'\)/);
+  assert.doesNotMatch(rows[0].innerHTML, /openTaskInStudio\('export_fixture'\)|history-versions/);
+  assert.equal(ui.el('task-progress-value').textContent, '37%');
+  assert.equal(ui.el('task-progress-stage').textContent, 'Đang xuất MP4');
+});
+
+test('earlier saved edits remain available in a closed disclosure and open without a fresh generation', async () => {
+  const ui = studio(); await ui.flush();
+  const latest = {task_id: 'full_version', video_id: 'same-video', session_id: 'full_version', saved: true, can_open: true,
+    title: 'Clip chung', status: 'STOPPED', stage: 'Đang giữ phần đã dịch', translation_mode: 'full'};
+  const old = {task_id: 'preview_version', saved: true, can_open: true, status: 'STOPPED',
+    translation_mode: 'preview', updated_at: 1700000000, stage: '<script>unsafe</script>'};
+  const missing = {task_id: 'missing_version', status: 'FAILED', can_open: false};
+  ui.replies.set('/api/tasks', {tasks: [latest, old, missing], videos: [{...latest, versions: [latest, old, missing]}]});
+  ui.replies.set('/api/streaming/preview_version', recoverySnapshot());
+  await ui.el('tab-tasks').click(); await ui.flush();
+  const rows = ui.el('tasks-table-body').children;
+  assert.equal(rows.length, 1);
+  assert.match(rows[0].innerHTML, /<details class="history-versions">/);
+  assert.match(rows[0].innerHTML, /Các bản đã lưu \(2\)/);
+  assert.match(rows[0].innerHTML, /Bản xem trước/);
+  assert.match(rows[0].innerHTML, /&lt;script&gt;unsafe&lt;\/script&gt;/);
+  assert.match(rows[0].innerHTML, /window.openTaskInStudio\('preview_version'\)/);
+  assert.doesNotMatch(rows[0].innerHTML, /openTaskInStudio\('missing_version'\)/);
+  await ui.window.openTaskInStudio('preview_version');
+  assert.equal(ui.el('view-studio').classList.contains('hidden'), false);
+  assert.equal(ui.el('seg-vi-0').textContent, recoverySnapshot().segments[0].final_vi);
+  assert.equal(ui.requests.filter(request => request.url.includes('/streaming/start')).length, 0);
+});
+
+test('grouped history keeps an unknown percentage indeterminate and never makes a cancelled row successful', async () => {
+  const ui = studio(); await ui.flush();
+  const task = {task_id: 'working', video_id: 'source-b', session_id: 'working', title: 'Video B',
+    status: 'RUNNING', phase: 'download', stage: 'Đang tải', progress_pct: null};
+  ui.replies.set('/api/tasks', {tasks: [task], videos: [task]});
+  await ui.el('btn-refresh-tasks').click();
+  let row = ui.el('tasks-table-body').children[0].innerHTML;
+  assert.match(row, /data-indeterminate="true"/);
+  assert.match(row, /Chưa có số liệu %/);
+  assert.doesNotMatch(row, /aria-valuenow|null%|100% ·/);
+  ui.replies.set('/api/tasks', {tasks: [{...task, status: 'CANCELLED'}], videos: [{...task, status: 'CANCELLED', saved: true}]});
+  await ui.el('btn-refresh-tasks').click();
+  row = ui.el('tasks-table-body').children[0].innerHTML;
+  assert.match(row, /ĐÃ DỪNG/);
+  assert.doesNotMatch(row, /history-progress-track|ĐÃ XUẤT VIDEO/);
+});
+
+test('history labels and identifiers cannot inject actions or unsafe result links', async () => {
+  const ui = studio(); await ui.flush();
+  const task = {task_id: "bad');alert(1)//", session_id: "bad');alert(1)//", video_id: 'source-unsafe',
+    title: '<img src=x onerror=alert(1)>', status: 'COMPLETED', can_pause: true, can_stop: true,
+    output_video_url: 'javascript:alert(1)', versions: [{task_id: "unsafe');alert(1)//", can_open: true, status: 'STOPPED'}]};
+  ui.replies.set('/api/tasks', {tasks: [task], videos: [task]});
+  await ui.el('btn-refresh-tasks').click();
+  const row = ui.el('tasks-table-body').children[0].innerHTML;
+  assert.match(row, /&lt;img src=x onerror=alert\(1\)&gt;/);
+  assert.doesNotMatch(row, /onclick=|href=|<img/);
+});
+
+test('queued video history shows waiting status with indeterminate progress instead of an error', async () => {
+  const ui = studio(); await ui.flush();
+  const task = {task_id: 'queued_video', session_id: 'queued_video', video_id: 'source-queued',
+    title: 'Video chờ', status: 'QUEUED', stage: 'Đang chờ lượt xử lý', progress_pct: null};
+  ui.replies.set('/api/tasks', {tasks: [task], videos: [task]});
+  await ui.el('btn-refresh-tasks').click();
+  const row = ui.el('tasks-table-body').children[0].innerHTML;
+  assert.match(row, /data-status="queued"/);
+  assert.match(row, /CHỜ XỬ LÝ/);
+  assert.match(row, /data-indeterminate="true"/);
+  assert.doesNotMatch(row, /LỖI|data-status="failed"|aria-valuenow/);
+});
+
 test('Diagnostics preserves log lines, safely highlights levels and copies exact raw text', async () => {
   const ui = studio(); await ui.flush();
   const raw = '2026-10-05 INFO first line\n2026-10-05 ERROR <script>unsafe</script>\n    traceback detail\n';

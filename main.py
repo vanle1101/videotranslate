@@ -42,6 +42,7 @@ from core.streaming.pipeline import (
 )
 from core.streaming.export import HQExporter
 from core.streaming.session_store import list_saved_sessions, restore_saved_session
+from core.streaming.video_history import group_video_history, source_metadata
 from core.streaming.output_gate import final_output_metadata, missing_spoken_output_ids, missing_speech_message
 from core.runtime_errors import export_failure
 from core.media_preview import preview_manager, DEFAULT_COMPATIBILITY_SECONDS
@@ -523,6 +524,8 @@ async def validate_live_output(session):
     if task and task.get("status") == "COMPLETED":
         task.update(status="FAILED", stage=message, progress=None, video_url="", output_filename="")
     persist_session(session)
+    if task and task.get("status") == "FAILED" and task.get("stage") == message:
+        task["updated_at"] = max(time.time(), getattr(session, "_history_updated_at", 0) or 0)
 
 
 async def editable_session(task_id):
@@ -662,6 +665,7 @@ async def list_tasks():
         tasks.append({
             "task_id": task_id,
             "task_type": "Realtime Dubbing",
+            **source_metadata(sess),
             "status": status_str,
             **progress,
             "duration": sess.total_duration,
@@ -673,11 +677,17 @@ async def list_tasks():
 
     # 2. HQ Export Tasks
     for export_id, exp in list(active_export_tasks.items()):
+        owner_id = exp.get("parent_session_id") or (export_id[7:] if export_id.startswith("export_") else "")
+        owner = active_streaming_sessions.get(owner_id)
         tasks.append({
             "task_id": export_id,
             "task_type": "HQ Export (BS-RoFormer)",
+            **(source_metadata(owner) if owner is not None else {}),
+            "parent_session_id": owner_id,
+            "is_export": True,
+            "updated_at": exp.get("updated_at", exp.get("start_time", 0)),
             "status": exp.get("status", "RUNNING"),
-            "progress_pct": exp.get("progress", 0),
+            "progress_pct": exp.get("progress"),
             "stage": exp.get("stage", "Đang xử lý..."),
             "duration": exp.get("duration", 0),
             "elapsed_seconds": round(time.time() - exp.get("start_time", time.time()), 1),
@@ -706,7 +716,7 @@ async def list_tasks():
                           "video_url": saved.get("output_video_url", ""),
                           "stage": saved.get("stage") or saved.get("missing_media", ""),
                           "can_pause": False, "can_resume": False, "can_stop": False})
-    return {"tasks": tasks}
+    return {"tasks": tasks, "videos": group_video_history(tasks)}
 
 @app.post("/api/tasks/{task_id}/pause")
 async def pause_task(task_id: str):
@@ -752,6 +762,7 @@ async def stop_task(task_id: str):
             if export_worker is not None and not export_worker.done():
                 await asyncio.gather(export_worker, return_exceptions=True)
         stopping = {
+            **source_metadata(sess),
             "task_id": task_id, "task_type": "Realtime Dubbing", "status": "CANCELLING",
             "phase": "stopping", "stage": "Đang dừng xử lý; chờ bộ nhận giọng trả quyền điều khiển…",
             "progress_pct": progress.get("progress_pct"), "duration": sess.total_duration,
@@ -1462,6 +1473,7 @@ async def export_hq(req: ExportHQRequest):
         metadata_warning = " ".join(filter(None, [metadata_warning, *save_warnings]))
         active_export_tasks[export_id].update(
             status="COMPLETED", progress=100,
+            updated_at=max(time.time(), getattr(session, "_history_updated_at", 0) or 0),
             stage=metadata_warning or "Xuất video hoàn tất thành công!",
             video_url=session.output_video_url, output_filename=session.output_filename,
             review_url=review_url, warnings=list(session.warnings), metadata_warning=metadata_warning)
@@ -1490,7 +1502,9 @@ async def export_hq(req: ExportHQRequest):
                 continue
             except Exception:
                 break
-        active_export_tasks[export_id].update(status="CANCELLED", stage="Đã hủy xuất video")
+        persist_session(session)
+        active_export_tasks[export_id].update(status="CANCELLED", stage="Đã hủy xuất video",
+            updated_at=max(time.time(), getattr(session, "_history_updated_at", 0) or 0))
         raise
     except Exception as error:
         status_name = "CANCELLED" if active_export_tasks.get(export_id, {}).get("cancelled") else "FAILED"
@@ -1501,6 +1515,8 @@ async def export_hq(req: ExportHQRequest):
             active_export_tasks[export_id]["stage"] = message
         await broadcast_session_event(req.task_id, "result_error", {"message": message, **session_output_details(session)})
         persist_session(session)
+        if export_id in active_export_tasks:
+            active_export_tasks[export_id]["updated_at"] = max(time.time(), getattr(session, "_history_updated_at", 0) or 0)
         failure = HTTPException(status_code=409 if status_name == "CANCELLED" else 500, detail=message)
         failure.result_error_reported = True
         raise failure from None

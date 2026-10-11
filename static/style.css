@@ -561,3 +561,55 @@ html { scroll-padding-top: 106px; }
   .preview-features { gap: 5px; }
   .studio-workspace { padding: 10px; }
 }
+
+/* Video history groups saved versions and rendering jobs under their source. */
+.history-table-container { overflow-x: auto; }
+.history-table { table-layout: fixed; min-width: 670px; }
+.history-table th:nth-child(1) { width: 34%; }
+.history-table th:nth-child(2) { width: 40%; }
+.history-table th:nth-child(3) { width: 9%; }
+.history-table th:nth-child(4) { width: 17%; }
+.history-video-row:hover { background: rgba(31,41,55,.28); }
+.history-video-row td { padding: 16px 14px; vertical-align: top; }
+.history-video-title { color: #f3f4f6; font-size: 12px; font-weight: 650; overflow-wrap: anywhere; }
+.history-video-source, .history-updated { display: block; margin-top: 5px; color: #94a3b8; font-size: 10px; overflow-wrap: anywhere; }
+.history-duration-cell { color: #cbd5e1; font-variant-numeric: tabular-nums; white-space: nowrap; }
+.history-status { display: inline-block; padding: 3px 7px; border: 1px solid #334155; border-radius: 5px; font-size: 10px; line-height: 1.5; color: #94a3b8; background: #1e293b; }
+.history-status[data-status="running"] { border-color: #065f46; color: #6ee7b7; background: #022c22; }
+.history-status[data-status="paused"], .history-status[data-status="cancelling"] { border-color: #92400e; color: #fcd34d; background: #451a03; }
+.history-status[data-status="queued"] { border-color: #475569; color: #cbd5e1; background: #1e293b; }
+.history-status[data-status="preview_ready"], .history-status[data-status="prepared"] { border-color: #5b21b6; color: #c4b5fd; background: #2e1065; }
+.history-status[data-status="completed"] { border-color: #1e40af; color: #93c5fd; background: #172554; }
+.history-status[data-status="failed"] { border-color: #9f1239; color: #fda4af; background: #4c0519; }
+.history-progress-content { display: flex; flex-direction: column; gap: 7px; margin-top: 9px; }
+.history-progress-track { height: 5px; max-width: 220px; overflow: hidden; background: #253043; border-radius: 4px; }
+.history-progress-fill { height: 100%; background: linear-gradient(90deg,#ec4899,#8b5cf6); transition: width .3s; }
+.history-progress-track[data-indeterminate="true"] .history-progress-fill { background: repeating-linear-gradient(110deg,#64748b 0 10px,#334155 10px 20px); opacity: .65; }
+.history-progress-label { color: #cbd5e1; font-size: 11px; line-height: 1.65; overflow-wrap: anywhere; }
+.history-actions { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 6px; }
+.history-button { padding: 6px 9px; min-height: 28px; border-radius: 5px; font-size: 10px; line-height: 1.5; color: #fff; text-align: center; cursor: pointer; }
+.history-button-primary { background: #be185d; }
+.history-button-primary:hover { background: #db2777; }
+.history-button-secondary { background: #273449; color: #e2e8f0; border: 1px solid #475569; }
+.history-button-secondary:hover { background: #334155; }
+.history-button-pause { background: #a16207; }
+.history-button-resume { background: #047857; }
+.history-button-stop { background: #9f1239; }
+.history-button:focus-visible, .history-versions summary:focus-visible { outline: 2px solid #f9a8d4; outline-offset: 3px; }
+.history-no-action { color: #64748b; }
+.history-versions { margin-top: 11px; font-size: 10px; }
+.history-versions summary { width: fit-content; color: #b8c4d7; padding: 3px 0; cursor: pointer; }
+.history-version-list { display: grid; gap: 8px; margin-top: 8px; }
+.history-version { display: flex; align-items: flex-start; justify-content: space-between; gap: 8px; padding: 9px; border: 1px solid #334155; border-radius: 6px; background: #111827; }
+.history-version > div { min-width: 0; }
+.history-version-label { display: block; color: #e2e8f0; }
+.history-version time, .history-version-state, .history-version-stage { display: block; margin-top: 4px; color: #94a3b8; line-height: 1.5; overflow-wrap: anywhere; }
+.history-version .history-button { flex-shrink: 0; }
+.history-version-unavailable { color: #94a3b8; font-size: 10px; }
+@media (max-width: 760px) {
+  #view-tasks { padding: 12px; }
+  .history-table th:nth-child(1) { width: 32%; }
+  .history-table th:nth-child(2) { width: 37%; }
+  .history-table th:nth-child(3) { width: 10%; }
+  .history-table th:nth-child(4) { width: 21%; }
+}

@@ -4209,6 +4209,114 @@ document.addEventListener("DOMContentLoaded", () => {
   window.resumeTask = id => controlTask(id, "resume");
   window.stopTask = id => controlTask(id, "stop");
 
+  const expandedHistoryVideos = new Set();
+  const historyTaskId = id => typeof id === "string" && /^[a-zA-Z0-9_-]{1,80}$/.test(id);
+
+  function historyStatus(task) {
+    const status = task.status;
+    const names = {QUEUED: "CHỜ XỬ LÝ", RUNNING: "ĐANG CHẠY", PAUSED: "TẠM DỪNG", CANCELLING: "ĐANG DỪNG",
+      PREVIEW_READY: "XEM TRƯỚC SẴN SÀNG", PREPARED: "CHỜ XUẤT MP4", CANCELLED: "ĐÃ DỪNG", STOPPED: "ĐÃ DỪNG"};
+    if (status === "COMPLETED") return task.output_video_url || task.video_url ? "ĐÃ XUẤT VIDEO" : "ĐÃ DỊCH · CHƯA XUẤT";
+    return names[status] || "LỖI";
+  }
+
+  function historyStatusBadge(task) {
+    const status = ["QUEUED", "RUNNING", "PAUSED", "CANCELLING", "PREVIEW_READY", "PREPARED", "COMPLETED", "STOPPED", "CANCELLED"].includes(task.status)
+      ? task.status.toLowerCase() : "failed";
+    return `<span class="history-status" data-status="${status}">${historyStatus(task)}</span>`;
+  }
+
+  function historyDate(timestamp) {
+    if (typeof timestamp !== "number" || !Number.isFinite(timestamp) || timestamp <= 0) return "";
+    const date = new Date(timestamp * 1000);
+    return Number.isFinite(date.getTime()) ? date.toLocaleString("vi-VN") : "";
+  }
+
+  function historySource(task) {
+    if (!task.source_url) return "";
+    try {
+      const url = new URL(task.source_url);
+      if (!["http:", "https:"].includes(url.protocol)) return "";
+      if (/^(.+\.)?douyin\.com$/i.test(url.hostname)) {
+        const id = url.searchParams.get("modal_id") || url.pathname.match(/\/video\/(\d+)/)?.[1];
+        return id && /^\d+$/.test(id) ? `Douyin · ${id}` : "Douyin";
+      }
+      return url.hostname;
+    } catch (_) { return ""; }
+  }
+
+  function historyOutputUrl(task) {
+    const raw = task.output_video_url || task.video_url;
+    if (!raw) return "";
+    const origin = `${window.location.protocol}//${window.location.host}`;
+    try {
+      const url = new URL(raw, origin);
+      if (url.origin !== origin || !/^\/api\/outputs\/[^/]+\.mp4$/i.test(url.pathname) || url.search || url.hash) return "";
+      const filename = decodeURIComponent(url.pathname.split("/").pop());
+      return /[\\/:\x00-\x1f]/.test(filename) ? "" : url.pathname;
+    } catch (_) { return ""; }
+  }
+
+  function renderHistoryRow(task) {
+    const tr = document.createElement("tr");
+    tr.className = "history-video-row";
+    const rowId = typeof task.video_id === "string" ? task.video_id : task.task_id;
+    tr.dataset.videoId = rowId || "";
+    tr.dataset.taskId = task.task_id || "";
+    const sessionId = task.session_id || (!String(task.task_id).startsWith("export_") ? task.task_id : "");
+    tr.dataset.sessionId = sessionId;
+    const displayed = displayedTaskProgress(task);
+    const pct = displayed.pct;
+    const terminalWithoutProgress = pct === null && ["COMPLETED", "PREVIEW_READY", "PREPARED", "FAILED", "STOPPED", "CANCELLED"].includes(task.status);
+    const progressLabel = pct === null ? "Chưa có số liệu %" : displayed.label;
+    const sourceLabel = historySource(task);
+    const videoTitle = task.title && task.title !== task.task_id && task.title !== sessionId
+      ? task.title : sourceLabel || "Video đang xử lý";
+    const date = historyDate(task.updated_at);
+    const versions = Array.isArray(task.versions) ? task.versions.filter(version => version.task_id !== sessionId) : [];
+    const versionMarkup = versions.length ? `<details class="history-versions"${expandedHistoryVideos.has(rowId) ? " open" : ""}>
+      <summary>Các bản đã lưu (${versions.length})</summary>
+      <div class="history-version-list">${versions.map(version => {
+        const label = version.translation_mode === "preview" ? "Bản xem trước" : version.translation_mode === "full" ? "Bản dịch toàn bộ" : "Bản dịch đã lưu";
+        const versionDate = historyDate(version.updated_at);
+        const canOpen = historyTaskId(version.task_id) && !version.task_id.startsWith("export_") && version.can_open !== false;
+        return `<div class="history-version" data-session-id="${escapeHtml(version.task_id || "")}">
+          <div><span class="history-version-label">${label}</span>${versionDate ? `<time>${escapeHtml(versionDate)}</time>` : ""}
+          <span class="history-version-state">${historyStatus(version)}</span>${version.stage ? `<span class="history-version-stage">${escapeHtml(version.stage)}</span>` : ""}</div>
+          ${canOpen ? `<button onclick="window.openTaskInStudio('${version.task_id}')" class="history-button history-button-secondary">Mở bản này</button>` : '<span class="history-version-unavailable">Không mở được</span>'}
+        </div>`;
+      }).join("")}</div>
+    </details>` : "";
+    let actions = "";
+    if (historyTaskId(sessionId) && !sessionId.startsWith("export_") && task.can_open !== false && (task.saved || task.session_id || !["STOPPED", "CANCELLED"].includes(task.status))) {
+      actions += `<button onclick="window.openTaskInStudio('${sessionId}')" class="history-button history-button-primary">${task.saved ? "Mở lại để chỉnh" : "Mở trong Studio"}</button>`;
+    }
+    if (historyTaskId(task.task_id)) {
+      if (task.can_pause) actions += `<button onclick="window.pauseTask('${task.task_id}')" class="history-button history-button-pause">Tạm dừng</button>`;
+      if (task.can_resume) actions += `<button onclick="window.resumeTask('${task.task_id}')" class="history-button history-button-resume">Tiếp tục</button>`;
+      if (task.can_stop) actions += `<button onclick="window.stopTask('${task.task_id}')" class="history-button history-button-stop">Dừng</button>`;
+    }
+    const outputUrl = task.status === "COMPLETED" ? historyOutputUrl(task) : "";
+    if (outputUrl) actions += `<a href="${escapeHtml(outputUrl)}" data-result-preview class="history-button history-button-secondary">Xem kết quả</a>`;
+    tr.innerHTML = `
+      <td class="history-video-cell"><div class="history-video-title">${escapeHtml(videoTitle)}</div>
+        ${sourceLabel && sourceLabel !== videoTitle ? `<div class="history-video-source">${escapeHtml(sourceLabel)}</div>` : ""}
+        ${date ? `<time class="history-updated">${escapeHtml(date)}</time>` : ""}${versionMarkup}</td>
+      <td class="history-progress-cell">${historyStatusBadge(task)}
+        <div class="history-progress-content">
+          ${terminalWithoutProgress ? "" : `<div class="history-progress-track" role="progressbar" aria-label="Tiến độ video"${pct === null ? ' aria-valuetext="Chưa có số liệu phần trăm" data-indeterminate="true"' : ` aria-valuemin="0" aria-valuemax="100" aria-valuenow="${pct}" data-indeterminate="false"`}><div class="history-progress-fill" style="width: ${pct === null ? 100 : pct}%"></div></div>`}
+          <span class="history-progress-label">${terminalWithoutProgress ? "" : `${escapeHtml(progressLabel)} · `}${escapeHtml(task.stage || "")}</span>
+        </div></td>
+      <td class="history-duration-cell">${formatTime(task.duration)}</td>
+      <td class="history-actions-cell"><div class="history-actions">${actions || '<span class="history-no-action">—</span>'}</div></td>
+    `;
+    tr.querySelector(".history-versions")?.addEventListener("toggle", event => {
+      if (event.target.open) expandedHistoryVideos.add(rowId);
+      else expandedHistoryVideos.delete(rowId);
+    });
+    return tr;
+  }
+
   async function updateTasksTable() {
     const tbody = document.getElementById("tasks-table-body");
     if (!tbody || taskPollInFlight) return;
@@ -4272,76 +4380,22 @@ document.addEventListener("DOMContentLoaded", () => {
         }
       }
 
-      if (tasks.length === 0) {
-        tbody.innerHTML = `<tr><td colspan="6" class="p-8 text-center text-gray-500 font-sans">${pendingStart ? "Đang gửi yêu cầu tạo tác vụ…" : currentTaskId && !["COMPLETED", "PREVIEW_READY", "PREPARED", "FAILED", "STOPPED", "CANCELLED"].includes(currentProgress?.status) ? "Chưa nhận được trạng thái tác vụ từ máy chủ. Đang kiểm tra lại…" : "Không có tác vụ nào đang hoạt động."}</td></tr>`;
+      // Runtime reconciliation above always consumes raw tasks. History alone
+      // uses source-video groups so exports and saved revisions share a row.
+      const videos = Array.isArray(data.videos) ? data.videos.map(video =>
+        isPreviewReady(video.status) && !hasMeasuredPreview(video)
+          ? {...video, status: "FAILED", phase: "prepare", progress_pct: null,
+            stage: "Chưa tạo được bản dịch và giọng xem trước; tiếp tục phần còn thiếu."} : video) : tasks;
+      if (videos.length === 0) {
+        tbody.innerHTML = `<tr><td colspan="4" class="p-8 text-center text-gray-500 font-sans">${pendingStart ? "Đang gửi yêu cầu tạo tác vụ…" : currentTaskId && !["COMPLETED", "PREVIEW_READY", "PREPARED", "FAILED", "STOPPED", "CANCELLED"].includes(currentProgress?.status) ? "Chưa nhận được trạng thái tác vụ từ máy chủ. Đang kiểm tra lại…" : "Chưa có video trong lịch sử."}</td></tr>`;
         return;
       }
-
       tbody.innerHTML = "";
-      tasks.forEach(t => {
-        const tr = document.createElement("tr");
-        tr.className = "hover:bg-gray-800/40 transition";
-        const displayed = displayedTaskProgress(t);
-        const pct = displayed.pct;
-        const terminalWithoutProgress = pct === null && ["COMPLETED", "PREVIEW_READY", "PREPARED", "FAILED", "STOPPED", "CANCELLED"].includes(t.status);
-        const progressLabel = pct === null ? "Chưa có số liệu %" : displayed.label;
-
-        let statusBadge = "";
-        if (t.status === "RUNNING") {
-          statusBadge = `<span class="px-2 py-0.5 rounded bg-emerald-950 text-emerald-400 border border-emerald-800 text-[10px] animate-pulse">ĐANG CHẠY</span>`;
-        } else if (t.status === "PAUSED" || t.status === "CANCELLING") {
-          statusBadge = `<span class="px-2 py-0.5 rounded bg-amber-950 text-amber-400 border border-amber-800 text-[10px]">${t.status === "CANCELLING" ? "ĐANG DỪNG" : "TẠM DỪNG"}</span>`;
-        } else if (t.status === "PREVIEW_READY") {
-          statusBadge = `<span class="px-2 py-0.5 rounded bg-violet-950 text-violet-300 border border-violet-800 text-[10px]">XEM TRƯỚC SẴN SÀNG</span>`;
-        } else if (t.status === "PREPARED") {
-          statusBadge = `<span class="px-2 py-0.5 rounded bg-violet-950 text-violet-300 border border-violet-800 text-[10px]">CHỜ XUẤT MP4</span>`;
-        } else if (t.status === "COMPLETED") {
-          const resultAvailable = !!(t.output_video_url || t.video_url);
-          statusBadge = `<span class="px-2 py-0.5 rounded bg-blue-950 text-blue-400 border border-blue-800 text-[10px]">${resultAvailable ? "ĐÃ XUẤT VIDEO" : "ĐÃ DỊCH · CHƯA XUẤT"}</span>`;
-        } else if (t.status === "CANCELLED" || t.status === "STOPPED") {
-          statusBadge = `<span class="px-2 py-0.5 rounded bg-gray-800 text-gray-400 border border-gray-700 text-[10px]">ĐÃ DỪNG</span>`;
-        } else {
-          statusBadge = `<span class="px-2 py-0.5 rounded bg-rose-950 text-rose-400 border border-rose-800 text-[10px]">LỖI</span>`;
-        }
-
-        let actionButtons = "";
-        if (/^[a-zA-Z0-9_-]{1,80}$/.test(t.task_id) && !t.task_id.startsWith("export_") && t.can_open !== false && (t.saved || !["STOPPED", "CANCELLED"].includes(t.status))) {
-          actionButtons += `<button onclick="window.openTaskInStudio('${t.task_id}')" class="px-2 py-1 bg-pink-600/80 hover:bg-pink-600 text-white rounded text-[10px]">${t.saved ? 'Mở lại để chỉnh' : 'Mở trong Studio'}</button> `;
-        }
-        if (t.can_pause) {
-          actionButtons += `<button onclick="window.pauseTask('${t.task_id}')" class="px-2 py-1 bg-amber-600/80 hover:bg-amber-600 text-white rounded text-[10px]"><i class="fa-solid fa-pause mr-1"></i>Tạm dừng</button> `;
-        }
-        if (t.can_resume) {
-          actionButtons += `<button onclick="window.resumeTask('${t.task_id}')" class="px-2 py-1 bg-emerald-600/80 hover:bg-emerald-600 text-white rounded text-[10px]"><i class="fa-solid fa-play mr-1"></i>Tiếp tục</button> `;
-        }
-        if (t.can_stop) {
-          actionButtons += `<button onclick="window.stopTask('${t.task_id}')" class="px-2 py-1 bg-rose-700/80 hover:bg-rose-700 text-white rounded text-[10px]"><i class="fa-solid fa-stop mr-1"></i>Hủy</button> `;
-        }
-        if (t.status === "COMPLETED" && t.video_url) {
-          actionButtons += `<a href="${t.video_url}" data-result-preview class="px-2 py-1 bg-pink-600 hover:bg-pink-500 text-white rounded text-[10px] inline-flex items-center gap-1"><i class="fa-solid fa-circle-play"></i>Xem kết quả</a> `;
-        }
-
-        tr.innerHTML = `
-          <td class="p-3.5 font-bold text-white">${escapeHtml(t.title || t.task_id)}${t.title ? `<div class="text-[10px] text-gray-400 font-normal">${escapeHtml(t.task_id)}</div>` : ''}${t.updated_at ? `<div class="text-[10px] text-gray-400 font-normal">${escapeHtml(new Date(t.updated_at * 1000).toLocaleString('vi-VN'))}</div>` : ''}</td>
-          <td class="p-3.5 text-pink-400 font-semibold">${escapeHtml(t.saved ? 'Phiên đã lưu' : t.task_type)}</td>
-          <td class="p-3.5">
-            <div class="flex items-center gap-2">
-              ${terminalWithoutProgress ? "" : `<div class="w-24 bg-gray-800 h-2 rounded-full overflow-hidden">
-                <div class="bg-gradient-to-r from-pink-500 to-violet-500 h-full transition-all duration-300" style="width: ${pct === null ? 100 : pct}%; opacity: ${pct === null ? 0.3 : 1}"></div>
-              </div>`}
-              <span class="text-[10px] text-gray-300 font-sans">${terminalWithoutProgress ? "" : `${progressLabel} · `}${escapeHtml(t.stage || '')}</span>
-            </div>
-          </td>
-          <td class="p-3.5 text-gray-300">${formatTime(t.duration)}</td>
-          <td class="p-3.5">${statusBadge}</td>
-          <td class="p-3.5 text-right space-x-1">${actionButtons || '<span class="text-gray-500 text-[10px]">-</span>'}</td>
-        `;
-        tbody.appendChild(tr);
-      });
+      videos.forEach(video => tbody.appendChild(renderHistoryRow(video)));
     } catch (e) {
       if (taskIdAtRequest !== currentTaskId || revisionAtRequest !== progressRevision) return;
       console.error("Error loading tasks:", e);
-      tbody.innerHTML = '<tr><td colspan="6" class="p-6 text-center text-rose-300">Không thể tải danh sách tác vụ. Bấm Làm mới để thử lại.</td></tr>';
+      tbody.innerHTML = '<tr><td colspan="4" class="p-6 text-center text-rose-300">Không thể tải lịch sử video. Bấm Làm mới để thử lại.</td></tr>';
       if (currentTaskId && !["COMPLETED", "PREVIEW_READY", "PREPARED", "FAILED", "STOPPED", "CANCELLED"].includes(currentProgress?.status)) {
         taskPollWarning = true;
         bufferingAlert.dataset.state = "disconnected";
