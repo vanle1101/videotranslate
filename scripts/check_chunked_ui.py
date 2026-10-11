@@ -115,6 +115,12 @@ def wait_for_idle(page, base, task_id, timeout=3600):
         # the full, caption-enriched long transcript five times per second is
         # unnecessary QA pressure and distorts recovery timings.
         wait(1500)
+    event("REAL_ACCEPTANCE_TIMEOUT", {"task_id":task_id,
+        "elapsed_seconds":round(time.monotonic() - started, 3),
+        "status":progress["status"], "ready":ready,
+        "provider_concurrency":settings.OPENCODE_CONCURRENCY,
+        "peak_active_requests":peak_active, "peak_queued_requests":peak_queued,
+        "ai_queue":queue})
     raise AssertionError("Real runtime did not reach a terminal state within the acceptance deadline")
 
 
