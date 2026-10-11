@@ -12,7 +12,11 @@ from core.review_checkpoint import file_digest
 
 def _code(function):
     code = getattr(function, "__code__", None)
-    return hashlib.sha256(marshal.dumps(code)).hexdigest() if code is not None else None
+    # Marshal v3+ records reference flags from live object refcounts. A source
+    # row retaining an emotion constant, or progress retaining a message,
+    # changes those bytes after inference even though executable code did not
+    # change. v2 serializes code and nested constants without reference flags.
+    return hashlib.sha256(marshal.dumps(code, 2)).hexdigest() if code is not None else None
 
 
 def _assets(root, names):
@@ -52,7 +56,7 @@ def source_runtime_identity(session):
     whisper = _assets(model_root, ("model.bin", "config.json", "tokenizer.json", "vocabulary.json", "vocabulary.txt"))
     # Remote-managed model names have no proven asset revision here. Keep this
     # limitation explicit instead of asserting a pinned remote model version.
-    identity = {"revision": 1, "loaded_code": {name: _code(fn) for name, fn in functions.items()},
+    identity = {"revision": 2, "loaded_code": {name: _code(fn) for name, fn in functions.items()},
         "worker_files": workers, "versions": versions, "whisper_assets": whisper,
         "whisper_asset_revision_known": (all(whisper[name] != "unavailable"
             for name in ("model.bin", "config.json", "tokenizer.json"))

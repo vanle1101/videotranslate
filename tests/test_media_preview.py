@@ -172,16 +172,15 @@ def test_session_source_covers_downloaded_url_and_uploaded_video(preview):
     assert client.get(ready['video_url']).status_code == 200
 
 
-def test_chunked_session_preview_defaults_to_prepared_source_cursor(preview):
+def test_source_preview_is_readable_before_recognition_completes(preview):
     client, _, source = preview
     session = SimpleNamespace(video_path=source, translation_mode='preview',
-                              _source_prepared_seconds=0.2)
+                              _source_prepared_seconds=0.2, total_duration=.5)
     with patch.object(main, 'get_streaming_session', return_value=session):
         response = client.post('/api/preview', json={'task_id': 'chunked-task'})
     assert response.status_code == 200
     ready = wait_ready(client, response.json())
-    assert ready['partial'] is True
-    assert ready['coverage_seconds'] <= 0.25
+    assert ready['coverage_seconds'] == pytest.approx(.5, abs=.05)
 
 
 def test_initial_source_preview_requests_a_short_compatibility_prefix(preview):
@@ -194,10 +193,10 @@ def test_initial_source_preview_requests_a_short_compatibility_prefix(preview):
                                   start_seconds=0, end_seconds=24.0)
 
 
-def test_chunked_preview_never_requests_beyond_prepared_cursor(preview):
+def test_source_window_clamps_to_video_duration_independently_of_translation_cursor(preview):
     client, _, source = preview
     session = SimpleNamespace(video_path=source, translation_mode='full',
-                              _source_prepared_seconds=0.2)
+                              _source_prepared_seconds=0.2, total_duration=.5)
     expected = {'preview_id': 'clamped', 'status': 'PROCESSING', 'video_url': None}
     with patch.object(main, 'get_streaming_session', return_value=session), \
             patch.object(main.preview_manager, 'start', return_value=expected) as start:
@@ -205,8 +204,39 @@ def test_chunked_preview_never_requests_beyond_prepared_cursor(preview):
             'task_id': 'chunked-task', 'coverage_seconds': 3,
         })
     assert response.status_code == 200
-    start.assert_called_once_with(source, coverage_seconds=0.2,
-                                  start_seconds=0, end_seconds=0.2)
+    start.assert_called_once_with(source, coverage_seconds=.5,
+                                  start_seconds=0, end_seconds=.5)
+
+
+@pytest.mark.parametrize('prepared', [0, .2])
+def test_forward_source_seek_after_failed_or_partial_translation_has_real_media(preview, prepared):
+    client, manager, source = preview
+    original = source.read_bytes()
+    session = SimpleNamespace(video_path=source, total_duration=.5,
+                              _source_prepared_seconds=prepared)
+    with patch.object(main, 'get_streaming_session', return_value=session):
+        response = client.post('/api/preview', json={
+            'task_id':'pending-recognition', 'start_seconds':.3, 'end_seconds':.5})
+    assert response.status_code == 200
+    ready = wait_ready(client, response.json())
+    assert ready['start_seconds'] == pytest.approx(.3, abs=.01)
+    assert ready['coverage_seconds'] <= .25
+    media = client.get(ready['video_url'], headers={'Range':'bytes=0-99'})
+    assert media.status_code == 206
+    assert media.headers['content-type'] == 'video/webm'
+    subprocess.run(['ffmpeg','-v','error','-nostdin','-i',str(manager.media(ready['preview_id'])),
+                    '-f','null','-'], capture_output=True, check=True, timeout=10)
+    assert source.read_bytes() == original
+
+
+def test_source_seek_cannot_read_past_actual_video_duration(preview):
+    client, _, source = preview
+    session = SimpleNamespace(video_path=source, total_duration=.5, _source_prepared_seconds=0)
+    with patch.object(main,'get_streaming_session',return_value=session), \
+            patch.object(main.preview_manager,'start') as start:
+        response = client.post('/api/preview',json={'task_id':'source','start_seconds':.5,'end_seconds':.6})
+    assert response.status_code == 409
+    start.assert_not_called()
 
 
 def test_exported_result_preview_uses_existing_output_and_preserves_final_mp4(preview):

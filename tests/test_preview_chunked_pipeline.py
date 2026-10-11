@@ -98,6 +98,60 @@ def preview(tmp_path, monkeypatch):
     return session, prepared, analyzed, speech, events
 
 
+def test_source_preparation_failure_with_no_rows_never_publishes_ready_preview(preview, monkeypatch, caplog):
+    session, prepared, analyzed, speech, events = preview
+
+    async def unavailable_source(current, start, end):
+        prepared.append((start, end))
+        raise MemoryError("controlled recognizer failure before source publication")
+
+    monkeypatch.setattr("core.streaming.chunked_source.prepare_interval", unavailable_source)
+
+    async def run():
+        await session.start()
+        await session.worker_task
+        snapshot = session.get_progress()
+        assert snapshot["status"] == "FAILED"
+        assert snapshot["can_retry"] and not snapshot["can_translate_full"]
+        assert session._startup_failed and not session._preview_ready
+        assert session._source_prepared_seconds == session._visual_completed_seconds == 0
+        assert not session.segments and snapshot["total_segments"] == 0
+        assert session.video_path.is_file()
+
+    asyncio.run(run())
+    assert prepared == [(0, 24)] and analyzed == speech == []
+    assert "SOURCE_RETRY_PENDING source_start=0.0 error_type=MemoryError" in caplog.text
+    assert "controlled recognizer failure before source publication" in caplog.text
+    assert "unavailable_source" in caplog.text
+    assert not any(event == "progress" and payload["status"] in {"PREVIEW_READY", "COMPLETED"}
+                   for event, payload in events)
+
+
+def test_actually_prepared_speechless_prefix_can_publish_ready_preview(preview, monkeypatch):
+    session, prepared, analyzed, speech, events = preview
+
+    async def silent_source(current, start, end):
+        prepared.append((start, end))
+        raw = current.cache_dir / "recognized_silence.wav"
+        wav(raw, end - start)
+        return {"start": start, "end": end, "rows": [],
+                "raw_audio": {"path": str(raw)}, "suppression_stats": {}}
+
+    monkeypatch.setattr("core.streaming.chunked_source.prepare_interval", silent_source)
+
+    async def run():
+        await session.start()
+        await session.worker_task
+        assert session.get_progress()["status"] == "PREVIEW_READY"
+        assert session.can_translate_full and not session.error
+        assert session._source_prepared_seconds == session._visual_completed_seconds == 24
+        assert not session.segments and session.playable_until == 24
+
+    asyncio.run(run())
+    assert prepared == [(0, 24)] and speech == []
+    assert analyzed[0][0:3] == (0, 24, [])
+
+
 def test_hours_source_preview_only_prepares_one_bounded_window(preview):
     session, prepared, analyzed, speech, events = preview
     session.total_duration = 7200

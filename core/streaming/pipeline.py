@@ -10,6 +10,7 @@ import math
 import uuid
 import os
 import threading
+import traceback
 import wave
 from concurrent.futures import TimeoutError as FutureTimeoutError
 from copy import deepcopy
@@ -53,6 +54,21 @@ PROJECT_SAVE_FAILURE_WARNING = "Không lưu được dự án xuống đĩa; gi�
 SOURCE_METADATA_FIELDS = ("speaker_id", "speaker_evidence", "speaker_diagnostics", "speaker_confirmation", "utterance_id", "utterance_evidence",
                           "source_asr_row_id", "source_asr_start", "source_asr_end",
                           "source_piece_index", "source_piece_count")
+
+
+def preview_source_covered(*, completed_seconds, source_prepared_seconds, chunked_source_started):
+    """An empty row list proves silence only inside an actually prepared prefix."""
+    if (isinstance(completed_seconds, bool) or not isinstance(completed_seconds, (int, float))
+            or not math.isfinite(completed_seconds) or completed_seconds <= 0):
+        return False
+    if not chunked_source_started:
+        # Legacy previews recognized the entire source before translation.
+        return True
+    return bool(not isinstance(source_prepared_seconds, bool)
+                and isinstance(source_prepared_seconds, (int, float))
+                and math.isfinite(source_prepared_seconds)
+                and source_prepared_seconds > 0
+                and source_prepared_seconds + .001 >= completed_seconds)
 
 
 class SegmentItem:
@@ -620,6 +636,9 @@ class StreamingPipelineSession:
     @property
     def can_translate_full(self):
         return bool(self.translation_mode == "preview" and self._preview_ready
+                    and preview_source_covered(completed_seconds=self._visual_completed_seconds,
+                        source_prepared_seconds=self._source_prepared_seconds,
+                        chunked_source_started=self._chunked_source_started)
                     and self.initialized and not self.is_running and not self.is_stopped
                     and not self.is_editing and self.video_path
                     and self.video_path.is_file())
@@ -1631,7 +1650,13 @@ class StreamingPipelineSession:
         elif self.is_paused and self.is_running:
             snapshot["status"] = "PAUSED"
         elif self._preview_ready and not self.is_running:
-            snapshot.update(status="PREVIEW_READY", phase="preview", stage="Bản xem trước đã sẵn sàng. Có thể sửa lời và dịch toàn bộ.")
+            if preview_source_covered(completed_seconds=self._visual_completed_seconds,
+                    source_prepared_seconds=self._source_prepared_seconds,
+                    chunked_source_started=self._chunked_source_started):
+                snapshot.update(status="PREVIEW_READY", phase="preview", stage="Bản xem trước đã sẵn sàng. Có thể sửa lời và dịch toàn bộ.")
+            else:
+                snapshot.update(status="FAILED", phase="prepare", progress_pct=None,
+                    stage="Bản xem trước chưa nhận diện và dịch được đoạn nguồn; bấm Tiếp tục để thử phần còn thiếu.")
         elif not self.is_running and self.review_summary.get("status") in {"failed", "incomplete"}:
             snapshot.update(status="FAILED", phase="review", stage=self._review_message())
         elif (not self.is_running and output_gate["final_output_blocked"]
@@ -2317,8 +2342,10 @@ class StreamingPipelineSession:
                     if warning not in self.warnings:
                         self.warnings.append(warning)
                     logging.getLogger("errors").error(
-                        "[%s] SOURCE_RETRY_PENDING source_start=%s error_type=%s",
-                        self.task_id, self._source_prepared_seconds, type(error).__name__)
+                        "[%s] SOURCE_RETRY_PENDING source_start=%s error_type=%s detail=%s traceback=%s",
+                        self.task_id, self._source_prepared_seconds, type(error).__name__,
+                        redacted_detail(error),
+                        redacted_detail("".join(traceback.format_tb(error.__traceback__))))
                     self._persist_if_enabled()
                     await self.emit("progress", self.get_progress())
                     break
@@ -3625,7 +3652,10 @@ class StreamingPipelineSession:
             # inspect its completed rows, Retry missing speech, or explicitly
             # process later intervals. Full export still refuses every gap.
             if self.translation_mode == "preview" and self._chunked_source_started and not self.is_stopped:
-                self._preview_ready = bool(self._visual_completed_seconds > 0
+                preview_covered = preview_source_covered(completed_seconds=self._visual_completed_seconds,
+                    source_prepared_seconds=self._source_prepared_seconds,
+                    chunked_source_started=self._chunked_source_started)
+                self._preview_ready = bool(preview_covered
                     and (not owned or any(s.status in {"READY", "PLAYED"} for s in owned)))
             failed = [s for s in owned if s.status == "FAILED"]
             if any(row["state"] != "COMPLETED" for row in self._chunk_jobs):
@@ -3639,7 +3669,13 @@ class StreamingPipelineSession:
                 await self.emit("error", {"message": self.error, "segment_ids": [s.id for s in failed]})
             if (not self.is_stopped and not self.error and self.translation_mode == "preview"
                     and self._chunked_source_started):
-                if any(s.status not in ("READY", "PLAYED") for s in owned):
+                if not preview_covered:
+                    self._preview_ready = False
+                    self._startup_failed = True
+                    self.error = "Bản xem trước chưa nhận diện và dịch được đoạn nguồn; bấm Tiếp tục để thử phần còn thiếu."
+                    await self.emit("error", {"message": self.error})
+                    await self.emit("progress", self.get_progress())
+                elif any(s.status not in ("READY", "PLAYED") for s in owned):
                     self.error = "Bản xem trước còn câu chưa xử lý xong; phần đã lưu được giữ."
                     await self.emit("progress", self.get_progress())
                 else:

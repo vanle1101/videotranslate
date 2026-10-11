@@ -938,6 +938,7 @@ def _valid_output(path, expected_duration):
 
 
 def _availability(data):
+    from core.streaming.pipeline import preview_source_covered
     fields, rows = data["session"], data["segments"]
     output_gate = final_output_metadata(rows)
     missing = []
@@ -957,15 +958,23 @@ def _availability(data):
                              and not fields.get("_visual_prepass_complete"))
     if visual_incomplete:
         ready = False
+    preview_covered = preview_source_covered(
+        completed_seconds=fields.get("_visual_completed_seconds", 0),
+        source_prepared_seconds=fields.get("_source_prepared_seconds", 0),
+        chunked_source_started=fields.get("_chunked_source_started", False))
+    invalid_preview = bool(fields.get("translation_mode") == "preview"
+                           and fields.get("_preview_ready") and not preview_covered)
+    if invalid_preview:
+        ready = False
     preview_ready = bool(fields.get("translation_mode") == "preview" and fields.get("_preview_ready")
                          and fields.get("initialized") and not missing and not absent_audio
-                         and fields.get("_visual_completed_seconds", 0) > 0
+                         and preview_covered
                          and data["state"] == "READY"
                          and all(row["status"] in {"READY", "PLAYED"} for row in rows
                                  if row["start"] < fields.get("_visual_completed_seconds", 0) - .001))
     preview_can_continue = bool(fields.get("translation_mode") == "preview" and fields.get("_preview_ready")
         and fields.get("initialized") and not missing and not absent_audio
-        and fields.get("_visual_completed_seconds", 0) > 0
+        and preview_covered
         and (preview_ready or any(row["status"] in {"READY", "PLAYED"} for row in rows
                                  if row["end"] <= fields.get("_visual_completed_seconds", 0) + .001)))
     if fields.get("review_summary", {}).get("status") in {"failed", "incomplete", "running"}:
@@ -979,7 +988,7 @@ def _availability(data):
     output_warning = OUTPUT_FAILURE_WARNING if current_output and not valid_output else ""
     review_incomplete = fields.get("review_summary", {}).get("status") in {"failed", "incomplete", "running"}
     waiting_export = bool(ready and fields.get("auto_export_result") and not valid_output)
-    status = ("FAILED" if output_warning else "PREVIEW_READY" if preview_ready else "PREPARED" if waiting_export or unresolved_speech else "COMPLETED" if ready else
+    status = ("FAILED" if output_warning or invalid_preview else "PREVIEW_READY" if preview_ready else "PREPARED" if waiting_export or unresolved_speech else "COMPLETED" if ready else
               "STOPPED" if data["state"] == "STOPPED" and not missing else
               "FAILED" if missing or data["state"] == "FAILED" or review_incomplete else "STOPPED")
     message = " ".join(missing)
@@ -987,6 +996,8 @@ def _availability(data):
         message = "Tải video chưa xong; mở dự án và bấm Tiếp tục để khôi phục phần đã tải."
     elif preview_ready:
         message = ""
+    elif invalid_preview and not message:
+        message = "Bản xem trước chưa nhận diện và dịch được đoạn nguồn; bấm Tiếp tục để thử phần còn thiếu."
     elif visual_incomplete and not message:
         message = "Dịch video chưa xong; phần đã dịch được giữ. Mở dự án và bấm Tiếp tục để xử lý phần còn lại."
     elif review_incomplete and not message:
@@ -1005,6 +1016,7 @@ def _availability(data):
         message = "Lời dịch và giọng đã lưu; chưa có MP4 được kiểm định. Mở dự án và xuất video."
     return {"status": status, "missing_media": message, "ready": ready, "preview_ready": preview_ready,
             **output_gate,
+            "preview_source_unprepared": invalid_preview,
             "preview_can_continue": preview_can_continue, "source_exists": _exists(fields.get("video_path")),
             "pending_download": pending_download, "output_warning": output_warning,
             "missing_audio_ids": absent_audio, "output_filename": output if valid_output and ready else ""}
@@ -1072,6 +1084,9 @@ def _restore_saved_session_owned(task_id, event_callback=None):
     for key in SESSION_FIELDS:
         if key in fields:
             setattr(session, key, fields[key])
+    # A stale success flag is not source evidence. Preserve partial speech
+    # recovery, but never restore an unprepared empty preview as ready.
+    session._preview_ready = available["preview_can_continue"]
     from core.streaming.recovery import recover_interrupted
     recover_interrupted(session._chunk_jobs)
     for key in PATH_FIELDS:
@@ -1165,12 +1180,13 @@ def _restore_saved_session_owned(task_id, event_callback=None):
     # Earlier interrupted preparation is restarted explicitly using the same source/checkpoints.
     session._restored_can_resume = bool(session.initialized and not source_missing
         and (not needs_preparation_resume or _exists(session.raw_audio_16k)))
-    if (not session.initialized or visual_incomplete) and not available["preview_can_continue"] and (not source_missing or available["pending_download"]):
+    if (not session.initialized or visual_incomplete or available["preview_source_unprepared"]) and not available["preview_can_continue"] and (not source_missing or available["pending_download"]):
         # A published prefix is initialized/playable while later visual chunks
         # are still missing. Retry must resume prepass checkpoints, never send
         # untouched source rows straight to speech generation.
         session._startup_failed = True
-        session.error = ("Dịch video chưa xong; các câu đã dịch và giọng đọc được giữ. Bấm Tiếp tục để xử lý phần còn lại."
+        session.error = (available["missing_media"] if available["preview_source_unprepared"] else
+                        "Dịch video chưa xong; các câu đã dịch và giọng đọc được giữ. Bấm Tiếp tục để xử lý phần còn lại."
                          if visual_incomplete else "Chuẩn bị video bị gián đoạn; bấm Tiếp tục để khôi phục phần đã lưu.")
         if available["pending_download"]:
             session._source_downloader = _SavedSourceDownloader()

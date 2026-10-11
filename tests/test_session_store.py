@@ -463,6 +463,51 @@ def test_saved_ready_wav_longer_than_dub_window_is_missing_audio_not_completed(p
     assert restored.can_retry
 
 
+@pytest.mark.parametrize("completed_seconds", [0., 24.])
+def test_stale_empty_preview_flag_without_prepared_source_never_restores_success(persisted, completed_seconds):
+    audio = Path(persisted.segments[0].audio_path)
+    healthy_audio = audio.read_bytes()
+    persisted.visual_translation = True
+    persisted.translation_mode = "preview"
+    persisted.total_duration = 320.
+    persisted._chunked_source_started = True
+    persisted._source_prepared_seconds = 0.
+    persisted._visual_incremental_started = True
+    persisted._visual_completed_seconds = completed_seconds
+    persisted._preview_ready = True
+    persisted.segments.clear()
+    persisted.persist()
+    original_manifest = _project_path(persisted.task_id).read_bytes()
+    listed = list_saved_sessions()[0]
+    assert listed["status"] == "FAILED" and not listed["can_translate_full"]
+    assert listed["progress_pct"] is None and not listed["output_filename"]
+    assert "chưa nhận diện và dịch" in listed["missing_media"]
+    restored = restore_saved_session(persisted.task_id)
+    assert restored.get_progress()["status"] == "FAILED" and restored.can_retry
+    assert not restored._preview_ready and not restored.can_translate_full
+    assert restored._startup_failed and restored.error
+    assert not restored.segments and restored._source_prepared_seconds == 0.
+    assert _project_path(persisted.task_id).read_bytes() == original_manifest
+    assert audio.read_bytes() == healthy_audio
+
+
+def test_verified_speechless_preview_survives_restore_with_positive_source_coverage(persisted):
+    persisted.visual_translation = True
+    persisted.translation_mode = "preview"
+    persisted.total_duration = 320.
+    persisted._chunked_source_started = True
+    persisted._source_prepared_seconds = 32.
+    persisted._visual_incremental_started = True
+    persisted._visual_completed_seconds = 24.
+    persisted._preview_ready = True
+    persisted.segments.clear()
+    persisted.persist()
+    assert list_saved_sessions()[0]["status"] == "PREVIEW_READY"
+    restored = restore_saved_session(persisted.task_id)
+    assert restored.get_progress()["status"] == "PREVIEW_READY"
+    assert restored.can_translate_full and not restored.error
+
+
 def test_intentional_preview_reopens_without_interrupted_error_and_retains_future_source(persisted):
     persisted.visual_translation = True
     persisted.translation_mode = "preview"

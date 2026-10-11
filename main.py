@@ -1585,9 +1585,9 @@ class PreviewRequest(BaseModel):
     file_path: Optional[str] = None
     task_id: Optional[str] = None
     output_filename: Optional[str] = None
-    # For a chunked task this asks the Qt compatibility preview to transcode
-    # only the prepared prefix.  Leaving it unset preserves the full-result
-    # preview contract used by exported MP4 files.
+    # A bounded original-video window for Qt compatibility. This source-media
+    # contract is independent of the translated/dubbed checkpoint. Leaving it
+    # unset preserves full-result previews for exported MP4 files.
     coverage_seconds: Optional[float] = Field(default=None, gt=0, le=86400)
     start_seconds: float = Field(default=0, ge=0, le=86400)
     end_seconds: Optional[float] = Field(default=None, gt=0, le=86400)
@@ -1626,23 +1626,23 @@ async def create_media_preview(req: PreviewRequest):
     start_seconds = req.start_seconds
     end_seconds = req.end_seconds
     # A compatibility fallback must never launch a full multi-hour transcode.
-    # For a chunked task keep the request inside the globally measured source
-    # cursor; when no task exists use one short prefix until the user starts it.
+    # Keep original-video seeks inside its known duration, not the ASR cursor.
+    # Translation may be pending/failed while the downloaded source is valid.
     # Exported result previews bypass this block and retain full-file semantics.
     if req.output_filename is None:
         try:
-            prepared = float(getattr(session, "_source_prepared_seconds", 0) or 0)
+            source_duration = float(getattr(session, "total_duration", 0) or 0)
         except (TypeError, ValueError):
-            prepared = 0
-        if prepared > 0:
-            if start_seconds >= prepared:
-                raise HTTPException(status_code=409, detail="Đoạn xem trước chưa được chuẩn bị")
+            source_duration = 0
+        if 0 < source_duration < float("inf"):
+            if start_seconds >= source_duration:
+                raise HTTPException(status_code=409, detail="Vị trí xem nằm ngoài thời lượng video nguồn")
             requested_end = end_seconds
             if requested_end is None:
                 requested_end = start_seconds + (coverage_seconds or DEFAULT_COMPATIBILITY_SECONDS)
-            end_seconds = min(requested_end, prepared)
+            end_seconds = min(requested_end, source_duration)
             if end_seconds <= start_seconds:
-                raise HTTPException(status_code=409, detail="Đoạn xem trước chưa được chuẩn bị")
+                raise HTTPException(status_code=409, detail="Vị trí xem nằm ngoài thời lượng video nguồn")
             coverage_seconds = end_seconds - start_seconds
         elif coverage_seconds is None and end_seconds is None:
             coverage_seconds = DEFAULT_COMPATIBILITY_SECONDS
