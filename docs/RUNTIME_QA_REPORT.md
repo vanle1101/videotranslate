@@ -1050,6 +1050,8 @@ Real acceptance `scripts/check_video_history_ui.py`: **PASS**. Four real retaine
 
 Focused regression: **62 Python tests passed** (`test_history_thumbnail.py`, `test_history_api.py`, `test_video_history.py`) and **246 JavaScript UI tests passed**. `node --check static/app.js` and `git diff --check` passed. The offscreen harness emitted only expected Chromium GPU fallback diagnostics.
 
+After the checks, the idle normal Studio was reloaded with the committed code. The fresh backend started on port 63175, reported five grouped history rows and four real thumbnail URLs, and had zero active tasks. No translation or provider call was started.
+
 ## Fullscreen player Settings trap — October 11, 2026
 
 **PASS for the reported fullscreen navigation failure in fresh offscreen production Qt/Chromium.** The normal user's application was not restarted or controlled. This acceptance concerns playback/navigation only; no new translation, provider call or export is claimed.
