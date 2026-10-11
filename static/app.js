@@ -2352,7 +2352,6 @@ document.addEventListener("DOMContentLoaded", () => {
       if (previewGlobalTime() < sourceAudition.start || previewGlobalTime() >= sourceAudition.end) stopSourceAudition();
       else return;
     }
-    selectPlaybackAtTime(previewGlobalTime());
     if (bgmAudio) bgmAudio.currentTime = previewGlobalTime();
     if (activeAudio) {
       activeAudio.pause();

@@ -392,6 +392,22 @@ test('forward seek past preview requests a bounded source window and clearly pla
   assert.equal(ui.requests.some(item=>item.url.endsWith('/translate-full')),false);
 });
 
+test('finished translated sample does not prepare an unnecessary original-only continuation window', async () => {
+  const ui=await partiallyTranslatedSource(), video=ui.el('video-player');
+  const initial=ui.requests.filter(item=>item.url==='/api/preview').length;
+  video.currentTime=23; await video.play(); await video.emit('timeupdate');
+  assert.equal(ui.requests.filter(item=>item.url==='/api/preview').length,initial);
+  video.currentTime=24; await video.emit('timeupdate'); await video.emit('ended'); await ui.flush();
+  // Native currentTime assignments also dispatch seeking/seeked. The
+  // preview's own end clamp must not authorize original-only playback.
+  await video.emit('seeking'); await video.emit('seeked');
+  await ui.el('player-play-toggle').click();
+  assert.equal(video.paused,true);
+  assert.equal(video.muted,true);
+  assert.equal(ui.requests.filter(item=>item.url==='/api/preview').length,initial);
+  assert.equal(video.paused,true);
+});
+
 test('zero recognized rows do not block forward keyboard seek or original playback after retryable failure', async () => {
   const ui=await partiallyTranslatedSource({failed:true}), video=ui.el('video-player');
   ui.replies.set('/api/preview',{preview_id:'failed-source-end',status:'READY',video_url:'/api/preview/failed-source-end/media',
