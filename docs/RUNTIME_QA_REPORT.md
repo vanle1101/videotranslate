@@ -1040,3 +1040,38 @@ Changed files: `main.py`, `core/streaming/{session_store,video_history}.py`, `st
 
 **Cleanup limitation:** automatic approval review rejected the single verified-root cleanup command with “blocked by policy”. The task's `workspace/temp/video-history-ui.png`, new history-module/test/harness bytecode and `%TEMP%/pytest-of-acer/pytest-1089`, `pytest-1090`, `pytest-1091` remain. No alternate deletion route was attempted and no previously rejected cleanup target was retried. The harness now writes a screenshot only when explicitly requested; all QA backends and processes exited normally.
 
+## Fullscreen player Settings trap — October 11, 2026
+
+**PASS for the reported fullscreen navigation failure in fresh offscreen production Qt/Chromium.** The normal user's application was not restarted or controlled. This acceptance concerns playback/navigation only; no new translation, provider call or export is claimed.
+
+### Reproduction and root causes
+
+Before changing production code, `scripts/check_player_fullscreen_ui.py --reproduce` launched the actual FastAPI service and `StudioMainWindow`, loaded retained source media, entered player fullscreen and clicked its Settings button. Settings appeared while Studio became hidden; both DOM fullscreen and the native Qt window remained fullscreen. Escape still left the native window fullscreen: **FAIL reproduced**.
+
+1. Player Settings immediately hid the fullscreen player's ancestor via `switchTab`, without exiting browser fullscreen first.
+2. The desktop restored its window only when Chromium sent a fullscreen-off notification. The hidden player could leave it without that notification or a usable native Escape route.
+3. Existing coverage tested ordinary fullscreen toggling, not navigation away from fullscreen or recovery after hiding its player.
+
+### Fixes
+
+- `static/app.js`: all navigation away from Studio awaits a bounded, acknowledged fullscreen exit before hiding the player. Concurrent exits share one request; navigation revisions prevent late responses from reopening an obsolete tab. Failed/unacknowledged/timed-out exit retains the player and displays an Escape instruction. Fullscreen labels/icons follow actual browser state.
+- `desktop_app.py`: a fullscreen-only native Escape action exits Chromium and independently restores the previous normal/maximized window state. Missing, delayed, duplicate and reentrant browser notifications are handled. Ordinary editors and modal dialogs retain their Escape behavior.
+- `templates/index.html`: Settings offers “Quay lại video”; playback source/time are preserved.
+- `tests/test_ui_interactions.mjs`, `tests/test_desktop_app.py`: regressions cover exit failure/timeout, stale navigation, focused editors, orphan fullscreen, modal Escape and normal/maximized restoration.
+
+### Real UI retest
+
+The fresh production harness runs offscreen and muted. Pointer/keyboard input targets only its QA widget. It uses the retained `d5820a71` source without restoring or rewriting the user's project. The retained manifest SHA256 was unchanged after cleanup.
+
+| Exact steps | Expected | Actual / retest |
+| --- | --- | --- |
+| Load actual source → Play → Fullscreen → player Settings | Settings opens in a regular window; media/time retained | **PASS**. Native and DOM fullscreen both false; same real media source, playback remained active and advanced from 0.893119 to 1.682007 seconds; no JavaScript errors. |
+| Settings → Quay lại video → Fullscreen → Escape | Studio returns and fullscreen exits | **PASS**. Studio visible; native/DOM fullscreen false; restore state cleared; playback advanced to 2.781722 seconds. |
+| Maximize QA window → Fullscreen → Settings | Previous maximized state restored | **PASS**. Native maximized true, fullscreen false; browser fullscreen cleared; playback retained. |
+| Recreate old broken hide-player/show-Settings operation during fullscreen → focus Settings model field → Escape | Independent native recovery despite hidden player | **PASS fault injection**. Native and DOM fullscreen false; maximized restored. Native Escape action disabled again in ordinary Settings. This injected DOM operation is not a provider mock. |
+| Shut down only QA page/window/backend | No QA service left; saved project unchanged | **PASS**. `QA_STOPPED true`, server thread cleared, retained manifest hash unchanged. No desktop input, provider calls, visible browser or live-app interruption. |
+
+Automated regression: **245 JavaScript UI tests passed**; **39 Python desktop/tray/Qt tests passed**, with two existing websockets deprecation warnings. Real production playback/navigation was additionally checked as above; automated tests alone are not the runtime acceptance. No TypeScript/npm production build exists for this Python/Qt application.
+
+**Loading limitation:** the user's previously running native window retains its loaded Python code. This task deliberately did not restart it. The fullscreen recovery action loads on its next full application exit/start; a fresh offscreen process has verified the changed code. No claim is made that the existing window already has that action.
+

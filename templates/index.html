@@ -330,11 +330,16 @@
   <!-- 5. SETTINGS VIEW (SYSTEM & ENGINE CONFIGURATION) -->
   <!-- ======================================================== -->
   <div id="view-settings" class="app-view hidden max-w-4xl mx-auto p-6 space-y-6">
-    <div class="pb-3 border-b border-gray-800">
-      <h2 class="text-base font-bold text-white flex items-center gap-2">
-        <i class="fa-solid fa-gear text-cyan-400"></i> Cài Đặt Hệ Thống & AI Engines
-      </h2>
-      <p class="text-xs text-gray-400">Cấu hình API dịch thuật, mô hình giọng đọc và quy tắc lọc âm thanh.</p>
+    <div class="flex flex-wrap items-center justify-between gap-3 pb-3 border-b border-gray-800">
+      <div>
+        <h2 class="text-base font-bold text-white flex items-center gap-2">
+          <i class="fa-solid fa-gear text-cyan-400"></i> Cài Đặt Hệ Thống & AI Engines
+        </h2>
+        <p class="text-xs text-gray-400">Cấu hình API dịch thuật, mô hình giọng đọc và quy tắc lọc âm thanh.</p>
+      </div>
+      <button id="btn-settings-back" type="button" class="px-3 py-2 rounded-lg border border-gray-700 bg-gray-800 hover:bg-gray-700 text-xs text-gray-200 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-cyan-400">
+        <i class="fa-solid fa-arrow-left mr-1" aria-hidden="true"></i> Quay lại video
+      </button>
     </div>
 
     <section id="douyin-cookies-panel" aria-labelledby="douyin-cookies-heading" class="bg-[#12151f] border border-gray-800 rounded-2xl p-5 shadow-xl space-y-3">

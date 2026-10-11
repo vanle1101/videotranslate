@@ -1285,6 +1285,104 @@ test('custom player buttons play and pause the selected preview and control its 
   assert.equal(ui.requests.some(request => request.url.includes('/streaming/start')), false);
 });
 
+test('fullscreen Settings waits for actual exit before hiding the player and Back preserves playback', async () => {
+  const ui = studio(); await ui.flush();
+  await ui.el('tab-studio').click();
+  ui.window.loadDroppedLocalVideo('D:/preview.mp4');
+  const video = ui.el('video-player');
+  video.currentTime = 8; await video.play();
+  const source = video.src, playCount = video.playCount;
+  await ui.el('player-fullscreen').click();
+  assert.match(ui.el('player-fullscreen').getAttribute('aria-label'), /Thoát/);
+  let finish;
+  ui.document.exitFullscreen = () => new Promise(resolve => { finish = () => { ui.document.fullscreenElement = null; resolve(); }; });
+  const navigation = ui.el('player-settings').click();
+  await ui.flush();
+  assert.equal(ui.el('view-studio').classList.contains('hidden'), false);
+  assert.equal(ui.el('view-settings').classList.contains('hidden'), true);
+  finish(); await navigation;
+  assert.equal(ui.document.fullscreenElement, null);
+  assert.equal(ui.el('view-settings').classList.contains('hidden'), false);
+  assert.equal(ui.el('view-studio').classList.contains('hidden'), true);
+  await ui.el('btn-settings-back').click();
+  assert.equal(ui.el('view-studio').classList.contains('hidden'), false);
+  assert.equal(video.currentTime, 8);
+  assert.equal(video.src, source);
+  assert.equal(video.paused, false);
+  assert.equal(video.playCount, playCount);
+  assert.equal(ui.requests.some(request => request.url.includes('/streaming/start')), false);
+});
+
+test('all navigation tabs leave fullscreen and latest navigation wins during an in-flight exit', async () => {
+  for (const target of ['settings', 'tasks', 'models', 'diagnostics']) {
+    const ui = studio(); await ui.flush(); await ui.el('tab-studio').click();
+    await ui.el('player-fullscreen').click();
+    await ui.el(`tab-${target}`).click();
+    assert.equal(ui.document.fullscreenElement, null);
+    assert.equal(ui.el(`view-${target}`).classList.contains('hidden'), false);
+    assert.equal(ui.el('view-studio').classList.contains('hidden'), true);
+  }
+  const ui = studio(); await ui.flush(); await ui.el('tab-studio').click();
+  await ui.el('player-fullscreen').click();
+  let finish, exits = 0;
+  ui.document.exitFullscreen = () => { exits++; return new Promise(resolve => { finish = () => { ui.document.fullscreenElement = null; resolve(); }; }); };
+  const settings = ui.el('player-settings').click();
+  const history = ui.el('tab-tasks').click();
+  await ui.flush();
+  assert.equal(exits, 1);
+  finish(); await Promise.all([settings, history]);
+  assert.equal(ui.el('view-tasks').classList.contains('hidden'), false);
+  assert.equal(ui.el('view-settings').classList.contains('hidden'), true);
+});
+
+test('failed or unacknowledged fullscreen exit keeps the player and its exit button visible', async () => {
+  for (const exit of [async () => { throw new Error('browser refused'); }, async () => {}]) {
+    const ui = studio(); await ui.flush(); await ui.el('tab-studio').click();
+    await ui.el('player-fullscreen').click();
+    ui.document.exitFullscreen = exit;
+    await ui.el('player-settings').click();
+    assert.equal(ui.document.fullscreenElement, ui.playerSurface);
+    assert.equal(ui.el('view-studio').classList.contains('hidden'), false);
+    assert.equal(ui.el('view-settings').classList.contains('hidden'), true);
+    assert.match(ui.el('player-task-status').textContent, /Esc/);
+  }
+});
+
+test('fullscreen exit timeout cannot hide the player and a late response cannot navigate to stale Settings', async () => {
+  const ui = studio(); await ui.flush(); await ui.el('tab-studio').click();
+  await ui.el('player-fullscreen').click();
+  let finish;
+  ui.document.exitFullscreen = () => new Promise(resolve => { finish = () => { ui.document.fullscreenElement = null; resolve(); }; });
+  const settings = ui.el('player-settings').click();
+  await ui.tickTimeouts(2500); await settings;
+  assert.equal(ui.el('view-studio').classList.contains('hidden'), false);
+  assert.match(ui.el('player-task-status').textContent, /Esc/);
+  finish(); await ui.flush();
+  assert.equal(ui.el('view-settings').classList.contains('hidden'), true);
+  await ui.el('player-settings').click();
+  assert.equal(ui.el('view-settings').classList.contains('hidden'), false);
+});
+
+test('returning to Studio cancels pending Settings navigation and fullscreen labels follow browser Escape', async () => {
+  const ui = studio(); await ui.flush(); await ui.el('tab-studio').click();
+  await ui.el('player-fullscreen').click();
+  let finish;
+  ui.document.exitFullscreen = () => new Promise(resolve => { finish = () => { ui.document.fullscreenElement = null; resolve(); }; });
+  const settings = ui.el('player-settings').click();
+  await ui.el('tab-studio').click();
+  finish(); await settings;
+  assert.equal(ui.el('view-studio').classList.contains('hidden'), false);
+  assert.equal(ui.el('view-settings').classList.contains('hidden'), true);
+  await ui.document.emit('fullscreenchange');
+  assert.equal(ui.el('player-fullscreen').getAttribute('aria-label'), 'Xem video toàn màn hình');
+  assert.match(ui.el('player-fullscreen').innerHTML, /fa-expand/);
+  ui.document.fullscreenElement = ui.playerSurface;
+  await ui.document.emit('fullscreenchange');
+  assert.equal(ui.el('player-fullscreen').getAttribute('aria-label'), 'Thoát toàn màn hình');
+  assert.match(ui.el('player-fullscreen').getAttribute('title'), /Esc/);
+  assert.match(ui.el('player-fullscreen').innerHTML, /fa-compress/);
+});
+
 test('paused seek never plays dubbing, play resumes same segment, and speed stays synchronized', async () => {
   const ui = studio(); await ui.start();
   const video = ui.el('video-player');

@@ -2208,7 +2208,45 @@ document.addEventListener("DOMContentLoaded", () => {
     { btnId: "tab-settings", viewId: "view-settings" }
   ];
 
-  function switchTab(targetViewId) {
+  let navigationRevision = 0;
+  let fullscreenExitPending = null;
+
+  async function leavePlayerFullscreen() {
+    if (!document.fullscreenElement) return;
+    if (!fullscreenExitPending) {
+      fullscreenExitPending = (async () => {
+        let timeout;
+        try {
+          await Promise.race([
+            document.exitFullscreen(),
+            new Promise((_, reject) => {
+              timeout = setTimeout(() => reject(new Error("Fullscreen exit timed out")), 2500);
+            })
+          ]);
+          if (document.fullscreenElement) throw new Error("Fullscreen exit not acknowledged");
+        } finally { clearTimeout(timeout); }
+      })();
+    }
+    const pending = fullscreenExitPending;
+    try { await pending; }
+    finally { if (fullscreenExitPending === pending) fullscreenExitPending = null; }
+  }
+
+  async function switchTab(targetViewId) {
+    const revision = ++navigationRevision;
+    // Hiding the fullscreen player's ancestor can leave Qt's native window
+    // fullscreen with no visible player/exit control. Leave Chromium first.
+    if (targetViewId !== "view-studio" && document.fullscreenElement) {
+      try { await leavePlayerFullscreen(); }
+      catch (_) {
+        if (revision === navigationRevision) {
+          playerTaskStatus.textContent = "Chưa thoát được toàn màn hình. Bấm Esc rồi mở lại Cài đặt.";
+          playerTaskStatus.classList.remove("hidden");
+        }
+        return;
+      }
+    }
+    if (revision !== navigationRevision) return;
     navTabs.forEach(({ btnId, viewId }) => {
       const btn = document.getElementById(btnId);
       const view = document.getElementById(viewId);
@@ -2231,6 +2269,7 @@ document.addEventListener("DOMContentLoaded", () => {
     const btn = document.getElementById(btnId);
     if (btn) btn.addEventListener("click", () => switchTab(viewId));
   });
+  document.getElementById("btn-settings-back")?.addEventListener("click", () => switchTab("view-studio"));
 
   // =========================================================
   // 2. HARDWARE DETECTION
@@ -2455,14 +2494,22 @@ document.addEventListener("DOMContentLoaded", () => {
     masterMuted = false;
     applyMasterVolume();
   });
+  function updateFullscreenControl() {
+    if (!playerFullscreen) return;
+    const active = !!document.fullscreenElement;
+    playerFullscreen.innerHTML = `<i class="fa-solid ${active ? "fa-compress" : "fa-expand"}" aria-hidden="true"></i>`;
+    playerFullscreen.setAttribute("aria-label", active ? "Thoát toàn màn hình" : "Xem video toàn màn hình");
+    playerFullscreen.setAttribute("title", active ? "Thoát toàn màn hình (Esc)" : "Toàn màn hình");
+  }
+  document.addEventListener("fullscreenchange", updateFullscreenControl);
   playerFullscreen?.addEventListener("click", async () => {
     try {
-      if (document.fullscreenElement) await document.exitFullscreen();
+      if (document.fullscreenElement) await leavePlayerFullscreen();
       else await playerContainer.closest(".player-surface").requestFullscreen();
     } catch (_) {
       playerTaskStatus.textContent = "Chưa mở được toàn màn hình. Hãy phóng to cửa sổ Studio.";
       playerTaskStatus.classList.remove("hidden");
-    }
+    } finally { updateFullscreenControl(); }
   });
   document.getElementById("player-settings")?.addEventListener("click", () => switchTab("view-settings"));
   for (const event of ["play", "pause", "ended", "emptied"]) videoPlayer.addEventListener(event, updatePlayerControls);

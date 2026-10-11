@@ -14,7 +14,7 @@ if str(APP_ROOT) not in sys.path:
 from config import settings, SafeStream
 
 from PySide6.QtCore import (
-    Qt, QThread, Signal, Slot, QObject, QTimer, QSize, QUrl
+    Qt, QThread, Signal, Slot, QObject, QTimer, QSize, QUrl, QEvent
 )
 from PySide6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
@@ -347,6 +347,7 @@ class StudioMainWindow(QMainWindow):
 
         # Keep explicit exit accessible even when the tray is hidden/unavailable.
         self._setup_exit_action()
+        self._setup_fullscreen_exit_action()
 
         # Setup System Tray
         self._setup_system_tray()
@@ -362,6 +363,53 @@ class StudioMainWindow(QMainWindow):
         self.exit_action.setShortcutContext(Qt.ShortcutContext.WindowShortcut)
         self.exit_action.triggered.connect(self.request_exit)
         self.addAction(self.exit_action)
+
+    def _setup_fullscreen_exit_action(self):
+        # QWebEngine does not reliably send a fullscreen-off request when a
+        # fullscreen DOM ancestor is hidden. Keep an independent native escape
+        # route, but leave Escape to editors/dialogs in ordinary window mode.
+        self.fullscreen_exit_action = QAction("Thoát toàn màn hình", self)
+        self.fullscreen_exit_action.setObjectName("exitFullscreenAction")
+        self.fullscreen_exit_action.setShortcut(QKeySequence("Escape"))
+        self.fullscreen_exit_action.setShortcutContext(Qt.ShortcutContext.WindowShortcut)
+        self.fullscreen_exit_action.setAutoRepeat(False)
+        self.fullscreen_exit_action.triggered.connect(self.exit_player_fullscreen)
+        self.addAction(self.fullscreen_exit_action)
+        self._update_fullscreen_exit_action()
+
+    def _update_fullscreen_exit_action(self):
+        action = getattr(self, "fullscreen_exit_action", None)
+        if action is not None:
+            action.setEnabled(self.isFullScreen() or self._fullscreen_restore_state is not None)
+
+    def changeEvent(self, event):
+        super().changeEvent(event)
+        if event.type() == QEvent.Type.WindowStateChange:
+            self._update_fullscreen_exit_action()
+
+    def exit_player_fullscreen(self):
+        """Exit Chromium and recover native fullscreen even after DOM exit."""
+        if not self.isFullScreen() and self._fullscreen_restore_state is None:
+            return
+        try:
+            self.web_view.page().triggerAction(QWebEnginePage.WebAction.ExitFullScreen)
+        finally:
+            # The browser's exit signal may be delayed or absent. Restoring now
+            # also makes a later duplicate fullscreen-off request harmless.
+            self._restore_fullscreen_window()
+
+    def _restore_fullscreen_window(self):
+        previous_state = self._fullscreen_restore_state
+        self._fullscreen_restore_state = None
+        if previous_state is not None:
+            if previous_state & Qt.WindowState.WindowMaximized:
+                self.showMaximized()
+            else:
+                self.showNormal()
+        elif self.isFullScreen():
+            # Orphaned native fullscreen has no saved player state to restore.
+            self.showNormal()
+        self._update_fullscreen_exit_action()
 
     def _setup_system_tray(self):
         """Creates system tray icon and context menu."""
@@ -417,23 +465,17 @@ class StudioMainWindow(QMainWindow):
         if request.toggleOn():
             if self._fullscreen_restore_state is None:
                 self._fullscreen_restore_state = (
-                    self.windowState() & ~Qt.WindowState.WindowMinimized
+                    self.windowState() & ~(
+                        Qt.WindowState.WindowMinimized | Qt.WindowState.WindowFullScreen
+                    )
                 )
             request.accept()
             self.showFullScreen()
+            self._update_fullscreen_exit_action()
             return
 
-        previous_state = self._fullscreen_restore_state
-        self._fullscreen_restore_state = None
         request.accept()
-        if previous_state is None:
-            return
-        if previous_state & Qt.WindowState.WindowFullScreen:
-            self.showFullScreen()
-        elif previous_state & Qt.WindowState.WindowMaximized:
-            self.showMaximized()
-        else:
-            self.showNormal()
+        self._restore_fullscreen_window()
 
     def run_js(self, script: str):
         self.web_view.page().runJavaScript(script)

@@ -4,6 +4,8 @@ import time
 import json
 import urllib.request
 from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import Mock
 
 import pytest
 
@@ -19,17 +21,36 @@ def fullscreen_window_factory(qt_app, qt_objects):
     with pytest.MonkeyPatch.context() as patch:
         patch.setenv("QT_QPA_PLATFORM", "offscreen")
         from desktop_app import StudioMainWindow
-        from PySide6.QtWidgets import QMainWindow
+        from PySide6.QtWidgets import QLineEdit, QMainWindow
 
         app = qt_app
 
-        class PlayerWindow(QMainWindow):
-            _on_fullscreen_requested = StudioMainWindow._on_fullscreen_requested
-            restore_window = StudioMainWindow.restore_window
+        class EscapeEditor(QLineEdit):
+            def __init__(self, parent):
+                super().__init__(parent)
+                self.escape_count = 0
+
+            def keyPressEvent(self, event):
+                from PySide6.QtCore import Qt
+                if event.key() == Qt.Key.Key_Escape:
+                    self.escape_count += 1
+                super().keyPressEvent(event)
+
+        class PlayerWindow(StudioMainWindow):
 
             def __init__(self):
-                super().__init__()
+                # Exercise Studio's real native fullscreen handling without
+                # starting a backend, tray, or WebEngine/browser instance.
+                QMainWindow.__init__(self)
                 self._fullscreen_restore_state = None
+                self.page_action = Mock()
+                self.web_view = SimpleNamespace(
+                    page=lambda: SimpleNamespace(triggerAction=self.page_action),
+                    stop=lambda: None,
+                )
+                self.editor = EscapeEditor(self)
+                self.setCentralWidget(self.editor)
+                self._setup_fullscreen_exit_action()
 
         def create_window(maximized=False):
             window = qt_objects(PlayerWindow())
@@ -101,6 +122,116 @@ def test_player_fullscreen_extra_exit_keeps_window_state(fullscreen_window_facto
     app.processEvents()
     assert leave.accepted
     assert window.isMaximized()
+
+
+@pytest.mark.parametrize("maximized", [False, True])
+def test_player_fullscreen_escape_from_focused_editor_restores_window(
+    fullscreen_window_factory, maximized
+):
+    from PySide6.QtCore import Qt
+    from PySide6.QtTest import QTest
+    from PySide6.QtWebEngineCore import QWebEnginePage
+
+    window, app = fullscreen_window_factory(maximized)
+    initial_size = window.size()
+    window._on_fullscreen_requested(FullscreenRequest(True))
+    window.activateWindow()
+    window.editor.setFocus()
+    app.processEvents()
+    assert window.fullscreen_exit_action.isEnabled()
+
+    QTest.keyClick(window.editor, Qt.Key.Key_Escape)
+    app.processEvents()
+    window.page_action.assert_called_once_with(QWebEnginePage.WebAction.ExitFullScreen)
+    assert not window.isFullScreen()
+    assert window.isMaximized() == maximized
+    if not maximized:
+        assert window.size() == initial_size
+    assert not window.fullscreen_exit_action.isEnabled()
+    assert window._fullscreen_restore_state is None
+    assert window.editor.escape_count == 0
+
+    # A delayed browser response must not undo the already-restored window.
+    window._on_fullscreen_requested(FullscreenRequest(False))
+    app.processEvents()
+    assert window.isMaximized() == maximized
+    assert not window.isFullScreen()
+
+
+def test_player_fullscreen_escape_recovers_orphaned_native_window(fullscreen_window_factory):
+    from PySide6.QtCore import Qt
+    from PySide6.QtTest import QTest
+
+    window, app = fullscreen_window_factory()
+    window.showFullScreen()
+    window.activateWindow()
+    window.editor.setFocus()
+    app.processEvents()
+    assert window._fullscreen_restore_state is None
+    assert window.fullscreen_exit_action.isEnabled()
+    QTest.keyClick(window.editor, Qt.Key.Key_Escape)
+    app.processEvents()
+    assert not window.isFullScreen()
+    assert not window.fullscreen_exit_action.isEnabled()
+    window.page_action.assert_called_once()
+
+
+def test_player_fullscreen_reentrant_browser_exit_preserves_maximized_state(fullscreen_window_factory):
+    window, app = fullscreen_window_factory(maximized=True)
+    window._on_fullscreen_requested(FullscreenRequest(True))
+    window.page_action.side_effect = lambda action: window._on_fullscreen_requested(FullscreenRequest(False))
+    window.exit_player_fullscreen()
+    app.processEvents()
+    assert window.isMaximized()
+    assert not window.isFullScreen()
+    assert window._fullscreen_restore_state is None
+    assert not window.fullscreen_exit_action.isEnabled()
+
+
+def test_player_fullscreen_reentry_from_orphan_does_not_restore_fullscreen(fullscreen_window_factory):
+    window, app = fullscreen_window_factory()
+    window.showFullScreen()
+    window._on_fullscreen_requested(FullscreenRequest(True))
+    window.exit_player_fullscreen()
+    app.processEvents()
+    assert not window.isFullScreen()
+    assert window._fullscreen_restore_state is None
+    assert not window.fullscreen_exit_action.isEnabled()
+
+
+def test_player_fullscreen_escape_disabled_in_ordinary_editor(fullscreen_window_factory):
+    from PySide6.QtCore import Qt
+    from PySide6.QtTest import QTest
+
+    window, app = fullscreen_window_factory()
+    window.activateWindow()
+    window.editor.setFocus()
+    app.processEvents()
+    assert not window.fullscreen_exit_action.isEnabled()
+    QTest.keyClick(window.editor, Qt.Key.Key_Escape)
+    app.processEvents()
+    assert window.editor.escape_count == 1
+    window.page_action.assert_not_called()
+    assert not window.isFullScreen()
+
+
+def test_player_fullscreen_does_not_capture_escape_in_modal_dialog(fullscreen_window_factory, qt_objects):
+    from PySide6.QtCore import Qt
+    from PySide6.QtTest import QTest
+    from PySide6.QtWidgets import QDialog
+
+    window, app = fullscreen_window_factory()
+    window._on_fullscreen_requested(FullscreenRequest(True))
+    dialog = qt_objects(QDialog(window))
+    dialog.setModal(True)
+    dialog.show()
+    dialog.activateWindow()
+    app.processEvents()
+    QTest.keyClick(dialog, Qt.Key.Key_Escape)
+    app.processEvents()
+    assert not dialog.isVisible()
+    assert window.isFullScreen()
+    window.page_action.assert_not_called()
 
 def test_desktop_backend_lifecycle():
     print("=" * 80)
