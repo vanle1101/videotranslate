@@ -153,7 +153,7 @@ def set_style(page, style):
         document.getElementById('caption-blur-original').checked=s.blur_original;
         document.getElementById('caption-position').dispatchEvent(new Event('change',{bubbles:true}));
         return true;})()""")
-    until(page, "document.getElementById('caption-style-status').textContent.startsWith('Đã cập nhật') && !document.getElementById('caption-style-controls').disabled")
+    until(page, "document.getElementById('caption-style-status').textContent.startsWith('Đã lưu kiểu phụ đề') && !document.getElementById('caption-style-controls').disabled")
     assert evaluate(page, "document.getElementById('caption-style-status').dataset.error") == "false"
 
 

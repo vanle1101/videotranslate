@@ -1,5 +1,6 @@
 """Caption changes are display-only transactions, never new translation/TTS."""
 import asyncio
+import wave
 from pathlib import Path
 from unittest.mock import Mock
 
@@ -72,6 +73,96 @@ def test_same_style_is_idempotent_and_preserves_current_result(caption_session):
     result = request(caption_session, {}).json()
     assert result["caption_style_revision"] == 0 and result["output_outdated"] is False
     assert result["output_video_url"] == "/api/outputs/old.mp4"
+
+
+def test_valid_translated_preview_is_editable_even_with_other_unfinished_rows(caption_session, monkeypatch):
+    session = caption_session
+    session.segments[0].needs_review = True
+    session.segments[0].preview_is_draft = True
+    later = SegmentItem(1, 3, 6, 3)
+    later.status = "WAITING"
+    session.segments[1] = later
+    session.total_duration = 6
+    monkeypatch.setattr(session, "get_progress", lambda: {"status": "PREVIEW_READY",
+        "preview_output_ready": True, "preview_untranslated_ids": [], "preview_missing_audio_ids": []})
+    response = request(session, {"position": "top", "background_color": "#123456", "blur_original": True})
+    assert response.status_code == 200, response.text
+    payload = response.json()
+    assert payload["has_subtitle_regions"] is True
+    assert payload["segments"][0]["caption_layout"]["source_masks"]
+    assert payload["segments"][0]["needs_review"] is True
+    assert later.status == "WAITING"
+    assert session.caption_style["background_color"] == "#123456"
+    assert (settings.BASE_DIR / "workspace" / "projects" / f"{session.task_id}.json").exists()
+    session.translator.assert_not_called()
+    assert session.tts_engine.mock_calls == []
+
+
+@pytest.mark.parametrize("invalid", [{"preview_output_ready": False},
+    {"preview_untranslated_ids": [0]}, {"preview_missing_audio_ids": [0]}])
+def test_invalid_preview_cannot_unlock_style_changes(caption_session, monkeypatch, invalid):
+    later = SegmentItem(1, 3, 6, 3)
+    later.status = "WAITING"
+    caption_session.segments[1] = later
+    progress = {"status": "PREVIEW_READY", "preview_output_ready": True,
+        "preview_untranslated_ids": [], "preview_missing_audio_ids": [], **invalid}
+    monkeypatch.setattr(caption_session, "get_progress", lambda: progress)
+    response = request(caption_session, {"position": "top"})
+    assert response.status_code == 409
+    assert caption_session.caption_style == {}
+
+
+def make_real_preview(session):
+    session.translation_mode = "preview"
+    session.preview_seconds = 3
+    session.total_duration = 6
+    session._chunked_source_started = True
+    session._source_prepared_seconds = 6
+    session._visual_completed_seconds = 3
+    session._preview_ready = True
+    row = session.segments[0]
+    row.audio_url = f"/api/streaming/audio/{session.task_id}/0?rev=0"
+    with wave.open(row.audio_path, "wb") as audio:
+        audio.setnchannels(1)
+        audio.setsampwidth(2)
+        audio.setframerate(16000)
+        audio.writeframes(b"\x01\x00" * 16000)
+    future = SegmentItem(1, 3, 6, 3)
+    future.text_zh = future.asr_text = "后面的句子"
+    session.segments[1] = future
+
+
+def test_genuine_preview_can_restyle_without_processing_future_source(caption_session):
+    make_real_preview(caption_session)
+    before_audio = Path(caption_session.segments[0].audio_path).read_bytes()
+    response = request(caption_session, {"text_color": "#ffffff", "background_color": "#113355",
+                                         "position": "bottom", "blur_original": True})
+    assert response.status_code == 200, response.text
+    assert response.json()["caption_style"]["blur_original"] is True
+    assert response.json()["segments"][0]["caption_layout"]["source_masks"]
+    assert caption_session.segments[1].status == "WAITING"
+    assert caption_session.segments[1].final_vi == ""
+    assert Path(caption_session.segments[0].audio_path).read_bytes() == before_audio
+    caption_session.translator.assert_not_called()
+    assert caption_session.tts_engine.mock_calls == []
+
+
+@pytest.mark.parametrize("failure", ["empty_audio", "missing_audio", "untranslated", "active"])
+def test_incomplete_preview_cannot_unlock_style_by_a_stale_ready_flag(caption_session, failure):
+    make_real_preview(caption_session)
+    row = caption_session.segments[0]
+    if failure == "empty_audio":
+        Path(row.audio_path).write_bytes(b"")
+    elif failure == "missing_audio":
+        Path(row.audio_path).unlink()
+    elif failure == "untranslated":
+        row.final_vi = ""
+        row.text_zh = "原文"
+    else:
+        caption_session.is_running = True
+    response = request(caption_session, {"position": "bottom"})
+    assert response.status_code == 409, response.text
+    assert caption_session.caption_style == {}
 
 
 def test_style_change_invalidates_completed_export_polling(caption_session):

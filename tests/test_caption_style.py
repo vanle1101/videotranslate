@@ -86,10 +86,33 @@ def test_untrusted_ocr_or_title_never_blurred(changes):
     assert plan["source_masks"] == []
 
 
-@pytest.mark.parametrize("changes", [{"needs_review": True}, {"needs_review": True, "preview_is_draft": True},
+@pytest.mark.parametrize("changes", [{"needs_review": True},
                                     {"confirmed_silence": True}, {"subtitle_cues": []}])
 def test_unapproved_or_silent_speech_never_masks_source(changes):
     assert build_caption_layout([speech(**changes)], [source()], caption_style={"blur_original": True})["source_masks"] == []
+
+
+def test_playable_preview_blur_uses_verified_geometry_without_approving_draft_translation():
+    segment = speech(needs_review=True, preview_is_draft=True)
+    plan = build_caption_layout([segment], [source()], caption_style={"blur_original": True})
+    assert plan["source_masks"] == [{"start": .4, "end": 2.8, "bbox": [.3, .7, .4, .04]}]
+    assert segment["needs_review"] is True and segment["preview_is_draft"] is True
+    assert build_caption_layout([segment], [source(source_region_verified=False)],
+        caption_style={"blur_original": True})["source_masks"] == []
+
+
+@pytest.mark.parametrize("style", [None, {}, {"background_color": None}, {"background_color": "#123456"}])
+def test_one_selected_palette_survives_ocr_gaps_speaker_changes_and_bottom_toggle(style):
+    first = speech()
+    second = speech(id=2, start=3, end=6, speech_start=3.4, speech_end=5.8,
+                   subtitle_cues=[{"start": 3.4, "end": 5.8, "text": "Người thứ hai trả lời."}])
+    palette = lambda cue: cue.get("background_color") or ("#FFE500" if cue["background"] == "yellow" else "#FFFFFF")
+    auto = build_caption_layout([first, second], [source()], (1920, 1080), style)["cues"]
+    bottom = build_caption_layout([first, second], [], (1920, 1080), style)["cues"]
+    expected = "#123456" if style and style.get("background_color") else "#FFE500"
+    assert {palette(cue) for cue in auto + bottom} == {expected}
+    assert [cue["placement"] for cue in auto] == ["below-source", "bottom"]
+    assert [(c["start"], c["end"], c["text"]) for c in auto] == [(c["start"], c["end"], c["text"]) for c in bottom]
 
 
 def test_independently_verified_region_remains_usable_when_ocr_translation_needs_review():

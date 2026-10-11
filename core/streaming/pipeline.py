@@ -12,6 +12,7 @@ import os
 import threading
 import traceback
 import wave
+from bisect import bisect_right
 from concurrent.futures import TimeoutError as FutureTimeoutError
 from copy import deepcopy
 from pathlib import Path
@@ -247,6 +248,10 @@ class StreamingPipelineSession:
         self.screen_texts: List[Dict[str, Any]] = []
         self.caption_style: Dict[str, Any] = {}
         self.caption_style_revision = 0
+        # Persisted on successful export. Missing/old markers are handled by
+        # history restore without deleting the previous MP4.
+        from core.subtitle_cues import CAPTION_RENDERER_VERSION
+        self.caption_renderer_version = CAPTION_RENDERER_VERSION
         self.caption_output_outdated = False
         self.translation_sources: List[Dict[str, str]] = []
         self.review_summary: Dict[str, Any] = {}
@@ -1614,31 +1619,82 @@ class StreamingPipelineSession:
     def segment_snapshot(self, segment):
         return self.caption_metadata(segment.to_dict())
 
+    def _has_valid_dub_audio(self, row):
+        if not row.audio_path or not row.audio_url:
+            return False
+        try:
+            duration = self._cached_dub_audio_duration(row.audio_path)
+            start, end = resolve_dub_timing({field: getattr(row, field) for field in (
+                "start", "end", "dub_start", "dub_end", "dub_tail_limit")})
+            return duration <= end - start + .000125
+        except (OSError, EOFError, wave.Error, ValueError, TypeError, ZeroDivisionError):
+            return False
+
     def _preview_output_metadata(self):
         owned = [row for row in self.segments.values()
                  if row.end <= self._visual_completed_seconds + .001]
-
-        def valid_audio(row):
-            if not row.audio_path or not row.audio_url:
-                return False
-            try:
-                duration = self._cached_dub_audio_duration(row.audio_path)
-                start, end = resolve_dub_timing(row.to_dict())
-                return duration <= end - start + .000125
-            except (OSError, EOFError, wave.Error, ValueError, TypeError, ZeroDivisionError):
-                return False
-
-        result = preview_output_metadata(owned, valid_audio)
+        result = preview_output_metadata(owned, self._has_valid_dub_audio)
         result["preview_output_ready"] = bool(result["preview_output_ready"] and
             preview_source_covered(completed_seconds=self._visual_completed_seconds,
                 source_prepared_seconds=self._source_prepared_seconds,
                 chunked_source_started=self._chunked_source_started))
         return result
 
+    def _processing_progress_metadata(self):
+        """Measure translated media work separately from review and final export.
+
+        Recognition lookahead is context, not part of the requested preview.
+        A full-video denominator is unknown until the source is recognized;
+        exposing a percentage of its growing prefix would imply false progress.
+        READY by itself is insufficient: empty uncertain drafts, missing WAVs
+        and media invalidated by a newer review remain unfinished work.
+        """
+        scope = self.translation_mode
+        source_known = bool(self.total_duration > 0 and (
+            self._source_prepared_seconds + .001 >= self.total_duration
+            or not self._chunked_source_started and (self.initialized or self._prepared)))
+        if scope == "preview":
+            target = min(self.preview_seconds, self.total_duration) if self.total_duration > 0 else None
+            rows = [row for row in self.segments.values()
+                    if target is not None and row.start < target]
+            # The source worker extends the interval to retain a sentence that
+            # straddles the nominal preview boundary. Count that complete turn.
+            boundary = max([target or 0., *(row.end for row in rows)])
+            total_known = bool(target is not None and (
+                source_known or self._source_prepared_seconds + .001 >= boundary))
+        else:
+            total_known = source_known
+            if total_known or not self._chunked_source_started:
+                rows = list(self.segments.values())
+            else:
+                intervals = sorted(self._chunk_jobs, key=lambda chunk: chunk["start"])
+                starts = [chunk["start"] for chunk in intervals]
+                def admitted(row):
+                    index = bisect_right(starts, row.start) - 1
+                    return index >= 0 and row.end <= intervals[index]["end"] + .001
+                rows = [row for row in self.segments.values()
+                        if self._published_row(row) or admitted(row)]
+        completed = 0
+        for row in rows:
+            if row.status not in {"READY", "PLAYED"}:
+                continue
+            silence = row.confirmed_silence or (
+                row.source_method == "audio" and row.subtitle_timing_source == "empty"
+                and not row.needs_review and not any(
+                    str(value or "").strip() for value in (row.text_zh, row.asr_text, row.final_vi)))
+            if silence or row.final_vi.strip() and self._has_valid_dub_audio(row):
+                completed += 1
+        total = len(rows)
+        return {"processing_scope": scope, "processing_total_known": total_known,
+                "processing_completed_segments": completed, "processing_total_segments": total,
+                "processing_progress_pct": round(completed * 100 / total, 1)
+                    if total_known and total else None}
+
     def get_progress(self) -> Dict[str, Any]:
         snapshot = dict(self.progress)
         output_gate = final_output_metadata(self.segments.values())
         snapshot.update(output_gate)
+        snapshot.update(self._processing_progress_metadata())
         from core.streaming.recovery import segment_state
         counts = {state: 0 for state in ("PENDING", "RUNNING", "COMPLETED", "RETRY_PENDING", "REVIEW_REQUIRED", "FAILED")}
         for row in self.segments.values():

@@ -58,6 +58,54 @@ test('audio identity stage reports measured frames without making the full task 
   assert.notEqual(ui.el('task-progress-value').textContent,'100%');
 });
 
+test('context review displays real spoken-row progress instead of an unknown percent', async () => {
+  const ui=studio();await ui.start();const socket=ui.sockets.at(-1);
+  socket.receive({type:'progress',status:'RUNNING',phase:'review',progress_pct:null,
+    processing_progress_pct:47.1,processing_completed_segments:8,processing_total_segments:17,
+    processing_scope:'preview',processing_total_known:true,review_summary:{status:'running'}});
+  assert.equal(ui.el('task-progress-value').textContent,'47.1% giọng mẫu');
+  assert.equal(ui.el('task-progress-bar').style.width,'47.1%');
+  assert.equal(ui.el('task-progress-track')['aria-valuenow'],'47.1');
+  assert.equal(ui.el('task-progress-track').dataset.indeterminate,'false');
+  assert.match(ui.el('task-progress-detail').textContent,/8\/17 câu/);
+  assert.match(ui.el('task-progress-detail').textContent,/AI vẫn đang rà/);
+  socket.receive({type:'progress',status:'RUNNING',phase:'review',progress_pct:null,
+    processing_progress_pct:100,processing_completed_segments:17});
+  assert.equal(ui.el('task-progress-value').textContent,'100% giọng mẫu');
+  assert.equal(ui.el('task-progress').dataset.status,'RUNNING');
+  assert.equal(ui.el('task-result-link').classList.contains('hidden'),true);
+});
+
+test('scoped speech percentages refresh from polling and cannot replace download or render progress', async () => {
+  const ui=studio();await ui.start();const socket=ui.sockets.at(-1);
+  socket.receive({type:'progress',status:'RUNNING',phase:'review',progress_pct:null,
+    processing_progress_pct:25,processing_completed_segments:1,processing_total_segments:4,
+    processing_scope:'preview',processing_total_known:true});
+  ui.replies.set('/api/tasks',{tasks:[{task_id:'fixture',status:'RUNNING',phase:'review',progress_pct:null,
+    processing_progress_pct:50,processing_completed_segments:2,processing_total_segments:4,
+    processing_scope:'preview',processing_total_known:true}]});
+  await ui.el('btn-refresh-tasks').click();
+  assert.equal(ui.el('task-progress-value').textContent,'50% giọng mẫu');
+  assert.match(ui.el('tasks-table-body').children[0].innerHTML,/50% giọng mẫu/);
+  socket.receive({type:'progress',status:'RUNNING',phase:'download',progress_pct:12});
+  assert.equal(ui.el('task-progress-value').textContent,'12%');
+  socket.receive({type:'progress',status:'RUNNING',phase:'export',progress_pct:null});
+  assert.equal(ui.el('task-progress-value').textContent,'Chưa có %');
+  assert.equal(ui.el('task-progress-track').dataset.indeterminate,'true');
+});
+
+test('incomplete full-video denominator stays unknown while known spoken counts remain visible', async () => {
+  const ui=studio();await ui.start();const socket=ui.sockets.at(-1);
+  socket.receive({type:'progress',status:'RUNNING',phase:'review',progress_pct:null,
+    processing_progress_pct:null,processing_completed_segments:16,processing_total_segments:17,
+    processing_scope:'full',processing_total_known:false});
+  assert.equal(ui.el('task-progress-value').textContent,'Chưa có %');
+  assert.match(ui.el('task-progress-detail').textContent,/16\/17 câu đã nhận diện/);
+  assert.match(ui.el('task-progress-detail').textContent,/phần tiếp theo/);
+  socket.receive({type:'progress',status:'RUNNING',phase:'review',progress_pct:null,stage_progress_pct:40});
+  assert.equal(ui.el('task-progress-value').textContent,'40% công đoạn');
+});
+
 test('speaker fields match backend limits and reject overlong addresses before submission', async () => {
   const ui=studio(); await ui.start();
   ui.sockets.at(-1).receive({type:'progress',status:'STOPPED'});
@@ -70,6 +118,18 @@ test('speaker fields match backend limits and reject overlong addresses before s
   await ui.el('seg-speaker-save-0').click();
   assert.equal(ui.requests.some(r=>r.url.endsWith('/speaker-confirmation')),false);
   assert.equal(ui.document.activeElement,ui.el('seg-speaker-listener-0'));
+});
+
+test('a new indeterminate stage clears the preceding stage percentage and an unknown total rejects speech percentage', async () => {
+  const ui=studio(); await ui.start(); const socket=ui.sockets.at(-1);
+  socket.receive({type:'progress',status:'RUNNING',phase:'visual',progress_pct:null,stage_progress_pct:100});
+  assert.equal(ui.el('task-progress-value').textContent,'100% công đoạn');
+  socket.receive({type:'progress',status:'RUNNING',phase:'review',progress_pct:null,
+    processing_progress_pct:100,processing_total_known:false,processing_scope:'full',
+    processing_completed_segments:10,processing_total_segments:10});
+  assert.equal(ui.el('task-progress-value').textContent,'Chưa có %');
+  assert.equal(ui.el('task-progress-track').dataset.indeterminate,'true');
+  assert.match(ui.el('task-progress-detail').textContent,/đang nhận diện phần tiếp theo/);
 });
 
 test('speaker confirmation broadcasts update the other client without approving meaning', async () => {
@@ -2667,6 +2727,77 @@ function styledCaptionReply(segment, style, revision = 1) {
     has_subtitle_regions: true, segments: [{...segment, caption_layout: restyle(segment.caption_layout),
       caption_bottom_layout: restyle(segment.caption_bottom_layout)}]};
 }
+
+test('translated preview exposes caption controls before future lookahead is translated and retains saved style on reopen', async () => {
+  const ui = studio(); await ui.start();
+  const segment = captionFixture(ui, {needs_review: true, verification: {status: 'incomplete'}});
+  const future = {id: 1, start: 4, end: 6, status: 'WAITING', text_zh: '下一句'};
+  const progress = {status: 'PREVIEW_READY', phase: 'preview_ready', processed_seconds: 4,
+    source_prepared_seconds: 4, preview_output_ready: true};
+  ui.sockets.at(-1).receive({type: 'segment_update', ...future});
+  ui.sockets.at(-1).receive({type: 'progress', ...progress});
+  assert.equal(ui.el('caption-style-panel').classList.contains('hidden'), false);
+  assert.equal(ui.el('caption-style-controls').disabled, false);
+  assert.equal(ui.el('task-result-link').classList.contains('hidden'), true);
+  const style = {text_color: '#112233', background_color: '#AABBCC', position: 'top', blur_original: false};
+  const reply = styledCaptionReply(segment, style);
+  ui.replies.set('/api/streaming/fixture/caption-style', reply);
+  ui.el('caption-text-color').value = style.text_color;
+  ui.el('caption-auto-background').checked = false;
+  ui.el('caption-background-color').value = style.background_color;
+  ui.el('caption-position').value = style.position;
+  await ui.el('caption-position').emit('change'); await ui.tickTimeouts(250);
+  assert.deepEqual(JSON.parse(ui.requests.at(-1).options.body), style);
+  assert.equal(ui.el('caption-style-controls').disabled, false);
+  ui.replies.set('/api/streaming/fixture', {...reply, initialized: true, duration: 6,
+    segments_count: 2, progress, segments: [reply.segments[0], future]});
+  const socket = ui.sockets.at(-1); socket.close(); socket.onclose();
+  await ui.tickTimeouts(1500); await ui.flush();
+  assert.equal(ui.el('caption-text-color').value, style.text_color);
+  assert.equal(ui.el('caption-background-color').value, style.background_color);
+  assert.equal(ui.el('caption-position').value, 'top');
+  assert.equal(ui.el('caption-style-controls').disabled, false);
+  assert.equal(ui.el('seg-vi-1').textContent, 'Bản dịch sẽ xuất hiện sau khi xử lý.');
+});
+
+test('missing dubbed preview never exposes usable styling and real preview enables supported blur', async () => {
+  const ui = studio(); await ui.start(); const socket = ui.sockets.at(-1);
+  let segment = captionFixture(ui, {audio_url: ''});
+  socket.receive({type: 'progress', status: 'PREVIEW_READY', phase: 'preview_ready',
+    processed_seconds: 4, source_prepared_seconds: 4, preview_output_ready: false});
+  assert.equal(ui.el('caption-style-controls').disabled, true);
+  assert.equal(ui.el('caption-style-panel').classList.contains('hidden'), true);
+  segment = {...segment, audio_url: '/real-dub.wav', needs_review: true};
+  socket.receive({type: 'segment_update', ...segment});
+  socket.receive({type: 'progress', status: 'PREVIEW_READY', phase: 'preview_ready',
+    processed_seconds: 4, source_prepared_seconds: 4, preview_output_ready: true});
+  const style = {text_color: '#000000', background_color: null, position: 'auto', blur_original: false};
+  socket.receive({type: 'caption_style', caption_style: style, caption_style_revision: 0,
+    has_subtitle_regions: true, segments: [segment]});
+  assert.equal(ui.el('caption-blur-original').disabled, false);
+  ui.replies.set('/api/streaming/fixture/caption-style', styledCaptionReply(segment, {...style, blur_original: true}));
+  ui.el('caption-blur-original').checked = true;
+  await ui.el('caption-blur-original').emit('change'); await ui.tickTimeouts(250);
+  assert.equal(JSON.parse(ui.requests.at(-1).options.body).blur_original, true);
+  assert.equal(ui.el('caption-blur-original').checked, true);
+  assert.equal(ui.el('caption-style-status').dataset.error, 'false');
+});
+
+test('unmeasured caption fallback uses one stable default background and respects selected colors', async () => {
+  const ui = studio(); await ui.start(); const socket = ui.sockets.at(-1);
+  for (const id of [0, 1]) socket.receive({type: 'segment_update', id, start: id * 2, end: id * 2 + 2,
+    status: 'READY', final_vi: id ? 'Câu thứ hai' : 'Câu thứ nhất', audio_url: '/dub.wav'});
+  const video = ui.el('video-player');
+  for (const time of [1, 3]) {
+    video.currentTime = time; await video.emit('timeupdate');
+    assert.equal(ui.el('subtitle-text').style.background, '#FFE500');
+  }
+  socket.receive({type: 'caption_style', caption_style: {text_color: '#112233',
+    background_color: '#AABBCC', position: 'auto', blur_original: false}, caption_style_revision: 1});
+  video.currentTime = 1; await video.emit('timeupdate');
+  assert.equal(ui.el('subtitle-text').style.background, '#AABBCC');
+  assert.equal(ui.el('subtitle-text').style.color, '#112233');
+});
 
 test('completed caption controls update measured preview and invalidate old MP4 without changing speech', async () => {
   const ui = studio(); await ui.start();

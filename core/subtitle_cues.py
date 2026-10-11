@@ -2,11 +2,17 @@
 import math
 import re
 
+# Bump when the generated caption pixels change. Older projects did not store
+# this marker; their default (auto white/yellow) render is stale after the
+# stable-yellow palette migration and must be re-exported on demand.
+CAPTION_RENDERER_VERSION = 2
+
 
 def normalize_caption_style(style=None):
     """Validate public caption options before they reach CSS or ASS filters.
 
-    A null background retains the automatic source-aware white/yellow palette.
+    A null background uses the same default yellow for the entire video.
+    Source OCR changes placement only; it must never change a chosen palette.
     The result is independent of the caller's dictionary and safe to persist.
     """
     defaults = {"background_color": None, "text_color": "#000000",
@@ -429,9 +435,10 @@ def _trusted_speech_regions(screen_texts, segments=None):
 def build_caption_layout(segments, screen_texts=None, video_size=None, caption_style=None):
     """One normalized caption plan for preview and ASS, preserving source text.
 
-    A trusted Chinese speech region selects a compact yellow caption immediately
-    below it (above only when necessary). No-region captions use a small white
-    box near the bottom. OCR translations/titles never become spoken captions.
+    A trusted Chinese speech region selects a compact caption immediately below
+    it (above only when necessary). No-region captions sit near the bottom. All
+    captions keep the selected palette, independent of intermittent OCR. OCR
+    translations/titles never become spoken captions.
     """
     width, height = video_size or (1080, 1920)
     width, height = max(16, int(width)), max(16, int(height))
@@ -479,7 +486,7 @@ def build_caption_layout(segments, screen_texts=None, video_size=None, caption_s
         target = max(active, key=lambda row: (
             min(row["end"], utterance_end) - max(row["start"], utterance_start),
             row["confidence"]), default=None)
-        placement, background, source_bbox = "bottom", "white", None
+        placement, background, source_bbox = "bottom", "yellow", None
         x, y = (width - box_w) / 2, height * .90 - box_h
         if target:
             source_bbox = target["bbox"]
@@ -511,7 +518,7 @@ def build_caption_layout(segments, screen_texts=None, video_size=None, caption_s
                 placement = "above-source"
             if y < height * .02:
                 x, y = (width - box_w) / 2, height * .90 - box_h
-                placement, background, source_bbox = "bottom", "white", None
+                placement, background, source_bbox = "bottom", "yellow", None
         if style["position"] != "auto":
             placement = style["position"]
             # User placement is anchored to the frame and remains independent
@@ -522,7 +529,10 @@ def build_caption_layout(segments, screen_texts=None, video_size=None, caption_s
             x = (width - box_w) / 2
             y = {"top": height * .04, "middle": (height - box_h) / 2,
                  "bottom": height * .96 - box_h}[placement]
-        if style["blur_original"] and not segment.get("needs_review") and not segment.get("preview_is_draft"):
+        if style["blur_original"]:
+            # The source geometry is independently verified above. A playable
+            # draft can opt into blur without approving its translation or
+            # address choices; unplayable/unreviewed speech has no pages.
             for row in active:
                 for cue in pages:
                     left, right = max(row["start"], cue["start"]), min(row["end"], cue["end"])

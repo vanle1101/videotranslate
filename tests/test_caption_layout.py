@@ -37,7 +37,7 @@ def test_no_pre_onset_or_future_speaker_full_current_utterance_only():
     plan = layout(source, [], (1080, 1920))
     assert [row["text"] for row in plan] == ["Anh đã đến rồi.", "Đến lượt người thứ hai."]
     assert [(row["start"], row["end"]) for row in plan] == [(.4, 2.8), (3.5, 5.7)]
-    assert all(row["background"] == "white" and row["placement"] == "bottom" for row in plan)
+    assert all(row["background"] == "yellow" and row["placement"] == "bottom" for row in plan)
     assert plan[0]["font_size"] == 38 and plan[0]["bbox"][2] < .5
     assert plan[0]["bbox"][1] + plan[0]["bbox"][3] == pytest.approx(.90)
     assert not any(row["start"] <= .2 < row["end"] for row in plan)
@@ -84,7 +84,7 @@ def test_yellow_caption_below_measured_chinese_without_mask_or_stale_ocr(mask_on
                                       {"bbox": [0, .7, 1, .2]}, {"bbox": [-.1, .7, .4, .04]}])
 def test_untrusted_title_or_large_region_does_not_anchor_or_mask(changes):
     cue = layout([speech()], [region(**changes)], (1080, 1920))[0]
-    assert cue["background"] == "white" and cue["source_bbox"] is None
+    assert cue["background"] == "yellow" and cue["source_bbox"] is None
 
 
 def test_low_chinese_region_places_caption_above_without_covering_source():
@@ -141,7 +141,8 @@ def test_utterance_anchor_does_not_leak_to_next_speaker():
     second = speech(identifier=1, start=3, end=6,
                     subtitle_cues=[{"start": 3.4, "end": 5.8, "text": "Người thứ hai trả lời."}])
     plan = layout([first, second], [region(end=3)], (1080, 1920))
-    assert [cue["background"] for cue in plan] == ["yellow", "white"]
+    assert [cue["background"] for cue in plan] == ["yellow", "yellow"]
+    assert [cue["placement"] for cue in plan] == ["below-source", "bottom"]
     assert not any(cue["segment_id"] == 1 and cue["start"] < 3.4 for cue in plan)
 
 
@@ -199,7 +200,7 @@ def test_placement_can_use_verified_source_region_without_approving_translation(
 def test_explicit_false_source_geometry_does_not_anchor_unreviewed_caption():
     unverified = region(needs_review=False, source_region_verified=False)
     plan = layout([speech()], [unverified], (1080, 1920))
-    assert plan[0]["source_bbox"] is None and plan[0]["background"] == "white"
+    assert plan[0]["source_bbox"] is None and plan[0]["background"] == "yellow"
     # An editor-created mask-only region remains geometry-only; it is not an
     # approval of whatever old OCR translation happened to be stored there.
     manual = {**unverified, "mask_only": True, "text_vi": ""}
@@ -233,7 +234,7 @@ def test_completed_speech_review_can_anchor_its_local_ocr_box_without_trusting_t
     for screens in ([], [uncertain_title], [region(needs_review=True, bbox=[.1, .1, .2, .04])],
                     [region(needs_review=True, text_zh="你没来")], [region(needs_review=True, start=4, end=5)]):
         rejected = layout([reviewed], screens, (1080, 1920))[0]
-        assert rejected["source_bbox"] is None and rejected["background"] == "white"
+        assert rejected["source_bbox"] is None and rejected["background"] == "yellow"
     for changed in ({"evidence_mode": "text-only"}, {"evidence_ids": []}, {"evidence": None},
                     {"status": "unresolved"}, {"second_pass_status": "failed"}):
         candidate = {**reviewed, "verification": {**reviewed["verification"], **changed}}
@@ -256,7 +257,7 @@ def test_unverified_or_text_only_review_never_anchors_a_source_box():
                        "bbox": [.3, .70, .4, .04]}],
     }):
         cue = layout([speech(verification=verification)], [], (1080, 1920))[0]
-        assert cue["placement"] == "bottom" and cue["background"] == "white"
+        assert cue["placement"] == "bottom" and cue["background"] == "yellow"
 
 
 def test_live_review_geometry_places_caption_below_source_without_changing_uncertainty():

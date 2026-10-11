@@ -619,6 +619,24 @@ document.addEventListener("DOMContentLoaded", () => {
     return `${Number.isInteger(pct) ? pct : pct.toFixed(1)}%`;
   }
 
+  function displayedTaskProgress(progress) {
+    // Source transfer and render have their own measurements. A completed
+    // speech stage never stands in for validated final-video completion.
+    const phase = String(progress?.phase || "");
+    const status = String(progress?.status || "").toUpperCase();
+    const processing = progress?.processing_total_known === false ? null : measuredProgress(progress?.processing_progress_pct);
+    const processingPhase = !["request", "resolve", "download", "export", "export_error"].includes(phase);
+    if (processingPhase && processing !== null && status !== "COMPLETED") {
+      const scope = progress.processing_scope === "preview" ? "giọng mẫu" : "lời & giọng";
+      return {pct: processing, label: `${formatProgressPercent(processing)} ${scope}`, kind: "speech"};
+    }
+    const pct = measuredProgress(progress?.progress_pct);
+    if (pct !== null) return {pct, label: formatProgressPercent(pct), kind: "stage"};
+    const stage = processingPhase ? measuredProgress(progress?.stage_progress_pct) : null;
+    if (stage !== null) return {pct: stage, label: `${formatProgressPercent(stage)} công đoạn`, kind: "stage"};
+    return {pct: null, label: formatProgressPercent(null), kind: "unknown"};
+  }
+
   function visualProgressDetail(progress) {
     const end = Number(progress.chunk_end);
     const start = Number(progress.chunk_start);
@@ -720,13 +738,15 @@ document.addEventListener("DOMContentLoaded", () => {
     captionStyleRequest = null;
     captionStyleLastResponse = null;
     writeCaptionStyleControls(captionStyle);
-    captionStyleStatus.textContent = "Xem trước thay đổi tại đây, rồi bấm Xuất video MP4 để lưu bản mới.";
+    captionStyleStatus.textContent = "Kiểu phụ đề được lưu cho bản xem trước và video xuất.";
     captionStyleStatus.dataset.error = "false";
   }
 
   function captionSourceReady() {
     const items = Object.values(segments);
     return !!currentTaskId && (["COMPLETED", "PREPARED"].includes(currentProgress?.status) ||
+      (isPreviewReady(currentProgress?.status) && hasMeasuredPreview(currentProgress) &&
+        items.some(segment => ["READY", "PLAYED"].includes(segment.status) && segment.audio_url)) ||
       (currentProgress?.phase === "export_error" && items.length > 0 &&
         items.every(segment => ["READY", "PLAYED"].includes(segment.status))));
   }
@@ -810,7 +830,7 @@ document.addEventListener("DOMContentLoaded", () => {
       applyCaptionStyleSnapshot(data, {force: true});
       data.segments.forEach(applySegmentUpdate);
       positionVideoOverlays();
-      captionStyleStatus.textContent = "Đã cập nhật xem trước. Bấm Xuất video MP4 để lưu bản mới.";
+      captionStyleStatus.textContent = "Đã lưu kiểu phụ đề và cập nhật xem trước.";
       captionStyleStatus.dataset.error = "false";
     } catch (error) {
       if (request.taskId !== currentTaskId || captionStyleRequest !== request || request.version !== captionStyleEditVersion) return;
@@ -1227,6 +1247,13 @@ document.addEventListener("DOMContentLoaded", () => {
     taskPollWarning = false;
     const previousPreparedSeconds = Number(currentProgress?.source_prepared_seconds);
     const previousStatus = currentProgress?.status;
+    // Stage-local measurements cannot carry across a new stage snapshot.
+    // Partial patches within the same stage may still retain its last sample.
+    if (progress.phase !== undefined && (progress.phase !== currentProgress?.phase ||
+        Object.hasOwn(progress, "progress_pct")) &&
+        progress.stage_progress_pct === undefined && currentProgress) {
+      currentProgress = {...currentProgress, stage_progress_pct: null};
+    }
     currentProgress = { ...currentProgress, ...progress };
     if (isPreviewReady(currentProgress.status) && !hasMeasuredPreview(currentProgress)) {
       currentProgress = {...currentProgress, status: "FAILED", phase: "prepare", progress_pct: null,
@@ -1266,18 +1293,19 @@ document.addEventListener("DOMContentLoaded", () => {
     }
     const terminal = ["COMPLETED", "PREVIEW_READY", "PREPARED", "FAILED", "STOPPED", "CANCELLED"].includes(status);
     setWorkerSourceBusy(!terminal || !!pendingTaskAction || reviewInProgress() || automaticExportActive);
-    const pct = measuredProgress(currentProgress.progress_pct);
-    updatePlayerDownloadProgress(currentProgress, pct, terminal);
+    const displayed = displayedTaskProgress(currentProgress);
+    const pct = displayed.pct;
+    updatePlayerDownloadProgress(currentProgress, measuredProgress(currentProgress.progress_pct), terminal);
     updatePlayerTaskStatus(currentProgress, terminal);
     if (!streamDisconnected) taskConnectionStatus.classList.add("hidden");
     taskProgress.classList.remove("hidden");
     taskProgress.dataset.status = status;
     taskProgressStage.textContent = `${status === "PAUSED" ? "Đã tạm dừng · " : ""}${currentProgress.stage || (isPreviewReady(status) ? "Đoạn xem trước đã sẵn sàng" : reviewInProgress() ? "AI đang kiểm tra lại bản dịch…" : "Đang xử lý video…")}`;
     bufferingAlert.dataset.state = status === "FAILED" ? "error" : status === "PAUSED" ? "paused" : "loading";
-    taskProgressValue.textContent = terminal && pct === null ? "" : formatProgressPercent(pct);
+    taskProgressValue.textContent = terminal && pct === null ? "" : displayed.label;
     taskProgressTrack.classList.toggle("hidden", terminal && pct === null);
     taskProgressTrack.dataset.indeterminate = String(pct === null);
-    taskProgressTrack.setAttribute("aria-valuetext", `${taskProgressStage.textContent}${pct === null ? ": chưa có số liệu phần trăm" : `: ${formatProgressPercent(pct)}`}`);
+    taskProgressTrack.setAttribute("aria-valuetext", `${taskProgressStage.textContent}${pct === null ? ": chưa có số liệu phần trăm" : `: ${displayed.label}`}`);
     if (pct === null) taskProgressTrack.removeAttribute("aria-valuenow");
     else taskProgressTrack.setAttribute("aria-valuenow", String(pct));
     taskProgressBar.style.width = pct === null ? "100%" : `${pct}%`;
@@ -1289,6 +1317,16 @@ document.addEventListener("DOMContentLoaded", () => {
       : currentProgress.phase === "visual" ? visualProgressDetail(currentProgress)
       : pct !== null ? "Tiến độ xử lý câu thoại: số câu hoàn tất / tổng số câu."
       : "Bước này chưa có số liệu phần trăm. Trạng thái sẽ cập nhật khi có kết quả.";
+    const completedSpeech = currentProgress.processing_completed_segments;
+    const totalSpeech = currentProgress.processing_total_segments;
+    if (Number.isInteger(completedSpeech) && Number.isInteger(totalSpeech) && totalSpeech > 0 &&
+        completedSpeech >= 0 && completedSpeech <= totalSpeech &&
+        !["request", "resolve", "download", "export", "export_error"].includes(currentProgress.phase)) {
+      taskProgressDetail.textContent += ` Lời và giọng Việt: ${completedSpeech}/${totalSpeech} câu${currentProgress.processing_total_known === false ? " đã nhận diện; đang nhận diện phần tiếp theo" : ""}.`;
+      if (currentProgress.phase === "review" && !terminal) {
+        taskProgressDetail.textContent += " AI vẫn đang rà nội dung; số này chưa xác nhận chất lượng dịch.";
+      }
+    }
     const states = currentProgress.segment_states;
     if (states && typeof states === "object") {
       const count = key => Number.isInteger(states[key]) && states[key] >= 0 ? states[key] : 0;
@@ -1899,7 +1937,8 @@ document.addEventListener("DOMContentLoaded", () => {
       Object.assign(subtitleOverlay.style, {left: `${side+width*.04}px`, right: `${side+width*.04}px`,
         top: "auto", bottom: `${top+height*.10}px`, width: "auto", height: "auto" });
       Object.assign(subtitleText.style, { width: "auto", height: "auto", padding: ".2em .55em",
-        display: "inline-block", background: "#FFFFFF", color: "#000000", fontSize: `${subtitleFontSize(width,height)}px` });
+        display: "inline-block", background: captionStyle.background_color || "#FFE500",
+        color: captionStyle.text_color || "#000000", fontSize: `${subtitleFontSize(width,height)}px` });
     }
   }
 
@@ -4038,7 +4077,7 @@ document.addEventListener("DOMContentLoaded", () => {
       }
       if (activeTask) {
         const statusChanged = activeTask.status !== currentProgress?.status;
-        const progressChanged = ["phase", "stage", "progress_pct", "downloaded_bytes", "total_bytes", "speed", "eta", "can_retry", "can_repair_failed", "can_pause", "can_resume", "can_stop", "can_review", "review_count", "output_video_url", "output_filename", "translation_mode", "can_translate_full", "preview_seconds", "processed_seconds", "source_prepared_seconds", "total_seconds", "review_scope"]
+        const progressChanged = ["phase", "stage", "progress_pct", "stage_progress_pct", "processing_progress_pct", "processing_completed_segments", "processing_total_segments", "processing_scope", "processing_total_known", "downloaded_bytes", "total_bytes", "speed", "eta", "can_retry", "can_repair_failed", "can_pause", "can_resume", "can_stop", "can_review", "review_count", "output_video_url", "output_filename", "translation_mode", "can_translate_full", "preview_seconds", "processed_seconds", "source_prepared_seconds", "total_seconds", "review_scope"]
           .some(key => activeTask[key] !== undefined && activeTask[key] !== currentProgress?.[key]) ||
           (activeTask.review_summary !== undefined && JSON.stringify(activeTask.review_summary) !== JSON.stringify(currentProgress?.review_summary));
         if (taskPollWarning || streamDisconnected || statusChanged || progressChanged) {
@@ -4072,9 +4111,10 @@ document.addEventListener("DOMContentLoaded", () => {
       tasks.forEach(t => {
         const tr = document.createElement("tr");
         tr.className = "hover:bg-gray-800/40 transition";
-        const pct = measuredProgress(t.progress_pct);
+        const displayed = displayedTaskProgress(t);
+        const pct = displayed.pct;
         const terminalWithoutProgress = pct === null && ["COMPLETED", "PREVIEW_READY", "PREPARED", "FAILED", "STOPPED", "CANCELLED"].includes(t.status);
-        const progressLabel = pct === null ? "Chưa có số liệu %" : formatProgressPercent(pct);
+        const progressLabel = pct === null ? "Chưa có số liệu %" : displayed.label;
 
         let statusBadge = "";
         if (t.status === "RUNNING") {
@@ -4711,7 +4751,7 @@ document.addEventListener("DOMContentLoaded", () => {
     if (!summary) return;
     if (captionStyle.position !== "auto" || captionStyle.background_color || captionStyle.text_color !== "#000000" || captionStyle.blur_original) {
       const positions = {auto: "tự động", top: "phía trên", middle: "ở giữa", bottom: "phía dưới"};
-      summary.textContent = `Phụ đề ${positions[captionStyle.position] || "tự động"}, màu chữ ${captionStyle.text_color}, nền ${captionStyle.background_color || "tự động"}. ${captionStyle.blur_original ? "Làm mờ vùng sub gốc đã nhận diện." : "Giữ nguyên sub gốc."} Xuất đúng kiểu đang xem trước, giữ nguyên giọng đọc.`;
+      summary.textContent = `Phụ đề ${positions[captionStyle.position] || "tự động"}, màu chữ ${captionStyle.text_color}, nền ${captionStyle.background_color || "vàng mặc định"}. ${captionStyle.blur_original ? "Làm mờ vùng sub gốc đã nhận diện." : "Giữ nguyên sub gốc."} Xuất đúng kiểu đang xem trước, giữ nguyên giọng đọc.`;
       return;
     }
     summary.textContent = toggleScreenText.checked

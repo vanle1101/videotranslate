@@ -550,6 +550,7 @@ def persist_session(session):
 
 
 def export_revision_signature(session):
+    from core.subtitle_cues import CAPTION_RENDERER_VERSION
     content = {"segments": [{"id": s.id, "revision": getattr(s, "revision", 0),
                              "start": s.start, "end": s.end, "final_vi": s.final_vi,
                              "confirmed_silence": getattr(s, "confirmed_silence", False),
@@ -559,7 +560,8 @@ def export_revision_signature(session):
                              "verification": getattr(s, "verification", None)}
                             for s in session.segments.values()],
                "screen_texts": getattr(session, "screen_texts", []),
-               "caption_style": getattr(session, "caption_style", {})}
+               "caption_style": getattr(session, "caption_style", {}),
+               "caption_renderer_version": CAPTION_RENDERER_VERSION}
     return hashlib.sha256(json.dumps(content, ensure_ascii=False, sort_keys=True).encode("utf-8")).hexdigest()
 
 
@@ -1115,8 +1117,13 @@ async def update_caption_style(task_id: str, req: CaptionStyleRequest):
     if (session.is_running or getattr(session, "is_editing", False)
             or active_export_tasks.get(f"export_{task_id}", {}).get("status") in {"RUNNING", "CANCELLING"}):
         raise HTTPException(status_code=409, detail="Hãy chờ xử lý hoặc xuất video xong trước khi chỉnh phụ đề.")
+    progress = session.get_progress()
+    valid_preview = (progress.get("status") == "PREVIEW_READY"
+                     and progress.get("preview_output_ready") is True
+                     and not progress.get("preview_untranslated_ids")
+                     and not progress.get("preview_missing_audio_ids"))
     if (session.error or not session.segments
-            or any(s.status not in ("READY", "PLAYED") for s in session.segments.values())):
+            or (not valid_preview and any(s.status not in ("READY", "PLAYED") for s in session.segments.values()))):
         raise HTTPException(status_code=409, detail="Hãy hoàn tất bản dịch trước khi chỉnh phụ đề.")
     from core.subtitle_cues import normalize_caption_style
     style = normalize_caption_style(req.model_dump())
@@ -1440,6 +1447,8 @@ async def export_hq(req: ExportHQRequest):
         session.output_filename = result["output_filename"]
         session.output_review_url = review_url
         session.caption_output_outdated = False
+        from core.subtitle_cues import CAPTION_RENDERER_VERSION
+        session.caption_renderer_version = CAPTION_RENDERER_VERSION
         await session.report_progress("complete", "MP4 đã xuất và giải mã kiểm tra thành công.", 100)
         warnings_before_save = list(session.warnings)
         persist_session(session)

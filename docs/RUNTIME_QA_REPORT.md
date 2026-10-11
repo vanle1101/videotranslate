@@ -1,5 +1,38 @@
 # Runtime QA report
 
+## Preview caption controls and measured progress — October 11, 2026
+
+**PASS for the reported changing subtitle palette, missing preview style controls and missing measured speech progress.** This is not full-video or semantic acceptance. Production UI checks used saved QA project `94f80114`: real 320.040635-second source, real 24.46-second translated sample and 17 existing Vietnamese WAVs. User project `d5820a71` was retained.
+
+### Causes and applied fixes
+
+1. `build_caption_layout` chose yellow when OCR found a Chinese subtitle and white when it did not. Intermittent OCR therefore changed palette between sentences. The default is now stable yellow; OCR only controls placement. Explicit background/text colors remain unchanged. The unmeasured frontend fallback uses the same selected palette.
+2. Frontend and caption-style API required the entire session to be finished. A valid translated preview still contains WAITING lookahead rows, so its controls were hidden and requests rejected. Both layers now admit a genuinely playable `PREVIEW_READY`, with the backend validating translated speech/source coverage. The expanded controls sit directly below the player, before the audio mixer. Color, position and optional blur persist without calling translation or TTS. Blur uses independently trusted source-region geometry; it never approves uncertain meaning/address choices.
+3. During contextual review, `progress_pct` was intentionally null, although validated spoken-row counts existed. New scoped processing fields count only real fitting WAVs or genuine silence, exclude preview lookahead, and retain an unknown whole-video denominator until recognition is complete. UI labels explicitly say `giọng mẫu` or `lời & giọng`; speech 100% does not mean AI review or MP4 validation passed. New stage snapshots clear stale stage percentages.
+4. Existing MP4s may have old white/yellow captions baked in. Renderer-version tracking invalidates legacy default-palette renders for re-export, preserving their bytes, transcript and speech. Custom-palette old renders remain usable. Successful export records the current renderer version; no previously rendered file is silently recolored.
+
+### Real production UI checks
+
+`scripts/check_preview_style_ui.py` uses `StudioMainWindow`, the production JS, actual HTTP/WebSocket routes and existing media, offscreen and muted. It does not mock the player, storage or provider.
+
+| Exact actions | Expected | Actual / retest |
+| --- | --- | --- |
+| Exit idle normal Studio through Ctrl+Q; start fresh QA backend/UI; History → `94f80114` | New code loads, valid sample remains editable | **PASS**, graceful normal shutdown 14:40:55; preserved source/sample restored. |
+| Inspect preview controls before continuing full translation | Visible expanded color/position/blur controls, despite future WAITING rows | **PASS**, enabled panel directly below player; source-geometry blur enabled. |
+| Compare all 17 actual sample caption cues | Same default background on every cue | **PASS**, all yellow `#FFE500`. |
+| Inspect backend counts and rendered task progress | Counts reflect actual sample media, no full-video success claim | **PASS**, `17/17`, `100% giọng mẫu`, status `PREVIEW_READY`; seven editorial warnings remain. |
+| Set white text, `#334455` background, bottom placement, original-sub blur through controls | Persist selected style, update actual preview | **PASS**, API layout and computed DOM colors match; actual source blur mask painted; no JS errors. |
+| Play/pause translated sample through its transport | Real source video advances with Vietnamese preview | **PASS**, decoded real video advances; no substitute media. |
+| Shut down QA backend/UI, start again, History → same project | Chosen colors/position/blur survive storage reconstruction | **PASS**, all four selections restored from the durable manifest. |
+| Restore QA project's original style; compare WAV hashes | No regenerated audio or damaged checkpoint | **PASS**, all 17 real WAVs unchanged; no provider calls needed for styling. |
+| Normal desktop launcher → fresh process/backend on port 59964 → open user project `d5820a71` in production UI, offscreen read-only | User's existing preview uses new controls/progress | **PASS**, panel visible/expanded/enabled, trusted-region blur enabled, `100% giọng mẫu`; no user style changed. |
+
+The first harness runs found two assertion issues: default palette uses the documented `background: yellow` rather than a custom hex field, and API normalizes hex colors to uppercase. Assertions now check the actual contract. The harness wait was also updated to the new successful-save message. These were test expectations, not hidden production successes. Final runtime retest passed at 14:46, and every QA backend was stopped.
+
+Final integrated regressions: **562 Python passed in 23.23 s** across caption layout/style/API, session persistence, measured progress, output gates, chunked preview, transcript edits and export lifecycle; **220 JavaScript UI tests passed**. Two new legacy-render test fixtures initially omitted verification evidence, so they produced no caption cues; their fixtures were corrected with actual cue eligibility, then the combined suite passed. No success/output validation was weakened. `git diff --check` passed. This Python/Qt/plain-JS project has no TypeScript/npm production build. The normal desktop application remains available; QA windows/servers exited.
+
+No new Muse translation/review or complete-video MP4 export was performed for this caption/progress fix. The seven unresolved content checks in this QA sample remain unresolved. This acceptance proves the reported controls, palette, persistence and actual sample playback; it does not establish a fault-free long-video pipeline.
+
 ## Current preview failure audit — October 11, 2026
 
 **PASS for genuine translated-preview recovery, reopening and forward/backward seeking; complete-video and semantic acceptance remain incomplete.** This continuation addresses the actual empty-preview and forward-seek failures in project `94f80114`, source Douyin ID `7692745161054506290`, retained source duration 320.040635 s. The user expects a genuinely translated and dubbed short sample before explicitly starting full translation. The current player uses original video with synchronized Vietnamese speech and captions; the sample is not a full-video MP4 export.

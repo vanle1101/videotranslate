@@ -1293,6 +1293,70 @@ def test_saved_mp4_probes_and_decodes_once_then_history_reuses_fingerprint(persi
     assert probe.call_count == 1
 
 
+@pytest.mark.parametrize("old_version", [None, 1])
+def test_legacy_default_render_requires_reexport_but_keeps_media_and_transcript(persisted, saved_mp4, monkeypatch, old_version):
+    from core.streaming import session_store as store
+    from core.subtitle_cues import CAPTION_RENDERER_VERSION
+    path = _project_path(persisted.task_id)
+    record = json.loads(path.read_text(encoding="utf-8"))
+    record["segments"][0]["subtitle_cues"] = [{"start": 0, "end": 2, "text": "Xin chào."}]
+    if old_version is None:
+        record["session"].pop("caption_renderer_version", None)
+    else:
+        record["session"]["caption_renderer_version"] = old_version
+    path.write_text(json.dumps(record), encoding="utf-8")
+    before = saved_mp4.read_bytes()
+    before_audio = Path(persisted.segments[0].audio_path).read_bytes()
+    saved = path.read_bytes()
+    probe = Mock(side_effect=AssertionError("Stale render need not be decoded"))
+    monkeypatch.setattr(store, "_probe_saved_output", probe)
+    for _ in range(2):
+        row = list_saved_sessions()[0]
+        assert row["status"] == "PREPARED" and row["can_open"]
+        assert row["output_video_url"] == "" and "Xuất video lại" in row["stage"]
+        assert path.read_bytes() == saved, "History detection does not rewrite user data"
+    restored = restore_saved_session(persisted.task_id)
+    assert restored.output_video_url == "" and restored.caption_output_outdated is True
+    assert restored.caption_renderer_version == old_version
+    assert restored.segments[0].status == "READY" and not restored.error
+    assert restored.segments[0].final_vi == persisted.segments[0].final_vi
+    assert restored.segment_snapshot(restored.segments[0])["caption_layout"]["cues"][0]["background"] == "yellow"
+    restored.persist()
+    active_streaming_sessions.clear()
+    assert list_saved_sessions()[0]["status"] == "PREPARED"
+    again = restore_saved_session(persisted.task_id)
+    assert again.get_progress()["status"] == "PREPARED" and again.caption_output_outdated is True
+    assert saved_mp4.read_bytes() == before
+    assert Path(again.segments[0].audio_path).read_bytes() == before_audio
+    assert CAPTION_RENDERER_VERSION > (old_version or 0)
+    probe.assert_not_called()
+
+
+def test_legacy_custom_background_render_stays_valid_without_migration(persisted, saved_mp4):
+    path = _project_path(persisted.task_id)
+    record = json.loads(path.read_text(encoding="utf-8"))
+    record["session"].pop("caption_renderer_version", None)
+    record["session"]["caption_style"] = {"background_color": "#123456", "text_color": "#FEDCBA"}
+    path.write_text(json.dumps(record), encoding="utf-8")
+    before = saved_mp4.read_bytes()
+    assert list_saved_sessions()[0]["output_video_url"] == "/api/outputs/saved.mp4"
+    restored = restore_saved_session(persisted.task_id)
+    assert restored.output_video_url == "/api/outputs/saved.mp4" and not restored.caption_output_outdated
+    restored.persist()
+    active_streaming_sessions.clear()
+    assert list_saved_sessions()[0]["output_video_url"] == "/api/outputs/saved.mp4"
+    assert saved_mp4.read_bytes() == before
+
+
+@pytest.mark.parametrize("version", [True, "2", -1, 0])
+def test_invalid_caption_renderer_version_does_not_rewrite_project(persisted, version):
+    before = _project_path(persisted.task_id).read_bytes()
+    persisted.caption_renderer_version = version
+    with pytest.raises(ValueError, match="Phiên bản dựng phụ đề"):
+        persisted.persist()
+    assert _project_path(persisted.task_id).read_bytes() == before
+
+
 @pytest.mark.parametrize("damage", ["truncate", "missing", "wrong_duration", "corrupt_samples"])
 def test_bad_saved_result_never_hides_editable_translation_or_publishes_url(persisted, saved_mp4, damage):
     if damage == "missing":

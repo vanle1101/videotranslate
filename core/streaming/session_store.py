@@ -75,7 +75,7 @@ SEGMENT_FIELDS = frozenset((
 ).split())
 SESSION_FIELDS = frozenset((
     "initial_buffer_seconds voice tts_engine_name asr_engine_name visual_translation total_duration video_size "
-    "screen_texts caption_style caption_style_revision caption_output_outdated translation_sources review_summary "
+    "screen_texts caption_style caption_style_revision caption_renderer_version caption_output_outdated translation_sources review_summary "
     "suppression_stats current_playback_time warnings rolling_context initialized auto_export_result "
     "_visual_incremental_started _visual_completed_seconds _visual_prepass_complete"
     " translation_mode preview_seconds _chunked_source_started _source_prepared_seconds _preview_ready"
@@ -652,6 +652,9 @@ def _validate_project(data, task_id):
     revision = fields.get("caption_style_revision", 0)
     if type(revision) is not int or revision < 0:
         raise ValueError("Phiên bản phụ đề không hợp lệ.")
+    renderer_version = fields.get("caption_renderer_version")
+    if renderer_version is not None and (type(renderer_version) is not int or renderer_version < 1):
+        raise ValueError("Phiên bản dựng phụ đề không hợp lệ.")
     summary = fields.get("review_summary", {})
     if summary.get("status") not in {None, "running", "completed", "failed", "incomplete"}:
         raise ValueError("Trạng thái kiểm tra bản dịch không hợp lệ.")
@@ -939,6 +942,7 @@ def _valid_output(path, expected_duration):
 
 def _availability(data):
     from core.streaming.pipeline import preview_source_covered
+    from core.subtitle_cues import CAPTION_RENDERER_VERSION
     fields, rows = data["session"], data["segments"]
     output_gate = final_output_metadata(rows)
     missing = []
@@ -991,11 +995,21 @@ def _availability(data):
     if output_gate["final_output_blocked"]:
         ready = False
     output = fields.get("output_filename", "")
-    current_output = bool(output and not fields.get("caption_output_outdated"))
+    style = fields.get("caption_style", {}) or {}
+    # Before the stable palette migration, a missing renderer marker means the
+    # null/automatic background could have been rendered white for OCR gaps.
+    # Invalidate only that legacy default render. Custom-background renders are
+    # byte-compatible and remain downloadable. The existing MP4 is never
+    # removed; the user only gets an actionable re-export state.
+    renderer_version = fields.get("caption_renderer_version")
+    legacy_default_caption = bool((output or fields.get("caption_output_outdated"))
+                                 and (renderer_version is None or renderer_version < CAPTION_RENDERER_VERSION)
+                                 and style.get("background_color") is None)
+    current_output = bool(output and not fields.get("caption_output_outdated") and not legacy_default_caption)
     valid_output = bool(current_output and _valid_output(settings.OUTPUT_DIR / output, fields.get("total_duration", 0)))
     output_warning = OUTPUT_FAILURE_WARNING if current_output and not valid_output else ""
     review_incomplete = fields.get("review_summary", {}).get("status") in {"failed", "incomplete", "running"}
-    waiting_export = bool(ready and fields.get("auto_export_result") and not valid_output)
+    waiting_export = bool(ready and (fields.get("auto_export_result") or legacy_default_caption) and not valid_output)
     status = ("FAILED" if output_warning or invalid_preview else "PREVIEW_READY" if preview_ready else "PREPARED" if waiting_export or unresolved_speech or preview_speech_unresolved else "COMPLETED" if ready else
               "STOPPED" if data["state"] == "STOPPED" and not missing else
               "FAILED" if missing or data["state"] == "FAILED" or review_incomplete else "STOPPED")
@@ -1023,7 +1037,9 @@ def _availability(data):
     if output_warning:
         message = " ".join(filter(None, (message, output_warning)))
     elif waiting_export:
-        message = "Lời dịch và giọng đã lưu; chưa có MP4 được kiểm định. Mở dự án và xuất video."
+        message = ("Bản MP4 cũ dùng kiểu phụ đề mặc định trước đây; file cũ vẫn được giữ. "
+                   "Xuất video lại để áp dụng nền vàng thống nhất." if legacy_default_caption else
+                   "Lời dịch và giọng đã lưu; chưa có MP4 được kiểm định. Mở dự án và xuất video.")
     return {"status": status, "missing_media": message, "ready": ready, "preview_ready": preview_ready,
             **output_gate,
             **preview_output,
@@ -1031,6 +1047,7 @@ def _availability(data):
             "preview_source_unprepared": invalid_preview,
             "preview_can_continue": preview_can_continue, "source_exists": _exists(fields.get("video_path")),
             "pending_download": pending_download, "output_warning": output_warning,
+            "caption_render_stale": legacy_default_caption,
             "missing_audio_ids": absent_audio, "output_filename": output if valid_output and ready else ""}
 
 
@@ -1096,6 +1113,11 @@ def _restore_saved_session_owned(task_id, event_callback=None):
     for key in SESSION_FIELDS:
         if key in fields:
             setattr(session, key, fields[key])
+    # A new session knows the current renderer, but a restored old render must
+    # retain its provenance until the user actually exports a new MP4.
+    session.caption_renderer_version = fields.get("caption_renderer_version")
+    if available["caption_render_stale"]:
+        session.caption_output_outdated = True
     # A stale success flag is not source evidence. Preserve partial speech
     # recovery, but never restore an unprepared empty preview as ready.
     session._preview_ready = available["preview_can_continue"]

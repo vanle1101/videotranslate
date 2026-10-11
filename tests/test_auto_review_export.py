@@ -84,6 +84,22 @@ def test_completed_review_exports_unresolved_with_warning_and_captions(session):
     assert main.active_export_tasks["export_review-export"]["review_warning"]
 
 
+def test_successful_reexport_stamps_current_caption_renderer_only_after_result(session):
+    from core.subtitle_cues import CAPTION_RENDERER_VERSION
+    item, exporter = session
+    item.caption_renderer_version = None
+    item.caption_output_outdated = True
+    item.persist = Mock()
+    def render(**kwargs):
+        assert item.caption_renderer_version is None and item.caption_output_outdated is True
+        return {"output_filename": "reviewed.mp4", "elapsed_seconds": 1}
+    exporter.export.side_effect = render
+    asyncio.run(main.export_hq(main.ExportHQRequest(task_id=item.task_id)))
+    assert item.caption_renderer_version == CAPTION_RENDERER_VERSION
+    assert item.caption_output_outdated is False
+    item.persist.assert_called_once()
+
+
 @pytest.mark.parametrize("status", [None, "running", "failed", "completed"])
 def test_uncertain_rows_without_a_completed_audit_stay_blocked(session, status):
     item, exporter = session
