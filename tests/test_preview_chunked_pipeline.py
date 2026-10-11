@@ -331,6 +331,72 @@ def test_provider_result_without_published_output_is_not_completed(preview, monk
     asyncio.run(run())
 
 
+def test_partial_source_retry_waits_for_owned_speech_and_preserves_ready_rows(preview, monkeypatch):
+    session, prepared, analyzed, speech, _ = preview
+    session.total_duration = 24
+    original_prepass = session.video_intelligence.prepass
+    original_synthesize = session._synthesize_segment
+    attempts = []
+    entered, release = asyncio.Event(), asyncio.Event()
+
+    def prepass(path, rows, **options):
+        attempts.append(options["start_time"])
+        if len(attempts) > 1:
+            publish = options["chunk_callback"]
+            def changed_draft(result, start, end):
+                for data in result["segments"].values():
+                    data["final_vi"] = "Bản nháp thử lại khác."
+                return publish(result, start, end)
+            options["chunk_callback"] = changed_draft
+        result = original_prepass(path, rows, **options)
+        if len(attempts) == 1:
+            raise TimeoutError("injected failure after partial publication")
+        return result
+
+    async def synthesize(item, **options):
+        if item.id == 0:
+            entered.set()
+            await release.wait()
+        await original_synthesize(item, **options)
+
+    monkeypatch.setattr(session.video_intelligence, "prepass", prepass)
+    monkeypatch.setattr(session, "_synthesize_segment", synthesize)
+
+    async def run():
+        start = asyncio.create_task(session.start())
+        try:
+            await asyncio.wait_for(entered.wait(), 3)
+            await asyncio.sleep(.05)
+            assert attempts == [0], "Retry must not republish a row still owned by speech"
+        finally:
+            release.set()
+            await asyncio.wait_for(start, 5)
+        await session.worker_task
+        assert attempts == [0, 0]
+        assert speech == [0, 1, 2], "Healthy speech must not be generated twice"
+        assert all(row.status == "READY" for row in session.segments.values())
+        assert [row.final_vi for row in session.segments.values()] == [f"Lời {sid}." for sid in range(3)]
+
+    asyncio.run(run())
+
+
+def test_retry_drain_reports_crashed_consumer_without_hanging(preview):
+    session, *_ = preview
+
+    async def run():
+        session._chunk_followups = asyncio.Queue(maxsize=2)
+        session._chunk_followups.put_nowait("unfinished owner")
+        async def crashed():
+            raise RuntimeError("injected drain worker crash")
+        session._chunk_followup_task = asyncio.create_task(crashed())
+        with pytest.raises(RuntimeError, match="injected drain worker crash"):
+            await asyncio.wait_for(session._drain_chunk_followups(), 1)
+        assert not [task for task in asyncio.all_tasks()
+                    if task is not asyncio.current_task() and not task.done()]
+
+    asyncio.run(run())
+
+
 def test_followup_worker_failure_does_not_leave_producer_hung(preview, monkeypatch):
     session, *_ = preview
     async def failed(*args):
@@ -1043,6 +1109,80 @@ def test_source_ocr_owner_is_released_before_next_native_interval(preview, monke
     asyncio.run(run())
     assert len(closed_intervals) == 3
     assert not live_ocr
+
+
+@pytest.mark.parametrize("newer_state", ["manual", "revision"])
+def test_review_dispatch_freezes_context_before_worker_and_preserves_newer_edit(preview, monkeypatch, newer_state):
+    session, *_ = preview
+    focus = SegmentItem(0, 0, 1, 1)
+    focus.text_zh = focus.asr_text = "我回来了"
+    focus.final_vi = "Con về rồi."
+    focus.speaker_id = "voice-0"
+    focus.speaker_evidence = {"scope_id": "first", "references": [{"source": "original"}]}
+    focus.verification = {"status": "pending", "semantic_verified": False}
+    neighbor = SegmentItem(1, 2, 3, 1)
+    neighbor.text_zh = neighbor.asr_text = "妈妈"
+    neighbor.speaker_id = "voice-1"
+    neighbor.speaker_evidence = {"scope_id": "first", "references": [{"source": "neighbor-original"}]}
+    session.segments = {0: focus, 1: neighbor}
+    session.screen_texts = [{"id": "title-0", "kind": "title", "start": 0, "end": 3,
+        "text_zh": "家", "text_vi": "Nhà", "bbox": [.1, .1, .5, .1]}]
+    expected_targets = deepcopy([focus.to_dict()])
+    expected_context = deepcopy([focus.to_dict(), neighbor.to_dict()])
+    expected_screens = deepcopy(session.screen_texts)
+    original_blocking = session._run_blocking
+    calls = []
+
+    def review(_reviewer, video_path, rows, screens, **options):
+        calls.append(1)
+        assert video_path == session.video_path
+        assert [row.to_dict() for row in rows] == expected_targets
+        context = options["context_segments"]
+        assert [row.to_dict() for row in context] == expected_context
+        assert context[0] is not focus and context[1] is not neighbor
+        assert screens == expected_screens
+        return {"segments": {0: {**rows[0].to_dict(), "final_vi": "Bản rà đã cũ.",
+            "needs_review": False, "verification": {"status": "verified", "semantic_verified": True}}},
+            "summary": {"checked": 1, "verified": 1}, "translation_sources": []}
+
+    monkeypatch.setattr("core.translation_review.AutomaticTranslationReviewer.review", review)
+    monkeypatch.setattr(session, "_review_translations", StreamingPipelineSession._review_translations.__get__(session))
+
+    async def run():
+        dispatched, release = asyncio.Event(), asyncio.Event()
+
+        async def delayed_worker(function, *args, **options):
+            # Hold the executor boundary, rather than freezing the context in
+            # the fake reviewer: production must snapshot before dispatch.
+            dispatched.set()
+            await release.wait()
+            return await original_blocking(function, *args, **options)
+
+        monkeypatch.setattr(session, "_run_blocking", delayed_worker)
+        owner = asyncio.create_task(session._review_translations(segment_ids={0}))
+        await asyncio.wait_for(dispatched.wait(), 5)
+        focus.revision += 1
+        focus.text_zh, focus.final_vi = "我刚回家", "Lời vừa sửa được giữ."
+        focus.speaker_id = "voice-new"
+        focus.speaker_evidence["references"][0]["source"] = "changed"
+        focus.verification = ({"status": "manual"} if newer_state == "manual"
+                              else {"status": "pending", "semantic_verified": False})
+        neighbor.text_zh = "爸爸"
+        neighbor.speaker_id = "voice-other"
+        neighbor.speaker_evidence["references"][0]["source"] = "neighbor-changed"
+        session.screen_texts[0]["text_vi"] = "Tiêu đề mới"
+        session.screen_texts[0]["bbox"][0] = .2
+        release.set()
+        await asyncio.wait_for(owner, 5)
+
+    asyncio.run(run())
+    assert calls == [1]
+    assert focus.text_zh == "我刚回家" and focus.final_vi == "Lời vừa sửa được giữ."
+    assert focus.speaker_id == "voice-new" and focus.speaker_evidence["references"][0]["source"] == "changed"
+    assert focus.verification == ({"status": "manual"} if newer_state == "manual"
+                                  else {"status": "pending", "semantic_verified": False})
+    assert neighbor.text_zh == "爸爸" and neighbor.speaker_id == "voice-other"
+    assert session.screen_texts[0]["text_vi"] == "Tiêu đề mới" and session.screen_texts[0]["bbox"][0] == .2
 
 
 def test_stale_address_resume_uses_current_context_and_keeps_unchanged_ready_audio(preview, monkeypatch):

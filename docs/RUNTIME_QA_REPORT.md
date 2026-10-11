@@ -1,5 +1,39 @@
 # Runtime QA report
 
+## Two concurrent Muse requests — October 12, 2026
+
+**Scope: increase Muse throughput in the existing chunked pipeline.** This does not constitute acceptance of every historical translation, speaker/address or multi-hour-video issue. The production UI run below is in progress; no completed preview or full export is claimed yet.
+
+### Root causes and fixes
+
+1. `OPENCODE_CONCURRENCY=1` serialized the independent source-translation producer and review/TTS consumer. The shared default and example configuration now admit **2** Muse requests; `.env` has no conflicting override. Provider/model, request deadlines, retries, cache and one-consumer ordering remain unchanged. The legacy nonvisual per-segment path still processes sequentially.
+2. Chunk review passed live `SegmentItem` references as surrounding context and only copied them once its worker began. It now captures a deep snapshot before dispatch, alongside target/screen snapshots. A delayed-admission regression changes source, nested speaker evidence, screens and a target's manual/revision state: the worker retains the original context and an older response cannot overwrite the newer edit.
+3. A partially published source interval could be retried while the consumer still owned its rows for review/TTS. Before retrying failed source intervals, the producer now drains existing followups; successful `READY` speech is retained. Queue drain races the consumer task so a worker crash propagates instead of hanging. Cancelling the drain releases its waiter without losing consumer ownership. New healthy intervals still overlap normally.
+
+### Real provider benchmark
+
+Actual `OpenCodeZenClient` requests to `muse-spark-1.3-contributor-free`, measured October 11 before enabling the default. Identical contextual prompts use retained project `94f80114`, source IDs 0–15 and target pairs [2,3]/[12,13]. Cache disabled, retries disabled, max tokens 512, request deadline 60 s, admission deadline 70 s. `scripts/check_muse_concurrency.py --run-real` reproduces this opt-in experiment; the measurements below are historical results, not hardcoded acceptance outputs.
+
+| Capacity | Total elapsed | Provider durations | Admission waits | Peak active | Result |
+|---|---:|---|---|---:|---|
+| 1 | 25.438 s | 16.016 / 9.422 s | 0 / 16.016 s | 1 | **PASS** |
+| 2 | 16.640 s | 11.594 / 16.640 s | 0 / 0 s | 2 | **PASS** |
+
+All four actual responses passed strict JSON structure, exact integer IDs, nonempty Vietnamese and no remaining CJK; names/age/birth year were preserved. The small sample used **34.6% less elapsed time (1.53×)**. It does not establish sustained provider limits, full-video speedup or multi-hour throughput. Both rounds ended with zero queued/active requests, retries, cache hits and circuit failures; the source project remained byte-identical and all owned benchmark/OpenCode I/O threads exited.
+
+### Regression and production UI checks
+
+| Test and exact steps | Expected | Actual / retest |
+|---|---|---|
+| Delay review executor admission; mutate live context/screens and a newer manual/revision edit; release worker | Original request snapshot; newer user commit survives | **PASS**, both manual/revision cases |
+| Publish a source batch, inject timeout, hold its first speech task, allow retry, then release speech | No republish while owned; no duplicate synthesis; preserve successful speech | **PASS**; isolated negative control bypassing the drain reproduced the original ownership failure |
+| Crash consumer with an unfinished queue entry; await drain | Error propagates promptly, no orphaned join waiter | **PASS**; independent drain-cancellation audit also passed |
+| Fresh production Qt/backend, offscreen/muted → import existing `workspace/temp/partial-qa.mp4` through actual file-selection bridge → Start preview | Real Muse translation/review/TTS and playable translated preview, no desktop input | **RUNNING**, task `6c74d25c`, PID 20136 / port 58673; actual runtime sampled **2 active Muse requests, 0 queued, 0 retries/cache hits** |
+
+Automated verification: **235 tests + 17 subtests passed** for shared admission/cache/cancel, OpenCode, chunked preview/edit ownership, semantic prompts and review regressions. Additional recovery/storage/address/progress checks: **292 passed** after fixing an isolated test-fixture failure (a fresh `main` import needs a temporary static directory). That fixture issue was not an application runtime failure. Source syntax checks passed without generating bytecode. No TypeScript/npm build is applicable to this Python/Qt application.
+
+Changes: `config.py`, `.env.example`, `core/engines/translation/opencode_client.py`, `core/streaming/pipeline.py`, `tests/test_preview_chunked_pipeline.py`, `tests/test_processing_progress.py`, `scripts/check_chunked_ui.py`, `scripts/check_muse_concurrency.py`, this report.
+
 ## Word-style font controls — October 11, 2026
 
 **PASS in the offscreen production UI and export path.** The caption toolbar now works like a simple Word-style control: choose a font whose menu text uses that family, enter a concrete size in points, pick common sizes from the list, or press **Tự động** to return to adaptive sizing. Point sizes accept 6–96 pt in 0.5 pt increments. Bold remains a compact `B` toggle; color, background opacity/transparency, outline, placement and original-subtitle blur remain available. No browser or visible UI automation was used for this retest.

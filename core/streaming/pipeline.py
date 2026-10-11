@@ -1162,7 +1162,7 @@ class StreamingPipelineSession:
         options = {"cancel_check": lambda: self.is_stopped, "progress_callback": progress,
                    "force_review": force_review}
         if segment_ids is not None:
-            options["context_segments"] = list(self.segments.values())
+            options["context_segments"] = deepcopy(list(self.segments.values()))
         try:
             result = await self._run_blocking(
                 AutomaticTranslationReviewer().review, self.video_path, deepcopy(targets), deepcopy(self.screen_texts), **options)
@@ -2119,6 +2119,22 @@ class StreamingPipelineSession:
                 put.cancel()
                 await asyncio.gather(put, return_exceptions=True)
 
+    async def _drain_chunk_followups(self):
+        """Do not republish a retried draft while its review/TTS owns the row."""
+        if self._chunk_followups is None:
+            return
+        drain = asyncio.create_task(self._chunk_followups.join())
+        try:
+            await asyncio.wait((drain, self._chunk_followup_task), return_when=asyncio.FIRST_COMPLETED)
+            if self._chunk_followup_task.done():
+                await self._chunk_followup_task
+                raise RuntimeError("Worker kiểm định đã dừng trước khi hoàn tất các đoạn.")
+            await drain
+        finally:
+            if not drain.done():
+                drain.cancel()
+                await asyncio.gather(drain, return_exceptions=True)
+
     def _published_row(self, row):
         return (row.end <= self._visual_completed_seconds + .001
                 or (row.source_method in {"text-ai", "video-ai"} and bool(row.translation_provider)
@@ -2447,6 +2463,10 @@ class StreamingPipelineSession:
                 cursor = self._visual_scanned_seconds
                 nominal_end = min(target, cursor + self.preview_seconds)
             else:
+                # A failed prepass may already have published partial batches.
+                # Finish those owners before retrying their source interval;
+                # READY speech then survives publication of the repeated draft.
+                await self._drain_chunk_followups()
                 cursor, nominal_end = retry_intervals.pop(0)
             while self._source_prepared_seconds < nominal_end - .001:
                 try:

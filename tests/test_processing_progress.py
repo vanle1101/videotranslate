@@ -10,6 +10,8 @@ from core.streaming.pipeline import SegmentItem, StreamingPipelineSession
 
 @pytest.fixture
 def session(tmp_path, monkeypatch):
+    # A fresh API-module import mounts static assets under the isolated root.
+    (tmp_path / "static").mkdir()
     monkeypatch.setattr(settings, "BASE_DIR", tmp_path)
     monkeypatch.setattr(settings, "LLM_PROVIDER", "opencode")
     current = StreamingPipelineSession("measured-processing", None, translation_mode="preview",

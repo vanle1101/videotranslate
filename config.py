@@ -99,9 +99,9 @@ class Settings(BaseSettings):
     OPENCODE_API_KEY: str = "" # Optional local override; otherwise read OpenCode auth.json.
     OPENCODE_MODEL: str = "muse-spark-1.3-contributor-free"
     OPENCODE_TIMEOUT: float = 60.0
-    # A single free provider request at a time by default. Stage deadlines
-    # shorten, never extend, each adapter's existing request timeout.
-    OPENCODE_CONCURRENCY: int = Field(default=1, ge=1, le=4)
+    # Let the source producer overlap the independent review/TTS consumer.
+    # Stage deadlines shorten, never extend, each adapter's request timeout.
+    OPENCODE_CONCURRENCY: int = Field(default=2, ge=1, le=4)
     OPENCODE_QUEUE_LIMIT: int = Field(default=24, ge=1, le=256)
     # Queue admission is separate from a provider request deadline. It must
     # cover the longest bounded review request already ahead in the FIFO.

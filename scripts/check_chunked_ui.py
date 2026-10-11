@@ -67,10 +67,13 @@ def wait_for_idle(page, base, task_id, timeout=3600):
     deadline, previous, prepared_at = started + timeout, None, None
     resource_at, peak_rss, resource_samples = 0.0, 0, 0
     initial_queue, initial_ready = None, None
+    peak_active, peak_queued = 0, 0
     while time.monotonic() < deadline:
         snapshot = backend(base, f"/api/streaming/{task_id}")
         progress = snapshot["progress"]
         queue = progress.get("ai_queue", {})
+        peak_active = max(peak_active, queue.get("active_requests", 0))
+        peak_queued = max(peak_queued, queue.get("queued_requests", 0))
         ready = sum(row["status"] in {"READY", "PLAYED"} for row in snapshot["segments"])
         if initial_queue is None:
             initial_queue, initial_ready = dict(queue), ready
@@ -103,6 +106,8 @@ def wait_for_idle(page, base, task_id, timeout=3600):
                 "source_seconds":snapshot["duration"], "status":progress["status"],
                 "ready_before":initial_ready, "ready_after":ready,
                 "sampled_peak_tree_rss_mib":round(peak_rss / 1024**2, 3), "resource_samples":resource_samples,
+                 "provider_concurrency":settings.OPENCODE_CONCURRENCY, "peak_active_requests":peak_active,
+                 "peak_queued_requests":peak_queued,
                 **{key: queue.get(key, 0) - initial_queue.get(key, 0)
                    for key in ("requests", "cache_hits", "retry_requests")}})
             return snapshot
