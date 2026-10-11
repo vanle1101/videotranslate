@@ -43,6 +43,9 @@ from core.streaming.pipeline import (
 from core.streaming.export import HQExporter
 from core.streaming.session_store import list_saved_sessions, restore_saved_session
 from core.streaming.video_history import group_video_history, source_metadata
+from core.history_thumbnail import (
+    ThumbnailError, attach_history_thumbnails, history_thumbnail_cache, resolve_history_source,
+)
 from core.streaming.output_gate import final_output_metadata, missing_spoken_output_ids, missing_speech_message
 from core.runtime_errors import export_failure
 from core.media_preview import preview_manager, DEFAULT_COMPATIBILITY_SECONDS
@@ -716,7 +719,53 @@ async def list_tasks():
                           "video_url": saved.get("output_video_url", ""),
                           "stage": saved.get("stage") or saved.get("missing_media", ""),
                           "can_pause": False, "can_resume": False, "can_stop": False})
-    return {"tasks": tasks, "videos": group_video_history(tasks)}
+    videos = await asyncio.to_thread(attach_history_thumbnails, group_video_history(tasks), tasks)
+    return {"tasks": tasks, "videos": videos}
+
+
+@app.get("/api/history/thumbnail/{session_id}")
+async def history_thumbnail(session_id: str, request: Request, v: str = ""):
+    cache = history_thumbnail_cache
+    if not cache.acquire_request():
+        raise HTTPException(status_code=503, detail="Đang tải nhiều ảnh xem trước; hãy tải lại lịch sử.")
+    cancel = threading.Event()
+
+    def decode():
+        source = resolve_history_source(session_id, active_streaming_sessions)
+        return cache.get(source, cancel=cancel)
+
+    worker = asyncio.create_task(asyncio.to_thread(decode))
+    try:
+        while not worker.done():
+            await asyncio.wait({worker}, timeout=.1)
+            if not worker.done() and await request.is_disconnected():
+                cancel.set()
+                raise ThumbnailError("Đã hủy tải ảnh xem trước.", 499)
+        image, fingerprint = await worker
+        etag = f'"{fingerprint}"'
+        headers = {"Cache-Control": "private, max-age=3600" if v == fingerprint else "no-cache",
+                   "ETag": etag, "X-Content-Type-Options": "nosniff"}
+        if request.headers.get("if-none-match") == etag:
+            return Response(status_code=304, headers=headers)
+        return Response(image, media_type="image/jpeg", headers=headers)
+    except asyncio.CancelledError:
+        cancel.set()
+        raise
+    except ThumbnailError as error:
+        raise HTTPException(status_code=error.status_code, detail=str(error)) from error
+    finally:
+        try:
+            if not worker.done():
+                cancel.set()
+            if cancel.is_set():
+                # Await process reaping on cancellation/disconnect. No FFmpeg
+                # or request worker may outlive this bounded request.
+                try:
+                    await asyncio.shield(worker)
+                except ThumbnailError:
+                    pass  # Cancellation cleanup; never success.
+        finally:
+            cache.release_request()
 
 @app.post("/api/tasks/{task_id}/pause")
 async def pause_task(task_id: str):

@@ -4285,8 +4285,7 @@ document.addEventListener("DOMContentLoaded", () => {
       const url = new URL(task.source_url);
       if (!["http:", "https:"].includes(url.protocol)) return "";
       if (/^(.+\.)?douyin\.com$/i.test(url.hostname)) {
-        const id = url.searchParams.get("modal_id") || url.pathname.match(/\/video\/(\d+)/)?.[1];
-        return id && /^\d+$/.test(id) ? `Douyin · ${id}` : "Douyin";
+        return "Douyin";
       }
       return url.hostname;
     } catch (_) { return ""; }
@@ -4304,6 +4303,51 @@ document.addEventListener("DOMContentLoaded", () => {
     } catch (_) { return ""; }
   }
 
+  // History thumbnails are supplied by the server from the source media.  Keep
+  // this deliberately strict: a history row must never turn an arbitrary value
+  // from a saved task into a remote image request.  Relative same-origin paths
+  // are all the history endpoint needs, and the optional cache fingerprint is
+  // numeric/hex data emitted by the API.
+  function historyThumbnailUrl(task) {
+    const raw = typeof task?.thumbnail_url === "string" ? task.thumbnail_url.trim() : "";
+    if (!raw) return "";
+    try {
+      const origin = `${window.location.protocol}//${window.location.host}`;
+      const url = new URL(raw, origin);
+      if (url.origin !== origin || !/^\/api\/history\/thumbnail\/[a-zA-Z0-9_-]{1,80}$/.test(url.pathname)) return "";
+      if (url.hash) return "";
+      for (const [key, value] of url.searchParams) {
+        if (key !== "v" || !/^[a-zA-Z0-9._-]{1,128}$/.test(value)) return "";
+      }
+      return `${url.pathname}${url.search}`;
+    } catch (_) { return ""; }
+  }
+
+  function historyThumbnailMarkup(task, sessionId, videoTitle) {
+    const url = historyThumbnailUrl(task);
+    const label = `Xem ảnh đại diện của ${videoTitle}`;
+    const fallback = `<span class="history-thumbnail-empty" aria-hidden="true">Không có ảnh</span>`;
+    if (!url || !historyTaskId(sessionId)) {
+      return `<span class="history-thumbnail" role="img" aria-label="Không có ảnh đại diện">${fallback}</span>`;
+    }
+    // The thumbnail itself is a button so keyboard and pointer users can open
+    // exactly the saved session represented by this row. It never starts a
+    // generation and does not depend on the action buttons below.
+    return `<button type="button" class="history-thumbnail history-thumbnail-button" aria-label="${escapeHtml(label)}" title="${escapeHtml(label)}" data-history-open="${escapeHtml(sessionId)}">
+      <img src="${escapeHtml(url)}" alt="" loading="lazy" decoding="async" width="140" height="90">
+      ${fallback}
+    </button>`;
+  }
+
+  function historyDisplayTitle(task, sourceLabel, sessionId) {
+    const raw = typeof task?.title === "string" ? task.title.trim() : "";
+    const isGeneratedName = /^(?:video|douyin-preview)[_-][a-z0-9-]{6,}\.(?:mp4|mov|mkv|webm|avi)$/i.test(raw)
+      || /^source\.(?:mp4|mov|mkv|webm|avi)$/i.test(raw);
+    if (/^Douyin(?:\s·|$)/i.test(sourceLabel || "")) return "Video Douyin";
+    if (raw && raw !== task.task_id && raw !== sessionId && !isGeneratedName) return raw;
+    return task?.video_path ? "Video đã tải lên" : "Video đang xử lý";
+  }
+
   function renderHistoryRow(task) {
     const tr = document.createElement("tr");
     tr.className = "history-video-row";
@@ -4317,8 +4361,10 @@ document.addEventListener("DOMContentLoaded", () => {
     const terminalWithoutProgress = pct === null && ["COMPLETED", "PREVIEW_READY", "PREPARED", "FAILED", "STOPPED", "CANCELLED"].includes(task.status);
     const progressLabel = pct === null ? "Chưa có số liệu %" : displayed.label;
     const sourceLabel = historySource(task);
-    const videoTitle = task.title && task.title !== task.task_id && task.title !== sessionId
-      ? task.title : sourceLabel || "Video đang xử lý";
+    const videoTitle = historyDisplayTitle(task, sourceLabel, sessionId);
+    const originalTitle = typeof task.title === "string" && task.title.trim() && task.title.trim() !== videoTitle
+      ? ` title="${escapeHtml(task.title.trim())}"` : "";
+    const thumbnailMarkup = historyThumbnailMarkup(task, sessionId, videoTitle);
     const date = historyDate(task.updated_at);
     const versions = Array.isArray(task.versions) ? task.versions.filter(version => version.task_id !== sessionId) : [];
     const versionMarkup = versions.length ? `<details class="history-versions"${expandedHistoryVideos.has(rowId) ? " open" : ""}>
@@ -4346,9 +4392,9 @@ document.addEventListener("DOMContentLoaded", () => {
     const outputUrl = task.status === "COMPLETED" ? historyOutputUrl(task) : "";
     if (outputUrl) actions += `<a href="${escapeHtml(outputUrl)}" data-result-preview class="history-button history-button-secondary">Xem kết quả</a>`;
     tr.innerHTML = `
-      <td class="history-video-cell"><div class="history-video-title">${escapeHtml(videoTitle)}</div>
+      <td class="history-video-cell"><div class="history-video-identity">${thumbnailMarkup}<div class="history-video-copy"><div class="history-video-title"${originalTitle}>${escapeHtml(videoTitle)}</div>
         ${sourceLabel && sourceLabel !== videoTitle ? `<div class="history-video-source">${escapeHtml(sourceLabel)}</div>` : ""}
-        ${date ? `<time class="history-updated">${escapeHtml(date)}</time>` : ""}${versionMarkup}</td>
+        ${date ? `<time class="history-updated">${escapeHtml(date)}</time>` : ""}${versionMarkup}</div></div></td>
       <td class="history-progress-cell">${historyStatusBadge(task)}
         <div class="history-progress-content">
           ${terminalWithoutProgress ? "" : `<div class="history-progress-track" role="progressbar" aria-label="Tiến độ video"${pct === null ? ' aria-valuetext="Chưa có số liệu phần trăm" data-indeterminate="true"' : ` aria-valuemin="0" aria-valuemax="100" aria-valuenow="${pct}" data-indeterminate="false"`}><div class="history-progress-fill" style="width: ${pct === null ? 100 : pct}%"></div></div>`}
@@ -4360,6 +4406,15 @@ document.addEventListener("DOMContentLoaded", () => {
     tr.querySelector(".history-versions")?.addEventListener("toggle", event => {
       if (event.target.open) expandedHistoryVideos.add(rowId);
       else expandedHistoryVideos.delete(rowId);
+    });
+    tr.querySelector("[data-history-open]")?.addEventListener("click", () => {
+      const id = tr.querySelector("[data-history-open]")?.dataset.historyOpen;
+      if (historyTaskId(id)) window.openTaskInStudio(id);
+    });
+    const image = tr.querySelector(".history-thumbnail img");
+    image?.addEventListener("error", () => {
+      image.hidden = true;
+      image.parentElement?.classList.add("history-thumbnail-broken");
     });
     return tr;
   }

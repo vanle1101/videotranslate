@@ -1040,6 +1040,16 @@ Changed files: `main.py`, `core/streaming/{session_store,video_history}.py`, `st
 
 **Cleanup limitation:** automatic approval review rejected the single verified-root cleanup command with “blocked by policy”. The task's `workspace/temp/video-history-ui.png`, new history-module/test/harness bytecode and `%TEMP%/pytest-of-acer/pytest-1089`, `pytest-1090`, `pytest-1091` remain. No alternate deletion route was attempted and no previously rejected cleanup target was retried. The harness now writes a screenshot only when explicitly requested; all QA backends and processes exited normally.
 
+## Video history thumbnails — October 11, 2026
+
+**PASS for source recognition in the real production history UI.** Each grouped video row now shows a lazy-loaded JPEG frame from its retained local source, scaled to a 140×90 preview with `object-fit: contain`, so portrait and landscape videos remain identifiable without cropping. The visible label is `Video Douyin` or `Video đã tải lên`; raw Douyin IDs are no longer shown in the row. Rows whose source is missing show `Không có ảnh` and keep their truthful error state.
+
+The thumbnail endpoint accepts only a validated saved/live session ID, resolves a regular local video, decodes one real frame through FFmpeg (maximum 320px, no generated file), checks the source fingerprint before publishing, and uses bounded RAM caching with one decoder, request deadlines and cancellation. Missing, corrupt, changed or unavailable sources return an actionable error; no placeholder image is returned. Thumbnail loading never restores, starts or rewrites a project.
+
+Real acceptance `scripts/check_video_history_ui.py`: **PASS**. Four real retained sources loaded as 320px JPEGs (the missing-source fixture correctly had no image), all five rows kept their grouping and actions, the full-frame CSS was `contain`, and the 12 saved manifests remained byte-identical across refresh and restart. No provider call or desktop input occurred.
+
+Focused regression: **62 Python tests passed** (`test_history_thumbnail.py`, `test_history_api.py`, `test_video_history.py`) and **246 JavaScript UI tests passed**. `node --check static/app.js` and `git diff --check` passed. The offscreen harness emitted only expected Chromium GPU fallback diagnostics.
+
 ## Fullscreen player Settings trap — October 11, 2026
 
 **PASS for the reported fullscreen navigation failure in fresh offscreen production Qt/Chromium.** The normal user's application was not restarted or controlled. This acceptance concerns playback/navigation only; no new translation, provider call or export is claimed.

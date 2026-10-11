@@ -2233,11 +2233,37 @@ test('video history renders one source row while raw live, saved and export task
   assert.equal(rows.length, 1);
   assert.equal(rows[0].dataset.videoId, 'one-source');
   assert.match(rows[0].innerHTML, /Một video/);
-  assert.match(rows[0].innerHTML, /Douyin · 7692745161054506290/);
+  assert.match(rows[0].innerHTML, />Douyin<\/div>/);
+  assert.doesNotMatch(rows[0].innerHTML, /7692745161054506290/);
   assert.match(rows[0].innerHTML, /50% giọng mẫu · Đang rà lời thoại/);
   assert.match(rows[0].innerHTML, /aria-valuenow="50"/);
   assert.doesNotMatch(rows[0].innerHTML, /Phiên đã lưu|Realtime Dubbing|HQ Export|<div[^>]*>fixture<\/div>/);
   assert.equal(ui.el('task-progress-value').textContent, '50% giọng mẫu');
+});
+
+test('video history shows a safe full-frame thumbnail instead of exposing machine identifiers', async () => {
+  const ui = studio(); await ui.flush();
+  const task = {task_id: 'thumb_fixture', session_id: 'thumb_fixture', video_id: 'source-thumb',
+    title: 'video_f68bfcb7b13425eb6fd838372765879.mp4', status: 'STOPPED', can_open: true,
+    source_url: 'https://www.douyin.com/jingxuan?modal_id=7692745161054506290',
+    thumbnail_url: '/api/history/thumbnail/thumb_fixture?v=abc123', progress_pct: null};
+  ui.replies.set('/api/tasks', {tasks: [task], videos: [task]});
+  await ui.el('btn-refresh-tasks').click();
+  let row = ui.el('tasks-table-body').children[0].innerHTML;
+  assert.match(row, /class="history-thumbnail history-thumbnail-button"/);
+  assert.match(row, /src="\/api\/history\/thumbnail\/thumb_fixture\?v=abc123"/);
+  assert.match(row, /loading="lazy" decoding="async"/);
+  assert.match(stylesheet, /\.history-thumbnail img\s*\{[^}]*object-fit:\s*contain/);
+  assert.match(stylesheet, /\.history-thumbnail\s*\{[^}]*width:\s*140px[^}]*height:\s*90px/);
+  assert.match(row, /Video Douyin|video_f68bfcb7b13425eb6fd838372765879\.mp4/);
+
+  const unsafe = {...task, task_id: 'thumb_unsafe', session_id: 'thumb_unsafe',
+    thumbnail_url: 'https://evil.example/frame.jpg'};
+  ui.replies.set('/api/tasks', {tasks: [unsafe], videos: [unsafe]});
+  await ui.el('btn-refresh-tasks').click();
+  row = ui.el('tasks-table-body').children[0].innerHTML;
+  assert.doesNotMatch(row, /evil\.example|<img/);
+  assert.match(row, /Không có ảnh/);
 });
 
 test('video history pause and stop retain the actual representative task id', async () => {

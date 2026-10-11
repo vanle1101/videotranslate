@@ -571,6 +571,17 @@ html { scroll-padding-top: 106px; }
 .history-table th:nth-child(4) { width: 17%; }
 .history-video-row:hover { background: rgba(31,41,55,.28); }
 .history-video-row td { padding: 16px 14px; vertical-align: top; }
+.history-video-identity { display: flex; align-items: flex-start; gap: 12px; min-width: 0; }
+.history-video-copy { min-width: 0; padding-top: 2px; }
+.history-thumbnail { position: relative; display: inline-flex; align-items: center; justify-content: center; flex: 0 0 140px; width: 140px; height: 90px; overflow: hidden; border: 1px solid #334155; border-radius: 7px; background: #0b1220; color: #94a3b8; }
+.history-thumbnail-button { padding: 0; cursor: pointer; }
+.history-thumbnail-button:hover { border-color: #db2777; }
+.history-thumbnail-button:focus-visible { outline: 2px solid #f9a8d4; outline-offset: 3px; }
+.history-thumbnail img { display: block; width: 100%; height: 100%; object-fit: contain; background: #0b1220; }
+.history-thumbnail-empty { display: none; position: absolute; inset: 0; align-items: center; justify-content: center; font-size: 10px; color: #94a3b8; }
+.history-thumbnail:not(.history-thumbnail-button), .history-thumbnail-broken { background: #111827; }
+.history-thumbnail:not(.history-thumbnail-button) .history-thumbnail-empty, .history-thumbnail-broken .history-thumbnail-empty { display: inline-flex; }
+.history-thumbnail-broken img { display: none; }
 .history-video-title { color: #f3f4f6; font-size: 12px; font-weight: 650; overflow-wrap: anywhere; }
 .history-video-source, .history-updated { display: block; margin-top: 5px; color: #94a3b8; font-size: 10px; overflow-wrap: anywhere; }
 .history-duration-cell { color: #cbd5e1; font-variant-numeric: tabular-nums; white-space: nowrap; }
@@ -612,4 +623,6 @@ html { scroll-padding-top: 106px; }
   .history-table th:nth-child(2) { width: 37%; }
   .history-table th:nth-child(3) { width: 10%; }
   .history-table th:nth-child(4) { width: 21%; }
+  .history-thumbnail { flex-basis: 112px; width: 112px; height: 72px; }
+  .history-video-identity { gap: 9px; }
 }

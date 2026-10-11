@@ -66,6 +66,30 @@ def inspect_history(page, base):
     video = matches[0]
     assert expected <= {version["task_id"] for version in video["versions"]}, video
     assert len(videos) < len(tasks), (len(tasks), len(videos))
+    expected_images = sum(bool(row.get("thumbnail_url")) for row in videos)
+    assert expected_images > 0, "Actual retained videos must have thumbnail URLs"
+    until(page, "(() => {const images=Array.from(document.querySelectorAll('#tasks-table-body .history-thumbnail img'));" +
+          "return images.length===" + str(expected_images) +
+          " && images.every(i=>i.complete && i.naturalWidth>0 && i.naturalHeight>0);})()", timeout=60)
+    thumbnails = evaluate(page, """Array.from(document.querySelectorAll('#tasks-table-body .history-video-row'), row=>{
+        const image=row.querySelector('.history-thumbnail img');
+        const container=row.querySelector('.history-thumbnail');
+        return {video_id:row.dataset.videoId,url:image?.getAttribute('src') || '',
+          width:image?.naturalWidth || 0,height:image?.naturalHeight || 0,
+          fit:image?getComputedStyle(image).objectFit:'',
+          display_width:container?.getBoundingClientRect().width || 0,
+          missing:!!row.querySelector('.history-thumbnail-empty'),
+          title:row.querySelector('.history-video-title')?.textContent || ''};})""")
+    for thumb in thumbnails:
+        metadata = next(row for row in videos if row['video_id'] == thumb['video_id'])
+        assert thumb['display_width'] >= 80, thumb
+        if metadata.get('thumbnail_url'):
+            assert thumb['url'] == metadata['thumbnail_url'], thumb
+            assert max(thumb['width'], thumb['height']) <= 320, thumb
+            assert thumb['fit'] == 'contain', thumb
+        else:
+            assert thumb['missing'] and not thumb['url'], thumb
+    event('REAL_HISTORY_THUMBNAILS', {'loaded_images':expected_images,'rows':thumbnails})
     state = evaluate(page, """(() => {const id=""" + json.dumps(video["video_id"]) + """;
         const rows=Array.from(document.querySelectorAll('#tasks-table-body .history-video-row'));
         const row=rows.find(r=>r.dataset.videoId===id);
@@ -80,7 +104,8 @@ def inspect_history(page, base):
           versions:Array.from(row.querySelectorAll('.history-version'),v=>v.dataset.sessionId),
           errors:window.__acceptanceErrors};})()""")
     assert state and state["rows"] == len(videos) and state["matches"] == 1, state
-    assert state["title"] == video["title"] and state["task"] == video["task_id"], state
+    expected_title = "Video Douyin" if video.get("source_url") else video["title"]
+    assert state["title"] == expected_title and state["task"] == video["task_id"], state
     assert state["session"] == video["session_id"] and state["columns"] == 4, state
     assert video.get("stage", "") in state["stage"] and not state["errors"], state
     if video["can_open"]:
@@ -117,6 +142,8 @@ def main():
               json.dumps(identity) + " && r.querySelector('details').open)")
         wait(500)
         if args.screenshot:
+            evaluate(page, "(() => {document.querySelectorAll('.history-versions').forEach(e=>e.open=false);return true;})()")
+            wait(100)
             assert window.web_view.grab().save(str(args.screenshot))
         close(app, window)
         window = None
