@@ -1098,14 +1098,14 @@ async def streaming_snapshot(task_id: str):
 
 
 def caption_style_details(session):
-    from core.subtitle_cues import build_caption_layout, normalize_caption_style
+    from core.subtitle_cues import build_source_subtitle_masks, normalize_caption_style
     style = normalize_caption_style(getattr(session, "caption_style", None))
-    plan = build_caption_layout([s.to_dict() for s in session.segments.values()],
-        getattr(session, "screen_texts", []), getattr(session, "video_size", (1080, 1920)),
-        caption_style={**style, "blur_original": True})
+    masks = build_source_subtitle_masks(getattr(session, "screen_texts", []),
+        [s.to_dict() for s in session.segments.values()], getattr(session, "video_size", (1080, 1920)))
     return {"caption_style": style,
             "caption_style_revision": getattr(session, "caption_style_revision", 0),
-            "has_subtitle_regions": bool(plan.get("source_masks")),
+            "source_subtitle_masks": masks,
+            "has_subtitle_regions": bool(masks),
             "output_outdated": getattr(session, "caption_output_outdated", False)}
 
 

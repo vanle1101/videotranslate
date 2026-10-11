@@ -1348,6 +1348,21 @@ def test_legacy_custom_background_render_stays_valid_without_migration(persisted
     assert saved_mp4.read_bytes() == before
 
 
+def test_version_two_custom_blurred_render_requires_reexport_without_deleting_media(persisted, saved_mp4):
+    path = _project_path(persisted.task_id)
+    record = json.loads(path.read_text(encoding="utf-8"))
+    record["session"]["caption_renderer_version"] = 2
+    record["session"]["caption_style"] = {"background_color": "#FFFFFF", "blur_original": True}
+    path.write_text(json.dumps(record), encoding="utf-8")
+    before = saved_mp4.read_bytes()
+    row = list_saved_sessions()[0]
+    assert row["status"] == "PREPARED" and row["output_video_url"] == ""
+    assert "Xuất video lại" in row["stage"]
+    restored = restore_saved_session(persisted.task_id)
+    assert restored.caption_output_outdated and restored.caption_style["blur_original"]
+    assert saved_mp4.read_bytes() == before
+
+
 @pytest.mark.parametrize("version", [True, "2", -1, 0])
 def test_invalid_caption_renderer_version_does_not_rewrite_project(persisted, version):
     before = _project_path(persisted.task_id).read_bytes()

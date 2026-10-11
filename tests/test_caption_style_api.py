@@ -61,6 +61,9 @@ def test_style_updates_shared_preview_without_touching_audio_or_translation(capt
     cue = result["segments"][0]["caption_layout"]["cues"][0]
     assert cue["color"] == "#FEDCBA" and cue["bbox"][1] < .15
     assert result["segments"][0]["caption_layout"]["source_masks"]
+    assert result["source_subtitle_masks"]
+    assert min(mask["start"] for mask in result["source_subtitle_masks"]) == 0
+    assert max(mask["end"] for mask in result["source_subtitle_masks"]) >= 3
     assert Path(session.segments[0].audio_path).read_bytes() == before_audio
     assert session.segments[0].final_vi == "Về nhất, phá kỷ lục của trường."
     assert main.export_revision_signature(session) != signature

@@ -5,7 +5,7 @@ import re
 # Bump when the generated caption pixels change. Older projects did not store
 # this marker; their default (auto white/yellow) render is stale after the
 # stable-yellow palette migration and must be re-exported on demand.
-CAPTION_RENDERER_VERSION = 2
+CAPTION_RENDERER_VERSION = 3
 
 
 def normalize_caption_style(style=None):
@@ -331,27 +331,58 @@ def _trusted_speech_regions(screen_texts, segments=None):
     regions = []
     from core.chinese_text import comparable_chinese
 
-    def same_subtitle_box(evidence, box):
+    def supported_geometry_texts(evidence, segment):
         text = comparable_chinese(evidence.get("text_zh"))
+        full_text = comparable_chinese(evidence.get("full_text_zh"))
+        scope = evidence.get("source_scope_ids")
+        # A single OCR line can straddle two ASR rows. A clipped fragment can
+        # cite its complete measured line only with explicit unambiguous scope;
+        # substring resemblance alone is insufficient geometry provenance.
+        full_line_supported = bool(full_text and text and text in full_text
+            and isinstance(scope, list) and scope
+            and all(type(value) is int for value in scope)
+            and segment.get("id") in scope
+            and evidence.get("source_scope_ambiguous") is False
+            and evidence.get("source_scope_conflict") is not True
+            and (segment.get("verification") or {}).get("source_scope_conflict") is not True)
+        return ({text, full_text} if full_line_supported else {text}), full_line_supported
+
+    def matching_subtitle_boxes(evidence, box, segment, *, adjacent=False):
+        supported_texts, full_line_supported = supported_geometry_texts(evidence, segment)
+        matches = []
         for source in screen_texts or []:
-            if (not isinstance(source, dict) or source.get("kind") != "subtitle"
-                    or source.get("source_method") != "local-ocr"
-                    or comparable_chinese(source.get("text_zh")) != text):
+            if not isinstance(source, dict):
+                continue
+            source_text = comparable_chinese(source.get("text_zh"))
+            # A sampled continuation can be mislabeled as a title. It can
+            # extend an independently matched subtitle anchor only when the
+            # complete cited speech line/scope, time and same geometry agree.
+            # It can never establish the initial subtitle anchor by itself.
+            continuation_title = bool(adjacent and full_line_supported
+                and source.get("kind") == "title"
+                and source_text == comparable_chinese(evidence.get("full_text_zh")))
+            if ((source.get("kind") != "subtitle" and not continuation_title)
+                    or source.get("source_method") != "local-ocr" or source_text not in supported_texts):
                 continue
             try:
                 sx, sy, sw, sh = map(float, source["bbox"])
-                if float(source["start"]) >= evidence["end"] or float(source["end"]) <= evidence["start"]:
+                start, end = float(source["start"]), float(source["end"])
+                confidence = float(source.get("confidence", 0))
+                slack = .25 if adjacent else 0
+                if start >= evidence["end"] + slack or end <= evidence["start"] - slack:
                     continue
             except (KeyError, TypeError, ValueError):
                 continue
-            if not all(math.isfinite(v) for v in (sx, sy, sw, sh)) or sw <= 0 or sh <= 0:
+            if (not all(math.isfinite(v) for v in (sx, sy, sw, sh, start, end, confidence))
+                    or confidence < .90 or end <= max(0, start) or sx < 0 or sy < 0 or sw <= 0 or sh <= 0
+                    or sh > .15 or sw * sh > .20 or sx + sw > 1 or sy + sh > 1):
                 continue
             x, y, w, h = box
             overlap = max(0, min(x + w, sx + sw) - max(x, sx)) * max(0, min(y + h, sy + sh) - max(y, sy))
             union = w * h + sw * sh - overlap
             if union > 0 and overlap / union >= .5:
-                return True
-        return False
+                matches.append({**source, "start": max(0, start), "end": end, "bbox": [sx, sy, sw, sh]})
+        return matches
     for row in screen_texts or []:
         if (not isinstance(row, dict) or row.get("kind") != "subtitle"
                 or (row.get("source_region_verified") is False and not row.get("mask_only"))
@@ -413,7 +444,8 @@ def _trusted_speech_regions(screen_texts, segments=None):
                     or confidence < .90 or x < 0 or y < 0 or w <= 0 or h <= 0
                     or h > .15 or w * h > .20 or x + w > 1 or y + h > 1):
                 continue
-            if not same_subtitle_box({**evidence, "start": start, "end": end}, [x, y, w, h]):
+            measured_evidence = {**evidence, "start": start, "end": end}
+            if not matching_subtitle_boxes(measured_evidence, [x, y, w, h], segment):
                 continue
             region = {"id": f"review-source-{segment.get('id', '')}-{evidence.get('id', '')}",
                       "start": max(0, start), "end": end,
@@ -429,7 +461,131 @@ def _trusted_speech_regions(screen_texts, segments=None):
                             for existing in regions)
             if not duplicate:
                 regions.append(region)
+            # OCR sometimes splits the same visible line at a sampled frame.
+            # Its matching continuation is independent geometry evidence, not
+            # an approval of either OCR translation or speaker/address choices.
+            for continuation in matching_subtitle_boxes(measured_evidence, [x, y, w, h], segment, adjacent=True):
+                extensions = []
+                if continuation["start"] < start:
+                    extensions.append((continuation["start"], min(continuation["end"], start)))
+                if continuation["end"] > end:
+                    extensions.append((max(continuation["start"], end), continuation["end"]))
+                for extension_start, extension_end in extensions:
+                    if extension_end <= extension_start or any(
+                            existing["bbox"] == continuation["bbox"] and existing["start"] <= extension_start
+                            and existing["end"] >= extension_end for existing in regions):
+                        continue
+                    regions.append({**continuation, "start": extension_start, "end": extension_end,
+                        "kind": "subtitle",
+                        "source_region_verified": True, "review_evidence": True,
+                        "needs_review": False, "mask_only": False})
     return regions
+
+
+def _source_subtitle_masks(regions, duration=None):
+    """Mask independently verified source intervals, never Vietnamese timing.
+
+    Short OCR gaps (at most 250 ms) between nearby subtitle boxes receive a
+    narrow union mask, plus at most 60 ms around their boundary. Each observed
+    interval receives a 100 ms OCR sampling margin, clipped to the video. Long gaps,
+    jumps to a different subtitle band, titles and oversized unions stay clear.
+    No unobserved subtitle band or unrestricted time extension is introduced.
+    """
+    ordered = sorted(regions, key=lambda row: (row["start"], row["end"], tuple(row["bbox"])))
+    masks = [{"start": max(0, row["start"] - .10),
+              "end": min(row["end"] + .10, duration) if duration is not None else row["end"] + .10,
+              "bbox": list(row["bbox"])} for row in ordered]
+    masks = [mask for mask in masks if mask["end"] > mask["start"]]
+    # Start order is not end order: a nested OCR observation must not hide a
+    # longer observed interval in the same band. Sweep only the 370 ms window
+    # of eligible ends, indexing nearby geometry and retaining the latest end
+    # for each exact box. Long overlapping observations wait in the end heap;
+    # no bridge scans the accumulated history of a multi-hour video.
+    import heapq
+    waiting, expiry, frontier, cells = [], [], {}, {}
+
+    def cell_for(box):
+        x, y, w, h = box
+        return math.floor((x + w / 2) / .12), math.floor((y + h / 2) / .15)
+
+    for index, current in enumerate(ordered):
+        cutoff = current["start"] - .25
+        while expiry and expiry[0][0] < cutoff:
+            _, identity, box = heapq.heappop(expiry)
+            existing = frontier.get(box)
+            if existing is not None and existing[1] == identity:
+                del frontier[box]
+                cell = cell_for(box)
+                cells[cell].discard(box)
+                if not cells[cell]:
+                    del cells[cell]
+        while waiting and waiting[0][0] <= current["start"] + .12:
+            end, identity, previous = heapq.heappop(waiting)
+            if end < cutoff:
+                continue
+            box = tuple(previous["bbox"])
+            existing = frontier.get(box)
+            if existing is not None and existing[0]["end"] >= end:
+                continue
+            frontier[box] = previous, identity
+            cells.setdefault(cell_for(box), set()).add(box)
+            heapq.heappush(expiry, (end, identity, box))
+        bx, by, bw, bh = current["bbox"]
+        cx, cy = bx + bw / 2, by + bh / 2
+        best = None
+        for cell_x in range(math.floor((cx - .12) / .12), math.floor((cx + .12) / .12) + 1):
+            for cell_y in range(math.floor((cy - .15) / .15), math.floor((cy + .15) / .15) + 1):
+                for box in cells.get((cell_x, cell_y), ()):
+                    previous, identity = frontier[box]
+                    gap = current["start"] - previous["end"]
+                    if not -.12 <= gap <= .25:
+                        continue
+                    ax, ay, aw, ah = box
+                    vertical_overlap = max(0, min(ay + ah, by + bh) - max(ay, by))
+                    horizontal_overlap = max(0, min(ax + aw, bx + bw) - max(ax, bx))
+                    if (vertical_overlap < min(ah, bh) * .65 or horizontal_overlap < min(aw, bw) * .5
+                            or abs(ax + aw / 2 - cx) > .12):
+                        continue
+                    left, top = min(ax, bx), min(ay, by)
+                    right, bottom = max(ax + aw, bx + bw), max(ay + ah, by + bh)
+                    union = [left, top, right - left, bottom - top]
+                    if union[3] > .15 or union[2] * union[3] > .20:
+                        continue
+                    score = previous["end"], identity
+                    if best is None or score > best[0]:
+                        best = score, previous, union
+        heapq.heappush(waiting, (current["end"], index, current))
+        if best is None:
+            continue
+        _, previous, union = best
+        start = max(previous["start"], min(previous["end"], current["start"]) - .06)
+        end = min(current["end"], max(previous["end"], current["start"]) + .06)
+        if duration is not None:
+            end = min(end, duration)
+        if end > start:
+            masks.append({"start": start, "end": end, "bbox": union})
+    # Consolidate windows at exactly the same geometry. Do not merge a real
+    # OCR gap unless the explicit bounded continuity rule above covered it.
+    merged = []
+    for mask in sorted(masks, key=lambda row: (tuple(row["bbox"]), row["start"], row["end"])):
+        if merged and mask["bbox"] == merged[-1]["bbox"] and mask["start"] <= merged[-1]["end"]:
+            merged[-1]["end"] = max(merged[-1]["end"], mask["end"])
+        else:
+            merged.append(mask)
+    return sorted(merged, key=lambda row: (row["start"], row["end"], row["bbox"]))
+
+
+def build_source_subtitle_masks(screen_texts, segments=None, video_size=None, *, duration=None):
+    """Shared source-time blur plan for preview and final export.
+
+    Geometry stays normalized to the source frame (video_size follows the
+    shared layout call contract). OCR review citations do not mutate or
+    approve translation, speakers or Vietnamese address choices.
+    """
+    if duration is not None and (isinstance(duration, bool) or not isinstance(duration, (int, float))
+                                 or not math.isfinite(duration) or duration <= 0):
+        raise ValueError("Thời lượng video để làm mờ phụ đề không hợp lệ.")
+    return _source_subtitle_masks(_trusted_speech_regions(screen_texts, segments), duration)
 
 
 def build_caption_layout(segments, screen_texts=None, video_size=None, caption_style=None):
@@ -450,7 +606,7 @@ def build_caption_layout(segments, screen_texts=None, video_size=None, caption_s
     # Reflow them for the actual frame, not a fixed 26-character column. Keep
     # a bounded reading measure even on very wide video, and room for padding.
     line_chars = max(1, min(72, math.floor(((width - 2 * margin_x) / base_font - 1.1) / .62)))
-    output, source_masks = [], []
+    output = []
     for index, segment in enumerate(segments or []):
         if not isinstance(segment, dict):
             continue
@@ -529,15 +685,6 @@ def build_caption_layout(segments, screen_texts=None, video_size=None, caption_s
             x = (width - box_w) / 2
             y = {"top": height * .04, "middle": (height - box_h) / 2,
                  "bottom": height * .96 - box_h}[placement]
-        if style["blur_original"]:
-            # The source geometry is independently verified above. A playable
-            # draft can opt into blur without approving its translation or
-            # address choices; unplayable/unreviewed speech has no pages.
-            for row in active:
-                for cue in pages:
-                    left, right = max(row["start"], cue["start"]), min(row["end"], cue["end"])
-                    if right > left:
-                        source_masks.append({"start": left, "end": right, "bbox": list(row["bbox"])})
         for cue in pages:
             planned = {"segment_id": segment.get("id", index), "start": cue["start"], "end": cue["end"],
                            "text": cue["text"], "placement": placement,
@@ -554,13 +701,17 @@ def build_caption_layout(segments, screen_texts=None, video_size=None, caption_s
     if style != normalize_caption_style():
         result["caption_style"] = style
     if style["blur_original"]:
-        # Merge identical adjacent regions, preventing duplicated blur passes
-        # at pagination boundaries while retaining real temporal gaps.
-        merged = []
-        for mask in sorted(source_masks, key=lambda row: (tuple(row["bbox"]), row["start"], row["end"])):
-            if merged and mask["bbox"] == merged[-1]["bbox"] and mask["start"] <= merged[-1]["end"]:
-                merged[-1]["end"] = max(merged[-1]["end"], mask["end"])
-            else:
-                merged.append(mask)
-        result["source_masks"] = sorted(merged, key=lambda row: (row["start"], row["end"]))
+        # Per-row snapshots carry only masks near that source row. The global
+        # plan for pauses/transitions comes from build_source_subtitle_masks.
+        masks = _source_subtitle_masks(regions)
+        windows = []
+        for segment in segments or []:
+            try:
+                start, end = float(segment["start"]), float(segment["end"])
+                if math.isfinite(start) and math.isfinite(end) and end > start:
+                    windows.append((max(0, start - .1), end + .1))
+            except (TypeError, KeyError, ValueError):
+                pass
+        result["source_masks"] = [mask for mask in masks if any(
+            mask["start"] < end and mask["end"] > start for start, end in windows)]
     return result

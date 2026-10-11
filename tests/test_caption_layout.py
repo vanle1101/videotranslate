@@ -8,7 +8,7 @@ import pytest
 
 from config import settings
 from core.subtitle import SubtitleGenerator
-from core.subtitle_cues import build_caption_layout
+from core.subtitle_cues import build_caption_layout, build_source_subtitle_masks
 from core.streaming.export import HQExporter
 from core.video_composer import VideoComposer, _escape_filter_filename
 
@@ -279,7 +279,9 @@ def test_live_review_geometry_places_caption_below_source_without_changing_uncer
     cue = plan["cues"][0]
     assert cue["placement"] == "below-source" and cue["background"] == "yellow"
     assert cue["bbox"][1] > evidence_box[1] + evidence_box[3]
-    assert plan["source_masks"] == [{"start": cue["start"], "end": cue["end"], "bbox": evidence_box}]
+    assert any(mask["bbox"] == evidence_box and mask["start"] == 0 and mask["end"] == pytest.approx(2.7)
+               for mask in plan["source_masks"])
+    assert any(mask["start"] <= 2.7 < mask["end"] for mask in plan["source_masks"])
     assert source["needs_review"] is True and source["source_region_verified"] is False
     no_masks = build_caption_layout([segment], [source], (1920, 1080), {"blur_original": False})
     assert "source_masks" not in no_masks
@@ -366,6 +368,9 @@ def test_bottom_preview_export_retains_source_blur_without_moving_captions(tmp_p
                         screen_texts=[], source_screen_texts=[region()], caption_style=style)
     plan = ass.call_args.kwargs["caption_layout"]
     assert plan["cues"] == build_caption_layout([speech()], [], size, style)["cues"]
-    assert plan["source_masks"] == build_caption_layout([speech()], [region()], size, style)["source_masks"]
+    assert plan["source_masks"] == build_source_subtitle_masks([region()], [speech()], size, duration=3)
+    assert any(mask["start"] <= .1 < mask["end"] for mask in plan["source_masks"]), "Source blur starts before TTS"
+    assert any(mask["start"] <= 2.9 < mask["end"] for mask in plan["source_masks"]), "Source blur outlasts TTS"
+    assert all(mask["end"] <= 3 for mask in plan["source_masks"])
     assert observed["source_masks"] == plan["source_masks"]
     assert observed["source_masks"]

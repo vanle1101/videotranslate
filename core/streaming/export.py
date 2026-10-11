@@ -151,12 +151,13 @@ class HQExporter:
         self.sub_gen.generate_srt(subtitle_segments, srt_path)
         video_size = self._video_size(video_path, cancel_check)
         caption_plan = build_caption_layout(subtitle_segments, screen_texts, video_size, caption_style=caption_style)
-        if caption_style["blur_original"] and source_screen_texts is not None:
+        if caption_style["blur_original"]:
             # Placement can be bottom-only while blur still uses observed source
-            # regions, matching the preview's caption_bottom_layout contract.
-            caption_plan["source_masks"] = build_caption_layout(
-                subtitle_segments, source_screen_texts, video_size,
-                caption_style=caption_style).get("source_masks", [])
+            # intervals, including the Vietnamese silence between two cues.
+            from core.subtitle_cues import build_source_subtitle_masks
+            caption_plan["source_masks"] = build_source_subtitle_masks(
+                screen_texts if source_screen_texts is None else source_screen_texts,
+                subtitle_segments, video_size, duration=total_duration)
         self.sub_gen.generate_ass(
             subtitle_segments, ass_path,
             screen_texts=screen_texts,

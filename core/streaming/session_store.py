@@ -998,13 +998,15 @@ def _availability(data):
     style = fields.get("caption_style", {}) or {}
     # Before the stable palette migration, a missing renderer marker means the
     # null/automatic background could have been rendered white for OCR gaps.
-    # Invalidate only that legacy default render. Custom-background renders are
-    # byte-compatible and remain downloadable. The existing MP4 is never
+    # Version 3 also repairs source-time blur and split OCR lines. An old
+    # blur-enabled render is stale regardless of its chosen background. The MP4 is never
     # removed; the user only gets an actionable re-export state.
     renderer_version = fields.get("caption_renderer_version")
     legacy_default_caption = bool((output or fields.get("caption_output_outdated"))
                                  and (renderer_version is None or renderer_version < CAPTION_RENDERER_VERSION)
-                                 and style.get("background_color") is None)
+                                 and ((style.get("background_color") is None and
+                                       (renderer_version is None or renderer_version < 2))
+                                      or style.get("blur_original") is True))
     current_output = bool(output and not fields.get("caption_output_outdated") and not legacy_default_caption)
     valid_output = bool(current_output and _valid_output(settings.OUTPUT_DIR / output, fields.get("total_duration", 0)))
     output_warning = OUTPUT_FAILURE_WARNING if current_output and not valid_output else ""
@@ -1037,8 +1039,8 @@ def _availability(data):
     if output_warning:
         message = " ".join(filter(None, (message, output_warning)))
     elif waiting_export:
-        message = ("Bản MP4 cũ dùng kiểu phụ đề mặc định trước đây; file cũ vẫn được giữ. "
-                   "Xuất video lại để áp dụng nền vàng thống nhất." if legacy_default_caption else
+        message = ("Bản MP4 cũ dùng cách dựng phụ đề/làm mờ trước đây; file cũ vẫn được giữ. "
+                   "Xuất video lại để áp dụng kiểu phụ đề và vùng làm mờ mới." if legacy_default_caption else
                    "Lời dịch và giọng đã lưu; chưa có MP4 được kiểm định. Mở dự án và xuất video.")
     return {"status": status, "missing_media": message, "ready": ready, "preview_ready": preview_ready,
             **output_gate,

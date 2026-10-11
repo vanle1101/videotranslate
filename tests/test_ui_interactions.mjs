@@ -2799,6 +2799,34 @@ test('unmeasured caption fallback uses one stable default background and respect
   assert.equal(ui.el('subtitle-text').style.color, '#112233');
 });
 
+test('source-time blur remains across translated cue gaps and updates independently of placement', async () => {
+  const ui=studio(); await ui.start(); const {segment,style}=completedCaptionFixture(ui);
+  const socket=ui.sockets.at(-1), video=ui.el('video-player');
+  const updated={...segment,caption_layout:{...segment.caption_layout,cues:[
+    {...segment.caption_layout.cues[0],start:.4,end:1.1},
+    {...segment.caption_layout.cues[1],start:1.3,end:1.7}],source_masks:[]}};
+  socket.receive({type:'caption_style',caption_style:{...style,blur_original:true},caption_style_revision:1,
+    source_subtitle_masks:[{start:.2,end:1.9,bbox:[.2,.4,.6,.08]}],segments:[updated]});
+  for(const time of [.25,.39,1.15,1.25,1.75,1.89]) {
+    video.currentTime=time; await video.emit('timeupdate');
+    assert.equal(ui.el('screen-text-overlay').children.length,1,`no source blur gap at ${time}`);
+  }
+  video.currentTime=1.2; await video.emit('timeupdate');
+  assert.equal(ui.el('subtitle-text').textContent,'','source blur must not invent Vietnamese speech');
+  ui.el('toggle-screen-text').checked=false; await ui.el('toggle-screen-text').emit('change');
+  video.currentTime=1.2; await video.emit('timeupdate');
+  assert.equal(ui.el('screen-text-overlay').children.length,1,'bottom mode uses the same source-time mask');
+  socket.receive({type:'screen_update',screen_texts:[],source_subtitle_masks:[]});
+  video.currentTime=1.2; await video.emit('timeupdate');
+  assert.equal(ui.el('screen-text-overlay').children.length,0,'new empty mask plan clears old source masks');
+  socket.receive({type:'review_complete',source_subtitle_masks:[{start:.2,end:1.9,bbox:[.2,.4,.6,.08]}]});
+  video.currentTime=1.2; await video.emit('timeupdate');
+  assert.equal(ui.el('screen-text-overlay').children.length,1);
+  ui.window.loadDroppedLocalVideo('D:/different.mp4');
+  video.currentTime=1.2; await video.emit('timeupdate');
+  assert.equal(ui.el('screen-text-overlay').children.length,0,'new source never retains prior mask plan');
+});
+
 test('completed caption controls update measured preview and invalidate old MP4 without changing speech', async () => {
   const ui = studio(); await ui.start();
   assert.equal(ui.el('caption-style-panel').classList.contains('hidden'), true);

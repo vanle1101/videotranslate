@@ -5,6 +5,9 @@ HTTP, media or provider responses. Temporary style edits are restored.
 """
 import hashlib
 import json
+import subprocess
+import tempfile
+from copy import deepcopy
 from pathlib import Path
 
 from check_production_ui import (
@@ -52,6 +55,81 @@ def fingerprint_audio():
     return {str(path): hashlib.sha256(path.read_bytes()).hexdigest() for path in files}
 
 
+def check_transition_render(snapshot):
+    """Render the actual failing interval with real retained Vietnamese WAVs.
+
+    This checks the production composer/ASS/mask path on a short excerpt. It
+    is not a full-video export or a new semantic-translation acceptance.
+    """
+    from PIL import Image
+    import io
+    from core.subtitle import SubtitleGenerator
+    from core.video_composer import VideoComposer
+    from core.streaming.export import HQExporter
+    manifest = json.loads((ROOT / "workspace/projects" / f"{TASK}.json").read_text(encoding="utf-8"))
+    offset, length = 14.8, 2.7
+    flags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+
+    def media(args):
+        return subprocess.run(["ffmpeg", "-v", "error", "-nostdin", "-y", *args],
+            capture_output=True, check=True, timeout=60, creationflags=flags)
+
+    with tempfile.TemporaryDirectory(prefix="blur-transition-", dir=ROOT / "workspace/temp") as folder:
+        work = Path(folder)
+        clip, speech, ass, result = (work / name for name in ("source.mp4", "voice.wav", "captions.ass", "result.mp4"))
+        media(["-ss", str(offset), "-i", manifest["session"]["video_path"], "-t", str(length),
+            "-vf", "scale=640:360", "-c:v", "libx264", "-crf", "20", "-c:a", "aac", str(clip)])
+        inputs, graph, labels = [], [], []
+        for row in manifest["segments"]:
+            if not row.get("audio_path"):
+                continue
+            from core.streaming.audio_cache import resolve_dub_timing
+            start, end = resolve_dub_timing(row)
+            if start >= offset + length or end <= offset:
+                continue
+            index = len(labels)
+            inputs += ["-i", row["audio_path"]]
+            labels.append(f"[a{index}]")
+            graph.append(f"[{index}:a]atrim=start={max(0,offset-start):.8f},asetpts=PTS-STARTPTS,adelay={max(0,round((start-offset)*1000))}:all=1[a{index}]")
+        assert labels
+        graph.append("".join(labels) + f"amix=inputs={len(labels)}:normalize=0,apad,atrim=duration={length}[dub]")
+        media([*inputs, "-filter_complex", ";".join(graph), "-map", "[dub]", "-c:a", "pcm_s16le", str(speech)])
+        cues = []
+        for row in snapshot["segments"]:
+            for cue in row.get("caption_layout", {}).get("cues", []):
+                if cue["start"] < offset + length and cue["end"] > offset:
+                    copied = deepcopy(cue)
+                    copied.update(start=max(0,cue["start"]-offset), end=min(length,cue["end"]-offset),
+                                  video_size=[640,360], font_size=cue["font_size"]/3,
+                                  border_radius=cue["border_radius"]/3)
+                    # Put sharp Vietnamese captions at the top in this render
+                    # check so pixel changes in the source region prove blur,
+                    # rather than a caption drawn over the Chinese glyphs.
+                    copied["bbox"][1] = .04
+                    cues.append(copied)
+        masks = [{**mask, "start": max(0,mask["start"]-offset), "end": min(length,mask["end"]-offset)}
+                 for mask in snapshot["source_subtitle_masks"] if mask["start"] < offset+length and mask["end"] > offset]
+        SubtitleGenerator().generate_ass([], ass, video_size=(640,360), caption_layout={"video_size":[640,360],"cues":cues})
+        VideoComposer().compose(clip, speech, ass, result, source_masks=masks)
+        HQExporter.validate_output(result, length)
+        measurements = []
+        for seconds in (15.15,15.51,15.58,16,16.98,17.1):
+            local = seconds-offset
+            box = next(mask["bbox"] for mask in masks if mask["start"] <= local < mask["end"])
+            frames=[]
+            for path in (clip,result):
+                data=media(["-ss",str(local),"-i",str(path),"-frames:v","1","-f","image2pipe","-vcodec","png","pipe:1"]).stdout
+                frame=Image.open(io.BytesIO(data)).convert("RGB")
+                x,y,w,h=box
+                frames.append(frame.crop((round(x*640),round(y*360),round((x+w)*640),round((y+h)*360))))
+            import numpy as np
+            difference=float(np.abs(np.asarray(frames[0],dtype=float)-np.asarray(frames[1],dtype=float)).mean())
+            assert difference>3, (seconds,difference)
+            measurements.append({"time":seconds,"source_region_pixel_change":round(difference,2)})
+        event("REAL_COMPOSER_TRANSITION_RENDER", {"bytes":result.stat().st_size,"duration":length,
+            "real_vietnamese_wavs":len(labels),"validated":True,"source_mask_measurements":measurements})
+
+
 def main():
     app = QApplication.instance() or QApplication([])
     app.setQuitOnLastWindowClosed(False)
@@ -87,9 +165,25 @@ def main():
         assert normalized_style(saved["caption_style"]) == trial, saved["caption_style"]
         cues = [cue for row in saved["segments"] for cue in row.get("caption_layout", {}).get("cues", [])]
         masks = [mask for row in saved["segments"] for mask in row.get("caption_layout", {}).get("source_masks", [])]
+        global_masks = saved["source_subtitle_masks"]
         assert cues and masks
         assert all(cue["placement"] == "bottom" and cue["background_color"].lower() == "#334455" and cue["color"].lower() == "#ffffff" for cue in cues)
         until(page, "document.getElementById('video-player').readyState>=2", timeout=90)
+        # This real source displays one OCR line across two translated rows.
+        # It starts slightly before sampled OCR and survives a Vietnamese gap.
+        checks = []
+        for seconds in (15.15, 15.51, 15.58, 16., 16.98, 17.1):
+            assert any(mask["start"] <= seconds < mask["end"] for mask in global_masks), seconds
+            evaluate(page, "(() => {const v=document.getElementById('video-player');v.currentTime=" + str(seconds) + ";v.dispatchEvent(new Event('timeupdate'));return true;})()")
+            until(page, "!document.getElementById('video-player').seeking && document.querySelectorAll('.source-subtitle-blur').length>0")
+            painted_mask = evaluate(page, """({time:document.getElementById('video-player').currentTime,
+                maskCount:document.querySelectorAll('.source-subtitle-blur').length,
+                filter:getComputedStyle(document.querySelector('.source-subtitle-blur')).backdropFilter})""")
+            assert painted_mask["filter"] != "none", painted_mask
+            checks.append(painted_mask)
+            if seconds == 16:
+                window.web_view.grab().save(str(ROOT / "workspace/temp/blur-transition-ui.png"))
+        event("SPLIT_SOURCE_LINE_TRANSITION_BLUR", checks)
         moment = (masks[0]["start"] + masks[0]["end"]) / 2
         evaluate(page, "(() => {const v=document.getElementById('video-player');v.currentTime=" + str(moment) + ";v.dispatchEvent(new Event('timeupdate'));return true;})()")
         until(page, "document.querySelectorAll('.source-subtitle-blur').length>0")
@@ -104,6 +198,7 @@ def main():
         until(page, "!document.getElementById('video-player').paused && document.getElementById('video-player').currentTime>" + str(moment + .2), timeout=30)
         assert click(page, "player-play-toggle")
         event("REAL_TRANSLATED_PREVIEW_PLAYBACK", True)
+        check_transition_render(saved)
         window.web_view.grab().save(str(ROOT / "workspace/temp/caption-style-ui-check.png"))
         close(app, window)
         window = None

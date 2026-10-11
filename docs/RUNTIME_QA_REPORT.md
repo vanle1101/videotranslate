@@ -1,5 +1,44 @@
 # Runtime QA report
 
+## Original-subtitle blur gaps at sentence transitions — October 11, 2026
+
+**PASS for the reproduced 15–17.1-second source-subtitle transition.** User project `d5820a71` retains its white background, black text, automatic placement and enabled original-subtitle blur. Verification used its real source and the saved QA project `94f80114`, sharing the 320.040635-second source and 24.46-second translated sample. No new translation, review approval or TTS was fabricated. This is not full-video translation/export acceptance.
+
+### Reproduced root causes
+
+1. Masks were intersected with Vietnamese cue/TTS windows. The Chinese subtitle remained visible before/after Vietnamese speech and during cue gaps, when those masks disappeared.
+2. The measured Chinese line `姑娘你是不是认错人了` spans source rows 10 and 11. Review evidence explicitly cites the complete line and both row IDs, but the geometry matcher required each fragment to equal the complete OCR line. It therefore rejected the real bounding box.
+3. An adjacent OCR sample of the same line, 16.98–17.313333 seconds, was classified as `title`. The first actual UI retest still failed at 17.1 seconds because that continuation was excluded. The matcher now permits this continuation only after a real subtitle anchor, with identical cited full-line text, explicit unambiguous scope, nearby time, high OCR confidence and overlapping geometry. It cannot establish a subtitle anchor or approve unrelated titles.
+4. Existing custom-background MP4s were not invalidated by the previous default-palette migration, so old blur gaps could remain baked into exported files.
+5. Additional review reproduced a nested-interval edge case: an OCR sample entirely inside a longer observation hid that longer observation when continuity compared only adjacent start-sorted rows. A valid 220 ms same-band transition then contained a small unblurred gap. An end-time heap and expiring nearby-geometry frontier now retain the latest eligible predecessor without scanning the accumulated history of a long video. Six regressions cover nested same-band/unrelated observations and rejection of a long-gap bridge.
+
+### Applied correction
+
+`build_source_subtitle_masks` supplies a shared normalized source-time plan to API/WebSocket snapshots, preview rendering and production export. It uses verified source intervals, bounded 100 ms sampling margins and narrow bridges for nearby same-band OCR gaps of at most 250 ms. It does not depend on Vietnamese caption visibility or placement. Distant/unverified regions, unrelated titles and long gaps remain excluded. Explicit scope-supported fragments can cite their complete measured OCR line without changing translation, speaker/address approval or original OCR metadata.
+
+Caption renderer version 3 marks older blur-enabled MP4s as stale even with custom colors. Those MP4 bytes, transcripts, audio and checkpoints remain intact; the user gets an actionable re-export state. Older custom-color files without blur remain usable.
+
+### Actual UI and media retests
+
+| Test / exact actions | Expected | Actual / verdict |
+| --- | --- | --- |
+| Production offscreen/muted Qt UI → History `94f80114` → enable blur and bottom placement → seek 15.15, 15.51, 15.58, 16, 16.98 and 17.1 seconds | Source subtitle remains blurred through the Vietnamese gap and full Chinese-line continuation | **PASS**, actual blur elements at all six positions; computed `backdrop-filter: blur(5px)`; no JavaScript errors. The earlier failed 17.1-second check exposed the title continuation and was retested after correction. |
+| Play/pause the same real translated sample; restart QA backend/UI and reopen History; restore original QA style | Real playback, durable chosen colors/position/blur and preserved speech | **PASS**, playback advances; selected style survives restart; all 17 retained WAV SHA256 hashes unchanged. No provider calls for styling. QA backend/UI exited. |
+| Production composer/ASS/mask graph → actual 14.8–17.5-second source excerpt plus four retained Vietnamese WAVs → MP4 → ffprobe/decode validation | Real readable video/audio and source-region blur independent of Vietnamese caption coverage | **PASS**, latest retest 16:05: 2.7-second MP4, 346,503 bytes; output validation passed. Vietnamese captions were placed at the top for this check. Mean source-region pixel changes at the six positions were 31.00, 30.62, 30.50, 30.73, 34.12 and 31.04. Temporary render removed automatically. This is a short excerpt, not a full export. |
+| Gracefully exit idle normal Studio using Ctrl+Q → normal desktop launcher | Updated backend loads without killing unrelated processes | **PASS**, normal launch 15:57:43, backend port 62803; saved user style preserved. |
+| Separate read-only offscreen production UI attached to normal backend 62803 → History `d5820a71` → same six seek positions | Exact user's white/black/auto style uses the corrected plan | **PASS**, all six positions have real `blur(5px)` elements; screenshot at 16 seconds visually inspected; no JavaScript errors. Backend/UI remain `PREVIEW_READY`; user colors and blur unchanged. This QA UI exited at 16:01 without interrupting the foreground app. |
+| Fresh production QA backend/UI after the nested-interval correction → repeat six seeks, playback, real render and backend restart | Latest code still blurs the actual transition and preserves saved media/style | **PASS**, final retest 16:05; all six positions covered, real playback and render validated, all 17 WAVs unchanged and original QA style restored. QA UI/backend exited. |
+
+### Regression evidence and limitations
+
+Latest relevant Python suite: **371 passed in 22.04 s**, covering caption layout/style, source masks, API, session restoration and auto-review/export. Latest JavaScript UI suite: **221 passed**; `node --check static/app.js` and `git diff --check` passed. Tests cover cue silence, OCR boundary margins, bounded/nested-interval bridging, explicit fragment scope, title continuation rejection/acceptance, duration clipping, empty-mask updates, new-source reset and stale blur-render invalidation.
+
+Changed production files: `core/subtitle_cues.py`, `core/streaming/{pipeline,export,session_store}.py`, `main.py`, `static/app.js`; runtime harness: `scripts/check_preview_style_ui.py`; regression files: `tests/test_{source_subtitle_masks,caption_layout,caption_style,caption_style_api,session_store}.py`, `tests/test_ui_interactions.mjs`.
+
+No full 320-second translated MP4 was produced for this fix. Existing unresolved semantic/address checks remain unresolved. Old blur-enabled MP4s need re-export to bake in the corrected masks; merely reopening them cannot change their pixels. This acceptance covers the reported real transition and its production preview/export paths, not every possible future OCR omission.
+
+The normal backend loaded the main reported-transition correction at 15:57; its exact user-project preview passed the six-point retest. The later nested-interval enhancement is verified in the fresh QA process but is not yet loaded in that retained normal process. A final normal restart remains pending: Computer Use repeatedly returned “user input was detected in this window; call get_window_state before continuing” while the normal window was minimized/occluded. A normal duplicate-launch activation allowed a fresh idle accessibility observation, but Ctrl+Q was again rejected by the input guard. No process-kill or guard-reset workaround was used; normal user app remains running. Do not count this attempted final restart as PASS.
+
 ## Preview caption controls and measured progress — October 11, 2026
 
 **PASS for the reported changing subtitle palette, missing preview style controls and missing measured speech progress.** This is not full-video or semantic acceptance. Production UI checks used saved QA project `94f80114`: real 320.040635-second source, real 24.46-second translated sample and 17 existing Vietnamese WAVs. User project `d5820a71` was retained.

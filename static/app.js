@@ -185,6 +185,7 @@ document.addEventListener("DOMContentLoaded", () => {
   let segments = {}; // segId -> segment data
   let screenTexts = [];
   let screenTextSignature = "";
+  let sourceSubtitleMasks = null;
   let visualSession = false;
   const defaultCaptionStyle = {background_color: null, text_color: "#000000", position: "auto", blur_original: false};
   let captionStyle = {...defaultCaptionStyle};
@@ -788,6 +789,7 @@ document.addEventListener("DOMContentLoaded", () => {
       writeCaptionStyleControls(captionStyle);
     }
     if (typeof data.has_subtitle_regions === "boolean") hasSubtitleRegions = data.has_subtitle_regions;
+    if (Array.isArray(data.source_subtitle_masks)) setSourceSubtitleMasks(data.source_subtitle_masks);
     if (data.output_outdated) invalidateCaptionOutput();
     else if (data.output_outdated === false) captionOutputOutdated = false;
     updateCaptionStyleAvailability();
@@ -1868,6 +1870,14 @@ document.addEventListener("DOMContentLoaded", () => {
     screenTextSignature = "";
   }
 
+  function setSourceSubtitleMasks(items) {
+    sourceSubtitleMasks = items.filter(mask => mask && Array.isArray(mask.bbox) && mask.bbox.length === 4 &&
+      [mask.start, mask.end, ...mask.bbox].every(Number.isFinite) && mask.start >= 0 && mask.end > mask.start &&
+      mask.bbox[0] >= 0 && mask.bbox[1] >= 0 && mask.bbox[2] > 0 && mask.bbox[3] > 0 &&
+      mask.bbox[0] + mask.bbox[2] <= 1.001 && mask.bbox[1] + mask.bbox[3] <= 1.001);
+    screenTextSignature = "";
+  }
+
   function subtitleFontSize(width, height) {
     // Match the ASS font in source pixels, then scale with the contained image.
     const sourceWidth = videoPlayer.videoWidth || width;
@@ -1877,6 +1887,7 @@ document.addEventListener("DOMContentLoaded", () => {
 
   function resetScreenTexts() {
     screenTexts = []; screenTextSignature = ""; visualSession = false;
+    sourceSubtitleMasks = null;
     screenTextOverlay?.replaceChildren();
     chineseSubMask.style.display = "none";
   }
@@ -1889,13 +1900,15 @@ document.addEventListener("DOMContentLoaded", () => {
       screenTextSignature = "";
       return false;
     }
-    const masks = !sourceAudition && captionStyle.blur_original ? Object.values(segments).flatMap(segment => {
+    const plannedMasks = sourceSubtitleMasks ?? Object.values(segments).flatMap(segment => {
       const plan = toggleScreenText.checked ? segment.caption_layout : segment.caption_bottom_layout;
-      return (plan?.source_masks || []).filter(mask => time >= mask.start && time < mask.end &&
+      return plan?.source_masks || [];
+    });
+    const masks = !sourceAudition && captionStyle.blur_original ? plannedMasks.filter(mask => time >= mask.start && time < mask.end &&
         Array.isArray(mask.bbox) && mask.bbox.length === 4 && mask.bbox.every(Number.isFinite) &&
         mask.bbox[0] >= 0 && mask.bbox[1] >= 0 && mask.bbox[2] > 0 && mask.bbox[3] > 0 &&
-        mask.bbox[0] + mask.bbox[2] <= 1.001 && mask.bbox[1] + mask.bbox[3] <= 1.001);
-    }) : [];
+        mask.bbox[0] + mask.bbox[2] <= 1.001 && mask.bbox[1] + mask.bbox[3] <= 1.001
+    ) : [];
     const unique = [...new Map(masks.map(mask => [JSON.stringify(mask.bbox), mask])).values()];
     const signature = JSON.stringify(unique.map(mask => mask.bbox));
     if (screenTextSignature !== signature) {
@@ -2803,6 +2816,7 @@ document.addEventListener("DOMContentLoaded", () => {
         }
       }
       else if (msg.type === "screen_update") {
+        if (Array.isArray(msg.source_subtitle_masks)) setSourceSubtitleMasks(msg.source_subtitle_masks);
         // Visual chunks are committed independently. Refresh OCR overlays even
         // when a chunk contains no speech row, so the UI never waits for the
         // full prepass before showing the completed on-screen text work.
@@ -2879,6 +2893,10 @@ document.addEventListener("DOMContentLoaded", () => {
         }
       }
       else if (msg.type === "review_complete") {
+        if (Array.isArray(msg.source_subtitle_masks)) {
+          setSourceSubtitleMasks(msg.source_subtitle_masks);
+          renderScreenTexts(previewGlobalTime());
+        }
         showPipelineWarnings(msg);
         if (pendingTaskAction?.kind === "review") pendingTaskAction.progressSeen = true;
         const summary = msg.review_summary || msg.summary;

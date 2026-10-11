@@ -67,14 +67,13 @@ def test_custom_placement_is_stable_across_pages_and_ocr():
     assert [(c["start"], c["end"]) for c in cues] == [(.4, 1.5), (1.5, 2.8)]
 
 
-def test_blur_masks_are_only_measured_overlaps_and_merge_page_boundaries():
+def test_blur_masks_follow_source_time_and_ignore_tts_page_gaps():
     segment = speech(subtitle_cues=[{"start": .4, "end": 1.2, "text": "Một câu."},
                                    {"start": 1.2, "end": 1.8, "text": "Câu tiếp."},
                                    {"start": 2.4, "end": 2.8, "text": "Sau khoảng nghỉ."}])
     plan = build_caption_layout([segment], [source(start=.7, end=2.6), source(start=10, end=12)],
                                 caption_style={"blur_original": True})
-    assert plan["source_masks"] == [{"start": .7, "end": 1.8, "bbox": [.3, .7, .4, .04]},
-                                    {"start": 2.4, "end": 2.6, "bbox": [.3, .7, .4, .04]}]
+    assert plan["source_masks"] == [{"start": .6, "end": 2.7, "bbox": [.3, .7, .4, .04]}]
     assert "source_masks" not in build_caption_layout([segment], [source()])
 
 
@@ -88,14 +87,16 @@ def test_untrusted_ocr_or_title_never_blurred(changes):
 
 @pytest.mark.parametrize("changes", [{"needs_review": True},
                                     {"confirmed_silence": True}, {"subtitle_cues": []}])
-def test_unapproved_or_silent_speech_never_masks_source(changes):
-    assert build_caption_layout([speech(**changes)], [source()], caption_style={"blur_original": True})["source_masks"] == []
+def test_speech_quality_cannot_suppress_independently_verified_source_blur(changes):
+    plan = build_caption_layout([speech(**changes)], [source()], caption_style={"blur_original": True})
+    assert plan["cues"] == []
+    assert plan["source_masks"] == [{"start": 0, "end": 3.1, "bbox": [.3, .7, .4, .04]}]
 
 
 def test_playable_preview_blur_uses_verified_geometry_without_approving_draft_translation():
     segment = speech(needs_review=True, preview_is_draft=True)
     plan = build_caption_layout([segment], [source()], caption_style={"blur_original": True})
-    assert plan["source_masks"] == [{"start": .4, "end": 2.8, "bbox": [.3, .7, .4, .04]}]
+    assert plan["source_masks"] == [{"start": 0, "end": 3.1, "bbox": [.3, .7, .4, .04]}]
     assert segment["needs_review"] is True and segment["preview_is_draft"] is True
     assert build_caption_layout([segment], [source(source_region_verified=False)],
         caption_style={"blur_original": True})["source_masks"] == []
@@ -118,7 +119,7 @@ def test_one_selected_palette_survives_ocr_gaps_speaker_changes_and_bottom_toggl
 def test_independently_verified_region_remains_usable_when_ocr_translation_needs_review():
     plan = build_caption_layout([speech()], [source(needs_review=True, source_region_verified=True)],
                                 caption_style={"blur_original": True})
-    assert plan["source_masks"] == [{"start": .4, "end": 2.8, "bbox": [.3, .7, .4, .04]}]
+    assert plan["source_masks"] == [{"start": 0, "end": 3.1, "bbox": [.3, .7, .4, .04]}]
 
 
 def test_ass_uses_rgb_colors_as_bgr_and_matches_preview_coordinates(tmp_path):

@@ -1596,6 +1596,11 @@ class StreamingPipelineSession:
             self._persist_if_enabled()
         if event_type == "segment_update":
             data = self.caption_metadata(data)
+        elif event_type in {"init", "screen_update", "review_complete"}:
+            from core.subtitle_cues import build_source_subtitle_masks
+            data = {**data, "source_subtitle_masks": build_source_subtitle_masks(
+                self.screen_texts, [s.to_dict() for s in self.segments.values()],
+                getattr(self, "video_size", (1080, 1920)))}
         if self.event_callback:
             payload = {"type": event_type, "task_id": self.task_id, **data}
             if asyncio.iscoroutinefunction(self.event_callback):
@@ -1611,6 +1616,11 @@ class StreamingPipelineSession:
         size = getattr(self, "video_size", (1080, 1920))
         style = getattr(self, "caption_style", None)
         layout = build_caption_layout([data], self.screen_texts, video_size=size, caption_style=style)
+        if "source_masks" in layout:
+            # Global source masks are sent once with snapshots/OCR updates.
+            # Keep the legacy row plan bounded to its original source interval.
+            layout["source_masks"] = [mask for mask in layout["source_masks"]
+                if mask["start"] < data["end"] + .1 and mask["end"] > data["start"] - .1]
         bottom = build_caption_layout([data], [], video_size=size, caption_style=style)
         if layout.get("source_masks"):
             bottom["source_masks"] = layout["source_masks"]
