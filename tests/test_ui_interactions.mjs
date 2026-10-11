@@ -333,6 +333,22 @@ test('preview rejects a positive processed cursor outside actual prepared source
   assert.equal(ui.el('btn-translate-full').classList.contains('hidden'),true);
 });
 
+test('explicit missing preview speech rejects otherwise plausible source and processed coverage', async () => {
+  for (const delivery of ['progress','finished','history']) {
+    const ui=studio(); await ui.start();
+    const progress={status:'PREVIEW_READY',translation_mode:'preview',processed_seconds:24,
+      source_prepared_seconds:24,total_seconds:320,can_translate_full:true,preview_output_ready:false};
+    if (delivery==='history') {
+      ui.replies.set('/api/streaming/no-dub-preview',{task_id:'no-dub-preview',initialized:true,
+        video_url:'/source.mp4',duration:320,segments_count:0,segments:[],progress});
+      await ui.window.studioAttachTask('no-dub-preview');
+    } else ui.sockets.at(-1).receive({type:delivery,...progress});
+    assert.equal(ui.el('task-progress').dataset.status,'FAILED',delivery);
+    assert.equal(ui.el('btn-translate-full').classList.contains('hidden'),true,delivery);
+    assert.doesNotMatch(ui.el('task-progress-detail').textContent,/Đã dịch đoạn xem trước/,delivery);
+  }
+});
+
 test('history cannot label another empty project as a ready translated preview', async () => {
   const ui=studio(); await ui.start();
   ui.replies.set('/api/tasks',{tasks:[{task_id:'other-empty',saved:true,status:'PREVIEW_READY',
@@ -360,6 +376,52 @@ async function partiallyTranslatedSource({failed=false}={}) {
   await video.emit('loadedmetadata'); await video.emit('canplay');
   return ui;
 }
+
+function receiveRecoveredPreview(ui) {
+  const socket=ui.sockets.at(-1);
+  socket.receive({type:'progress',status:'RUNNING',translation_mode:'preview',processed_seconds:0,
+    source_prepared_seconds:24,total_seconds:320,can_translate_full:false});
+  socket.receive({type:'background_update',bgm_url:'/retry-bgm.ogg',source_prepared_seconds:24});
+  socket.receive({type:'segment_update',id:0,start:1,end:5,status:'READY',
+    audio_url:'/retry.wav',final_vi:'Lời dịch mới'});
+  socket.receive({type:'ready_to_play',playable_until:24});
+  socket.receive({type:'telemetry',playable_until:24,buffer_ahead:24});
+  socket.receive({type:'progress',status:'PREVIEW_READY',translation_mode:'preview',processed_seconds:24,
+    source_prepared_seconds:24,total_seconds:320,can_translate_full:true,preview_output_ready:true});
+}
+
+test('Home before Retry switches to the real dubbed preview when its opening silence becomes ready', async () => {
+  const ui=await partiallyTranslatedSource({failed:true}),video=ui.el('video-player');
+  await ui.el('segments-timeline-track').emit('keydown',{key:'Home'});
+  assert.match(ui.el('player-task-status').textContent,/Video gốc/);
+  receiveRecoveredPreview(ui);
+  assert.equal(video.muted,true);
+  assert.doesNotMatch(ui.el('player-task-status').textContent,/Video gốc/);
+  assert.equal(video.currentTime,0);
+  assert.equal(video.paused,true);
+  await ui.el('player-play-toggle').click();
+  video.currentTime=2; await video.emit('timeupdate'); await ui.flush(); await ui.tickFrames();
+  assert.equal(video.paused,false);
+  assert.equal(video.muted,true);
+  assert.equal(ui.el('subtitle-text').textContent,'Lời dịch mới');
+  assert.equal(ui.audio.findLast(item=>item.src==='/retry.wav').paused,false);
+});
+
+test('recovered translation preserves playing original inspection until the next explicit Play', async () => {
+  const ui=await partiallyTranslatedSource({failed:true}),video=ui.el('video-player');
+  await ui.el('segments-timeline-track').emit('keydown',{key:'Home'});
+  await ui.el('player-play-toggle').click();
+  receiveRecoveredPreview(ui);
+  assert.equal(video.paused,false);
+  assert.equal(video.muted,false);
+  assert.match(ui.el('player-task-status').textContent,/Video gốc/);
+  video.currentTime=2; await video.emit('timeupdate');
+  assert.equal(ui.el('subtitle-text').textContent,'');
+  await ui.el('player-play-toggle').click();
+  await ui.el('player-play-toggle').click(); await ui.flush(); await ui.tickFrames();
+  assert.equal(video.muted,true);
+  assert.equal(ui.el('subtitle-text').textContent,'Lời dịch mới');
+});
 
 test('forward seek past preview requests a bounded source window and clearly plays original audio', async () => {
   const ui=await partiallyTranslatedSource(), video=ui.el('video-player');

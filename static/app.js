@@ -75,7 +75,7 @@ document.addEventListener("DOMContentLoaded", () => {
   function hasMeasuredPreview(progress) {
     const completed = Number(progress?.processed_seconds);
     const prepared = progress?.source_prepared_seconds == null ? null : Number(progress.source_prepared_seconds);
-    return Number.isFinite(completed) && completed > 0 &&
+    return progress?.preview_output_ready !== false && Number.isFinite(completed) && completed > 0 &&
       (prepared === null || (Number.isFinite(prepared) && prepared + .05 >= completed));
   }
 
@@ -1252,6 +1252,7 @@ document.addEventListener("DOMContentLoaded", () => {
         stage: reviewSummaryText(), progress_pct: null};
       resetTaskResult();
     }
+    refreshPreparedPlaybackMode();
     const status = currentProgress.status || "RUNNING";
     if (currentProgress.phase === "export") automaticExportActive = ["RUNNING", "CANCELLING"].includes(status);
     else if (["FAILED", "STOPPED", "CANCELLED"].includes(status)) automaticExportActive = false;
@@ -1949,6 +1950,7 @@ document.addEventListener("DOMContentLoaded", () => {
     if (previewResumeTime === null) return;
     previewResumeTime = null;
     previewPending = false;
+    refreshPreparedPlaybackMode();
     if (!currentTaskId || translationReady) bufferingAlert.classList.add("hidden");
     else bufferingText.textContent = "Đang chờ các câu dịch đầu tiên...";
     const shouldPlay = playWhenPreviewReady;
@@ -2302,6 +2304,7 @@ document.addEventListener("DOMContentLoaded", () => {
 
   videoPlayer.addEventListener("play", () => {
     if (resultPreviewActive) { videoPlayer.pause(); return; }
+    refreshPreparedPlaybackMode(true);
     if (!sourceAudition && !sourceInspection && bgmAudio) {
       bgmAudio.currentTime = previewGlobalTime();
       bgmAudio.play().catch(reportPlayFailure);
@@ -2610,6 +2613,7 @@ document.addEventListener("DOMContentLoaded", () => {
       const previous = previousSegments[s.id];
       segments[s.id] = previous && (previous.revision || 0) > (s.revision || 0) ? previous : s;
     });
+    refreshPreparedPlaybackMode();
     renderTimelineSlices();
     renderSegmentsDrawer();
     updateExportAvailability();
@@ -2792,6 +2796,7 @@ document.addEventListener("DOMContentLoaded", () => {
         if (msg.review_summary) showTaskProgress({review_summary: msg.review_summary});
         showPipelineWarnings(msg);
         if (Number.isFinite(Number(msg.playable_until))) translatedPlayableUntil = Math.max(0, Number(msg.playable_until));
+        refreshPreparedPlaybackMode();
         telPlayable.textContent = formatTime(msg.playable_until);
         const buf = msg.buffer_ahead || 0;
         telBuffer.textContent = `+${buf.toFixed(1)}s`;
@@ -2814,6 +2819,8 @@ document.addEventListener("DOMContentLoaded", () => {
       }
       else if (msg.type === "ready_to_play") {
         translationReady = true;
+        if (Number.isFinite(Number(msg.playable_until))) translatedPlayableUntil = Math.max(0, Number(msg.playable_until));
+        refreshPreparedPlaybackMode();
         if (!previewPending) bufferingAlert.classList.add("hidden");
         if (autoPlayTaskId === taskId) {
           autoPlayTaskId = null;
@@ -3301,6 +3308,16 @@ document.addEventListener("DOMContentLoaded", () => {
     updatePlayerTaskStatus(currentProgress, ["COMPLETED", "PREVIEW_READY", "PREPARED", "FAILED", "STOPPED", "CANCELLED"].includes(currentProgress?.status));
   }
 
+  function refreshPreparedPlaybackMode(starting = false) {
+    // A failed preview may have been inspected at Home before its first
+    // spoken row exists. Actual coverage can make that opening silence part
+    // of a dubbed preview. Keep an ongoing original audition untouched; a
+    // paused viewer or an explicit new Play may use the now-ready mix.
+    if (sourceInspection && !sourceAudition && !previewPending &&
+        (videoPlayer.paused || starting) && translatedAtTime(previewGlobalTime()))
+      selectPlaybackAtTime(previewGlobalTime());
+  }
+
   function seekTranscript(segment) {
     if (!segment || !currentTaskId) return;
     const bounds = resolveDubTiming(segment);
@@ -3422,8 +3439,7 @@ document.addEventListener("DOMContentLoaded", () => {
     segments[segment.id] = segment;
     // Saving/recovering the selected sentence can make its paused position
     // genuinely dubbed. Never change an original audition mid-playback.
-    if (sourceInspection && videoPlayer.paused && translatedAtTime(previewGlobalTime()))
-      selectPlaybackAtTime(previewGlobalTime());
+    refreshPreparedPlaybackMode();
     updateSegmentSlice(segment);
     updateSegmentDrawerItem(segment);
     updateExportAvailability();

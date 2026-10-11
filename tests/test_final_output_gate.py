@@ -144,7 +144,7 @@ def test_durable_history_and_reload_preserve_uncertain_rows_without_false_full_r
     assert store._project_path(sess.task_id).read_bytes() == before
 
 
-def test_saved_partial_preview_can_continue_while_omitted_speech_blocks_full_export(omitted_speech):
+def test_saved_preview_with_only_empty_unresolved_source_speech_is_review_required_not_ready(omitted_speech):
     sess = omitted_speech
     sess.translation_mode = "preview"
     sess.total_duration = 40.
@@ -154,10 +154,98 @@ def test_saved_partial_preview_can_continue_while_omitted_speech_blocks_full_exp
     sess._visual_completed_seconds = sess._visual_scanned_seconds = 4.
     sess.persist()
     available = store._availability(store._read(sess.task_id))
-    assert available["status"] == "PREVIEW_READY" and available["preview_can_continue"]
+    assert available["status"] == "PREPARED" and not available["preview_can_continue"]
     assert not available["ready"] and available["final_output_blocked"]
+    assert not available["preview_output_ready"] and available["preview_spoken_segments"] == 0
     assert available["missing_speech_ids"] == [0, 1]
-    assert store.list_saved_sessions()[0]["can_translate_full"] is True
+    assert store.list_saved_sessions()[0]["can_translate_full"] is False
+    assert sess.get_progress()["status"] == "PREPARED" and not sess.can_translate_full
+    assert sess.get_progress()["content_review_state"] == "REVIEW_REQUIRED"
+    main.active_streaming_sessions.clear()
+    restored = store.restore_saved_session(sess.task_id)
+    assert restored.get_progress()["status"] == "PREPARED" and not restored.can_translate_full
+    assert not restored.error and not restored._startup_failed
+    assert restored.get_progress()["can_review"]
+    assert all(row.needs_review and not row.confirmed_silence for row in restored.segments.values())
+
+
+def test_unresolved_preview_restore_keeps_future_lookahead_and_review_scopes_to_owned_prefix(omitted_speech):
+    sess = omitted_speech
+    sess.translation_mode = "preview"
+    sess.total_duration = 40.
+    sess._chunked_source_started = sess._visual_incremental_started = True
+    sess._source_prepared_seconds = 8.
+    sess._visual_completed_seconds = sess._visual_scanned_seconds = 4.
+    future = SegmentItem(2, 6., 8., 2.)
+    future.text_zh = future.asr_text = "后面的源话"
+    sess.segments[2] = future
+    before = deepcopy(future.to_dict())
+    sess.persist()
+    main.active_streaming_sessions.clear()
+    restored = store.restore_saved_session(sess.task_id)
+    assert restored.get_progress()["status"] == "PREPARED"
+    assert restored.get_progress()["can_review"]
+    assert not restored.can_translate_full
+    assert restored.segments[2].to_dict() == before
+
+    options_seen = []
+
+    async def review(**options):
+        options_seen.append(options)
+        restored.review_summary = {"status": "completed", "unresolved": 2}
+
+    restored._review_translations = review
+
+    async def run():
+        await restored.start_automatic_review()
+        await restored.review_task
+
+    asyncio.run(run())
+    assert options_seen == [{"regenerate_audio": True, "force_review": True, "segment_ids": {0, 1}}]
+    assert restored.segments[2].to_dict() == before
+    assert restored.get_progress()["status"] == "PREPARED" and not restored.can_translate_full
+
+
+def test_real_translated_speech_sample_can_continue_while_another_unresolved_row_blocks_export(omitted_speech):
+    sess = omitted_speech
+    row = sess.segments[0]
+    row.final_vi = "Còn bạn thì sao?"
+    path = sess.segments_dir / "seg_0.wav"
+    with wave.open(str(path), "wb") as audio:
+        audio.setparams((1, 2, 16000, 0, "NONE", "not compressed"))
+        audio.writeframes(b"\x01\x00" * 16000)
+    row.audio_path, row.audio_url = str(path), "/api/streaming/audio/omitted-speech/0"
+    sess.translation_mode = "preview"
+    sess.total_duration = 40.
+    sess._preview_ready = True
+    sess._visual_incremental_started = True
+    sess._visual_prepass_complete = False
+    sess._visual_completed_seconds = sess._visual_scanned_seconds = 4.
+    sess.persist()
+    available = store._availability(store._read(sess.task_id))
+    assert available["status"] == "PREVIEW_READY" and available["preview_can_continue"]
+    assert available["preview_output_ready"] and available["preview_spoken_segments"] == 1
+    assert available["final_output_blocked"] and available["missing_speech_ids"] == [1]
+    assert sess.get_progress()["status"] == "PREVIEW_READY" and sess.can_translate_full
+    assert sess.get_progress()["content_review_state"] == "REVIEW_REQUIRED"
+
+
+@pytest.mark.parametrize("audio", [b"", b"not a wave", b"RIFF"])
+def test_nonempty_translation_with_invalid_audio_is_not_a_playable_preview(omitted_speech, audio):
+    sess = omitted_speech
+    sess.segments = {0: sess.segments[0]}
+    row = sess.segments[0]
+    row.final_vi = "Còn bạn thì sao?"
+    path = sess.segments_dir / "seg_0.wav"
+    path.write_bytes(audio)
+    row.audio_path, row.audio_url = str(path), "/api/streaming/audio/omitted-speech/0"
+    sess.translation_mode = "preview"
+    sess._preview_ready = True
+    sess._visual_completed_seconds = 4.
+    assert not sess.can_translate_full
+    progress = sess.get_progress()
+    assert progress["status"] == "FAILED" and not progress["preview_output_ready"]
+    assert progress["preview_missing_audio_ids"] == [0]
 
 
 def test_existing_result_link_is_not_published_as_complete_for_omitted_speech(omitted_speech):

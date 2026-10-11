@@ -21,7 +21,7 @@ from urllib.parse import quote, urlsplit, urlunsplit, parse_qsl, urlencode
 
 from config import settings
 from core.streaming.audio_cache import resolve_dub_timing
-from core.streaming.output_gate import final_output_metadata, missing_speech_message
+from core.streaming.output_gate import final_output_metadata, preview_output_metadata, missing_speech_message
 
 VERSION = 1
 MAX_BYTES = 16 * 1024 * 1024
@@ -966,15 +966,23 @@ def _availability(data):
                            and fields.get("_preview_ready") and not preview_covered)
     if invalid_preview:
         ready = False
+    preview_rows = [row for row in rows if row["end"] <= fields.get("_visual_completed_seconds", 0) + .001]
+    preview_output = preview_output_metadata(preview_rows,
+        lambda row: _valid_row_audio(row, row.get("audio_path")))
+    preview_output["preview_output_ready"] = bool(preview_covered and preview_output["preview_output_ready"])
+    preview_speech_unresolved = bool(fields.get("translation_mode") == "preview" and preview_covered
+        and not preview_output["preview_output_ready"] and preview_output["preview_untranslated_ids"]
+        and all(row["status"] in {"READY", "PLAYED"} for row in preview_rows)
+        and data["state"] == "READY")
     preview_ready = bool(fields.get("translation_mode") == "preview" and fields.get("_preview_ready")
                          and fields.get("initialized") and not missing and not absent_audio
-                         and preview_covered
+                         and preview_output["preview_output_ready"]
                          and data["state"] == "READY"
                          and all(row["status"] in {"READY", "PLAYED"} for row in rows
                                  if row["start"] < fields.get("_visual_completed_seconds", 0) - .001))
     preview_can_continue = bool(fields.get("translation_mode") == "preview" and fields.get("_preview_ready")
         and fields.get("initialized") and not missing and not absent_audio
-        and preview_covered
+        and preview_output["preview_output_ready"]
         and (preview_ready or any(row["status"] in {"READY", "PLAYED"} for row in rows
                                  if row["end"] <= fields.get("_visual_completed_seconds", 0) + .001)))
     if fields.get("review_summary", {}).get("status") in {"failed", "incomplete", "running"}:
@@ -988,7 +996,7 @@ def _availability(data):
     output_warning = OUTPUT_FAILURE_WARNING if current_output and not valid_output else ""
     review_incomplete = fields.get("review_summary", {}).get("status") in {"failed", "incomplete", "running"}
     waiting_export = bool(ready and fields.get("auto_export_result") and not valid_output)
-    status = ("FAILED" if output_warning or invalid_preview else "PREVIEW_READY" if preview_ready else "PREPARED" if waiting_export or unresolved_speech else "COMPLETED" if ready else
+    status = ("FAILED" if output_warning or invalid_preview else "PREVIEW_READY" if preview_ready else "PREPARED" if waiting_export or unresolved_speech or preview_speech_unresolved else "COMPLETED" if ready else
               "STOPPED" if data["state"] == "STOPPED" and not missing else
               "FAILED" if missing or data["state"] == "FAILED" or review_incomplete else "STOPPED")
     message = " ".join(missing)
@@ -998,6 +1006,8 @@ def _availability(data):
         message = ""
     elif invalid_preview and not message:
         message = "Bản xem trước chưa nhận diện và dịch được đoạn nguồn; bấm Tiếp tục để thử phần còn thiếu."
+    elif preview_speech_unresolved and not message:
+        message = missing_speech_message(preview_output["preview_untranslated_ids"])
     elif visual_incomplete and not message:
         message = "Dịch video chưa xong; phần đã dịch được giữ. Mở dự án và bấm Tiếp tục để xử lý phần còn lại."
     elif review_incomplete and not message:
@@ -1016,6 +1026,8 @@ def _availability(data):
         message = "Lời dịch và giọng đã lưu; chưa có MP4 được kiểm định. Mở dự án và xuất video."
     return {"status": status, "missing_media": message, "ready": ready, "preview_ready": preview_ready,
             **output_gate,
+            **preview_output,
+            "preview_speech_unresolved": preview_speech_unresolved,
             "preview_source_unprepared": invalid_preview,
             "preview_can_continue": preview_can_continue, "source_exists": _exists(fields.get("video_path")),
             "pending_download": pending_download, "output_warning": output_warning,
@@ -1116,7 +1128,8 @@ def _restore_saved_session_owned(task_id, event_callback=None):
         segment = SegmentItem(row["id"], row["start"], row["end"], row["duration"])
         for key, value in row.items():
             setattr(segment, key, value)
-        untouched_preview_row = bool(available["preview_can_continue"] and row["status"] == "WAITING"
+        untouched_preview_row = bool((available["preview_can_continue"] or available["preview_speech_unresolved"])
+                                     and row["status"] == "WAITING"
                                      and row["start"] >= session._visual_completed_seconds - .001)
         valid_audio = _valid_row_audio(row, segment.audio_path)
         if not untouched_preview_row and (row["id"] in available["missing_audio_ids"] or row["status"] not in {"READY", "PLAYED", "NEEDS_REVIEW"}):
@@ -1180,7 +1193,7 @@ def _restore_saved_session_owned(task_id, event_callback=None):
     # Earlier interrupted preparation is restarted explicitly using the same source/checkpoints.
     session._restored_can_resume = bool(session.initialized and not source_missing
         and (not needs_preparation_resume or _exists(session.raw_audio_16k)))
-    if (not session.initialized or visual_incomplete or available["preview_source_unprepared"]) and not available["preview_can_continue"] and (not source_missing or available["pending_download"]):
+    if (not session.initialized or visual_incomplete or available["preview_source_unprepared"]) and not available["preview_can_continue"] and not available["preview_speech_unresolved"] and (not source_missing or available["pending_download"]):
         # A published prefix is initialized/playable while later visual chunks
         # are still missing. Retry must resume prepass checkpoints, never send
         # untouched source rows straight to speech generation.

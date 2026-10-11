@@ -127,6 +127,42 @@ def test_source_preparation_failure_with_no_rows_never_publishes_ready_preview(p
                    for event, payload in events)
 
 
+def test_unresolved_source_with_no_vi_or_wav_is_prepared_for_review_without_false_preview(preview, monkeypatch):
+    session, prepared, analyzed, speech, events = preview
+
+    async def unresolved_review(**options):
+        for sid in options["segment_ids"]:
+            row = session.segments[sid]
+            row.final_vi = row.literal_vi = row.natural_vi = ""
+            row.needs_review = True
+            row.verification = {"status": "unresolved", "semantic_verified": False}
+        session.review_summary = {"status": "completed"}
+
+    async def empty_playback(row, **options):
+        assert row.needs_review and not row.final_vi
+        row.status = "READY"
+        await session.emit("segment_update", row.to_dict())
+
+    monkeypatch.setattr(session, "_review_translations", unresolved_review)
+    monkeypatch.setattr(session, "_synthesize_segment", empty_playback)
+
+    async def run():
+        await session.start()
+        await session.worker_task
+        progress = session.get_progress()
+        assert progress["status"] == "PREPARED" and progress["content_review_state"] == "REVIEW_REQUIRED"
+        assert not progress["preview_output_ready"] and not session._preview_ready
+        assert not session.can_translate_full and not session.error
+        assert progress["preview_untranslated_ids"] == [0, 1, 2]
+        assert all(session.segments[sid].needs_review and not session.segments[sid].confirmed_silence
+                   for sid in range(3))
+
+    asyncio.run(run())
+    assert prepared == [(0, 24)] and speech == []
+    assert not any(event == "progress" and payload["status"] in {"PREVIEW_READY", "COMPLETED"}
+                   for event, payload in events)
+
+
 def test_actually_prepared_speechless_prefix_can_publish_ready_preview(preview, monkeypatch):
     session, prepared, analyzed, speech, events = preview
 
@@ -171,6 +207,36 @@ def test_hours_source_preview_only_prepares_one_bounded_window(preview):
     assert speech == [0, 1, 2]
     assert session.segments[3].status == "WAITING"
     assert not any(event == "progress" and payload["status"] == "COMPLETED" for event, payload in events)
+
+
+def test_explicit_review_only_rechecks_published_preview_and_preserves_waiting_lookahead(preview, monkeypatch):
+    session, prepared, analyzed, speech, events = preview
+    reviewed = []
+    original_review = session._review_translations
+
+    async def review(**options):
+        reviewed.append(options)
+        await original_review(**options)
+
+    async def run():
+        await session.start()
+        await session.worker_task
+        future = session.segments[3]
+        before = deepcopy(vars(future))
+        wavs = {sid: Path(session.segments[sid].audio_path).read_bytes() for sid in range(3)}
+        assert future.status == "WAITING" and session.get_progress()["can_review"]
+        monkeypatch.setattr(session, "_review_translations", review)
+        await session.start_automatic_review()
+        await session.review_task
+        assert session.get_progress()["status"] == "PREVIEW_READY"
+        assert session.can_translate_full and session.get_progress()["can_review"]
+        assert vars(future) == before
+        assert wavs == {sid: Path(session.segments[sid].audio_path).read_bytes() for sid in range(3)}
+        assert not any(event == "progress" and payload["status"] == "COMPLETED" for event, payload in events)
+
+    asyncio.run(run())
+    assert reviewed == [{"regenerate_audio": True, "force_review": True, "segment_ids": {0, 1, 2}}]
+    assert prepared == [(0, 24)] and speech == [0, 1, 2]
 
 
 def test_provider_hole_does_not_block_later_intervals_and_resume_reuses_success(preview, monkeypatch):

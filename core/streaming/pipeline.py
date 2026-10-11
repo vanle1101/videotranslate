@@ -32,7 +32,7 @@ from core.engines.alignment.natural_speech import synthesize_natural_speech
 from core.engines.separator.realtime_suppressor import RealtimeVocalSuppressor
 from core.engines.alignment.speech_timing import build_speech_timing, take_tts_word_boundaries, trim_tts_padding
 from core.streaming.audio_cache import resolve_dub_timing
-from core.streaming.output_gate import final_output_metadata, missing_spoken_output_ids, missing_speech_message
+from core.streaming.output_gate import final_output_metadata, preview_output_metadata, missing_spoken_output_ids, missing_speech_message
 from core.engines.alignment.dub_timing import available_reflow_duration, plan_reflow, MAX_TAIL_LIMIT_EXTENSION
 
 class SegmentEditConflict(RuntimeError):
@@ -639,6 +639,7 @@ class StreamingPipelineSession:
                     and preview_source_covered(completed_seconds=self._visual_completed_seconds,
                         source_prepared_seconds=self._source_prepared_seconds,
                         chunked_source_started=self._chunked_source_started)
+                    and self._preview_output_metadata()["preview_output_ready"]
                     and self.initialized and not self.is_running and not self.is_stopped
                     and not self.is_editing and self.video_path
                     and self.video_path.is_file())
@@ -880,7 +881,10 @@ class StreamingPipelineSession:
                 pending = [s for s in self.segments.values() if s.needs_review]
                 may_finish = not recovery_edit or (not self.is_stopped and not self._startup_failed
                     and self.review_summary.get("status") not in {"failed", "incomplete", "running"})
-                if may_finish and not pending and not self.is_running and all(s.status in ("READY", "PLAYED") for s in self.segments.values()):
+                if (may_finish and not self.is_running and self.translation_mode == "preview"
+                        and self._chunked_source_started):
+                    await self.report_progress("complete", self._review_message(), None)
+                elif may_finish and not pending and not self.is_running and all(s.status in ("READY", "PLAYED") for s in self.segments.values()):
                     self.error = None
                     await self.report_progress("complete", "Đã kiểm tra, dịch và lồng tiếng hoàn tất", 100)
                 elif may_finish and not self.is_running and pending and not any(s.status == "FAILED" for s in self.segments.values()):
@@ -1516,9 +1520,21 @@ class StreamingPipelineSession:
         if synthesize_pending:
             await self._resume_deferred_speech_rows(deferred_speech)
 
+    def _idle_review_targets(self):
+        if self.translation_mode == "preview" and self._chunked_source_started:
+            if not preview_source_covered(completed_seconds=self._visual_completed_seconds,
+                    source_prepared_seconds=self._source_prepared_seconds,
+                    chunked_source_started=True):
+                return []
+            return [row for row in self.segments.values()
+                    if row.end <= self._visual_completed_seconds + .001]
+        return list(self.segments.values())
+
     async def start_automatic_review(self):
+        targets = self._idle_review_targets()
+        preview_scope = self.translation_mode == "preview" and self._chunked_source_started
         if (not self.initialized or self.is_running or self.is_stopped or self.is_editing or self.error
-                or any(s.status not in ("READY", "PLAYED") for s in self.segments.values())):
+                or not targets or any(s.status not in ("READY", "PLAYED") for s in targets)):
             raise SegmentEditConflict("Hãy chờ xử lý xong trước khi AI kiểm tra lại.")
         if settings.LLM_PROVIDER != "opencode":
             raise SegmentEditConflict("Kiểm tra lại miễn phí hiện dùng OpenCode trong Cài đặt.")
@@ -1534,10 +1550,10 @@ class StreamingPipelineSession:
                     "output_video_url": "", "output_filename": "", "review_summary": dict(self.review_summary)})
                 # An explicit user retry is a fresh audit; automatic resume
                 # inside the initial pipeline may reuse exact verified batches.
-                pending_ids = {row.id for row in self.segments.values()
+                pending_ids = {row.id for row in targets
                                if row.speaker_review_pending and (row.verification or {}).get("status") != "manual"}
                 await self._review_translations(regenerate_audio=True, force_review=True,
-                    segment_ids=pending_ids or None)
+                    segment_ids=pending_ids or ({row.id for row in targets} if preview_scope else None))
             except asyncio.CancelledError:
                 self.is_stopped = True
                 raise
@@ -1553,7 +1569,7 @@ class StreamingPipelineSession:
                 self.is_running = False
                 self.review_task = None
                 if not self.is_stopped:
-                    failed_audio = [segment.id for segment in self.segments.values()
+                    failed_audio = [segment.id for segment in targets
                                     if segment.status == "FAILED"
                                     or (segment.final_vi.strip() and segment.status in ("READY", "PLAYED")
                                         and not segment.audio_path)]
@@ -1598,6 +1614,27 @@ class StreamingPipelineSession:
     def segment_snapshot(self, segment):
         return self.caption_metadata(segment.to_dict())
 
+    def _preview_output_metadata(self):
+        owned = [row for row in self.segments.values()
+                 if row.end <= self._visual_completed_seconds + .001]
+
+        def valid_audio(row):
+            if not row.audio_path or not row.audio_url:
+                return False
+            try:
+                duration = self._cached_dub_audio_duration(row.audio_path)
+                start, end = resolve_dub_timing(row.to_dict())
+                return duration <= end - start + .000125
+            except (OSError, EOFError, wave.Error, ValueError, TypeError, ZeroDivisionError):
+                return False
+
+        result = preview_output_metadata(owned, valid_audio)
+        result["preview_output_ready"] = bool(result["preview_output_ready"] and
+            preview_source_covered(completed_seconds=self._visual_completed_seconds,
+                source_prepared_seconds=self._source_prepared_seconds,
+                chunked_source_started=self._chunked_source_started))
+        return result
+
     def get_progress(self) -> Dict[str, Any]:
         snapshot = dict(self.progress)
         output_gate = final_output_metadata(self.segments.values())
@@ -1629,12 +1666,16 @@ class StreamingPipelineSession:
                         source_prepared_seconds=self._source_prepared_seconds,
                         processed_seconds=self._visual_completed_seconds,
                         total_seconds=self.total_duration, can_translate_full=self.can_translate_full)
+        preview_output = self._preview_output_metadata() if self.translation_mode == "preview" else None
+        if preview_output is not None:
+            snapshot.update(preview_output)
         snapshot["review_summary"] = self.review_summary
         snapshot["review_scope"] = self._review_scope
         snapshot["reviewing_segment_ids"] = list(self._reviewing_segment_ids)
+        review_targets = self._idle_review_targets()
         snapshot["can_review"] = bool(self.initialized and not self.is_running and not self.is_stopped
                                       and not self.is_editing and not self.error and settings.LLM_PROVIDER == "opencode"
-                                      and all(s.status in ("READY", "PLAYED") for s in self.segments.values()))
+                                      and review_targets and all(s.status in ("READY", "PLAYED") for s in review_targets))
         snapshot["can_pause"] = bool(self.initialized and self.is_running and not self.is_paused and not self.is_stopped and not self.error
                                     and not (self.review_task and not self.review_task.done()))
         if getattr(self, "_stop_draining", False):
@@ -1649,11 +1690,17 @@ class StreamingPipelineSession:
                 snapshot.update(status="FAILED", phase="failed", stage=self.error)
         elif self.is_paused and self.is_running:
             snapshot["status"] = "PAUSED"
-        elif self._preview_ready and not self.is_running:
+        elif self.translation_mode == "preview" and self._preview_ready and not self.is_running:
             if preview_source_covered(completed_seconds=self._visual_completed_seconds,
                     source_prepared_seconds=self._source_prepared_seconds,
-                    chunked_source_started=self._chunked_source_started):
+                    chunked_source_started=self._chunked_source_started) and preview_output["preview_output_ready"]:
                 snapshot.update(status="PREVIEW_READY", phase="preview", stage="Bản xem trước đã sẵn sàng. Có thể sửa lời và dịch toàn bộ.")
+            elif preview_output["preview_untranslated_ids"]:
+                snapshot.update(status="PREPARED", phase="prepared", progress_pct=None,
+                    stage=missing_speech_message(preview_output["preview_untranslated_ids"]))
+            elif preview_output["preview_missing_audio_ids"]:
+                snapshot.update(status="FAILED", phase="tts", progress_pct=None,
+                    stage="Đoạn xem trước chưa có giọng Việt hợp lệ; bấm Tiếp tục để tạo lại phần thiếu.")
             else:
                 snapshot.update(status="FAILED", phase="prepare", progress_pct=None,
                     stage="Bản xem trước chưa nhận diện và dịch được đoạn nguồn; bấm Tiếp tục để thử phần còn thiếu.")
@@ -1669,6 +1716,20 @@ class StreamingPipelineSession:
         return snapshot
 
     async def report_progress(self, phase: str, stage: str, progress_pct=None, **details):
+        if (phase == "complete" and not self.is_running and self.translation_mode == "preview"
+                and self._chunked_source_started):
+            # A manual repair or fresh prefix review cannot complete the rest
+            # of the video. Recompute sample readiness after publishing its WAV.
+            preview_output = self._preview_output_metadata()
+            self._preview_ready = preview_output["preview_output_ready"]
+            if self._preview_ready:
+                phase, stage = "preview", "Bản xem trước đã sẵn sàng. Có thể sửa lời và dịch toàn bộ."
+            else:
+                phase = "prepared"
+                stage = (missing_speech_message(preview_output["preview_untranslated_ids"])
+                         if preview_output["preview_untranslated_ids"] else
+                         "Đoạn xem trước chưa có giọng Việt hợp lệ; tạo lại phần thiếu trước khi dịch toàn bộ.")
+            progress_pct = None
         missing_speech = missing_spoken_output_ids(self.segments.values())
         if phase == "complete" and missing_speech:
             phase, stage, progress_pct = "prepared", missing_speech_message(missing_speech), None
@@ -2739,6 +2800,7 @@ class StreamingPipelineSession:
             "ready_to_play": self.first_play_emitted,
             "status": "cancelling" if getattr(self, "_stop_draining", False) else "cancelled" if self.is_stopped else ("failed" if self.error else ("running" if self.is_running else "prepared" if self.progress.get("phase") == "prepared" or output_gate["final_output_blocked"] else "finished")),
             **output_gate,
+            **(self._preview_output_metadata() if self.translation_mode == "preview" else {}),
             "error": self.error,
             "warnings": list(self.warnings),
             "review_summary": dict(self.review_summary),
@@ -3656,6 +3718,7 @@ class StreamingPipelineSession:
                     source_prepared_seconds=self._source_prepared_seconds,
                     chunked_source_started=self._chunked_source_started)
                 self._preview_ready = bool(preview_covered
+                    and self._preview_output_metadata()["preview_output_ready"]
                     and (not owned or any(s.status in {"READY", "PLAYED"} for s in owned)))
             failed = [s for s in owned if s.status == "FAILED"]
             if any(row["state"] != "COMPLETED" for row in self._chunk_jobs):
@@ -3675,6 +3738,17 @@ class StreamingPipelineSession:
                     self.error = "Bản xem trước chưa nhận diện và dịch được đoạn nguồn; bấm Tiếp tục để thử phần còn thiếu."
                     await self.emit("error", {"message": self.error})
                     await self.emit("progress", self.get_progress())
+                elif not self._preview_output_metadata()["preview_output_ready"]:
+                    self._preview_ready = False
+                    preview_output = self._preview_output_metadata()
+                    if preview_output["preview_untranslated_ids"]:
+                        await self.report_progress("prepared",
+                            missing_speech_message(preview_output["preview_untranslated_ids"]), None)
+                    else:
+                        self._startup_failed = True
+                        self.error = "Đoạn xem trước chưa có giọng Việt hợp lệ; bấm Tiếp tục để tạo lại phần thiếu."
+                        await self.emit("error", {"message": self.error})
+                        await self.emit("progress", self.get_progress())
                 elif any(s.status not in ("READY", "PLAYED") for s in owned):
                     self.error = "Bản xem trước còn câu chưa xử lý xong; phần đã lưu được giữ."
                     await self.emit("progress", self.get_progress())

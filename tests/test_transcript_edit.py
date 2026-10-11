@@ -1579,3 +1579,32 @@ def test_chunked_automatic_review_speech_failure_keeps_proof_but_never_completed
     assert session.get_progress()["progress_pct"] is None
     assert session.can_retry
     assert not any(data.get("status") == "COMPLETED" for kind, data in session.events if kind == "progress")
+
+
+def test_manual_speech_repair_makes_preview_available_without_touching_future_source(session):
+    session.video_path.write_bytes(b"isolated retained-source fixture; not used for media acceptance")
+    row = session.segments[0]
+    row.final_vi, row.audio_path, row.audio_url = "", None, None
+    row.needs_review = True
+    row.verification = {"status": "unresolved", "semantic_verified": False}
+    session.translation_mode = "preview"
+    session._chunked_source_started = session._visual_incremental_started = True
+    session._source_prepared_seconds = 12.
+    session._visual_completed_seconds = session._visual_scanned_seconds = 6.
+    session._preview_ready = False
+    session.progress.update(status="PREPARED", phase="prepared")
+    future = SegmentItem(1, 8., 10., 2.)
+    future.text_zh = future.asr_text = "还没翻译的源话"
+    session.segments[1] = future
+    before = deepcopy(vars(future))
+
+    async def run():
+        assert not session.can_translate_full
+        await session.edit_segment(0, "Lời người dùng đã kiểm tra.")
+        assert session.get_progress()["status"] == "PREVIEW_READY"
+        assert session.get_progress()["preview_output_ready"] and session.can_translate_full
+        assert row.audio_path and row.audio_url and row.verification["status"] == "manual"
+        assert vars(future) == before and future.status == "WAITING"
+        assert not any(data.get("status") == "COMPLETED" for kind, data in session.events if kind == "progress")
+
+    asyncio.run(run())

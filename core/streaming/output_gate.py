@@ -40,3 +40,26 @@ def final_output_metadata(rows):
     return {"missing_speech_ids": missing, "final_output_blocked": bool(missing),
             # This is an editorial state, never a claim of certain semantic truth.
             "content_review_state": "REVIEW_REQUIRED" if pending_review else "NO_PENDING_REVIEW"}
+
+
+def preview_output_metadata(rows, valid_audio):
+    """Require audible translated speech, or an actually speech-free prefix.
+
+    Source coverage is checked separately. A READY row containing unresolved
+    source speech with no Vietnamese and no WAV is not a translated sample.
+    A draft with real speech remains inspectable without approving its meaning.
+    """
+    rows = list(rows)
+    playable, missing_audio = [], []
+    untranslated = missing_spoken_output_ids(rows)
+    spoken = [row for row in rows if str(_value(row, "final_vi", "") or "").strip()
+              and _value(row, "confirmed_silence", False) is not True]
+    for row in spoken:
+        if _value(row, "status") in {"READY", "PLAYED"} and valid_audio(row):
+            playable.append(_value(row, "id"))
+        else:
+            missing_audio.append(_value(row, "id"))
+    return {"preview_output_ready": bool(playable or not spoken and not untranslated),
+            "preview_spoken_segments": len(playable),
+            "preview_untranslated_ids": untranslated,
+            "preview_missing_audio_ids": missing_audio}
