@@ -1,5 +1,13 @@
 # Runtime QA report
 
+## Word-style font controls — October 11, 2026
+
+**PASS in the offscreen production UI and export path.** The caption toolbar now works like a simple Word-style control: choose a font whose menu text uses that family, enter a concrete size in points, pick common sizes from the list, or press **Tự động** to return to adaptive sizing. Point sizes accept 6–96 pt in 0.5 pt increments. Bold remains a compact `B` toggle; color, background opacity/transparency, outline, placement and original-subtitle blur remain available. No browser or visible UI automation was used for this retest.
+
+The point value is stored as `font_size_pt` and takes precedence over the legacy percentage scale. Conversion to source pixels happens once (`pt × 4/3`), then the same measured cue drives preview and ASS/MP4 export. Long captions may still be safely fitted to the frame; the requested point value is retained so it can be restored when the layout permits. **454 Python tests and 233 JavaScript UI tests passed.**
+
+The real offscreen production check (`scripts/check_caption_typography_ui.py`) passed with an 18 pt Tahoma regular transparent caption, switched back to adaptive sizing, selected all five fonts, exercised the actual transparent-background checkbox and reset button, rendered a 2.7-second MP4 with the real composer, and reopened the saved style through a fresh QA backend. The output contained valid audio/video and preserved all 17 WAV hashes. No translation, Muse or TTS calls were made for style changes.
+
 ## Transparent backgrounds and subtitle typography — October 11, 2026
 
 **PASS for the new caption-style contract, real offscreen production UI, persisted selections and a real rendered excerpt.** Added background opacity 0–100% (0 means transparent), five installed Windows fonts, adaptive size 50–200%, bold and contrasting outline. Existing color, placement and original-subtitle blur controls remain independent. Changing style reuses the retained Vietnamese audio; it does not invoke Muse or TTS. This scoped acceptance does not establish full-video translation quality or resolve the previously documented semantic review issues.

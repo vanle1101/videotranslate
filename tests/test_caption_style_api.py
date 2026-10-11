@@ -216,7 +216,9 @@ def test_export_keeps_blur_evidence_independent_of_placement_toggle(caption_sess
     {"text_color": 123}, {"position": "outside"}, {"blur_original": "true"}, {"unknown": True},
     {"background_opacity": -1}, {"background_opacity": 101}, {"background_opacity": True},
     {"font_scale": 49}, {"font_scale": 201}, {"font_scale": "120"},
-    {"font_family": "Arial;bad"}, {"bold": 1}, {"outline": "true"}])
+    {"font_family": "Arial;bad"}, {"bold": 1}, {"outline": "true"},
+    {"font_size_pt": True}, {"font_size_pt": "12"}, {"font_size_pt": []},
+    {"font_size_pt": 5.5}, {"font_size_pt": 96.5}, {"font_size_pt": 12.25}])
 def test_invalid_style_never_mutates_session(caption_session, data):
     response = request(caption_session, data)
     assert response.status_code == 422
@@ -239,6 +241,22 @@ def test_transparent_background_and_typography_update_shared_layout(caption_sess
     assert payload["output_outdated"] and payload["source_subtitle_masks"]
     assert Path(caption_session.segments[0].audio_path).read_bytes() == before
     assert caption_session.tts_engine.mock_calls == []
+
+
+@pytest.mark.parametrize("points", [None, 6, 12.5, 24, 96])
+def test_word_point_size_api_contract_and_absolute_precedence(caption_session, points):
+    before = Path(caption_session.segments[0].audio_path).read_bytes()
+    response = request(caption_session, {"font_size_pt": points, "font_scale": 200,
+        "font_family": "Segoe UI", "position": "top"})
+    assert response.status_code == 200, response.text
+    payload = response.json()
+    cue = payload["segments"][0]["caption_layout"]["cues"][0]
+    assert payload["caption_style"]["font_size_pt"] == points and cue["font_size_pt"] == points
+    assert cue["font_family"] == "Segoe UI"
+    if points in (6, 12.5, 24):
+        assert cue["font_size"] == pytest.approx(points * 4 / 3, abs=.001)
+    assert Path(caption_session.segments[0].audio_path).read_bytes() == before
+    assert caption_session.tts_engine.mock_calls == [] and caption_session.translator.mock_calls == []
 
 
 @pytest.mark.parametrize("state", ["processing", "exporting", "failed", "not_ready"])

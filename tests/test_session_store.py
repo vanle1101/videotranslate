@@ -579,6 +579,8 @@ def test_stop_during_private_chunk_review_remains_stopped_on_reopen(persisted):
     {"background_opacity": -1}, {"background_opacity": 101}, {"background_opacity": True},
     {"font_scale": 49}, {"font_scale": 201}, {"font_scale": "150"},
     {"font_family": "Missing font"}, {"bold": "true"}, {"outline": 1},
+    {"font_size_pt": True}, {"font_size_pt": "12"}, {"font_size_pt": 5.5},
+    {"font_size_pt": 96.5}, {"font_size_pt": 12.25},
 ])
 def test_corrupted_caption_style_cannot_restore(persisted, style):
     path = _project_path(persisted.task_id)
@@ -597,6 +599,24 @@ def test_caption_transparency_and_typography_survive_restore(persisted):
     persisted.persist()
     restored = restore_saved_session(persisted.task_id)
     assert restored.caption_style == persisted.caption_style
+
+
+@pytest.mark.parametrize("points", [None, 6, 12.5, 24, 96])
+def test_word_point_size_survives_repeated_durable_restore_without_touching_audio(persisted, points):
+    segment = persisted.segments[0]
+    segment.subtitle_cues = [{"start": .1, "end": 1.8, "text": segment.final_vi}]
+    segment.subtitle_timing_source = "audio-onset-estimate"
+    before = Path(segment.audio_path).read_bytes()
+    persisted.caption_style = {"background_opacity": 0, "font_family": "Segoe UI", "font_scale": 200,
+                               "font_size_pt": points, "bold": False, "outline": True}
+    persisted.persist()
+    for _ in range(2):
+        restored = restore_saved_session(persisted.task_id)
+        assert restored.caption_style == persisted.caption_style
+        assert restored.caption_metadata(restored.segments[0].to_dict())["caption_layout"]["cues"][0]["font_size_pt"] == points
+        assert Path(restored.segments[0].audio_path).read_bytes() == before
+        restored.persist()
+        active_streaming_sessions.pop(persisted.task_id)
 
 
 def test_exact_nested_evidence_and_measured_cues_survive(persisted):

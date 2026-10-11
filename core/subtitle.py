@@ -87,7 +87,7 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
             # A precomputed layout is the preview/export contract. Validate its
             # typography again so font strings cannot become ASS controls.
             cue_style = normalize_caption_style({**layout_style,
-                **{key: cue[key] for key in ("background_opacity", "font_family", "bold") if key in cue}})
+                **{key: cue[key] for key in ("background_opacity", "font_family", "font_size_pt", "bold") if key in cue}})
             x, y, w, h = cue["bbox"]
             left, top, box_w, box_h = x * width, y * height, w * width, h * height
             radius = min(cue["border_radius"], box_h / 2, box_w / 2)

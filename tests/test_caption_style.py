@@ -25,7 +25,7 @@ def test_style_defaults_are_compatible_and_independent():
     defaults = normalize_caption_style()
     assert defaults == {"background_color": None, "text_color": "#000000", "position": "auto", "blur_original": False,
                         "background_opacity": 100, "font_family": "Arial", "font_scale": 100,
-                        "bold": True, "outline": False}
+                        "bold": True, "outline": False, "font_size_pt": None}
     assert build_caption_layout([speech()], [source()], (1920, 1080), defaults) == build_caption_layout([speech()], [source()], (1920, 1080))
     options = {"background_color": "#fe12ab", "text_color": "#12aBfE"}
     assert normalize_caption_style(options)["background_color"] == "#FE12AB"
@@ -43,7 +43,10 @@ def test_style_defaults_are_compatible_and_independent():
     {"font_scale": 100.0}, {"font_scale": float("nan")}, {"font_scale": float("inf")},
     {"font_family": "Arial\\1a&HFF&"}, {"font_family": "Arial,1"}, {"font_family": "arial"},
     {"font_family": None}, {"font_family": []}, {"bold": 1}, {"bold": "true"},
-    {"outline": 0}, {"outline": "false"}])
+    {"outline": 0}, {"outline": "false"},
+    {"font_size_pt": 5.5}, {"font_size_pt": 96.5}, {"font_size_pt": 12.25},
+    {"font_size_pt": True}, {"font_size_pt": "12"}, {"font_size_pt": []},
+    {"font_size_pt": float("nan")}, {"font_size_pt": float("inf")}, {"font_size_pt": 10 ** 1000}])
 def test_malformed_style_is_rejected(style):
     with pytest.raises(ValueError):
         normalize_caption_style(style)
@@ -177,6 +180,38 @@ def test_dark_text_has_opposing_light_outline():
     assert dark["outline_width"] > 0 and dark["outline_color"] == "#FFFFFF"
 
 
+@pytest.mark.parametrize("points", [6, 6.5, 12, 12.5, 24, 48, 96])
+def test_word_point_size_conversion_precedes_wrap_and_overrides_legacy_scale(tmp_path, points):
+    row = speech(final_vi="Mẹ ơi!", subtitle_cues=[{"start": .4, "end": 2.8, "text": "Mẹ ơi!"}])
+    plan = build_caption_layout([row], [], (1920, 1080), {"font_size_pt": points, "font_scale": 50})
+    other_scale = build_caption_layout([row], [], (1920, 1080), {"font_size_pt": points, "font_scale": 200})
+    assert plan["cues"] == other_scale["cues"]
+    cue = plan["cues"][0]
+    assert cue["font_size_pt"] == points
+    assert cue["font_size"] == pytest.approx(points * 4 / 3, abs=.001)
+    ass = SubtitleGenerator().generate_ass([row], tmp_path / "points.ass",
+        video_size=(1920, 1080), caption_layout=plan).read_text(encoding="utf-8")
+    assert f"\\fs{cue['font_size']:.3f}" in ass and "Mẹ ơi!" in ass
+    assert "0:00:00.40,0:00:02.80" in ass
+
+
+def test_auto_point_size_retains_legacy_scale_and_layout():
+    legacy = {"background_color": None, "text_color": "#000000", "position": "auto", "blur_original": False,
+              "background_opacity": 100, "font_family": "Arial", "font_scale": 150,
+              "bold": True, "outline": False}
+    assert normalize_caption_style(legacy)["font_size_pt"] is None
+    assert build_caption_layout([speech()], [], (1920, 1080), legacy) == build_caption_layout(
+        [speech()], [], (1920, 1080), {**legacy, "font_size_pt": None})
+
+
+def test_requested_point_size_is_preserved_when_long_text_requires_safe_fit():
+    row = speech(final_vi="W" * 100, subtitle_cues=[{"start": .4, "end": 2.8, "text": "W" * 100}])
+    cue = build_caption_layout([row], [], (360, 640), {"font_size_pt": 96})["cues"][0]
+    assert cue["font_size_pt"] == 96 and cue["font_size"] < 128
+    assert cue["text"] == "W" * 100
+    assert cue["bbox"][0] >= .039 and cue["bbox"][0] + cue["bbox"][2] <= .961
+
+
 def test_each_cue_controls_ass_style_and_rejects_unsafe_precomputed_font(tmp_path):
     plan = build_caption_layout([speech()], [], (1920, 1080))
     cue = plan["cues"][0]
@@ -252,6 +287,32 @@ def test_real_maximum_font_size_and_outline_stay_inside_caption_box(tmp_path, fo
     assert len(glyphs) > 30, "Vietnamese text and its contrasting outline must actually render"
     assert all(x * size[0] - 2 <= px <= (x + w) * size[0] + 2
                and y * size[1] - 2 <= py <= (y + h) * size[1] + 2 for px, py in glyphs)
+
+
+@pytest.mark.skipif(not shutil.which("ffmpeg"), reason="FFmpeg/libass required")
+def test_real_word_point_size_changes_exported_vietnamese_glyph_dimensions(tmp_path):
+    row = speech(final_vi="Chị đã về rồi.",
+        subtitle_cues=[{"start": .4, "end": 2.8, "text": "Chị đã về rồi."}])
+    measurements = []
+    for points in (18, 36):
+        style = {"background_opacity": 0, "font_family": "Segoe UI", "font_size_pt": points,
+                 "text_color": "#FFFFFF", "bold": False, "position": "middle"}
+        path = SubtitleGenerator().generate_ass([row], tmp_path / f"points-{points}.ass",
+                                                video_size=(1280, 720), caption_style=style)
+        completed = subprocess.run(["ffmpeg", "-hide_banner", "-loglevel", "error", "-nostdin",
+            "-f", "lavfi", "-i", "color=c=blue:s=1280x720:d=0.1", "-vf",
+            f"setpts=PTS+1/TB,ass=filename={_escape_filter_filename(path)}", "-frames:v", "1",
+            "-pix_fmt", "rgb24", "-f", "rawvideo", "pipe:1"], capture_output=True, timeout=20,
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+        assert completed.returncode == 0, completed.stderr.decode(errors="replace")
+        glyphs = [(index % 1280, index // 1280) for index, (r, g, b) in enumerate(zip(
+            completed.stdout[::3], completed.stdout[1::3], completed.stdout[2::3]))
+            if r > 150 and g > 150 and b > 150]
+        assert len(glyphs) > 30
+        measurements.append((max(x for x, _ in glyphs) - min(x for x, _ in glyphs) + 1,
+                             max(y for _, y in glyphs) - min(y for _, y in glyphs) + 1))
+    assert all(1.7 * smaller <= larger <= 2.3 * smaller
+               for smaller, larger in zip(*measurements))
 
 
 @pytest.mark.skipif(not shutil.which("ffmpeg"), reason="FFmpeg/libass required")

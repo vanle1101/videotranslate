@@ -116,8 +116,17 @@ html { scroll-padding-top: 106px; }
 .caption-font-control > select { width: 100%; min-width: 0; padding: 4px; border: 1px solid #354968; border-radius: 5px; background: #0a1120; color: #eef3ff; }
 .caption-font-control, .caption-size-control > label, .caption-opacity-control > label { white-space: nowrap; }
 .caption-typography-grid input[type="range"] { flex: 1; min-width: 35px; width: 100%; accent-color: #387bff; }
-.caption-percent-input { display: flex; align-items: center; gap: 2px; }
-.caption-percent-input input { width: 50px; padding: 4px 2px 4px 5px; border: 1px solid #354968; border-radius: 5px; background: #0a1120; color: #eef3ff; }
+.caption-point-input { display: flex; align-items: center; gap: 3px; }
+.caption-point-input input { width: 65px; min-width: 0; padding: 4px 2px 4px 5px; border: 1px solid #354968; border-radius: 5px; background: #0a1120; color: #eef3ff; font-size: 11px; }
+.caption-point-input input::placeholder { font-size: 10px; color: #aab8d2; }
+.caption-auto-size { padding: 4px 6px; border: 1px solid #354968; border-radius: 5px; background: #0a1120; color: #aebdd5; white-space: nowrap; }
+.caption-auto-size[aria-pressed="true"] { background: #213b60; border-color: #5a87c4; color: #eef3ff; }
+.caption-bold-button { position: relative; flex-shrink: 0; cursor: pointer; }
+.caption-bold-button input { position: absolute; width: 1px; height: 1px; opacity: 0; }
+.caption-bold-button > span { display: grid; place-items: center; width: 27px; height: 26px; border: 1px solid #354968; border-radius: 5px; background: #0a1120; font: bold 14px Georgia,serif; }
+.caption-bold-button input:checked + span { background: #213b60; border-color: #5a87c4; color: #eef3ff; }
+.caption-bold-button input:focus-visible + span { outline: 2px solid #83b4ff; outline-offset: 2px; }
+.caption-bold-button input:disabled + span { opacity: .45; cursor: not-allowed; }
 .caption-opacity-control { grid-column: 1 / -1; }
 .caption-opacity-control output { min-width: 34px; text-align: right; font-variant-numeric: tabular-nums; }
 .caption-style-panel input:focus-visible, .caption-style-panel select:focus-visible, .caption-style-panel button:focus-visible { outline: 2px solid #83b4ff; outline-offset: 2px; }

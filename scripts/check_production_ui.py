@@ -142,6 +142,7 @@ def read_style(page):
         blur_original:document.getElementById('caption-blur-original').checked,
         background_opacity:Number(document.getElementById('caption-background-opacity').value),
         font_scale:Number(document.getElementById('caption-font-scale').value),
+        font_size_pt:document.getElementById('caption-font-size-pt').value === '' ? null : Number(document.getElementById('caption-font-size-pt').value),
         font_family:document.getElementById('caption-font-family').value,
         bold:document.getElementById('caption-font-bold').checked,
         outline:document.getElementById('caption-font-outline').checked})""")
@@ -159,9 +160,12 @@ def set_style(page, style):
         document.getElementById('caption-background-opacity').value=s.background_opacity ?? 100;
         document.getElementById('caption-font-scale').value=s.font_scale ?? 100;
         document.getElementById('caption-font-scale-number').value=s.font_scale ?? 100;
+        document.getElementById('caption-font-size-pt').value=s.font_size_pt == null ? '' : s.font_size_pt;
         document.getElementById('caption-font-family').value=s.font_family || 'Arial';
         document.getElementById('caption-font-bold').checked=s.bold !== false;
         document.getElementById('caption-font-outline').checked=!!s.outline;
+        document.getElementById('caption-font-size-auto').setAttribute('aria-pressed',String(s.font_size_pt == null));
+        document.getElementById('caption-font-size-pt').dispatchEvent(new Event('change',{bubbles:true}));
         document.getElementById('caption-position').dispatchEvent(new Event('change',{bubbles:true}));
         return true;})()""")
     until(page, "document.getElementById('caption-style-status').textContent.startsWith('Đã lưu kiểu phụ đề') && !document.getElementById('caption-style-controls').disabled")

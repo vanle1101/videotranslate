@@ -94,6 +94,8 @@ document.addEventListener("DOMContentLoaded", () => {
   const captionFontFamily = document.getElementById("caption-font-family");
   const captionFontScale = document.getElementById("caption-font-scale");
   const captionFontScaleNumber = document.getElementById("caption-font-scale-number");
+  const captionFontSizePt = document.getElementById("caption-font-size-pt");
+  const captionFontSizeAuto = document.getElementById("caption-font-size-auto");
   const captionFontBold = document.getElementById("caption-font-bold");
   const captionFontOutline = document.getElementById("caption-font-outline");
   const captionPosition = document.getElementById("caption-position");
@@ -197,8 +199,9 @@ document.addEventListener("DOMContentLoaded", () => {
   let visualSession = false;
   const captionFonts = ["Arial", "Segoe UI", "Tahoma", "Verdana", "Times New Roman"];
   const defaultCaptionStyle = {background_color: null, text_color: "#000000", position: "auto", blur_original: false,
-    background_opacity: 100, font_family: "Arial", font_scale: 100, bold: true, outline: false};
+    background_opacity: 100, font_family: "Arial", font_scale: 100, font_size_pt: null, bold: true, outline: false};
   let captionStyle = {...defaultCaptionStyle};
+  let captionPointValue = null;
   let captionStyleTaskId = null, captionStyleTimer = null, captionStyleRequest = null;
   let captionStyleLastResponse = null;
   let captionStyleRevision = 0, captionStyleEditVersion = 0;
@@ -741,7 +744,11 @@ document.addEventListener("DOMContentLoaded", () => {
     captionBackgroundOpacityValue.textContent = `${value.background_opacity}%`;
     captionTransparentBackground.checked = value.background_opacity === 0;
     captionFontFamily.value = value.font_family;
+    captionFontFamily.style.fontFamily = `"${value.font_family}", ${value.font_family === "Times New Roman" ? "serif" : "Arial, sans-serif"}`;
     captionFontScale.value = captionFontScaleNumber.value = String(value.font_scale);
+    captionPointValue = value.font_size_pt;
+    captionFontSizePt.value = value.font_size_pt === null ? "" : String(value.font_size_pt);
+    captionFontSizeAuto.setAttribute("aria-pressed", String(value.font_size_pt === null));
     captionFontBold.checked = value.bold;
     captionFontOutline.checked = value.outline;
   }
@@ -755,8 +762,15 @@ document.addEventListener("DOMContentLoaded", () => {
     return {...defaultCaptionStyle, ...value,
       background_opacity: captionInteger(value.background_opacity, 0, 100, 100),
       font_scale: captionInteger(value.font_scale, 50, 200, 100),
+      font_size_pt: captionPointSize(value.font_size_pt),
       font_family: captionFonts.includes(value.font_family) ? value.font_family : "Arial",
       bold: value.bold !== false, outline: value.outline === true};
+  }
+
+  function captionPointSize(value) {
+    if (value == null || value === "") return null;
+    const numeric = typeof value === "boolean" ? NaN : Number(value);
+    return Number.isFinite(numeric) && numeric >= 6 && numeric <= 96 && Number.isInteger(numeric * 2) ? numeric : null;
   }
 
   function syncCaptionStyleTask() {
@@ -833,6 +847,7 @@ document.addEventListener("DOMContentLoaded", () => {
       background_opacity: captionInteger(captionBackgroundOpacity.value, 0, 100, 100),
       font_family: captionFonts.includes(captionFontFamily.value) ? captionFontFamily.value : "Arial",
       font_scale: captionInteger(captionFontScaleNumber.value, 50, 200, Number(captionFontScale.value) || 100),
+      font_size_pt: captionPointValue,
       bold: captionFontBold.checked, outline: captionFontOutline.checked};
   }
 
@@ -895,6 +910,10 @@ document.addEventListener("DOMContentLoaded", () => {
     control.addEventListener("input", scheduleCaptionStyle);
     control.addEventListener("change", scheduleCaptionStyle);
   }
+  captionFontFamily.addEventListener("change", () => {
+    const family = captionFonts.includes(captionFontFamily.value) ? captionFontFamily.value : "Arial";
+    captionFontFamily.style.fontFamily = `"${family}", ${family === "Times New Roman" ? "serif" : "Arial, sans-serif"}`;
+  });
   captionTransparentBackground.addEventListener("change", () => {
     if (captionStyleLocked()) return;
     captionBackgroundOpacity.value = captionTransparentBackground.checked ? "0" : "100";
@@ -919,6 +938,9 @@ document.addEventListener("DOMContentLoaded", () => {
     if (!committed && (!Number.isFinite(numeric) || numeric < 50 || numeric > 200)) return;
     const size = captionInteger(control.value, 50, 200, Number(captionFontScale.value) || 100);
     captionFontScale.value = String(size);
+    captionPointValue = null;
+    captionFontSizePt.value = "";
+    captionFontSizeAuto.setAttribute("aria-pressed", "true");
     // Preserve numeric editing until blur/change, so typing 150 is possible.
     if (committed || control === captionFontScale) captionFontScaleNumber.value = String(size);
     scheduleCaptionStyle();
@@ -927,6 +949,33 @@ document.addEventListener("DOMContentLoaded", () => {
   captionFontScale.addEventListener("change", () => updateCaptionSize(captionFontScale, true));
   captionFontScaleNumber.addEventListener("input", () => updateCaptionSize(captionFontScaleNumber));
   captionFontScaleNumber.addEventListener("change", () => updateCaptionSize(captionFontScaleNumber, true));
+  function updateCaptionPointSize(committed = false) {
+    if (captionStyleLocked()) return;
+    const empty = captionFontSizePt.value === "";
+    let size = captionPointSize(captionFontSizePt.value);
+    if (!empty && size === null) {
+      if (!committed) return;
+      const numeric = Number(captionFontSizePt.value);
+      if (!Number.isFinite(numeric)) {
+        captionFontSizePt.value = captionPointValue === null ? "" : String(captionPointValue);
+        return;
+      }
+      size = Math.round(Math.max(6, Math.min(96, numeric)) * 2) / 2;
+      captionFontSizePt.value = String(size);
+    }
+    captionPointValue = size;
+    captionFontSizeAuto.setAttribute("aria-pressed", String(size === null));
+    scheduleCaptionStyle();
+  }
+  captionFontSizePt.addEventListener("input", () => updateCaptionPointSize());
+  captionFontSizePt.addEventListener("change", () => updateCaptionPointSize(true));
+  captionFontSizeAuto.addEventListener("click", () => {
+    if (captionStyleLocked()) return;
+    captionFontSizePt.value = "";
+    captionPointValue = null;
+    captionFontSizeAuto.setAttribute("aria-pressed", "true");
+    scheduleCaptionStyle();
+  });
   captionStyleReset.addEventListener("click", () => {
     if (captionStyleLocked()) return;
     writeCaptionStyleControls(defaultCaptionStyle); scheduleCaptionStyle();
@@ -1950,7 +1999,10 @@ document.addEventListener("DOMContentLoaded", () => {
     // Match the ASS font in source pixels, then scale with the contained image.
     const sourceWidth = videoPlayer.videoWidth || width;
     const sourceHeight = videoPlayer.videoHeight || height;
-    return Math.max(8, Math.round(Math.min(sourceWidth * .035, sourceHeight * .028))) * width / sourceWidth * captionStyle.font_scale / 100;
+    const sourceFont = captionStyle.font_size_pt === null
+      ? Math.max(8, Math.round(Math.min(sourceWidth * .035, sourceHeight * .028))) * captionStyle.font_scale / 100
+      : captionStyle.font_size_pt * 4 / 3;
+    return sourceFont * width / sourceWidth;
   }
 
   function captionBackground(color, opacity) {
@@ -4868,10 +4920,11 @@ document.addEventListener("DOMContentLoaded", () => {
     const summary = document.getElementById("export-screen-text-summary");
     if (!summary) return;
     if (captionStyle.position !== "auto" || captionStyle.background_color || captionStyle.text_color !== "#000000" || captionStyle.blur_original ||
-        captionStyle.background_opacity !== 100 || captionStyle.font_family !== "Arial" || captionStyle.font_scale !== 100 || !captionStyle.bold || captionStyle.outline) {
+        captionStyle.background_opacity !== 100 || captionStyle.font_family !== "Arial" || captionStyle.font_scale !== 100 || captionStyle.font_size_pt !== null || !captionStyle.bold || captionStyle.outline) {
       const positions = {auto: "tự động", top: "phía trên", middle: "ở giữa", bottom: "phía dưới"};
       const background = captionStyle.background_opacity === 0 ? "trong suốt" : `${captionStyle.background_color || "vàng mặc định"} (${captionStyle.background_opacity}%)`;
-      summary.textContent = `Phụ đề ${positions[captionStyle.position] || "tự động"}, màu chữ ${captionStyle.text_color}, nền ${background}. Font ${captionStyle.font_family}, cỡ ${captionStyle.font_scale}%${captionStyle.bold ? ", đậm" : ""}${captionStyle.outline ? ", có viền chữ" : ""}. ${captionStyle.blur_original ? "Làm mờ vùng sub gốc đã nhận diện." : "Giữ nguyên sub gốc."} Xuất đúng kiểu đang xem trước, giữ nguyên giọng đọc.`;
+      const size = captionStyle.font_size_pt === null ? `tự động (${captionStyle.font_scale}%)` : `${captionStyle.font_size_pt} pt`;
+      summary.textContent = `Phụ đề ${positions[captionStyle.position] || "tự động"}, màu chữ ${captionStyle.text_color}, nền ${background}. Font ${captionStyle.font_family}, cỡ ${size}${captionStyle.bold ? ", đậm" : ""}${captionStyle.outline ? ", có viền chữ" : ""}. ${captionStyle.blur_original ? "Làm mờ vùng sub gốc đã nhận diện." : "Giữ nguyên sub gốc."} Xuất đúng kiểu đang xem trước, giữ nguyên giọng đọc.`;
       return;
     }
     summary.textContent = toggleScreenText.checked

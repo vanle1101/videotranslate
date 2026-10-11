@@ -2709,7 +2709,7 @@ function captionFixture(ui, overrides = {}) {
   return segment;
 }
 
-const defaultTypography = {background_opacity: 100, font_family: 'Arial', font_scale: 100, bold: true, outline: false};
+const defaultTypography = {background_opacity: 100, font_family: 'Arial', font_scale: 100, font_size_pt: null, bold: true, outline: false};
 function completedCaptionFixture(ui) {
   const segment = captionFixture(ui);
   const style = {background_color: null, text_color: '#000000', position: 'auto', blur_original: false};
@@ -2725,8 +2725,8 @@ function styledCaptionReply(segment, style, revision = 1) {
     cues: plan.cues.map(cue => ({...cue, bbox: [.1,.1,.8,.08],
       background_color: style.background_color || '#FFE500', color: style.text_color,
       background_opacity: style.background_opacity ?? 100, font_family: style.font_family || 'Arial',
-      bold: style.bold !== false, font_size: cue.font_size * (style.font_scale || 100) / 100,
-      outline_width: style.outline ? cue.font_size * (style.font_scale || 100) / 100 * .06 : 0,
+      bold: style.bold !== false, font_size: style.font_size_pt == null ? cue.font_size * (style.font_scale || 100) / 100 : style.font_size_pt * 4 / 3,
+      outline_width: style.outline ? (style.font_size_pt == null ? cue.font_size * (style.font_scale || 100) / 100 : style.font_size_pt * 4 / 3) * .06 : 0,
       outline_color: '#FFFFFF'}))});
   return {caption_style: style, caption_style_revision: revision, output_outdated: true,
     has_subtitle_regions: true, segments: [{...segment, caption_layout: restyle(segment.caption_layout),
@@ -2827,6 +2827,107 @@ test('numeric font input remains editable while typing and commits bounded integ
     assert.equal(input.value, String(expected));
     assert.equal(JSON.parse(ui.requests.at(-1).options.body).font_scale, expected);
   }
+});
+
+test('Word-style font toolbar exposes point suggestions and hides the legacy percentage controls', () => {
+  assert.match(template, /id="caption-font-size-pt"[^>]*list="caption-font-sizes"[^>]*min="6"[^>]*max="96"[^>]*step="0\.5"/);
+  const list = template.match(/<datalist id="caption-font-sizes">([\s\S]*?)<\/datalist>/)[1];
+  assert.deepEqual([...list.matchAll(/value="([\d.]+)"/g)].map(match => Number(match[1])),
+    [8, 9, 10, 11, 12, 14, 16, 18, 20, 24, 28, 32, 36, 48, 72, 96]);
+  assert.match(template, /<div hidden class="hidden"[^>]*><input id="caption-font-scale"/);
+  assert.match(template, /value="Times New Roman" style="font-family:'Times New Roman',serif"/);
+  assert.match(template, /id="caption-font-bold"[^>]*aria-label="Chữ đậm phụ đề"/);
+});
+
+test('point size saves real source-pixel typography and Auto returns to the preserved adaptive scale', async () => {
+  const ui = studio(); await ui.start(); const {segment, style} = completedCaptionFixture(ui);
+  const video = ui.el('video-player'); video.videoWidth = 1080; video.videoHeight = 1920;
+  ui.el('player-container').getBoundingClientRect = () => ({width: 600, height: 640});
+  await video.emit('loadedmetadata');
+  const chosen = {...defaultTypography, ...style, font_scale: 125, font_size_pt: 24,
+    font_family: 'Segoe UI', background_opacity: 0, outline: true};
+  ui.sockets.at(-1).receive({type: 'caption_style', ...styledCaptionReply(segment, {...chosen, font_size_pt: null}, 1)});
+  ui.replies.set('/api/streaming/fixture/caption-style', styledCaptionReply(segment, chosen, 2));
+  ui.el('caption-font-size-pt').value = '24';
+  await ui.el('caption-font-size-pt').emit('input');
+  assert.equal(ui.el('caption-font-size-auto')['aria-pressed'], 'false');
+  await ui.tickTimeouts(250);
+  assert.deepEqual(JSON.parse(ui.requests.at(-1).options.body), chosen);
+  assert.equal(parseFloat(ui.el('subtitle-text').style.fontSize), 32 / 3, '24 pt is 32 source pixels, scaled once to the contained video');
+  assert.equal(ui.el('caption-font-family').style.fontFamily, '"Segoe UI", Arial, sans-serif');
+  await ui.el('btn-export-hq').click();
+  assert.match(ui.el('export-screen-text-summary').textContent, /24 pt/);
+  await ui.el('btn-close-export-modal').click();
+  const automatic = {...chosen, font_size_pt: null};
+  ui.replies.set('/api/streaming/fixture/caption-style', styledCaptionReply(segment, automatic, 3));
+  await ui.el('caption-font-size-auto').click(); await ui.tickTimeouts(250);
+  assert.deepEqual(JSON.parse(ui.requests.at(-1).options.body), automatic);
+  assert.equal(ui.el('caption-font-size-pt').value, '');
+  assert.equal(ui.el('caption-font-size-auto')['aria-pressed'], 'true');
+  assert.equal(ui.el('caption-font-scale').value, '125');
+  assert.equal(ui.el('caption-transparent-background').checked, true);
+});
+
+test('point input accepts half points, bounds committed values and never leaks invalid draft into another style save', async () => {
+  const ui = studio(); await ui.start(); const {segment, style} = completedCaptionFixture(ui);
+  const input = ui.el('caption-font-size-pt');
+  const chosen = {...defaultTypography, ...style, font_size_pt: 12.5};
+  ui.replies.set('/api/streaming/fixture/caption-style', styledCaptionReply(segment, chosen, 1));
+  input.value = '1'; await input.emit('input');
+  input.value = '12.5'; await input.emit('input'); await ui.tickTimeouts(250);
+  assert.equal(JSON.parse(ui.requests.at(-1).options.body).font_size_pt, 12.5);
+  input.value = '1'; await input.emit('input');
+  ui.replies.set('/api/streaming/fixture/caption-style', styledCaptionReply(segment, {...chosen, text_color: '#112233'}, 2));
+  ui.el('caption-text-color').value = '#112233'; await ui.el('caption-text-color').emit('change'); await ui.tickTimeouts(250);
+  assert.equal(JSON.parse(ui.requests.at(-1).options.body).font_size_pt, 12.5, 'a partial draft cannot silently enable Auto');
+  for (const [raw, expected, revision] of [['101', 96, 3], ['2', 6, 4], ['14.3', 14.5, 5]]) {
+    input.value = raw;
+    ui.replies.set('/api/streaming/fixture/caption-style', styledCaptionReply(segment, {...chosen, text_color: '#112233', font_size_pt: expected}, revision));
+    await input.emit('change'); await ui.tickTimeouts(250);
+    assert.equal(input.value, String(expected));
+    assert.equal(JSON.parse(ui.requests.at(-1).options.body).font_size_pt, expected);
+  }
+});
+
+test('point size history survives reconnect and reset without redoing translation or speech', async () => {
+  const ui = studio(); await ui.start(); const {segment, style} = completedCaptionFixture(ui);
+  const chosen = {...defaultTypography, ...style, font_size_pt: 28, font_family: 'Tahoma', bold: false};
+  const snapshot = {...styledCaptionReply(segment, chosen, 2), initialized: true, duration: 4,
+    segments_count: 1, progress: {status: 'COMPLETED', phase: 'complete'}};
+  ui.replies.set('/api/streaming/history_points', snapshot);
+  await ui.window.studioAttachTask('history_points');
+  assert.equal(ui.el('caption-font-size-pt').value, '28');
+  assert.equal(ui.el('caption-font-size-auto')['aria-pressed'], 'false');
+  ui.replies.set('/api/streaming/history_points/caption-style', styledCaptionReply(segment, {...defaultTypography, ...style}, 3));
+  const before = ui.requests.length;
+  await ui.el('caption-style-reset').click(); await ui.tickTimeouts(250);
+  assert.equal(ui.requests.length, before + 1);
+  assert.equal(JSON.parse(ui.requests.at(-1).options.body).font_size_pt, null);
+  assert.equal(ui.el('caption-font-size-pt').value, '');
+  assert.equal(ui.el('caption-font-size-auto')['aria-pressed'], 'true');
+});
+
+test('point-size saves serialize and an older acknowledged response cannot replace a newer size', async () => {
+  const ui = studio(); await ui.start(); const {segment, style} = completedCaptionFixture(ui);
+  let finishFirst, finishSecond, count = 0;
+  ui.replies.set('/api/streaming/fixture/caption-style', () => new Promise(resolve => {
+    count++; if (count === 1) finishFirst = resolve; else finishSecond = resolve;
+  }));
+  const input = ui.el('caption-font-size-pt');
+  input.value = '20'; await input.emit('input'); await ui.tickTimeouts(250);
+  input.value = '28'; await input.emit('input'); await ui.tickTimeouts(250);
+  assert.equal(count, 1);
+  finishFirst({ok: true, json: async () => styledCaptionReply(segment, {...defaultTypography, ...style, font_size_pt: 20}, 1)});
+  await ui.flush(); assert.equal(count, 2);
+  assert.equal(input.value, '28');
+  assert.equal(JSON.parse(ui.requests.at(-1).options.body).font_size_pt, 28);
+  finishSecond({ok: true, json: async () => styledCaptionReply(segment, {...defaultTypography, ...style, font_size_pt: 28}, 2)});
+  await ui.flush();
+  ui.sockets.at(-1).receive({type: 'caption_style', ...styledCaptionReply(segment, {...defaultTypography, ...style, font_size_pt: 20}, 1)});
+  assert.equal(input.value, '28');
+  ui.window.loadDroppedLocalVideo('D:/next-points.mp4');
+  assert.equal(input.value, '');
+  assert.equal(ui.el('caption-font-size-auto')['aria-pressed'], 'true');
 });
 
 test('legacy snapshots use safe typography defaults and unexpected font metadata cannot inject CSS', async () => {

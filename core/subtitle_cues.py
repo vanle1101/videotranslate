@@ -20,7 +20,8 @@ def normalize_caption_style(style=None):
     defaults = {"background_color": None, "text_color": "#000000",
                 "position": "auto", "blur_original": False,
                 "background_opacity": 100, "font_family": "Arial",
-                "font_scale": 100, "bold": True, "outline": False}
+                "font_scale": 100, "bold": True, "outline": False,
+                "font_size_pt": None}
     if style is None:
         return defaults
     if not isinstance(style, dict):
@@ -43,6 +44,12 @@ def normalize_caption_style(style=None):
                                     ("font_scale", 50, 200, "Cỡ chữ")):
         if type(result[key]) is not int or not lower <= result[key] <= upper:
             raise ValueError(f"{label} phải là số nguyên từ {lower} đến {upper}.")
+    points = result["font_size_pt"]
+    if points is not None:
+        if (type(points) not in (int, float) or not 6 <= points <= 96
+                or not math.isfinite(points) or not float(points * 2).is_integer()):
+            raise ValueError("Cỡ chữ phải từ 6 đến 96 pt, theo bước 0,5 pt.")
+        result["font_size_pt"] = float(points)
     if not isinstance(result["font_family"], str) or result["font_family"] not in CAPTION_FONTS:
         raise ValueError("Font phụ đề không được hỗ trợ.")
     for key, label in (("bold", "Chữ đậm"), ("outline", "Viền chữ")):
@@ -620,7 +627,10 @@ def build_caption_layout(segments, screen_texts=None, video_size=None, caption_s
     width, height = max(16, int(width)), max(16, int(height))
     style = normalize_caption_style(caption_style)
     regions = _trusted_speech_regions(screen_texts, segments)
-    base_font = max(8, round(min(width * .035, height * .028))) * style["font_scale"] / 100
+    # Word-style point sizes use CSS's standard 96 dpi conversion. This same
+    # source-pixel size drives preview and ASS; legacy automatic scale survives.
+    base_font = (style["font_size_pt"] * 4 / 3 if style["font_size_pt"] is not None else
+                 max(8, round(min(width * .035, height * .028))) * style["font_scale"] / 100)
     # These conservative glyph measures retain Arial's legacy layout while
     # reserving more space for wider fonts. Scaling precedes word wrapping.
     glyph_width = {"Arial": .62, "Segoe UI": .68, "Tahoma": .68,
@@ -725,6 +735,7 @@ def build_caption_layout(segments, screen_texts=None, video_size=None, caption_s
                            "background": background, "color": "black", "border_radius": round(font * .18, 3),
                            "background_opacity": style["background_opacity"],
                            "font_family": style["font_family"], "bold": style["bold"],
+                           "font_size_pt": style["font_size_pt"],
                            "outline_width": round(font * stroke_ratio, 3),
                            "outline_color": caption_outline_color(style["text_color"])}
             if style["background_color"] is not None:

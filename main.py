@@ -156,6 +156,7 @@ class CaptionStyleRequest(BaseModel):
     background_opacity: int = Field(default=100, ge=0, le=100, strict=True)
     font_family: Literal["Arial", "Segoe UI", "Tahoma", "Verdana", "Times New Roman"] = "Arial"
     font_scale: int = Field(default=100, ge=50, le=200, strict=True)
+    font_size_pt: Optional[float] = Field(default=None, ge=6, le=96, multiple_of=.5, strict=True)
     bold: bool = Field(default=True, strict=True)
     outline: bool = Field(default=False, strict=True)
 
