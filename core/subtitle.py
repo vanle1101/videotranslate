@@ -1,7 +1,8 @@
 from pathlib import Path
+import math
 from typing import List, Dict, Any
 from config import settings
-from core.subtitle_cues import build_subtitle_cues, fit_title_text, normalize_screen_texts, uncovered_intervals, build_caption_layout, speech_caption_cues, normalize_caption_style
+from core.subtitle_cues import build_subtitle_cues, fit_title_text, normalize_screen_texts, uncovered_intervals, build_caption_layout, speech_caption_cues, normalize_caption_style, caption_outline_color
 
 
 def _ass_text(text: str) -> str:
@@ -64,6 +65,7 @@ class SubtitleGenerator:
         width, height = max(16, int(width)), max(16, int(height))
         style = normalize_caption_style(caption_style)
         layout = build_caption_layout(segments, screen_texts, (width, height), style) if caption_layout is None else caption_layout
+        layout_style = normalize_caption_style(layout.get("caption_style", style))
         header = f"""[Script Info]
 Title: Vietnamese Captions
 ScriptType: v4.00+
@@ -75,27 +77,44 @@ PlayResY: {height}
 
 [V4+ Styles]
 Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding
-Style: Caption,{self.font},32,&H00000000,&H00000000,&H00000000,&H00000000,-1,0,0,0,100,100,0,0,1,0,0,5,0,0,0,1
+Style: Caption,{layout_style['font_family']},32,&H00000000,&H00000000,&H00000000,&H00000000,-1,0,0,0,100,100,0,0,1,0,0,5,0,0,0,1
 
 [Events]
 Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
 """
         events = []
         for cue in layout["cues"]:
+            # A precomputed layout is the preview/export contract. Validate its
+            # typography again so font strings cannot become ASS controls.
+            cue_style = normalize_caption_style({**layout_style,
+                **{key: cue[key] for key in ("background_opacity", "font_family", "bold") if key in cue}})
             x, y, w, h = cue["bbox"]
             left, top, box_w, box_h = x * width, y * height, w * width, h * height
             radius = min(cue["border_radius"], box_h / 2, box_w / 2)
             color = _ass_color(cue["background_color"]) if cue.get("background_color") else ("00E5FF" if cue["background"] == "yellow" else "FFFFFF")
             text_color = _ass_color(cue["color"]) if cue.get("color", "black") != "black" else "000000"
-            rect = (f"{{\\an7\\pos({left:.3f},{top:.3f})\\p1\\bord0\\shad0\\1c&H{color}&}}"
+            alpha = round(255 * (100 - cue_style["background_opacity"]) / 100)
+            outline_width = cue.get("outline_width", cue["font_size"] * .065 if cue_style["outline"] else 0)
+            if (isinstance(outline_width, bool) or not isinstance(outline_width, (int, float))
+                    or not math.isfinite(outline_width) or outline_width < 0
+                    or outline_width > cue["font_size"]):
+                raise ValueError("Độ dày viền phụ đề không hợp lệ.")
+            outline_color = _ass_color(cue.get("outline_color") or caption_outline_color(
+                cue["color"] if cue.get("color", "black") != "black" else "#000000"))
+            rect = (f"{{\\an7\\pos({left:.3f},{top:.3f})\\p1\\bord0\\shad0\\1c&H{color}&\\1a&H{alpha:02X}&}}"
                     f"m {radius:.3f} 0 l {box_w-radius:.3f} 0 "
                     f"b {box_w:.3f} 0 {box_w:.3f} 0 {box_w:.3f} {radius:.3f} "
                     f"l {box_w:.3f} {box_h-radius:.3f} b {box_w:.3f} {box_h:.3f} {box_w:.3f} {box_h:.3f} {box_w-radius:.3f} {box_h:.3f} "
                     f"l {radius:.3f} {box_h:.3f} b 0 {box_h:.3f} 0 {box_h:.3f} 0 {box_h-radius:.3f} "
                     f"l 0 {radius:.3f} b 0 0 0 0 {radius:.3f} 0{{\\p0}}")
             position = (f"{{\\an5\\q2\\pos({left+box_w/2:.3f},{top+box_h/2:.3f})"
-                        f"\\fs{cue['font_size']:.3f}\\bord0\\shad0\\1c&H{text_color}&}}")
-            for layer, text in ((0, rect), (1, position + _ass_text(cue["text"]))):
+                        f"\\fn{cue_style['font_family']}\\b{-1 if cue_style['bold'] else 0}"
+                        f"\\fs{cue['font_size']:.3f}\\bord{outline_width:.3f}\\shad0"
+                        f"\\1c&H{text_color}&\\1a&H00&\\3c&H{outline_color}&\\3a&H00&}}")
+            layers = [(1, position + _ass_text(cue["text"]))]
+            if cue_style["background_opacity"] > 0:
+                layers.insert(0, (0, rect))
+            for layer, text in layers:
                 events.append(f"Dialogue: {layer},{self._format_time_ass(cue['start'])},{self._format_time_ass(cue['end'])},Caption,,0,0,0,,{text}")
         output_path.parent.mkdir(parents=True, exist_ok=True)
         output_path.write_text(header + "\n".join(events), encoding="utf-8")

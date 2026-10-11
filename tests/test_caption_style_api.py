@@ -213,11 +213,32 @@ def test_export_keeps_blur_evidence_independent_of_placement_toggle(caption_sess
 
 
 @pytest.mark.parametrize("data", [{"text_color": "red"}, {"background_color": "#000000;blur"},
-    {"text_color": 123}, {"position": "outside"}, {"blur_original": "true"}, {"unknown": True}])
+    {"text_color": 123}, {"position": "outside"}, {"blur_original": "true"}, {"unknown": True},
+    {"background_opacity": -1}, {"background_opacity": 101}, {"background_opacity": True},
+    {"font_scale": 49}, {"font_scale": 201}, {"font_scale": "120"},
+    {"font_family": "Arial;bad"}, {"bold": 1}, {"outline": "true"}])
 def test_invalid_style_never_mutates_session(caption_session, data):
     response = request(caption_session, data)
     assert response.status_code == 422
     assert caption_session.caption_style == {} and caption_session.output_filename == "old.mp4"
+
+
+def test_transparent_background_and_typography_update_shared_layout(caption_session):
+    before = Path(caption_session.segments[0].audio_path).read_bytes()
+    result = request(caption_session, {"background_opacity": 0, "font_scale": 150,
+        "font_family": "Tahoma", "text_color": "#FFFFFF", "bold": False, "outline": True,
+        "position": "bottom", "blur_original": True})
+    assert result.status_code == 200, result.text
+    payload = result.json()
+    cue = payload["segments"][0]["caption_layout"]["cues"][0]
+    assert payload["caption_style"]["background_opacity"] == 0
+    assert payload["caption_style"]["font_scale"] == 150
+    assert cue["font_family"] == "Tahoma" and cue["bold"] is False
+    assert cue["background_opacity"] == 0 and cue["outline_width"] > 0
+    assert cue["outline_color"] == "#000000"
+    assert payload["output_outdated"] and payload["source_subtitle_masks"]
+    assert Path(caption_session.segments[0].audio_path).read_bytes() == before
+    assert caption_session.tts_engine.mock_calls == []
 
 
 @pytest.mark.parametrize("state", ["processing", "exporting", "failed", "not_ready"])

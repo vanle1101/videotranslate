@@ -7,6 +7,8 @@ import re
 # stable-yellow palette migration and must be re-exported on demand.
 CAPTION_RENDERER_VERSION = 3
 
+CAPTION_FONTS = ("Arial", "Segoe UI", "Tahoma", "Verdana", "Times New Roman")
+
 
 def normalize_caption_style(style=None):
     """Validate public caption options before they reach CSS or ASS filters.
@@ -16,7 +18,9 @@ def normalize_caption_style(style=None):
     The result is independent of the caller's dictionary and safe to persist.
     """
     defaults = {"background_color": None, "text_color": "#000000",
-                "position": "auto", "blur_original": False}
+                "position": "auto", "blur_original": False,
+                "background_opacity": 100, "font_family": "Arial",
+                "font_scale": 100, "bold": True, "outline": False}
     if style is None:
         return defaults
     if not isinstance(style, dict):
@@ -35,7 +39,23 @@ def normalize_caption_style(style=None):
         raise ValueError("Vị trí phụ đề không hợp lệ.")
     if type(result["blur_original"]) is not bool:
         raise ValueError("Tùy chọn làm mờ phụ đề gốc phải là true hoặc false.")
+    for key, lower, upper, label in (("background_opacity", 0, 100, "Độ đậm nền"),
+                                    ("font_scale", 50, 200, "Cỡ chữ")):
+        if type(result[key]) is not int or not lower <= result[key] <= upper:
+            raise ValueError(f"{label} phải là số nguyên từ {lower} đến {upper}.")
+    if not isinstance(result["font_family"], str) or result["font_family"] not in CAPTION_FONTS:
+        raise ValueError("Font phụ đề không được hỗ trợ.")
+    for key, label in (("bold", "Chữ đậm"), ("outline", "Viền chữ")):
+        if type(result[key]) is not bool:
+            raise ValueError(f"{label} phải là true hoặc false.")
     return result
+
+
+def caption_outline_color(text_color):
+    """Choose one opposing stroke for readable text on transparent footage."""
+    text_color = normalize_caption_style({"text_color": text_color})["text_color"]
+    red, green, blue = (int(text_color[index:index + 2], 16) for index in (1, 3, 5))
+    return "#000000" if .2126 * red + .7152 * green + .0722 * blue >= 128 else "#FFFFFF"
 
 
 def _wrap_words(text, line_chars):
@@ -600,12 +620,18 @@ def build_caption_layout(segments, screen_texts=None, video_size=None, caption_s
     width, height = max(16, int(width)), max(16, int(height))
     style = normalize_caption_style(caption_style)
     regions = _trusted_speech_regions(screen_texts, segments)
-    base_font = max(8, round(min(width * .035, height * .028)))
+    base_font = max(8, round(min(width * .035, height * .028))) * style["font_scale"] / 100
+    # These conservative glyph measures retain Arial's legacy layout while
+    # reserving more space for wider fonts. Scaling precedes word wrapping.
+    glyph_width = {"Arial": .62, "Segoe UI": .68, "Tahoma": .68,
+                   "Verdana": .72, "Times New Roman": .66}[style["font_family"]]
+    stroke_ratio = .065 if style["outline"] else 0
     margin_x, gap = width * .04, max(2, height * .006)
     # Measured speech cues may contain automatic narrow-screen line breaks.
     # Reflow them for the actual frame, not a fixed 26-character column. Keep
     # a bounded reading measure even on very wide video, and room for padding.
-    line_chars = max(1, min(72, math.floor(((width - 2 * margin_x) / base_font - 1.1) / .62)))
+    line_chars = max(1, min(72, math.floor(((width - 2 * margin_x) / base_font
+                                         - 1.1 - 2 * stroke_ratio) / glyph_width)))
     output = []
     for index, segment in enumerate(segments or []):
         if not isinstance(segment, dict):
@@ -632,9 +658,11 @@ def build_caption_layout(segments, screen_texts=None, video_size=None, caption_s
         # must not make a sentence jump, change font, or switch background.
         longest = max(len(line) for page in pages for line in page["text"].split("\n"))
         line_count = max(len(page["text"].split("\n")) for page in pages)
-        font = min(base_font, (width - 2 * margin_x) / max(1, longest * .62 + 1.1))
-        pad_x, pad_y = font * .55, font * .20
-        box_w = min(width - 2 * margin_x, longest * font * .62 + 2 * pad_x)
+        font = min(base_font,
+                   (width - 2 * margin_x) / max(1, longest * glyph_width + 1.1 + 2 * stroke_ratio),
+                   height * .92 / (line_count * 1.25 + .4 + 2 * stroke_ratio))
+        pad_x, pad_y = font * (.55 + stroke_ratio), font * (.20 + stroke_ratio)
+        box_w = min(width - 2 * margin_x, longest * font * glyph_width + 2 * pad_x)
         box_h = line_count * font * 1.25 + 2 * pad_y
         utterance_start = min(page["start"] for page in pages)
         utterance_end = max(page["end"] for page in pages)
@@ -685,13 +713,20 @@ def build_caption_layout(segments, screen_texts=None, video_size=None, caption_s
             x = (width - box_w) / 2
             y = {"top": height * .04, "middle": (height - box_h) / 2,
                  "bottom": height * .96 - box_h}[placement]
+        # Tiny frames and unusually long manual lines must remain in-frame
+        # even when automatic placement falls back from a source region.
+        y = min(height * .98 - box_h, max(height * .02, y))
         for cue in pages:
             planned = {"segment_id": segment.get("id", index), "start": cue["start"], "end": cue["end"],
                            "text": cue["text"], "placement": placement,
                            "bbox": [x / width, y / height, box_w / width, box_h / height],
                            "source_bbox": source_bbox, "font_size": round(font, 3),
                            "video_size": [width, height],
-                           "background": background, "color": "black", "border_radius": round(font * .18, 3)}
+                           "background": background, "color": "black", "border_radius": round(font * .18, 3),
+                           "background_opacity": style["background_opacity"],
+                           "font_family": style["font_family"], "bold": style["bold"],
+                           "outline_width": round(font * stroke_ratio, 3),
+                           "outline_color": caption_outline_color(style["text_color"])}
             if style["background_color"] is not None:
                 planned.update(background="custom", background_color=style["background_color"])
             if style["text_color"] != "#000000":

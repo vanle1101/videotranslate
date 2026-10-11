@@ -2709,6 +2709,7 @@ function captionFixture(ui, overrides = {}) {
   return segment;
 }
 
+const defaultTypography = {background_opacity: 100, font_family: 'Arial', font_scale: 100, bold: true, outline: false};
 function completedCaptionFixture(ui) {
   const segment = captionFixture(ui);
   const style = {background_color: null, text_color: '#000000', position: 'auto', blur_original: false};
@@ -2722,11 +2723,169 @@ function styledCaptionReply(segment, style, revision = 1) {
   const restyle = plan => ({...plan, source_masks: style.blur_original
     ? [{start: .2, end: 1.8, bbox: [.2,.4,.6,.08]}] : [],
     cues: plan.cues.map(cue => ({...cue, bbox: [.1,.1,.8,.08],
-      background_color: style.background_color || '#FFE500', color: style.text_color}))});
+      background_color: style.background_color || '#FFE500', color: style.text_color,
+      background_opacity: style.background_opacity ?? 100, font_family: style.font_family || 'Arial',
+      bold: style.bold !== false, font_size: cue.font_size * (style.font_scale || 100) / 100,
+      outline_width: style.outline ? cue.font_size * (style.font_scale || 100) / 100 * .06 : 0,
+      outline_color: '#FFFFFF'}))});
   return {caption_style: style, caption_style_revision: revision, output_outdated: true,
     has_subtitle_regions: true, segments: [{...segment, caption_layout: restyle(segment.caption_layout),
       caption_bottom_layout: restyle(segment.caption_bottom_layout)}]};
 }
+
+test('transparent background saves independent color and blur with readable outline and opaque text', async () => {
+  const ui = studio(); await ui.start(); const {segment, style} = completedCaptionFixture(ui);
+  const chosen = {...defaultTypography, ...style, background_color: '#FFFFFF', blur_original: true};
+  ui.sockets.at(-1).receive({type: 'caption_style', ...styledCaptionReply(segment, chosen, 1)});
+  const transparent = {...chosen, background_opacity: 0, outline: true};
+  ui.replies.set('/api/streaming/fixture/caption-style', styledCaptionReply(segment, transparent, 2));
+  const before = ui.requests.length;
+  ui.el('caption-transparent-background').checked = true;
+  await ui.el('caption-transparent-background').emit('change');
+  assert.equal(ui.el('caption-font-outline').checked, true);
+  assert.equal(ui.el('caption-background-opacity-value').textContent, '0%');
+  await ui.tickTimeouts(250);
+  assert.equal(ui.requests.length, before + 1, 'styling never calls Muse or TTS');
+  assert.deepEqual(JSON.parse(ui.requests.at(-1).options.body), transparent);
+  const video = ui.el('video-player'); video.currentTime = .5; await video.emit('timeupdate');
+  const text = ui.el('subtitle-text');
+  assert.equal(text.style.background, 'rgba(255, 255, 255, 0)');
+  assert.equal(text.style.opacity, '1');
+  assert.equal(text.style.color, '#000000');
+  assert.equal(text.style.webkitTextStrokeColor, '#FFFFFF');
+  assert.equal(parseFloat(text.style.webkitTextStrokeWidth) > 0, true);
+  assert.equal(ui.el('screen-text-overlay').children.length, 1, 'original blur remains independent of background alpha');
+  assert.equal(ui.el('btn-save-result').disabled, true, 'old MP4 is invalidated');
+  const unoutlined = {...transparent, outline: false};
+  ui.replies.set('/api/streaming/fixture/caption-style', styledCaptionReply(segment, unoutlined, 3));
+  ui.el('caption-font-outline').checked = false; await ui.el('caption-font-outline').emit('change');
+  await ui.tickTimeouts(250);
+  assert.equal(ui.el('subtitle-text').style.webkitTextStrokeWidth, '0px', 'user can explicitly remove the suggested outline');
+});
+
+test('opacity slider updates its real percentage and coalesces dragging into one style mutation', async () => {
+  const ui = studio(); await ui.start(); const {segment, style} = completedCaptionFixture(ui);
+  const chosen = {...defaultTypography, ...style, background_opacity: 35};
+  ui.replies.set('/api/streaming/fixture/caption-style', styledCaptionReply(segment, chosen));
+  const before = ui.requests.length;
+  for (const value of ['75', '50', '35']) {
+    ui.el('caption-background-opacity').value = value;
+    await ui.el('caption-background-opacity').emit('input');
+    assert.equal(ui.el('caption-background-opacity-value').textContent, `${value}%`);
+  }
+  assert.equal(ui.requests.length, before);
+  await ui.tickTimeouts(250);
+  assert.equal(ui.requests.length, before + 1);
+  assert.deepEqual(JSON.parse(ui.requests.at(-1).options.body), chosen);
+  assert.equal(ui.el('subtitle-text').style.background, 'rgba(255, 229, 0, 0.35)');
+  assert.equal(ui.el('subtitle-text').style.opacity, '1');
+  assert.equal(ui.el('caption-auto-background').checked, true, 'default color is independent of alpha');
+  assert.equal(ui.el('caption-transparent-background').checked, false);
+});
+
+test('font size and weight use measured cue geometry and remain stable throughout an utterance', async () => {
+  const ui = studio(); await ui.start(); const {segment, style} = completedCaptionFixture(ui);
+  const video = ui.el('video-player'); video.videoWidth = 1080; video.videoHeight = 1920;
+  ui.el('player-container').getBoundingClientRect = () => ({width: 600, height: 640});
+  await video.emit('loadedmetadata');
+  const chosen = {...defaultTypography, ...style, font_family: 'Times New Roman', font_scale: 150, bold: false};
+  ui.replies.set('/api/streaming/fixture/caption-style', styledCaptionReply(segment, chosen));
+  ui.el('caption-font-family').value = chosen.font_family;
+  ui.el('caption-font-bold').checked = false;
+  ui.el('caption-font-scale').value = '150'; await ui.el('caption-font-scale').emit('input');
+  assert.equal(ui.el('caption-font-scale-number').value, '150');
+  await ui.tickTimeouts(250);
+  assert.deepEqual(JSON.parse(ui.requests.at(-1).options.body), chosen);
+  assert.equal(ui.el('subtitle-text').style.fontSize, '27px');
+  assert.equal(ui.el('subtitle-text').style.fontFamily, '"Times New Roman", serif');
+  assert.equal(ui.el('subtitle-text').style.fontWeight, '400');
+  const geometry = {...ui.el('subtitle-overlay').style};
+  video.currentTime = 1.5; await video.emit('timeupdate');
+  assert.deepEqual(ui.el('subtitle-overlay').style, geometry);
+  await ui.el('btn-export-hq').click();
+  assert.match(ui.el('export-screen-text-summary').textContent, /Times New Roman.*150%/);
+});
+
+test('numeric font input remains editable while typing and commits bounded integers without request flooding', async () => {
+  const ui = studio(); await ui.start(); const {segment, style} = completedCaptionFixture(ui);
+  const input = ui.el('caption-font-scale-number');
+  const before = ui.requests.length;
+  input.value = '1'; await input.emit('input');
+  assert.equal(input.value, '1');
+  assert.equal(ui.el('caption-font-scale').value, '100');
+  await ui.tickTimeouts(250); assert.equal(ui.requests.length, before);
+  input.value = '15'; await input.emit('input');
+  input.value = '150'; await input.emit('input');
+  assert.equal(ui.el('caption-font-scale').value, '150');
+  ui.replies.set('/api/streaming/fixture/caption-style', styledCaptionReply(segment, {...defaultTypography, ...style, font_scale: 150}, 1));
+  await input.emit('change'); await ui.tickTimeouts(250);
+  assert.equal(ui.requests.length, before + 1);
+  for (const [value, expected, revision] of [['999', 200, 2], ['2', 50, 3]]) {
+    input.value = value;
+    ui.replies.set('/api/streaming/fixture/caption-style', styledCaptionReply(segment, {...defaultTypography, ...style, font_scale: expected}, revision));
+    await input.emit('change'); await ui.tickTimeouts(250);
+    assert.equal(input.value, String(expected));
+    assert.equal(JSON.parse(ui.requests.at(-1).options.body).font_scale, expected);
+  }
+});
+
+test('legacy snapshots use safe typography defaults and unexpected font metadata cannot inject CSS', async () => {
+  const ui = studio(); await ui.start(); const {segment, style} = completedCaptionFixture(ui);
+  assert.equal(ui.el('caption-background-opacity').value, '100');
+  assert.equal(ui.el('caption-font-family').value, 'Arial');
+  assert.equal(ui.el('caption-font-scale-number').value, '100');
+  assert.equal(ui.el('caption-font-bold').checked, true);
+  assert.equal(ui.el('caption-font-outline').checked, false);
+  const changed = {...style, font_family: 'Arial"; background:red;', background_opacity: 'oops', font_scale: null};
+  const malformed = styledCaptionReply(segment, style, 1);
+  malformed.caption_style = changed;
+  malformed.segments[0].caption_layout.cues.forEach(cue => {cue.font_family = changed.font_family;});
+  ui.sockets.at(-1).receive({type: 'caption_style', ...malformed});
+  const video = ui.el('video-player'); video.currentTime = .5; await video.emit('timeupdate');
+  assert.equal(ui.el('subtitle-text').style.fontFamily, '"Arial", Arial, sans-serif');
+  assert.equal(ui.el('caption-font-family').value, 'Arial');
+  assert.equal(ui.el('caption-background-opacity').value, '100');
+});
+
+test('history restore and reset include typography, alpha and outline without repeating generation', async () => {
+  const ui = studio(); await ui.start(); const {segment, style} = completedCaptionFixture(ui);
+  const chosen = {...defaultTypography, ...style, font_family: 'Segoe UI', font_scale: 135,
+    background_color: '#FFFFFF', background_opacity: 0, bold: false, outline: true};
+  const snapshot = {...styledCaptionReply(segment, chosen, 2), initialized: true, duration: 4,
+    segments_count: 1, progress: {status: 'COMPLETED', phase: 'complete'}};
+  ui.replies.set('/api/streaming/history_style', snapshot);
+  const before = ui.requests.length;
+  await ui.window.studioAttachTask('history_style');
+  assert.equal(ui.el('caption-transparent-background').checked, true);
+  assert.equal(ui.el('caption-background-opacity-value').textContent, '0%');
+  assert.equal(ui.el('caption-font-family').value, 'Segoe UI');
+  assert.equal(ui.el('caption-font-scale-number').value, '135');
+  assert.equal(ui.el('caption-font-bold').checked, false);
+  assert.equal(ui.el('caption-font-outline').checked, true);
+  assert.equal(ui.requests.slice(before).some(request => request.options.method === 'POST'), false);
+  ui.replies.set('/api/streaming/history_style/caption-style', styledCaptionReply(segment, {...defaultTypography, ...style}, 3));
+  await ui.el('caption-style-reset').click(); await ui.tickTimeouts(250);
+  assert.deepEqual(JSON.parse(ui.requests.at(-1).options.body), {...defaultTypography, ...style});
+  assert.equal(ui.el('caption-transparent-background').checked, false);
+  assert.equal(ui.el('caption-font-scale').value, '100');
+  assert.equal(ui.el('caption-font-outline').checked, false);
+});
+
+test('switching project discards all typography controls and ignores the late old style save', async () => {
+  const ui = studio(); await ui.start(); const {segment, style} = completedCaptionFixture(ui);
+  let finish;
+  ui.replies.set('/api/streaming/fixture/caption-style', () => new Promise(resolve => {finish = resolve;}));
+  ui.el('caption-font-family').value = 'Tahoma'; await ui.el('caption-font-family').emit('change');
+  ui.el('caption-transparent-background').checked = true; await ui.el('caption-transparent-background').emit('change');
+  await ui.tickTimeouts(250);
+  ui.window.loadDroppedLocalVideo('D:/another.mp4');
+  finish({ok: true, json: async () => styledCaptionReply(segment, {...defaultTypography, ...style,
+    background_opacity: 0, outline: true, font_family: 'Tahoma'}, 1)}); await ui.flush();
+  assert.equal(ui.el('caption-transparent-background').checked, false);
+  assert.equal(ui.el('caption-background-opacity-value').textContent, '100%');
+  assert.equal(ui.el('caption-font-family').value, 'Arial');
+  assert.equal(ui.el('caption-font-outline').checked, false);
+});
 
 test('translated preview exposes caption controls before future lookahead is translated and retains saved style on reopen', async () => {
   const ui = studio(); await ui.start();
@@ -2747,7 +2906,7 @@ test('translated preview exposes caption controls before future lookahead is tra
   ui.el('caption-background-color').value = style.background_color;
   ui.el('caption-position').value = style.position;
   await ui.el('caption-position').emit('change'); await ui.tickTimeouts(250);
-  assert.deepEqual(JSON.parse(ui.requests.at(-1).options.body), style);
+  assert.deepEqual(JSON.parse(ui.requests.at(-1).options.body), {...defaultTypography, ...style});
   assert.equal(ui.el('caption-style-controls').disabled, false);
   ui.replies.set('/api/streaming/fixture', {...reply, initialized: true, duration: 6,
     segments_count: 2, progress, segments: [reply.segments[0], future]});
@@ -2850,7 +3009,7 @@ test('completed caption controls update measured preview and invalidate old MP4 
   const requests = ui.requests.slice(requestsBefore);
   assert.equal(requests.length, 1);
   assert.equal(requests[0].url, '/api/streaming/fixture/caption-style');
-  assert.deepEqual(JSON.parse(requests[0].options.body), style);
+  assert.deepEqual(JSON.parse(requests[0].options.body), {...defaultTypography, ...style});
   assert.equal(ui.el('btn-export-hq').disabled, false);
   assert.equal(ui.el('btn-save-result').disabled, true);
   assert.equal(ui.el('task-result-link').classList.contains('hidden'), true);
@@ -2992,7 +3151,7 @@ test('caption controls lock during transcript editing, review and export and res
   ui.sockets.at(-1).receive({type: 'caption_style', ...styledCaptionReply(segment, {...style, position: 'bottom', text_color: '#FFFFFF'}, 1)});
   ui.replies.set('/api/streaming/fixture/caption-style', styledCaptionReply(segment, style, 2));
   await ui.el('caption-style-reset').click(); await ui.tickTimeouts(250);
-  assert.deepEqual(JSON.parse(ui.requests.at(-1).options.body), style);
+  assert.deepEqual(JSON.parse(ui.requests.at(-1).options.body), {...defaultTypography, ...style});
   ui.sockets.at(-1).receive({type: 'export_progress', progress: 12, stage: 'Đang xuất'});
   assert.equal(ui.el('caption-style-controls').disabled, true);
 });

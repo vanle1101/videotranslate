@@ -181,6 +181,38 @@ def test_automatic_reflow_uses_portrait_width_and_preserves_all_words():
     assert (wide["start"], wide["end"]) == (portrait["start"], portrait["end"])
 
 
+def test_font_scale_is_applied_before_reflow_without_changing_words_or_cue_times():
+    text = "Trải nghiệm 400 mét hội thao qua góc nhìn thứ nhất."
+    segment = speech(final_vi=text, subtitle_timing_source="audio-onset-estimate",
+                     subtitle_cues=[{"start": .4, "end": 2.8, "text": text}])
+    small, large = (build_caption_layout([segment], [], (1920, 1080),
+        {"font_scale": scale})["cues"][0] for scale in (50, 200))
+    assert small["font_size"] == 15 and large["font_size"] > small["font_size"] * 3
+    assert small["text"] == text and large["text"].count("\n") == 1
+    assert " ".join(large["text"].split()) == text
+    assert (small["start"], small["end"]) == (large["start"], large["end"]) == (.4, 2.8)
+
+
+@pytest.mark.parametrize("size", [(16, 16), (360, 640), (640, 360), (1080, 1920), (1920, 1080)])
+@pytest.mark.parametrize("position", ["auto", "top", "middle", "bottom"])
+@pytest.mark.parametrize("font", ["Arial", "Verdana", "Times New Roman"])
+def test_maximum_font_scale_and_outline_keep_complete_text_inside_frame(size, position, font):
+    text = "Chị đã về rồi, em cứ bình tĩnh nói cho chị biết chuyện gì đang xảy ra."
+    segment = speech(final_vi=text, subtitle_timing_source="edge-word-boundary",
+                     subtitle_cues=[{"start": .4, "end": 2.8, "text": text}])
+    plan = build_caption_layout([segment], [region(bbox=[.3, .94, .4, .05])], size,
+        {"font_family": font, "font_scale": 200, "outline": True,
+         "position": position, "background_opacity": 0})
+    cue = plan["cues"][0]
+    assert " ".join(cue["text"].split()) == text
+    assert (cue["start"], cue["end"]) == (.4, 2.8)
+    x, y, w, h = cue["bbox"]
+    assert .039 <= x <= x + w <= .961
+    assert .019 <= y <= y + h <= .981
+    assert cue["font_size"] > 0 and cue["outline_width"] > 0
+    assert cue["background_opacity"] == 0
+
+
 @pytest.mark.parametrize("timing_source", [None, "edge-word-boundary", "audio-pause-estimate"])
 def test_user_line_breaks_survive_wider_video(timing_source):
     text = "Về nhất, phá kỷ\nlục của trường."

@@ -576,6 +576,9 @@ def test_stop_during_private_chunk_review_remains_stopped_on_reopen(persisted):
 @pytest.mark.parametrize("style", [
     {"position": "diagonal"}, {"text_color": "red"}, {"background_color": "#zzzzzz"},
     {"blur_original": "false"}, {"position": []},
+    {"background_opacity": -1}, {"background_opacity": 101}, {"background_opacity": True},
+    {"font_scale": 49}, {"font_scale": 201}, {"font_scale": "150"},
+    {"font_family": "Missing font"}, {"bold": "true"}, {"outline": 1},
 ])
 def test_corrupted_caption_style_cannot_restore(persisted, style):
     path = _project_path(persisted.task_id)
@@ -585,6 +588,15 @@ def test_corrupted_caption_style_cannot_restore(persisted, style):
     assert list_saved_sessions()[0]["can_open"] is False
     with pytest.raises((ValueError, TypeError)):
         restore_saved_session(persisted.task_id)
+
+
+def test_caption_transparency_and_typography_survive_restore(persisted):
+    persisted.caption_style = {"background_color": "#113355", "text_color": "#FFFFFF",
+        "position": "bottom", "blur_original": False, "background_opacity": 0,
+        "font_family": "Tahoma", "font_scale": 150, "bold": False, "outline": True}
+    persisted.persist()
+    restored = restore_saved_session(persisted.task_id)
+    assert restored.caption_style == persisted.caption_style
 
 
 def test_exact_nested_evidence_and_measured_cues_survive(persisted):

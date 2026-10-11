@@ -88,6 +88,14 @@ document.addEventListener("DOMContentLoaded", () => {
   const captionTextColor = document.getElementById("caption-text-color");
   const captionBackgroundColor = document.getElementById("caption-background-color");
   const captionAutoBackground = document.getElementById("caption-auto-background");
+  const captionTransparentBackground = document.getElementById("caption-transparent-background");
+  const captionBackgroundOpacity = document.getElementById("caption-background-opacity");
+  const captionBackgroundOpacityValue = document.getElementById("caption-background-opacity-value");
+  const captionFontFamily = document.getElementById("caption-font-family");
+  const captionFontScale = document.getElementById("caption-font-scale");
+  const captionFontScaleNumber = document.getElementById("caption-font-scale-number");
+  const captionFontBold = document.getElementById("caption-font-bold");
+  const captionFontOutline = document.getElementById("caption-font-outline");
   const captionPosition = document.getElementById("caption-position");
   const captionBlurOriginal = document.getElementById("caption-blur-original");
   const captionStyleReset = document.getElementById("caption-style-reset");
@@ -187,7 +195,9 @@ document.addEventListener("DOMContentLoaded", () => {
   let screenTextSignature = "";
   let sourceSubtitleMasks = null;
   let visualSession = false;
-  const defaultCaptionStyle = {background_color: null, text_color: "#000000", position: "auto", blur_original: false};
+  const captionFonts = ["Arial", "Segoe UI", "Tahoma", "Verdana", "Times New Roman"];
+  const defaultCaptionStyle = {background_color: null, text_color: "#000000", position: "auto", blur_original: false,
+    background_opacity: 100, font_family: "Arial", font_scale: 100, bold: true, outline: false};
   let captionStyle = {...defaultCaptionStyle};
   let captionStyleTaskId = null, captionStyleTimer = null, captionStyleRequest = null;
   let captionStyleLastResponse = null;
@@ -720,12 +730,33 @@ document.addEventListener("DOMContentLoaded", () => {
   }
 
   function writeCaptionStyleControls(value) {
+    value = normalizeCaptionStyle(value);
     captionTextColor.value = value.text_color || "#000000";
     captionAutoBackground.checked = value.background_color === null;
     captionBackgroundColor.value = value.background_color || "#FFE500";
     captionPosition.value = value.position || "auto";
     if (toggleScreenText) toggleScreenText.checked = captionPosition.value === "auto";
     captionBlurOriginal.checked = value.blur_original === true;
+    captionBackgroundOpacity.value = String(value.background_opacity);
+    captionBackgroundOpacityValue.textContent = `${value.background_opacity}%`;
+    captionTransparentBackground.checked = value.background_opacity === 0;
+    captionFontFamily.value = value.font_family;
+    captionFontScale.value = captionFontScaleNumber.value = String(value.font_scale);
+    captionFontBold.checked = value.bold;
+    captionFontOutline.checked = value.outline;
+  }
+
+  function captionInteger(value, minimum, maximum, fallback) {
+    const numeric = value == null || value === "" ? NaN : Number(value);
+    return Number.isFinite(numeric) ? Math.max(minimum, Math.min(maximum, Math.round(numeric))) : fallback;
+  }
+
+  function normalizeCaptionStyle(value = {}) {
+    return {...defaultCaptionStyle, ...value,
+      background_opacity: captionInteger(value.background_opacity, 0, 100, 100),
+      font_scale: captionInteger(value.font_scale, 50, 200, 100),
+      font_family: captionFonts.includes(value.font_family) ? value.font_family : "Arial",
+      bold: value.bold !== false, outline: value.outline === true};
   }
 
   function syncCaptionStyleTask() {
@@ -784,7 +815,7 @@ document.addEventListener("DOMContentLoaded", () => {
     const revision = Number(data.caption_style_revision) || 0;
     if (revision < captionStyleRevision || (!force && (captionStyleDirty || captionStyleRequest))) return;
     if (data.caption_style) {
-      captionStyle = {...defaultCaptionStyle, ...data.caption_style};
+      captionStyle = normalizeCaptionStyle(data.caption_style);
       captionStyleRevision = revision;
       writeCaptionStyleControls(captionStyle);
     }
@@ -798,7 +829,11 @@ document.addEventListener("DOMContentLoaded", () => {
   function readCaptionStyleControls() {
     return {text_color: captionTextColor.value,
       background_color: captionAutoBackground.checked ? null : captionBackgroundColor.value,
-      position: captionPosition.value, blur_original: captionBlurOriginal.checked};
+      position: captionPosition.value, blur_original: captionBlurOriginal.checked,
+      background_opacity: captionInteger(captionBackgroundOpacity.value, 0, 100, 100),
+      font_family: captionFonts.includes(captionFontFamily.value) ? captionFontFamily.value : "Arial",
+      font_scale: captionInteger(captionFontScaleNumber.value, 50, 200, Number(captionFontScale.value) || 100),
+      bold: captionFontBold.checked, outline: captionFontOutline.checked};
   }
 
   function scheduleCaptionStyle() {
@@ -855,10 +890,43 @@ document.addEventListener("DOMContentLoaded", () => {
     }
   }
 
-  for (const control of [captionTextColor, captionBackgroundColor, captionAutoBackground, captionPosition, captionBlurOriginal]) {
+  for (const control of [captionTextColor, captionBackgroundColor, captionAutoBackground, captionPosition, captionBlurOriginal,
+      captionFontFamily, captionFontBold, captionFontOutline]) {
     control.addEventListener("input", scheduleCaptionStyle);
     control.addEventListener("change", scheduleCaptionStyle);
   }
+  captionTransparentBackground.addEventListener("change", () => {
+    if (captionStyleLocked()) return;
+    captionBackgroundOpacity.value = captionTransparentBackground.checked ? "0" : "100";
+    captionBackgroundOpacityValue.textContent = `${captionBackgroundOpacity.value}%`;
+    if (captionTransparentBackground.checked) captionFontOutline.checked = true;
+    scheduleCaptionStyle();
+  });
+  function updateCaptionOpacity() {
+    if (captionStyleLocked()) return;
+    const previousTransparent = captionTransparentBackground.checked;
+    captionBackgroundOpacity.value = String(captionInteger(captionBackgroundOpacity.value, 0, 100, 100));
+    captionBackgroundOpacityValue.textContent = `${captionBackgroundOpacity.value}%`;
+    captionTransparentBackground.checked = Number(captionBackgroundOpacity.value) === 0;
+    if (!previousTransparent && captionTransparentBackground.checked) captionFontOutline.checked = true;
+    scheduleCaptionStyle();
+  }
+  captionBackgroundOpacity.addEventListener("input", updateCaptionOpacity);
+  captionBackgroundOpacity.addEventListener("change", updateCaptionOpacity);
+  function updateCaptionSize(control, committed = false) {
+    if (captionStyleLocked()) return;
+    const numeric = control.value === "" ? NaN : Number(control.value);
+    if (!committed && (!Number.isFinite(numeric) || numeric < 50 || numeric > 200)) return;
+    const size = captionInteger(control.value, 50, 200, Number(captionFontScale.value) || 100);
+    captionFontScale.value = String(size);
+    // Preserve numeric editing until blur/change, so typing 150 is possible.
+    if (committed || control === captionFontScale) captionFontScaleNumber.value = String(size);
+    scheduleCaptionStyle();
+  }
+  captionFontScale.addEventListener("input", () => updateCaptionSize(captionFontScale));
+  captionFontScale.addEventListener("change", () => updateCaptionSize(captionFontScale, true));
+  captionFontScaleNumber.addEventListener("input", () => updateCaptionSize(captionFontScaleNumber));
+  captionFontScaleNumber.addEventListener("change", () => updateCaptionSize(captionFontScaleNumber, true));
   captionStyleReset.addEventListener("click", () => {
     if (captionStyleLocked()) return;
     writeCaptionStyleControls(defaultCaptionStyle); scheduleCaptionStyle();
@@ -1882,7 +1950,34 @@ document.addEventListener("DOMContentLoaded", () => {
     // Match the ASS font in source pixels, then scale with the contained image.
     const sourceWidth = videoPlayer.videoWidth || width;
     const sourceHeight = videoPlayer.videoHeight || height;
-    return Math.max(8, Math.round(Math.min(sourceWidth * .035, sourceHeight * .028))) * width / sourceWidth;
+    return Math.max(8, Math.round(Math.min(sourceWidth * .035, sourceHeight * .028))) * width / sourceWidth * captionStyle.font_scale / 100;
+  }
+
+  function captionBackground(color, opacity) {
+    const hex = /^#[0-9a-f]{6}$/i.test(color || "") ? color : "#FFE500";
+    const alpha = captionInteger(opacity, 0, 100, 100);
+    if (alpha === 100) return hex;
+    const rgb = [1, 3, 5].map(index => parseInt(hex.slice(index, index + 2), 16));
+    return `rgba(${rgb.join(", ")}, ${alpha / 100})`;
+  }
+
+  function contrastCaptionOutline(color) {
+    const rgb = [1, 3, 5].map(index => parseInt(color.slice(index, index + 2), 16));
+    return rgb[0] * .2126 + rgb[1] * .7152 + rgb[2] * .0722 >= 128 ? "#000000" : "#FFFFFF";
+  }
+
+  function applyCaptionTypography(cue, renderedFontSize, sourceScale) {
+    const family = captionFonts.includes(cue?.font_family) ? cue.font_family : captionStyle.font_family;
+    const color = /^#[0-9a-f]{6}$/i.test(cue?.color || "") ? cue.color : captionStyle.text_color;
+    const hasMeasuredOutline = cue?.outline_width != null && Number.isFinite(cue.outline_width) && cue.outline_width >= 0;
+    const stroke = hasMeasuredOutline ? cue.outline_width * sourceScale * 2 : captionStyle.outline ? renderedFontSize * .13 : 0;
+    const outlineColor = /^#[0-9a-f]{6}$/i.test(cue?.outline_color || "") ? cue.outline_color : contrastCaptionOutline(color);
+    Object.assign(subtitleText.style, {
+      fontFamily: `"${family}", ${family === "Times New Roman" ? "serif" : "Arial, sans-serif"}`,
+      fontWeight: (cue?.bold ?? captionStyle.bold) ? "700" : "400",
+      color, opacity: "1", textShadow: "none", paintOrder: "stroke fill",
+      webkitTextStrokeWidth: `${stroke}px`, webkitTextStrokeColor: outlineColor,
+    });
   }
 
   function resetScreenTexts() {
@@ -1938,20 +2033,25 @@ document.addEventListener("DOMContentLoaded", () => {
     const side = (frame.width - width) / 2, top = (frame.height - height) / 2;
     if (cue) {
       const [x,y,w,h] = cue.bbox;
+      const sourceScale = width / cue.video_size[0];
+      const fontSize = cue.font_size * sourceScale;
       Object.assign(subtitleOverlay.style, { left: `${side+x*width}px`, top: `${top+y*height}px`,
         width: `${w*width}px`, height: `${h*height}px`, right: "auto", bottom: "auto" });
       Object.assign(subtitleText.style, { width: "100%", height: "100%", padding: "0",
         display: "flex", alignItems: "center", justifyContent: "center", boxSizing: "border-box",
-        fontSize: `${cue.font_size * width / cue.video_size[0]}px`,
-        background: /^#[0-9a-f]{6}$/i.test(cue.background_color || "") ? cue.background_color : cue.background === "yellow" ? "#FFE500" : "#FFFFFF",
+        fontSize: `${fontSize}px`,
+        background: captionBackground(cue.background_color || (cue.background === "yellow" ? "#FFE500" : "#FFFFFF"),
+          cue.background_opacity ?? captionStyle.background_opacity),
         color: /^#[0-9a-f]{6}$/i.test(cue.color || "") ? cue.color : "#000000",
         borderRadius: `${cue.border_radius * width / cue.video_size[0]}px` });
+      applyCaptionTypography(cue, fontSize, sourceScale);
     } else {
       Object.assign(subtitleOverlay.style, {left: `${side+width*.04}px`, right: `${side+width*.04}px`,
         top: "auto", bottom: `${top+height*.10}px`, width: "auto", height: "auto" });
       Object.assign(subtitleText.style, { width: "auto", height: "auto", padding: ".2em .55em",
-        display: "inline-block", background: captionStyle.background_color || "#FFE500",
-        color: captionStyle.text_color || "#000000", fontSize: `${subtitleFontSize(width,height)}px` });
+        display: "inline-block", background: captionBackground(captionStyle.background_color, captionStyle.background_opacity),
+        color: captionStyle.text_color || "#000000", fontSize: `${subtitleFontSize(width,height)}px`, borderRadius: ".18em" });
+      applyCaptionTypography(null, subtitleFontSize(width,height), width / (videoPlayer.videoWidth || width));
     }
   }
 
@@ -4767,13 +4867,15 @@ document.addEventListener("DOMContentLoaded", () => {
   function updateExportScreenTextSummary() {
     const summary = document.getElementById("export-screen-text-summary");
     if (!summary) return;
-    if (captionStyle.position !== "auto" || captionStyle.background_color || captionStyle.text_color !== "#000000" || captionStyle.blur_original) {
+    if (captionStyle.position !== "auto" || captionStyle.background_color || captionStyle.text_color !== "#000000" || captionStyle.blur_original ||
+        captionStyle.background_opacity !== 100 || captionStyle.font_family !== "Arial" || captionStyle.font_scale !== 100 || !captionStyle.bold || captionStyle.outline) {
       const positions = {auto: "tự động", top: "phía trên", middle: "ở giữa", bottom: "phía dưới"};
-      summary.textContent = `Phụ đề ${positions[captionStyle.position] || "tự động"}, màu chữ ${captionStyle.text_color}, nền ${captionStyle.background_color || "vàng mặc định"}. ${captionStyle.blur_original ? "Làm mờ vùng sub gốc đã nhận diện." : "Giữ nguyên sub gốc."} Xuất đúng kiểu đang xem trước, giữ nguyên giọng đọc.`;
+      const background = captionStyle.background_opacity === 0 ? "trong suốt" : `${captionStyle.background_color || "vàng mặc định"} (${captionStyle.background_opacity}%)`;
+      summary.textContent = `Phụ đề ${positions[captionStyle.position] || "tự động"}, màu chữ ${captionStyle.text_color}, nền ${background}. Font ${captionStyle.font_family}, cỡ ${captionStyle.font_scale}%${captionStyle.bold ? ", đậm" : ""}${captionStyle.outline ? ", có viền chữ" : ""}. ${captionStyle.blur_original ? "Làm mờ vùng sub gốc đã nhận diện." : "Giữ nguyên sub gốc."} Xuất đúng kiểu đang xem trước, giữ nguyên giọng đọc.`;
       return;
     }
     summary.textContent = toggleScreenText.checked
-      ? "Tự đặt vị trí: giữ sub Trung, lời Việt nền vàng ở ngay dưới; không có sub gốc thì dùng ô trắng nhỏ phía dưới. Mỗi lượt thoại chỉ hiện khi bắt đầu đọc."
+      ? "Tự đặt vị trí: giữ sub Trung, lời Việt nền vàng ở ngay dưới; không có sub gốc thì đặt lời Việt phía dưới. Mỗi lượt thoại chỉ hiện khi bắt đầu đọc."
       : "Sub Việt nhỏ ở phía dưới. Giữ nguyên chữ và hình nguồn; mỗi lượt thoại hiện cùng giọng đọc.";
   }
   btnExportHQ.addEventListener("click", () => {

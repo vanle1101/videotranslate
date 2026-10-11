@@ -89,7 +89,7 @@ META_FIELDS = frozenset((
     "source text verified meaning_preserved natural accepted candidate measured_seconds max_speed "
     "kind text_vi mask_only needs_review review_reason source_method text word words "
     "checked corrected unresolved manual incomplete version method speech_id duration ratio "
-    "background_color text_color position blur_original suppression_level_db throughput_rtf "
+    "background_color text_color position blur_original background_opacity font_family font_scale bold outline suppression_level_db throughput_rtf "
     "zh vi source_evidence_ids speaker theme terms pronouns name src tgt note "
     "address_context address_context_sources address_stale_source_ids address_applicable address_neutral_faithful address_verified address_reason address_preserved self_address listener_address self_uncertain listener_uncertain address_uses uncertain quote "
     "source_accepted source_scope_conflict full_text_zh source_scope_ids source_scope_window source_scope_ambiguous "
@@ -643,12 +643,11 @@ def _validate_project(data, task_id):
         if not isinstance(fields.get(key, {}), dict):
             raise ValueError("Siêu dữ liệu dự án không hợp lệ.")
     style = fields.get("caption_style", {})
-    if (set(style) - {"background_color", "text_color", "position", "blur_original"}
-            or style.get("position", "auto") not in {"auto", "top", "middle", "bottom"}
-            or type(style.get("blur_original", False)) is not bool
-            or any(not isinstance(style[key], str) or not re.fullmatch(r"#[0-9a-fA-F]{6}", style[key])
-                   for key in ("text_color", "background_color") if key in style and not (key == "background_color" and style[key] is None))):
-        raise ValueError("Kiểu phụ đề đã lưu không hợp lệ.")
+    from core.subtitle_cues import normalize_caption_style
+    try:
+        normalize_caption_style(style)
+    except (ValueError, TypeError):
+        raise ValueError("Kiểu phụ đề đã lưu không hợp lệ.") from None
     revision = fields.get("caption_style_revision", 0)
     if type(revision) is not int or revision < 0:
         raise ValueError("Phiên bản phụ đề không hợp lệ.")

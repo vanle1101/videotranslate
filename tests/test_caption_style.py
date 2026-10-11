@@ -5,7 +5,7 @@ import subprocess
 import pytest
 
 from core.subtitle import SubtitleGenerator
-from core.subtitle_cues import build_caption_layout, normalize_caption_style
+from core.subtitle_cues import CAPTION_FONTS, build_caption_layout, normalize_caption_style
 from core.video_composer import _escape_filter_filename
 
 
@@ -23,7 +23,9 @@ def source(**changes):
 
 def test_style_defaults_are_compatible_and_independent():
     defaults = normalize_caption_style()
-    assert defaults == {"background_color": None, "text_color": "#000000", "position": "auto", "blur_original": False}
+    assert defaults == {"background_color": None, "text_color": "#000000", "position": "auto", "blur_original": False,
+                        "background_opacity": 100, "font_family": "Arial", "font_scale": 100,
+                        "bold": True, "outline": False}
     assert build_caption_layout([speech()], [source()], (1920, 1080), defaults) == build_caption_layout([speech()], [source()], (1920, 1080))
     options = {"background_color": "#fe12ab", "text_color": "#12aBfE"}
     assert normalize_caption_style(options)["background_color"] == "#FE12AB"
@@ -34,7 +36,14 @@ def test_style_defaults_are_compatible_and_independent():
 @pytest.mark.parametrize("style", [False, [], "yellow", {"unknown": True}, {"background_color": "red"},
     {"background_color": "#fff"}, {"text_color": None}, {"text_color": "#FFFFFF;bad"},
     {"text_color": "#FFFFFF\\1a&HFF&"}, {"position": "left"}, {"position": []},
-    {"blur_original": 1}, {"blur_original": "false"}])
+    {"blur_original": 1}, {"blur_original": "false"},
+    {"background_opacity": -1}, {"background_opacity": 101}, {"background_opacity": True},
+    {"background_opacity": "0"}, {"background_opacity": 50.0}, {"background_opacity": None},
+    {"font_scale": 49}, {"font_scale": 201}, {"font_scale": True}, {"font_scale": "100"},
+    {"font_scale": 100.0}, {"font_scale": float("nan")}, {"font_scale": float("inf")},
+    {"font_family": "Arial\\1a&HFF&"}, {"font_family": "Arial,1"}, {"font_family": "arial"},
+    {"font_family": None}, {"font_family": []}, {"bold": 1}, {"bold": "true"},
+    {"outline": 0}, {"outline": "false"}])
 def test_malformed_style_is_rejected(style):
     with pytest.raises(ValueError):
         normalize_caption_style(style)
@@ -132,6 +141,117 @@ def test_ass_uses_rgb_colors_as_bgr_and_matches_preview_coordinates(tmp_path):
     x, y, w, h = plan["cues"][0]["bbox"]
     assert f"\\pos({(x+w/2)*1920:.3f},{(y+h/2)*1080:.3f})" in ass
     assert ass.count("Dialogue:") == 2, "ASS must not substitute an opaque rectangle for source blur"
+
+
+@pytest.mark.parametrize("font", CAPTION_FONTS)
+def test_selected_font_weight_and_outline_are_retained_in_precomputed_ass(tmp_path, font):
+    style = {"font_family": font, "font_scale": 150, "bold": False, "outline": True,
+             "background_opacity": 0, "text_color": "#FFFFFF"}
+    plan = build_caption_layout([speech()], [source()], (1920, 1080), style)
+    cue = plan["cues"][0]
+    assert cue["font_family"] == font and cue["bold"] is False
+    assert cue["outline_width"] > 0 and cue["outline_color"] == "#000000"
+    # Exporter supplies the layout without a second caption_style argument.
+    ass = SubtitleGenerator().generate_ass([speech()], tmp_path / "font.ass",
+        video_size=(1920, 1080), caption_layout=plan).read_text(encoding="utf-8")
+    assert f"\\fn{font}\\b0" in ass
+    assert f"\\bord{cue['outline_width']:.3f}" in ass
+    assert r"\3c&H000000&" in ass and r"\1a&H00&" in ass
+    assert "Dialogue: 0," not in ass and r"\p1" not in ass
+    assert "Về nhất, phá kỷ" in ass and "lục của trường." in ass
+
+
+@pytest.mark.parametrize("opacity,alpha", [(100, "00"), (75, "40"), (50, "80"), (25, "BF"), (1, "FC")])
+def test_partial_background_alpha_does_not_fade_text(tmp_path, opacity, alpha):
+    plan = build_caption_layout([speech()], [], (1920, 1080), {"background_opacity": opacity})
+    ass = SubtitleGenerator().generate_ass([speech()], tmp_path / "alpha.ass",
+        video_size=(1920, 1080), caption_layout=plan).read_text(encoding="utf-8")
+    background, text = (line for line in ass.splitlines() if line.startswith("Dialogue:"))
+    assert f"\\1a&H{alpha}&" in background
+    assert r"\1a&H00&" in text and r"\b-1" in text
+    assert r"\bord0.000" in text
+
+
+def test_dark_text_has_opposing_light_outline():
+    dark = build_caption_layout([speech()], [], (1920, 1080), {"outline": True})["cues"][0]
+    assert dark["outline_width"] > 0 and dark["outline_color"] == "#FFFFFF"
+
+
+def test_each_cue_controls_ass_style_and_rejects_unsafe_precomputed_font(tmp_path):
+    plan = build_caption_layout([speech()], [], (1920, 1080))
+    cue = plan["cues"][0]
+    cue.update(background_opacity=0, font_family="Tahoma", bold=False,
+               outline_width=1.5, outline_color="#FFFFFF")
+    ass = SubtitleGenerator().generate_ass([speech()], tmp_path / "cue.ass",
+        video_size=(1920, 1080), caption_layout=plan).read_text(encoding="utf-8")
+    assert "Dialogue: 0," not in ass and r"\fnTahoma\b0" in ass and r"\bord1.500" in ass
+    cue["font_family"] = r"Arial\alpha&HFF&"
+    with pytest.raises(ValueError, match="Font"):
+        SubtitleGenerator().generate_ass([speech()], tmp_path / "unsafe.ass", caption_layout=plan)
+    assert not (tmp_path / "unsafe.ass").exists()
+
+
+@pytest.mark.parametrize("outline", [-1, float("nan"), float("inf"), True, "1", 200])
+def test_corrupt_precomputed_outline_is_rejected_before_export(tmp_path, outline):
+    plan = build_caption_layout([speech()], [], (1920, 1080), {"outline": True})
+    plan["cues"][0]["outline_width"] = outline
+    with pytest.raises(ValueError, match="viền"):
+        SubtitleGenerator().generate_ass([speech()], tmp_path / "unsafe.ass", caption_layout=plan)
+    assert not (tmp_path / "unsafe.ass").exists()
+
+
+@pytest.mark.skipif(not shutil.which("ffmpeg"), reason="FFmpeg/libass required")
+@pytest.mark.parametrize("opacity", [0, 50, 100])
+def test_real_libass_transparency_changes_only_background(tmp_path, opacity):
+    style = {"background_color": "#FF0000", "text_color": "#00FF00", "position": "middle",
+             "background_opacity": opacity, "font_family": "Tahoma", "font_scale": 150,
+             "bold": False, "outline": False}
+    path = SubtitleGenerator().generate_ass([speech()], tmp_path / "alpha-render.ass",
+                                            video_size=(640, 360), caption_style=style)
+    completed = subprocess.run(["ffmpeg", "-hide_banner", "-loglevel", "error", "-nostdin",
+        "-f", "lavfi", "-i", "color=c=blue:s=640x360:d=0.1", "-vf",
+        f"setpts=PTS+1/TB,ass=filename={_escape_filter_filename(path)}", "-frames:v", "1",
+        "-pix_fmt", "rgb24", "-f", "rawvideo", "pipe:1"], capture_output=True, timeout=20,
+        creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+    assert completed.returncode == 0, completed.stderr.decode(errors="replace")
+    pixels = list(zip(completed.stdout[::3], completed.stdout[1::3], completed.stdout[2::3]))
+    assert len(pixels) == 640 * 360
+    red = sum(r > 180 and g < 50 and b < 60 for r, g, b in pixels)
+    purple = sum(95 < r < 160 and g < 50 and 95 < b < 170 for r, g, b in pixels)
+    green = sum(g > 180 and r < 60 and b < 80 for r, g, b in pixels)
+    # 15 px regular Tahoma is antialiased, and YUV chroma subsampling changes
+    # edge pixels. Its opaque interiors must still exceed a faded 50% green.
+    assert green > 5, "Text must remain opaque at all background opacity settings"
+    if opacity == 100:
+        assert red > 150 and purple < 30
+    elif opacity == 50:
+        assert red == 0 and purple > 150
+    else:
+        assert red == 0 and purple < 30
+
+
+@pytest.mark.skipif(not shutil.which("ffmpeg"), reason="FFmpeg/libass required")
+@pytest.mark.parametrize("font", CAPTION_FONTS)
+@pytest.mark.parametrize("size", [(360, 640), (640, 360)])
+def test_real_maximum_font_size_and_outline_stay_inside_caption_box(tmp_path, font, size):
+    style = {"background_opacity": 0, "font_family": font, "font_scale": 200,
+             "position": "bottom", "outline": True}
+    plan = build_caption_layout([speech()], [], size, style)
+    path = SubtitleGenerator().generate_ass([speech()], tmp_path / "bounds.ass",
+        video_size=size, caption_layout=plan)
+    completed = subprocess.run(["ffmpeg", "-hide_banner", "-loglevel", "error", "-nostdin",
+        "-f", "lavfi", "-i", f"color=c=blue:s={size[0]}x{size[1]}:d=0.1", "-vf",
+        f"setpts=PTS+1/TB,ass=filename={_escape_filter_filename(path)}", "-frames:v", "1",
+        "-pix_fmt", "rgb24", "-f", "rawvideo", "pipe:1"], capture_output=True, timeout=20,
+        creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+    assert completed.returncode == 0, completed.stderr.decode(errors="replace")
+    x, y, w, h = plan["cues"][0]["bbox"]
+    glyphs = [(index % size[0], index // size[0]) for index, (r, g, b) in enumerate(zip(
+        completed.stdout[::3], completed.stdout[1::3], completed.stdout[2::3]))
+        if (r > 150 and g > 150 and b > 150) or max(r, g, b) < 35]
+    assert len(glyphs) > 30, "Vietnamese text and its contrasting outline must actually render"
+    assert all(x * size[0] - 2 <= px <= (x + w) * size[0] + 2
+               and y * size[1] - 2 <= py <= (y + h) * size[1] + 2 for px, py in glyphs)
 
 
 @pytest.mark.skipif(not shutil.which("ffmpeg"), reason="FFmpeg/libass required")

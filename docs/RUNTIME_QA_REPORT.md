@@ -1,5 +1,35 @@
 # Runtime QA report
 
+## Transparent backgrounds and subtitle typography — October 11, 2026
+
+**PASS for the new caption-style contract, real offscreen production UI, persisted selections and a real rendered excerpt.** Added background opacity 0–100% (0 means transparent), five installed Windows fonts, adaptive size 50–200%, bold and contrasting outline. Existing color, placement and original-subtitle blur controls remain independent. Changing style reuses the retained Vietnamese audio; it does not invoke Muse or TTS. This scoped acceptance does not establish full-video translation quality or resolve the previously documented semantic review issues.
+
+### Root causes and fixes
+
+1. The four-field style contract had no opacity or typography settings. All nine fields now agree across strict API validation, saved-project metadata, shared layout, frontend and ASS export. Older saved styles receive the unchanged defaults. Storage validation uses the shared normalizer; new fields are not dropped by metadata sanitization.
+2. Rendering always painted an opaque rectangle. A zero-opacity cue now emits no ASS background rectangle, and partial opacity affects the rectangle only. Text and source-subtitle blur remain opaque/independent. Selecting transparent in the UI suggests a contrasting text outline, which the user can disable.
+3. Font size previously had no user scale. Scaling now precedes wrapping and accounts for font width and outline, with bounded layout and complete text preserved. Preview uses the same measured cue font, size, weight and outline as export. Changing these fields changes the export fingerprint; an old MP4 must be re-exported to reflect new settings.
+
+### Real runtime tests
+
+`scripts/check_caption_typography_ui.py` drives production `StudioMainWindow`, real HTTP/WebSocket/storage and the actual FFmpeg composer. It runs offscreen and muted, edits only QA project `94f80114`, then restores its original style. No browser was opened and no provider/media response was mocked.
+
+| Exact steps | Expected | Actual / retest |
+| --- | --- | --- |
+| History → saved QA sample → white text, Tahoma, 150%, regular, outline, bottom, 0% background, original-subtitle blur → seek 16 s | Transparent background, visible outlined text, independent source blur | **PASS**, computed alpha 0, Tahoma, weight 400, positive outline, real source blur; controls fit their panel and no JS errors. The first assertion incorrectly required the RGB channels of a fully transparent color to be zero; it was corrected to the actual valid `rgba(51,68,85,0)` contract. |
+| Same real sample → opacity 45%, size 100%, bold, outline off → select each of all five fonts | Real opacity and size changes, each font selectable | **PASS**, background `rgba(51,68,85,0.45)`, smaller text, weight 700, zero outline; Arial, Segoe UI, Tahoma, Verdana and Times New Roman accepted. |
+| Click the actual Nền trong suốt checkbox → await server acknowledgment → click Mặc định | Checkbox executes its handler, suggests outline and saves; reset restores all nine defaults | **PASS**, zero opacity and contrasting outline persisted, then all defaults restored. |
+| Set transparent Tahoma style → shut down QA backend/UI → start fresh → reopen History | Durable nine-field selections and real preview | **PASS**, all fields restored from the saved manifest. All 17 retained WAV hashes unchanged; original QA style restored at the end. |
+| Actual source 14.8–17.5 s + four existing Vietnamese WAVs → production ASS/composer → MP4 → ffprobe/decode validation | Valid real output with transparent captions and source blur | **PASS**, 2.7 s, 353,065 bytes, Tahoma/opacity 0; no background rectangles emitted. Source-region pixel changes at the six original transition positions remained 30.60–34.16. Temporary render removed automatically. This is an excerpt, not a complete 320-second export. |
+
+Regression checks: **510 distinct Python tests passed**, including API/storage/export/source-blur regressions and actual FFmpeg/libass transparency and glyph-bound checks for all five fonts at maximum size in portrait/landscape. **228 JavaScript UI tests passed** after the final fallback/summary corrections; JS syntax and diff checks passed. No TypeScript/npm build exists in this Python/Qt project. Fault-response fixtures are regression evidence only, not real provider acceptance.
+
+Files changed: `main.py`, `core/subtitle_cues.py`, `core/subtitle.py`, `core/streaming/session_store.py`, `templates/index.html`, `static/app.js`, `static/style.css`, three production-UI acceptance scripts and five regression files.
+
+**Runtime loading limitation:** the user's normal desktop instance on port 56347 was started at 16:21 and predates this typography change. The fresh QA backend loaded and passed the new code. To honor the latest instruction to work in the background without opening UI, the existing normal window was not activated/restarted. The normal application will load the updated backend on its next full exit/start. Do not describe that old live instance as updated. All task-owned QA processes exited; the normal user application and its saved project were retained.
+
+**Cleanup limitation:** automatic approval review rejected the narrowly scoped cleanup command with “blocked by policy”. The visually inspected `workspace/temp/caption-typography-ui.png` and current-run `%TEMP%/pytest-of-acer/pytest-1069`, `pytest-1070`, `pytest-1071` remain; no alternate deletion route was attempted. Temporary composer MP4s were already removed by their normal `TemporaryDirectory` lifecycle. No user media, earlier rejected cleanup targets or dependencies were deleted.
+
 ## Original-subtitle blur gaps at sentence transitions — October 11, 2026
 
 **PASS for the reproduced 15–17.1-second source-subtitle transition.** User project `d5820a71` retains its white background, black text, automatic placement and enabled original-subtitle blur. Verification used its real source and the saved QA project `94f80114`, sharing the 320.040635-second source and 24.46-second translated sample. No new translation, review approval or TTS was fabricated. This is not full-video translation/export acceptance.

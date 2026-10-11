@@ -145,15 +145,23 @@
           </div>
         </div>
         <details id="caption-style-panel" class="caption-style-panel hidden" open>
-          <summary>Chỉnh phụ đề <span>Màu sắc · vị trí · sub gốc</span></summary>
+          <summary>Chỉnh phụ đề <span>Nền · font · cỡ chữ · vị trí</span></summary>
           <fieldset id="caption-style-controls" disabled>
             <div class="caption-style-grid">
               <label>Màu chữ<input id="caption-text-color" type="color" value="#000000" aria-label="Màu chữ phụ đề"></label>
               <label>Màu nền<input id="caption-background-color" type="color" value="#FFE500" aria-label="Màu nền phụ đề"></label>
               <label>Vị trí<select id="caption-position"><option value="auto">Tự động</option><option value="top">Phía trên</option><option value="middle">Ở giữa</option><option value="bottom">Phía dưới</option></select></label>
             </div>
+            <div class="caption-typography-grid">
+              <label class="caption-font-control" for="caption-font-family">Font chữ<select id="caption-font-family"><option value="Arial">Arial</option><option value="Segoe UI">Segoe UI</option><option value="Tahoma">Tahoma</option><option value="Verdana">Verdana</option><option value="Times New Roman">Times New Roman</option></select></label>
+              <div class="caption-size-control"><label for="caption-font-scale">Cỡ chữ</label><input id="caption-font-scale" type="range" min="50" max="200" step="1" value="100" aria-label="Cỡ chữ phụ đề theo phần trăm"><span class="caption-percent-input"><input id="caption-font-scale-number" type="number" min="50" max="200" step="1" value="100" aria-label="Nhập cỡ chữ phụ đề theo phần trăm"><span aria-hidden="true">%</span></span></div>
+              <div class="caption-opacity-control"><label for="caption-background-opacity">Độ đậm nền</label><input id="caption-background-opacity" type="range" min="0" max="100" step="1" value="100" aria-label="Độ đậm nền phụ đề"><output id="caption-background-opacity-value" for="caption-background-opacity">100%</output></div>
+            </div>
             <div class="caption-style-options">
               <label title="Dùng nền vàng thống nhất cho tất cả câu; bỏ chọn để chọn màu khác."><input id="caption-auto-background" type="checkbox" checked> Dùng nền mặc định (vàng)</label>
+              <label title="Bỏ nền phụ đề, giữ chữ và vùng làm mờ sub gốc nếu đã bật"><input id="caption-transparent-background" type="checkbox"> Nền trong suốt</label>
+              <label><input id="caption-font-bold" type="checkbox" checked> Đậm</label>
+              <label title="Viền tương phản giúp đọc rõ trên nền trong suốt"><input id="caption-font-outline" type="checkbox"> Viền chữ</label>
               <label title="Chỉ làm mờ vùng phụ đề gốc đã nhận diện"><input id="caption-blur-original" type="checkbox"> Làm mờ sub gốc</label>
               <button id="caption-style-reset" type="button">Mặc định</button>
             </div>

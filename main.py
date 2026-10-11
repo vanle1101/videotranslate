@@ -153,6 +153,11 @@ class CaptionStyleRequest(BaseModel):
     text_color: str = Field(default="#000000", pattern=r"^#[0-9A-Fa-f]{6}$", strict=True)
     position: Literal["auto", "top", "middle", "bottom"] = "auto"
     blur_original: bool = Field(default=False, strict=True)
+    background_opacity: int = Field(default=100, ge=0, le=100, strict=True)
+    font_family: Literal["Arial", "Segoe UI", "Tahoma", "Verdana", "Times New Roman"] = "Arial"
+    font_scale: int = Field(default=100, ge=50, le=200, strict=True)
+    bold: bool = Field(default=True, strict=True)
+    outline: bool = Field(default=False, strict=True)
 
 class ConfigRequest(BaseModel):
     gemini_key: Optional[str] = None

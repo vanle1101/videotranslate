@@ -20,7 +20,7 @@ TASK = "94f80114"
 
 
 def normalized_style(style):
-    return {key: value.lower() if isinstance(value, str) else value for key, value in style.items()}
+    return {key: value.lower() if key.endswith("color") and isinstance(value, str) else value for key, value in style.items()}
 
 
 def launch(app):
@@ -102,6 +102,8 @@ def check_transition_render(snapshot):
                     copied.update(start=max(0,cue["start"]-offset), end=min(length,cue["end"]-offset),
                                   video_size=[640,360], font_size=cue["font_size"]/3,
                                   border_radius=cue["border_radius"]/3)
+                    if "outline_width" in copied:
+                        copied["outline_width"] /= 3
                     # Put sharp Vietnamese captions at the top in this render
                     # check so pixel changes in the source region prove blur,
                     # rather than a caption drawn over the Chinese glyphs.
@@ -110,6 +112,8 @@ def check_transition_render(snapshot):
         masks = [{**mask, "start": max(0,mask["start"]-offset), "end": min(length,mask["end"]-offset)}
                  for mask in snapshot["source_subtitle_masks"] if mask["start"] < offset+length and mask["end"] > offset]
         SubtitleGenerator().generate_ass([], ass, video_size=(640,360), caption_layout={"video_size":[640,360],"cues":cues})
+        if cues and all(cue.get("background_opacity",100)==0 for cue in cues):
+            assert "Dialogue: 0," not in ass.read_text(encoding="utf-8"), "Transparent captions must not paint a rectangle"
         VideoComposer().compose(clip, speech, ass, result, source_masks=masks)
         HQExporter.validate_output(result, length)
         measurements = []
@@ -127,7 +131,9 @@ def check_transition_render(snapshot):
             assert difference>3, (seconds,difference)
             measurements.append({"time":seconds,"source_region_pixel_change":round(difference,2)})
         event("REAL_COMPOSER_TRANSITION_RENDER", {"bytes":result.stat().st_size,"duration":length,
-            "real_vietnamese_wavs":len(labels),"validated":True,"source_mask_measurements":measurements})
+            "real_vietnamese_wavs":len(labels),"validated":True,"source_mask_measurements":measurements,
+            "caption_opacities":sorted({cue.get("background_opacity",100) for cue in cues}),
+            "caption_fonts":sorted({cue.get("font_family","Arial") for cue in cues})})
 
 
 def main():
@@ -159,7 +165,7 @@ def main():
         cues = [cue for row in snapshot["segments"] for cue in row.get("caption_layout", {}).get("cues", [])]
         assert cues and all(cue.get("background_color", "#FFE500" if cue.get("background") == "yellow" else "").upper() == "#FFE500" for cue in cues)
         event("STABLE_DEFAULT_PALETTE", {"cues": len(cues), "background": "#FFE500"})
-        trial = {"text_color": "#ffffff", "background_color": "#334455", "position": "bottom", "blur_original": True}
+        trial = {**original, "text_color": "#ffffff", "background_color": "#334455", "position": "bottom", "blur_original": True}
         set_style(page, trial)
         saved = backend(base, f"/api/streaming/{TASK}")
         assert normalized_style(saved["caption_style"]) == trial, saved["caption_style"]

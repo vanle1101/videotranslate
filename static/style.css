@@ -111,6 +111,17 @@ html { scroll-padding-top: 106px; }
 .caption-style-grid label { display: flex; align-items: center; justify-content: space-between; gap: 5px; }
 .caption-style-grid input[type="color"] { width: 30px; height: 25px; border: 1px solid #50607b; border-radius: 4px; padding: 2px; background: #0a1120; cursor: pointer; }
 .caption-style-grid select { min-width: 0; max-width: 100%; border: 1px solid #354968; padding: 4px; border-radius: 5px; background: #0a1120; color: #eef3ff; }
+.caption-typography-grid { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1.5fr); gap: 9px 12px; margin-top: 10px; }
+.caption-font-control, .caption-size-control, .caption-opacity-control { display: flex; align-items: center; gap: 6px; min-width: 0; }
+.caption-font-control > select { width: 100%; min-width: 0; padding: 4px; border: 1px solid #354968; border-radius: 5px; background: #0a1120; color: #eef3ff; }
+.caption-font-control, .caption-size-control > label, .caption-opacity-control > label { white-space: nowrap; }
+.caption-typography-grid input[type="range"] { flex: 1; min-width: 35px; width: 100%; accent-color: #387bff; }
+.caption-percent-input { display: flex; align-items: center; gap: 2px; }
+.caption-percent-input input { width: 50px; padding: 4px 2px 4px 5px; border: 1px solid #354968; border-radius: 5px; background: #0a1120; color: #eef3ff; }
+.caption-opacity-control { grid-column: 1 / -1; }
+.caption-opacity-control output { min-width: 34px; text-align: right; font-variant-numeric: tabular-nums; }
+.caption-style-panel input:focus-visible, .caption-style-panel select:focus-visible, .caption-style-panel button:focus-visible { outline: 2px solid #83b4ff; outline-offset: 2px; }
+@media (max-width: 720px) { .caption-typography-grid { grid-template-columns: minmax(0, 1fr); } }
 .caption-style-options { display: flex; align-items: center; flex-wrap: wrap; gap: 8px 12px; margin-top: 9px; }
 .caption-style-options label { display: flex; align-items: center; gap: 5px; }
 .caption-style-options input { accent-color: #387bff; }
