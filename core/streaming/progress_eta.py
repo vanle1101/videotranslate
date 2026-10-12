@@ -18,7 +18,7 @@ _RATE_LOCK = threading.Lock()
 
 def processing_profile(session, stage):
     """Rates belong to the real provider/voice/settings, not a global guess."""
-    payload = ["stage-eta-1", stage, settings.LLM_PROVIDER, settings.OPENCODE_MODEL,
+    payload = ["stage-eta-2", stage, settings.LLM_PROVIDER, settings.OPENCODE_MODEL,
                getattr(session, "tts_engine_name", None), getattr(session, "voice", None),
                getattr(getattr(session, "aligner", None), "max_speed", None)]
     return "stage:" + hashlib.sha256(json.dumps(payload, sort_keys=True).encode()).hexdigest()
@@ -32,7 +32,8 @@ def stage_measurement_start(session):
 def record_processing_stage(session, stage, units, measurement):
     """Persist only successful work; interrupted/paused samples cannot train ETA."""
     started, run, baseline = measurement
-    if (session.is_stopped or session.is_paused or run != getattr(session, "_run_started_at", None)
+    if (not getattr(session, "_persistence_enabled", False)
+            or session.is_stopped or session.is_paused or run != getattr(session, "_run_started_at", None)
             or baseline != getattr(session, "_eta_sample_started", None)):
         return
     record_validated_export(processing_profile(session, stage), units, time.monotonic() - started)
@@ -51,6 +52,10 @@ def _stage_forecast(session, snapshot):
     if not snapshot.get("processing_total_known") or not translated_all:
         return None
     rows = list(getattr(session, "segments", {}).values())
+    if any(getattr(row, "failed_stage", None) == "ALIGNING" and row.status not in {"READY", "PLAYED"}
+           for row in rows):
+        return {"eta_seconds": None, "eta_scope": "final", "eta_reason": "timing_recovery",
+                "eta_components": {}, "eta_missing_stages": []}
     pending_ids = set(getattr(session, "_eta_review_pending_ids", ()))
     pending_ids.update(getattr(session, "_reviewing_segment_ids", ()))
     for row in rows:
@@ -228,7 +233,7 @@ def processing_eta(session, snapshot, *, now=None):
         return {**result, "eta_reason": "retry_pending"}
     if not preview and getattr(session, "auto_export_result", False):
         forecast = _stage_forecast(session, snapshot)
-        if forecast is not None and forecast["eta_reason"] == "content_blocked":
+        if forecast is not None and forecast["eta_reason"] in {"content_blocked", "timing_recovery"}:
             return forecast
         if forecast is not None and forecast["eta_seconds"] is not None:
             return forecast

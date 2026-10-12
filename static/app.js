@@ -706,6 +706,7 @@ document.addEventListener("DOMContentLoaded", () => {
     const seconds = progress?.eta_seconds;
     if (progress?.eta_scope !== "final" || typeof seconds !== "number" || !Number.isFinite(seconds) || seconds <= 0) {
       if (progress?.eta_reason === "content_blocked") return "Cần sửa câu chưa có lời dịch trước khi ước tính MP4";
+      if (progress?.eta_reason === "timing_recovery") return "Đang sửa câu quá dài; sẽ tính lại thời gian MP4";
       if (progress?.eta_reason === "calibrating_stages") {
         const labels = {review: "rà bản dịch", speech: "tạo giọng", export: "xuất MP4"};
         const stages = (progress.eta_missing_stages || []).map(stage => labels[stage]).filter(Boolean);

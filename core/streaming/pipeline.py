@@ -1619,8 +1619,8 @@ class StreamingPipelineSession:
         self.review_task = asyncio.create_task(run_review())
         return self.get_progress()
 
-    async def emit(self, event_type: str, data: Dict[str, Any]):
-        if event_type in {"init", "segment_update", "screen_update", "finished", "error", "review_complete", "result_invalidated", "source_ready"}:
+    async def emit(self, event_type: str, data: Dict[str, Any], *, checkpoint=True):
+        if checkpoint and event_type in {"init", "segment_update", "screen_update", "finished", "error", "review_complete", "result_invalidated", "source_ready"}:
             self._persist_if_enabled()
         if event_type == "segment_update":
             data = self.caption_metadata(data)
@@ -3901,7 +3901,11 @@ class StreamingPipelineSession:
                 label = {"TTS": "Đang tạo giọng đọc", "ALIGNING": "Đang căn nhịp đọc",
                          "REWRITING": "AI đang rút gọn và kiểm tra nghĩa lời đọc"}[stage]
                 await self._segment_progress("align" if stage == "ALIGNING" else "tts", f"{label} câu {seg.id + 1}")
-                await self.emit("segment_update", seg.to_dict())
+                # The initial TTS ownership is already durable. These cosmetic
+                # stage changes contain no new text/audio/checkpoint result;
+                # rewriting the complete project at every callback blocks the
+                # synthesis worker. READY, failures and Stop still commit.
+                await self.emit("segment_update", seg.to_dict(), checkpoint=False)
             def speech_stage(stage):
                 asyncio.run_coroutine_threadsafe(publish_stage(stage), loop).result()
             async with self._tts_lock:

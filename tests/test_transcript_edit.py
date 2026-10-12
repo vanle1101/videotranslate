@@ -798,6 +798,21 @@ def test_empty_review_repair_cannot_race_active_owner(session):
     asyncio.run(run())
 
 
+def test_transient_synthesis_status_broadcast_does_not_rewrite_checkpoint(session, monkeypatch):
+    persist = Mock()
+    monkeypatch.setattr(session, "_persist_if_enabled", persist)
+    row = session.segments[0]
+    async def run():
+        row.status = "ALIGNING"
+        await session.emit("segment_update", row.to_dict(), checkpoint=False)
+        persist.assert_not_called()
+        assert session.events[-1][1]["status"] == "ALIGNING"
+        row.status = "READY"
+        await session.emit("segment_update", row.to_dict())
+        persist.assert_called_once()
+    asyncio.run(run())
+
+
 @pytest.mark.parametrize("stage", ["TTS", "ALIGNING"])
 @pytest.mark.parametrize("stopped", [False, True])
 @pytest.mark.parametrize("same_text", [False, True])

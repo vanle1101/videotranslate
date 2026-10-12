@@ -30,6 +30,7 @@ test('ETA explains calibration, recovery and exceeded estimates instead of promi
   assert.match(ui.el('task-progress-eta').title,/MP4 tải được/);
   for (const [reason,text] of [['retry_pending','Đang phục hồi lỗi; sẽ tính lại thời gian'],
     ['content_blocked','Cần sửa câu chưa có lời dịch trước khi ước tính MP4'],
+    ['timing_recovery','Đang sửa câu quá dài; sẽ tính lại thời gian MP4'],
     ['estimate_exceeded','Lâu hơn dự kiến; đang tiếp tục xử lý']]) {
     socket.receive({type:'progress',status:'RUNNING',eta_seconds:null,eta_scope:'final',eta_reason:reason});
     assert.equal(ui.el('task-progress-eta').textContent,text);

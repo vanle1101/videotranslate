@@ -252,6 +252,7 @@ def test_recovery_forecast_starts_before_prepass_review_finishes(session):
 
 
 def test_stage_measurements_reject_pause_stop_and_changed_run(session, monkeypatch):
+    session._persistence_enabled = True
     monkeypatch.setattr(eta.time, "monotonic", lambda: 100.)
     mark = eta.stage_measurement_start(session)
     monkeypatch.setattr(eta.time, "monotonic", lambda: 120.)
@@ -269,3 +270,18 @@ def test_stage_measurements_reject_pause_stop_and_changed_run(session, monkeypat
     assert eta.estimated_export_seconds(eta.processing_profile(session, "review"), 8) == 40
     session.voice = "different-voice"
     assert eta.estimated_export_seconds(eta.processing_profile(session, "review"), 8) is None
+
+
+def test_nonpersistent_test_session_cannot_write_live_performance_samples(session, monkeypatch):
+    monkeypatch.setattr(eta.time, "monotonic", lambda: 100.)
+    mark = eta.stage_measurement_start(session)
+    monkeypatch.setattr(eta.time, "monotonic", lambda: 120.)
+    eta.record_processing_stage(session, "review", 1, mark)
+    assert not eta._database().exists()
+
+
+def test_pending_timing_conflict_does_not_use_fast_successful_speech_rate(session):
+    session._visual_prepass_complete = True
+    session.segments = {0: SimpleNamespace(id=0, status="WAITING", failed_stage="ALIGNING")}
+    result = eta.processing_eta(session, state(), now=130)
+    assert result["eta_seconds"] is None and result["eta_reason"] == "timing_recovery"
