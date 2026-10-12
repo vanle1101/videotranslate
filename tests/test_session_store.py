@@ -211,6 +211,7 @@ def test_large_editable_project_reopens_with_source_identity_and_summary(persist
     import core.streaming.session_store as store
     monkeypatch.setattr(store, "COMPRESS_AFTER_BYTES", 1)
     persisted._chunked_source_identity = "a" * 64
+    persisted._parallel_chunk_planning = True
     persisted._visual_context_summary = "Bản tóm tắt nháp, không phải bằng chứng."
     before = persisted.segments[0].final_vi
     path = persisted.persist()
@@ -218,6 +219,7 @@ def test_large_editable_project_reopens_with_source_identity_and_summary(persist
     restored = restore_saved_session(persisted.task_id)
     assert restored.segments[0].final_vi == before
     assert restored._chunked_source_identity == "a" * 64
+    assert restored._parallel_chunk_planning is True
     assert restored._visual_context_summary == persisted._visual_context_summary
 
 

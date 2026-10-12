@@ -49,7 +49,7 @@ def _shared_execution_layer():
     """One provider queue for independently constructed reviewer/translator clients."""
     from config import settings
     policy = AIExecutionPolicy(
-        concurrency=getattr(settings, "OPENCODE_CONCURRENCY", 2),
+        concurrency=getattr(settings, "OPENCODE_CONCURRENCY", 5),
         queue_limit=getattr(settings, "OPENCODE_QUEUE_LIMIT", 24),
         queue_timeout=getattr(settings, "OPENCODE_QUEUE_TIMEOUT", 30.0),
         circuit_failures=getattr(settings, "OPENCODE_CIRCUIT_FAILURES", 4),

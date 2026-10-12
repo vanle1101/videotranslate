@@ -33,6 +33,8 @@ def preview(tmp_path, monkeypatch):
     monkeypatch.setattr(settings, "BASE_DIR", tmp_path)
     monkeypatch.setattr(settings, "LLM_PROVIDER", "opencode")
     monkeypatch.setattr(settings, "DIARIZATION_ENABLED", False)
+    # Existing sequential contracts; parallel ownership is exercised separately.
+    monkeypatch.setattr(settings, "TRANSLATION_CHUNK_WORKERS", 1)
     model = tmp_path / "workspace/models" / f"faster-whisper-{settings.WHISPER_MODEL_SIZE}"
     model.mkdir(parents=True)
     for name in ("config.json", "model.bin", "tokenizer.json", "vocabulary.json"):
@@ -285,6 +287,139 @@ def test_new_full_visual_request_uses_bounded_source_pipeline(preview):
     assert prepared == [(0, 24), (32, 56)]
     assert [(start, end) for start, end, *_ in analyzed] == [(0, 24), (24, 48), (48, 64)]
     assert all(row.status == "READY" for row in session.segments.values())
+
+
+def test_full_parallel_workers_own_disjoint_minute_ranges_and_publish_in_order(preview, monkeypatch):
+    session, prepared, analyzed, speech, events = preview
+    session.translation_mode = "full"
+    session.total_duration = 300
+    monkeypatch.setattr(settings, "TRANSLATION_CHUNK_WORKERS", 5)
+    monkeypatch.setattr(settings, "OPENCODE_CONCURRENCY", 5)
+    monkeypatch.setattr(session, "_parallel_chunk_capacity", lambda: 5)
+    original = session.video_intelligence.prepass
+    lock, barrier = threading.Lock(), threading.Barrier(5)
+    started, completed, owners, contexts = [], [], {}, {}
+
+    class PrivateEngine:
+        provider = "opencode"
+        class OCR:
+            def close(self):
+                pass
+        screen_ocr = OCR()
+        def prepass(self, path, rows, **options):
+            start = options["start_time"]
+            with lock:
+                started.append(start)
+                owners[start] = [row.id for row in rows]
+                contexts[start] = deepcopy(options["context_segments"])
+            barrier.wait(5)
+            # Later intervals finish sooner, but they may not publish first.
+            time.sleep((300 - start) / 10000)
+            result = original(path, rows, **options)
+            with lock:
+                completed.append(start)
+            return result
+
+    monkeypatch.setattr(session, "_new_chunk_intelligence", PrivateEngine)
+    async def run():
+        await session.start()
+        await session.worker_task
+    asyncio.run(run())
+    assert len(started) == 5 and completed != sorted(completed)
+    jobs = session._chunk_jobs
+    assert jobs[0]["start"] == 0 and jobs[-1]["end"] == 300
+    assert all(a["end"] == b["start"] for a, b in zip(jobs, jobs[1:]))
+    flattened = [sid for start in sorted(owners) for sid in owners[start]]
+    assert len(flattened) == len(set(flattened)) == len(session.segments)
+    assert speech == sorted(session.segments), "Review/TTS publication follows the timeline"
+    assert all(row["state"] == "COMPLETED" and row["attempts"] == 1 for row in jobs)
+    assert all(row.status == "READY" for row in session.segments.values())
+    assert all(contexts[start][0].id == 0 for start in contexts), "Distant raw relationship cues survive"
+    assert session.get_progress()["chunk_workers"] == 5
+    assert all(row.end <= start + 60 + 12 for start, rows in contexts.items() for row in rows)
+
+
+def test_parallel_interval_retry_is_independent_and_resume_reuses_completed_owners(preview, monkeypatch):
+    session, prepared, analyzed, speech, events = preview
+    session.translation_mode = "full"
+    session.total_duration = 120
+    monkeypatch.setattr(session, "_parallel_chunk_capacity", lambda: 2)
+    original = session.video_intelligence.prepass
+    attempts = {}
+    broken = True
+    class PrivateEngine:
+        provider = "opencode"
+        class OCR:
+            def close(self):
+                pass
+        screen_ocr = OCR()
+        def prepass(self, path, rows, **options):
+            start = options["start_time"]
+            attempts[start] = attempts.get(start, 0) + 1
+            if broken and start == 0:
+                # Keep complete partial batches through a later provider error.
+                if attempts[start] == 1:
+                    partial = {**options, "end_time": rows[0].end}
+                    original(path, rows[:1], **partial)
+                raise TimeoutError("injected interval failure")
+            return original(path, rows, **options)
+    monkeypatch.setattr(session, "_new_chunk_intelligence", PrivateEngine)
+    async def run():
+        nonlocal broken
+        await session.start()
+        await session.worker_task
+        successful = next(row for row in session._chunk_jobs if row["start"] != 0)
+        assert successful["state"] == "COMPLETED" and successful["attempts"] == 1
+        assert session._visual_completed_seconds == 0
+        assert session.segments[0].status == "READY"
+        healthy = {sid: Path(row.audio_path).read_bytes() for sid, row in session.segments.items() if row.status == "READY"}
+        prior_bounds = [(row["start"], row["end"]) for row in session._chunk_jobs]
+        later_calls = attempts[successful["start"]]
+        monkeypatch.setattr(settings, "TRANSLATION_CHUNK_SECONDS", 30)
+        broken = False
+        await session.retry_failed_synthesis()
+        await session.start_task
+        await session.worker_task
+        assert attempts[successful["start"]] == later_calls
+        assert [(row["start"], row["end"]) for row in session._chunk_jobs] == prior_bounds
+        assert all(Path(session.segments[sid].audio_path).read_bytes() == content for sid, content in healthy.items())
+        assert all(row.status == "READY" for row in session.segments.values())
+    asyncio.run(run())
+
+
+def test_parallel_stop_drains_private_workers_and_checkpoints_each_owner(preview, monkeypatch):
+    session, *_ = preview
+    session.translation_mode = "full"
+    session.total_duration = 120
+    monkeypatch.setattr(session, "_parallel_chunk_capacity", lambda: 2)
+    entered, left = threading.Barrier(3), []
+    class PrivateEngine:
+        provider = "opencode"
+        class OCR:
+            def close(self):
+                pass
+        screen_ocr = OCR()
+        def prepass(self, path, rows, **options):
+            entered.wait(5)
+            try:
+                while not options["cancel_check"]():
+                    time.sleep(.005)
+                raise asyncio.CancelledError
+            finally:
+                left.append(options["start_time"])
+    monkeypatch.setattr(session, "_new_chunk_intelligence", PrivateEngine)
+    async def run():
+        start = asyncio.create_task(session.start())
+        await asyncio.to_thread(entered.wait, 5)
+        session.stop()
+        start.cancel()
+        await asyncio.gather(start, return_exceptions=True)
+        assert len(left) == 2
+        assert all(row["state"] == "RETRY_PENDING" for row in session._chunk_jobs)
+        assert session._chunk_followup_task is None
+        assert not any(task is not asyncio.current_task() and not task.done()
+                       for task in asyncio.all_tasks())
+    asyncio.run(run())
 
 
 def test_stop_keeps_one_checkpoint_owner_until_followup_drains(preview):
@@ -1865,3 +2000,201 @@ def test_transient_late_retry_preserves_stop_and_newer_manual_revision(preview, 
         assert calls == [(1, False), (2, False), (3, False)]
         assert session.segments[1].final_vi == "Lời vừa sửa tay."
         assert session.segments[1].verification["status"] == "manual"
+
+
+def test_parallel_timing_only_neighbor_revision_keeps_undispatched_translation(preview, monkeypatch):
+    session, _, _, speech, _ = preview
+    session.translation_mode, session.total_duration = "full", 120
+    monkeypatch.setattr(session, "_parallel_chunk_capacity", lambda: 2)
+    original_prepass = session.video_intelligence.prepass
+    original_synthesize = session._synthesize_segment
+    timing_published = threading.Event()
+    moved = []
+
+    class PrivateEngine:
+        provider = "opencode"
+        class OCR:
+            def close(self):
+                pass
+        screen_ocr = OCR()
+
+        def prepass(self, path, rows, **options):
+            if options["start_time"] >= 60:
+                assert timing_published.wait(5), "The earlier chunk did not publish neighbor timing"
+            return original_prepass(path, rows, **options)
+
+    async def synthesize(row, **options):
+        if not moved:
+            later = next(item for item in session.segments.values() if item.start >= 60)
+            assert later.status == "WAITING" and not later.final_vi and not later.translation_provider
+            owner_before = session._visual_review_state(later)
+            revision_before = later.revision
+            session._publish_dub_plan({later.id: {
+                "dub_start": later.start + .1, "dub_end": later.end + .1}}, row.id)
+            assert later.revision == revision_before + 1
+            assert session._visual_review_state(later) == owner_before
+            moved.append(later.id)
+            timing_published.set()
+        await original_synthesize(row, **options)
+
+    monkeypatch.setattr(session, "_new_chunk_intelligence", PrivateEngine)
+    monkeypatch.setattr(session, "_synthesize_segment", synthesize)
+
+    async def run():
+        await session.start()
+        await session.worker_task
+
+    asyncio.run(run())
+    assert moved and moved[0] in speech
+    later = session.segments[moved[0]]
+    assert later.final_vi and later.translation_provider == "opencode" and later.status == "READY"
+    assert later.revision == 1 and later.dub_start == later.start + .1
+    assert all(job["state"] == "COMPLETED" and job["attempts"] == 1 for job in session._chunk_jobs)
+    assert speech == sorted(session.segments)
+
+
+def test_parallel_pending_owners_resume_with_one_worker_without_replanning(preview, monkeypatch):
+    from core.streaming.recovery import reserve, validate_records
+    from core.streaming.session_store import save_session
+
+    session, _, analyzed, speech, _ = preview
+    session.translation_mode, session.total_duration = "full", 120
+    session._chunked_source_started = session._parallel_chunk_planning = True
+    reserve(session._chunk_jobs, 0., 60., "1" * 64)
+    reserve(session._chunk_jobs, 60., 120., "2" * 64)
+    original_bounds = [(job["id"], job["start"], job["end"]) for job in session._chunk_jobs]
+    # The planner marker and PENDING owners must survive durable storage before
+    # memory pressure changes the available worker count from two to one.
+    manifest = json.loads(save_session(session).read_text(encoding="utf-8"))
+    assert manifest["session"]["_parallel_chunk_planning"] is True
+    assert all(job["state"] == "PENDING" for job in manifest["session"]["_chunk_jobs"])
+    assert session._visual_scanned_seconds == 0
+    monkeypatch.setattr(session, "_parallel_chunk_capacity", lambda: 1)
+    monkeypatch.setattr(settings, "TRANSLATION_CHUNK_SECONDS", 30.)
+    original_prepass = session.video_intelligence.prepass
+
+    class PrivateEngine:
+        provider = "opencode"
+        class OCR:
+            def close(self):
+                pass
+        screen_ocr = OCR()
+        def prepass(self, path, rows, **options):
+            return original_prepass(path, rows, **options)
+
+    monkeypatch.setattr(session, "_new_chunk_intelligence", PrivateEngine)
+
+    async def run():
+        await session.start()
+        await session.worker_task
+
+    asyncio.run(run())
+    assert [(job["id"], job["start"], job["end"]) for job in session._chunk_jobs] == original_bounds
+    validate_records(session._chunk_jobs, session.total_duration)
+    assert [(lo, hi) for lo, hi, *_ in analyzed] == [(0., 60.), (60., 120.)]
+    assert all(job["state"] == "COMPLETED" and job["attempts"] == 1 for job in session._chunk_jobs)
+    assert len(speech) == len(set(speech)) == len(session.segments)
+    assert session.get_progress()["chunk_workers"] == 1
+
+
+def test_parallel_extended_boundary_prepares_stable_lookahead_before_retry(preview, monkeypatch):
+    session, *_ = preview
+    session.translation_mode, session.total_duration = "full", 130
+    session._parallel_chunk_planning = True
+    monkeypatch.setattr(session, "_parallel_chunk_capacity", lambda: 1)
+    original_prepass = session.video_intelligence.prepass
+    prepared, contexts, attempts = [], [], {}
+
+    async def prepare_until(end):
+        prepared.append(end)
+        candidates = [(0, 55., 65.), (1, 67., 67.5), (2, 70., 72.)]
+        for sid, start, stop in candidates:
+            if stop <= end and sid not in session.segments:
+                row = SegmentItem(sid, start, stop, stop - start)
+                row.text_zh = row.asr_text = f"源{sid}"
+                row.asr_pretranscribed = True
+                session.segments[sid] = row
+        session._source_prepared_seconds = max(session._source_prepared_seconds, end)
+        session._prepared = True
+        return True
+
+    class PrivateEngine:
+        provider = "opencode"
+        class OCR:
+            def close(self):
+                pass
+        screen_ocr = OCR()
+        def prepass(self, path, rows, **options):
+            start = options["start_time"]
+            attempts[start] = attempts.get(start, 0) + 1
+            if start == 0:
+                contexts.append([(row.id, row.start, row.end, row.asr_text)
+                                 for row in options["context_segments"]])
+                assert options["end_time"] == 65.
+                assert {row.id for row in options["context_segments"]} == {0, 1, 2}
+            result = original_prepass(path, rows, **options)
+            if start == 0 and attempts[start] == 1:
+                raise TimeoutError("Injected failure after a checkpointed batch")
+            return result
+
+    monkeypatch.setattr(session, "_prepare_source_until", prepare_until)
+    monkeypatch.setattr(session, "_new_chunk_intelligence", PrivateEngine)
+
+    async def run():
+        await session.start()
+        await session.worker_task
+
+    asyncio.run(run())
+    assert prepared[:2] == [68., 73.], "Lookahead must follow the measured, extended boundary"
+    assert len(contexts) == 2 and contexts[0] == contexts[1]
+    first = session._chunk_jobs[0]
+    assert (first["start"], first["end"], first["attempts"], first["state"]) == (0., 65., 2, "COMPLETED")
+
+
+@pytest.mark.parametrize("fault", ["missing", "duplicate", "gap", "extra_id"])
+def test_parallel_invalid_callback_coverage_keeps_owner_pending_and_healthy_peer(preview, monkeypatch, fault):
+    session, _, _, speech, _ = preview
+    session.translation_mode, session.total_duration = "full", 120
+    monkeypatch.setattr(session, "_parallel_chunk_capacity", lambda: 2)
+    original_prepass = session.video_intelligence.prepass
+    attempts = {}
+
+    class PrivateEngine:
+        provider = "opencode"
+        class OCR:
+            def close(self):
+                pass
+        screen_ocr = OCR()
+        def prepass(self, path, rows, **options):
+            start = options["start_time"]
+            attempts[start] = attempts.get(start, 0) + 1
+            if start != 0:
+                return original_prepass(path, rows, **options)
+            publish = options["chunk_callback"]
+            def broken_callback(result, lo, hi):
+                if fault == "missing":
+                    return
+                if fault == "duplicate":
+                    publish(result, lo, hi)
+                    publish(result, lo, hi)
+                elif fault == "gap":
+                    publish(result, lo + 1., hi)
+                elif fault == "extra_id":
+                    invalid = deepcopy(result)
+                    invalid["segments"][9999] = {**next(iter(result["segments"].values())), "id": 9999}
+                    publish(invalid, lo, hi)
+            return original_prepass(path, rows, **{**options, "chunk_callback": broken_callback})
+
+    monkeypatch.setattr(session, "_new_chunk_intelligence", PrivateEngine)
+
+    async def run():
+        await session.start()
+        await session.worker_task
+
+    asyncio.run(run())
+    failed, healthy = session._chunk_jobs
+    assert failed["state"] == "RETRY_PENDING" and failed["attempts"] == 2
+    assert healthy["state"] == "COMPLETED" and healthy["attempts"] == 1
+    assert attempts == {0.: 2, 60.: 1}
+    assert all(row.status == "READY" for row in session.segments.values() if row.start >= 60)
+    assert len(speech) == len(set(speech)), "Partial successful callback batches must not synthesize twice"

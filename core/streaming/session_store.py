@@ -80,7 +80,7 @@ SESSION_FIELDS = frozenset((
     "_visual_incremental_started _visual_completed_seconds _visual_prepass_complete"
     " translation_mode preview_seconds _chunked_source_started _source_prepared_seconds _preview_ready"
     " _chunked_source_identity _visual_context_summary"
-    " _chunk_jobs _visual_scanned_seconds _legacy_visual_prefix"
+    " _chunk_jobs _visual_scanned_seconds _legacy_visual_prefix _parallel_chunk_planning"
 ).split())
 PATH_FIELDS = ("video_path", "ref_audio", "raw_audio_16k", "bgm_audio_path")
 META_FIELDS = frozenset((
@@ -620,7 +620,8 @@ def _validate_project(data, task_id):
         if not isinstance(fields.get(key), str) or not fields[key] or len(fields[key]) > 200:
             raise ValueError("Cấu hình giọng hoặc nhận diện không hợp lệ.")
     for key in ("visual_translation", "initialized", "caption_output_outdated", "auto_export_result",
-                "_visual_incremental_started", "_visual_prepass_complete", "_chunked_source_started", "_preview_ready"):
+                "_visual_incremental_started", "_visual_prepass_complete", "_chunked_source_started", "_preview_ready",
+                "_parallel_chunk_planning"):
         if key in fields and type(fields[key]) is not bool:
             raise ValueError("Trạng thái dự án không hợp lệ.")
     completed_visual = fields.get("_visual_completed_seconds", 0)

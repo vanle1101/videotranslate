@@ -225,6 +225,7 @@ class StreamingPipelineSession:
         self._visual_prepass_complete = False
         self._visual_scanned_seconds = 0.0
         self._chunk_jobs = []
+        self._parallel_chunk_planning = False
         self._legacy_visual_prefix = 0.0
         self._chunk_followups = None
         self._chunk_followup_task = None
@@ -342,7 +343,7 @@ class StreamingPipelineSession:
         if edit is not None:
             token, started_stopped = edit
             return token.is_set() or (self.is_stopped and not started_stopped)
-        return self.is_stopped
+        return self.is_stopped or getattr(self, "_persistence_capacity_failed", False)
 
     def _refresh_processed_duration(self):
         """Credit each current ready source interval once, including silence."""
@@ -1729,6 +1730,9 @@ class StreamingPipelineSession:
         snapshot["can_retry"] = self.can_retry
         snapshot["can_repair_failed"] = any(self._can_repair_failed_segment(row) for row in self.segments.values())
         snapshot.update(translation_mode=self.translation_mode, preview_seconds=self.preview_seconds,
+                        chunk_workers=getattr(self, "_parallel_chunk_workers", 1),
+                        configured_chunk_workers=settings.TRANSLATION_CHUNK_WORKERS,
+                        chunk_seconds=settings.TRANSLATION_CHUNK_SECONDS,
                         source_prepared_seconds=self._source_prepared_seconds,
                         processed_seconds=self._visual_completed_seconds,
                         total_seconds=self.total_duration, can_translate_full=self.can_translate_full)
@@ -1927,7 +1931,7 @@ class StreamingPipelineSession:
                 if (value := getattr(item, name, None)) is not None}}
             for item in sorted(self.segments.values(), key=lambda value: (value.start, value.id))])
 
-    async def _publish_visual_chunk(self, result, start, end):
+    async def _publish_visual_chunk(self, result, start, end, *, preserve_screen_intervals=()):
         """Commit and synthesize one measured chunk before translating another."""
         from core.video_intelligence import VideoIntelligence
         if self.is_stopped:
@@ -1944,10 +1948,13 @@ class StreamingPipelineSession:
             self._visual_context_summary = summary[:4000]
         if end > published_until:
             screen_start = max(start, published_until)
+            def protected(screen):
+                return any(screen["start"] < hi and screen["end"] > lo
+                           for lo, hi in preserve_screen_intervals)
             self.screen_texts = [row for row in self.screen_texts
-                                 if not (screen_start <= row["start"] and row["end"] <= end)]
+                                 if protected(row) or not (screen_start <= row["start"] and row["end"] <= end)]
             for screen in result.get("screen_texts", []):
-                if screen["end"] > screen_start:
+                if screen["end"] > screen_start and not protected(screen):
                     self.screen_texts.append({**deepcopy(screen), "start": max(screen_start, screen["start"])})
         pending = set()
         review_candidates = set()
@@ -2426,9 +2433,74 @@ class StreamingPipelineSession:
             self._chunk_followup_task = None
             self._chunk_followups = None
 
+    async def _prepare_source_until(self, nominal_end):
+        from core.streaming.chunked_source import prepare_interval, publish_background_prefix
+        source_blocked = False
+        while self._source_prepared_seconds < nominal_end - .001:
+            await self.pause_event.wait()
+            if self.is_stopped:
+                raise asyncio.CancelledError
+            try:
+                record = await prepare_interval(self, self._source_prepared_seconds,
+                    min(self.total_duration, self._source_prepared_seconds + self.preview_seconds))
+            except asyncio.CancelledError:
+                raise
+            except Exception as error:
+                if getattr(self, "_persistence_capacity_failed", False):
+                    raise
+                # A native recognizer/resource failure in the source tail
+                # must not cancel already admitted review/TTS work. Keep
+                # the exact prepared cursor for Resume, drain its healthy
+                # predecessors, and report the incomplete source at the
+                # terminal gate. A failed durable write still propagates.
+                source_blocked = True
+                self._startup_failed = True
+                warning = (f"Chưa nhận diện được đoạn từ {self._source_prepared_seconds:.2f} giây; "
+                           "các đoạn đã nhận diện tiếp tục xử lý. Tiếp tục sẽ thử đúng đoạn còn thiếu.")
+                if warning not in self.warnings:
+                    self.warnings.append(warning)
+                logging.getLogger("errors").error(
+                    "[%s] SOURCE_RETRY_PENDING source_start=%s error_type=%s detail=%s traceback=%s",
+                    self.task_id, self._source_prepared_seconds, type(error).__name__,
+                    redacted_detail(error),
+                    redacted_detail("".join(traceback.format_tb(error.__traceback__))))
+                self._persist_if_enabled()
+                await self.emit("progress", self.get_progress())
+                break
+            old_background = self.bgm_audio_path
+            background = await publish_background_prefix(self, record)
+            next_id = max(self.segments, default=-1) + 1
+            for row in record["rows"]:
+                item = SegmentItem(next_id, row["start"], row["end"], row["duration"])
+                item.text_zh = item.asr_text = row["text_zh"]
+                item.emotion = row.get("emotion") or "<|NEUTRAL|>"
+                item.asr_pretranscribed = True
+                for name in SOURCE_METADATA_FIELDS:
+                    if name in row:
+                        setattr(item, name, deepcopy(row[name]))
+                self.segments[next_id] = item
+                next_id += 1
+            self.raw_audio_16k = Path(record["raw_audio"]["path"])
+            self.bgm_audio_path = background
+            self.suppression_stats = record["suppression_stats"]
+            self._source_prepared_seconds = record["end"]
+            self._prepared = True
+            self.bgm_url = f"/api/streaming/bgm/{self.task_id}?coverage={round(record['end'] * 1000)}"
+            self._persist_if_enabled()
+            # Old containers are task-generated prefix views. Keep all
+            # immutable per-interval packets/checkpoints for exact Retry.
+            if old_background and old_background != background and old_background.parent == background.parent:
+                try:
+                    old_background.unlink(missing_ok=True)
+                except OSError:
+                    pass
+            await self.emit("background_update", {"bgm_url": self.bgm_url,
+                "source_prepared_seconds": self._source_prepared_seconds})
+        return not source_blocked
+
     async def _produce_chunked_visual(self):
         """Prepare, translate and publish one source interval at a time."""
-        from core.streaming.chunked_source import prepare_interval, publish_background_prefix, ensure_source_identity
+        from core.streaming.chunked_source import ensure_source_identity
         from core.streaming.export import HQExporter
         from core.video_intelligence import VideoIntelligence
         self._chunked_source_started = True
@@ -2450,16 +2522,26 @@ class StreamingPipelineSession:
         recover_interrupted(self._chunk_jobs)
         self._visual_scanned_seconds = max(self._visual_scanned_seconds, self._visual_completed_seconds)
         target = min(self.total_duration, self.preview_seconds) if self.translation_mode == "preview" else self.total_duration
+        if self.visual_translation and self.translation_mode == "full" and settings.LLM_PROVIDER == "opencode":
+            workers = self._parallel_chunk_capacity()
+            if workers > 1 or self._parallel_chunk_planning:
+                await self._produce_parallel_visual(target, workers)
+                return await self._complete_chunked_source()
         # New source is admitted before retrying old holes. A bounded review/TTS
         # queue keeps source decoding and provider work from monopolizing RAM.
         retry_intervals = [(row["start"], row["end"]) for row in self._chunk_jobs
                            if row["state"] != "COMPLETED" and row["start"] < target]
-        source_blocked = False
+        # A stopped parallel wave may have reserved later PENDING owners before
+        # any result was published. Falling back to one worker must reuse those
+        # exact ranges, rather than inserting new overlapping intervals.
+        self._visual_scanned_seconds = max(self._visual_scanned_seconds,
+            max((row["end"] for row in self._chunk_jobs), default=0.))
         while self._visual_scanned_seconds < target - .001 or retry_intervals:
             await self.pause_event.wait()
             if self.is_stopped:
                 raise asyncio.CancelledError
-            if self._visual_scanned_seconds < target - .001:
+            retry_interval = self._visual_scanned_seconds >= target - .001
+            if not retry_interval:
                 cursor = self._visual_scanned_seconds
                 nominal_end = min(target, cursor + self.preview_seconds)
             else:
@@ -2468,68 +2550,11 @@ class StreamingPipelineSession:
                 # READY speech then survives publication of the repeated draft.
                 await self._drain_chunk_followups()
                 cursor, nominal_end = retry_intervals.pop(0)
-            while self._source_prepared_seconds < nominal_end - .001:
-                try:
-                    record = await prepare_interval(self, self._source_prepared_seconds,
-                        min(self.total_duration, self._source_prepared_seconds + self.preview_seconds))
-                except asyncio.CancelledError:
-                    raise
-                except Exception as error:
-                    if getattr(self, "_persistence_capacity_failed", False):
-                        raise
-                    # A native recognizer/resource failure in the source tail
-                    # must not cancel already admitted review/TTS work. Keep
-                    # the exact prepared cursor for Resume, drain its healthy
-                    # predecessors, and report the incomplete source at the
-                    # terminal gate. A failed durable write still propagates.
-                    source_blocked = True
-                    self._startup_failed = True
-                    warning = (f"Chưa nhận diện được đoạn từ {self._source_prepared_seconds:.2f} giây; "
-                               "các đoạn đã nhận diện tiếp tục xử lý. Tiếp tục sẽ thử đúng đoạn còn thiếu.")
-                    if warning not in self.warnings:
-                        self.warnings.append(warning)
-                    logging.getLogger("errors").error(
-                        "[%s] SOURCE_RETRY_PENDING source_start=%s error_type=%s detail=%s traceback=%s",
-                        self.task_id, self._source_prepared_seconds, type(error).__name__,
-                        redacted_detail(error),
-                        redacted_detail("".join(traceback.format_tb(error.__traceback__))))
-                    self._persist_if_enabled()
-                    await self.emit("progress", self.get_progress())
-                    break
-                old_background = self.bgm_audio_path
-                background = await publish_background_prefix(self, record)
-                next_id = max(self.segments, default=-1) + 1
-                for row in record["rows"]:
-                    item = SegmentItem(next_id, row["start"], row["end"], row["duration"])
-                    item.text_zh = item.asr_text = row["text_zh"]
-                    item.emotion = row.get("emotion") or "<|NEUTRAL|>"
-                    item.asr_pretranscribed = True
-                    for name in SOURCE_METADATA_FIELDS:
-                        if name in row:
-                            setattr(item, name, deepcopy(row[name]))
-                    self.segments[next_id] = item
-                    next_id += 1
-                self.raw_audio_16k = Path(record["raw_audio"]["path"])
-                self.bgm_audio_path = background
-                self.suppression_stats = record["suppression_stats"]
-                self._source_prepared_seconds = record["end"]
-                self._prepared = True
-                self.bgm_url = f"/api/streaming/bgm/{self.task_id}?coverage={round(record['end'] * 1000)}"
-                self._persist_if_enabled()
-                # Old containers are task-generated prefix views. Keep all
-                # immutable per-interval packets/checkpoints for exact Retry.
-                if old_background and old_background != background and old_background.parent == background.parent:
-                    try:
-                        old_background.unlink(missing_ok=True)
-                    except OSError:
-                        pass
-                await self.emit("background_update", {"bgm_url": self.bgm_url,
-                    "source_prepared_seconds": self._source_prepared_seconds})
-            if source_blocked:
+            if not await self._prepare_source_until(nominal_end):
                 break
             end = min(nominal_end, self._source_prepared_seconds)
             crossing = [row for row in self.segments.values() if row.start < end < row.end]
-            if crossing:
+            if crossing and not retry_interval:
                 end = max(row.end for row in crossing)
             if end <= cursor or end > self._source_prepared_seconds + .05:
                 raise ValueError("Không tìm được ranh giới câu thoại trong đoạn đã nhận diện.")
@@ -2662,6 +2687,219 @@ class StreamingPipelineSession:
             self._visual_scanned_seconds = max(self._visual_scanned_seconds, end)
             self._visual_completed_seconds = contiguous_coverage(self._chunk_jobs, self._legacy_visual_prefix)
             self._persist_if_enabled()
+        await self._complete_chunked_source()
+
+    def _parallel_chunk_capacity(self):
+        """OCR uses one CPU thread per owner; leave RAM for ASR and review."""
+        import psutil
+        memory_workers = max(1, int((psutil.virtual_memory().available - 2 * 1024**3) // 1024**3))
+        return min(settings.TRANSLATION_CHUNK_WORKERS, settings.OPENCODE_CONCURRENCY,
+                   max(1, (os.cpu_count() or 1) - 1), memory_workers)
+
+    @staticmethod
+    def _new_chunk_intelligence():
+        from core.video_intelligence import VideoIntelligence
+        from core.screen_ocr import ChunkScreenOCR
+        engine = VideoIntelligence()
+        engine.screen_ocr = ChunkScreenOCR()
+        return engine
+
+    def _parallel_source_snapshot(self, start, end):
+        # Context outside the owned interval is read-only. Use original ASR,
+        # not other workers' arriving drafts, to keep retry/cache inputs stable.
+        context = []
+        owned = []
+        for row in sorted(self.segments.values(), key=lambda item: (item.start, item.id)):
+            if row.end > min(self.total_duration, end + 8.) + .001:
+                continue
+            source = SegmentItem(row.id, row.start, row.end, row.duration)
+            source.text_zh = source.asr_text = row.asr_text or row.text_zh
+            for name in SOURCE_METADATA_FIELDS:
+                setattr(source, name, deepcopy(getattr(row, name, None)))
+            context.append(source)
+            if start <= row.start < row.end <= end + .001:
+                owned.append(source)
+        return owned, context
+
+    async def _produce_parallel_visual(self, target, workers):
+        from core.streaming.parallel_chunks import ChunkWork, OrderedChunkRunner
+        from core.streaming.recovery import reserve, input_hash, transition, contiguous_coverage
+        # Existing ranges are authoritative on Resume, even if the user changes
+        # the requested chunk length. Completed owners are never submitted again.
+        retry = [(row["start"], row["end"]) for row in self._chunk_jobs
+                 if row["state"] != "COMPLETED" and row["start"] < target]
+        cursor = max(self._visual_scanned_seconds, self._legacy_visual_prefix,
+                     max((row["end"] for row in self._chunk_jobs), default=0.))
+        attempts = {}
+        self._parallel_chunk_planning = True
+        self._parallel_chunk_workers = workers
+        def current():
+            if getattr(self, "_persistence_capacity_failed", False):
+                raise RuntimeError(self.error or PROJECT_SAVE_FAILURE_WARNING)
+            return not self.is_stopped
+        logging.getLogger("pipeline").info(
+            "CHUNK_POOL_START run_id=%s workers=%s chunk_seconds=%s", self.task_id,
+            workers, settings.TRANSLATION_CHUNK_SECONDS)
+        while cursor < target - .001 or retry:
+            await self.pause_event.wait()
+            if self.is_stopped:
+                raise asyncio.CancelledError
+            wave = []
+            source_blocked = False
+            retry_wave = cursor >= target - .001
+            if retry_wave:
+                await self._drain_chunk_followups()
+            for _ in range(workers):
+                if retry_wave:
+                    if not retry:
+                        break
+                    start, end = retry.pop(0)
+                else:
+                    if cursor >= target - .001:
+                        break
+                    start, end = cursor, min(target, cursor + settings.TRANSLATION_CHUNK_SECONDS)
+                # Recognition alone owns global IDs and speaker evidence. It
+                # stays serial and file-backed; only detached translations fan out.
+                if not await self._prepare_source_until(min(self.total_duration, end + 8.)):
+                    source_blocked = True
+                    break
+                if not retry_wave:
+                    crossing = [row for row in self.segments.values() if row.start < end < row.end]
+                    end = max([end, *(row.end for row in crossing)])
+                    # Lookahead follows the measured end, including a sentence
+                    # crossing the nominal boundary. Retry sees the same context.
+                    if not await self._prepare_source_until(min(self.total_duration, end + 8.)):
+                        source_blocked = True
+                        break
+                    cursor = end
+                if end <= start or end > self._source_prepared_seconds + .001:
+                    raise ValueError("Ranh giới đoạn song song nằm ngoài nguồn đã nhận diện.")
+                wave.append((start, end))
+            if not wave:
+                break
+            # A complete bounded wave is recognized before any translation is
+            # dispatched: adjacent raw dialogue has the same immutable evidence.
+            jobs, metadata = [], {}
+            for start, end in wave:
+                source, context = self._parallel_source_snapshot(start, end)
+                signature = input_hash(source, {"source": self._chunked_source_identity,
+                    "provider": settings.LLM_PROVIDER, "model": settings.OPENCODE_MODEL,
+                    "visual": True, "parallel_context_version": 1})
+                record = reserve(self._chunk_jobs, start, end, signature)
+                if record["state"] == "COMPLETED":
+                    continue
+                owners = {row.id: self._visual_review_state(self.segments[row.id]) for row in source}
+                async def execute(record=record, source=source, context=context):
+                    if not current():
+                        raise asyncio.CancelledError
+                    transition(record, "RUNNING")
+                    self._persist_if_enabled()
+                    engine = self._new_chunk_intelligence()
+                    batches = []
+                    batch_cursor, published_ids = record["start"], set()
+                    def collect(result, lo, hi):
+                        nonlocal batch_cursor
+                        check = current_execution_context().cancel_check
+                        if self.is_stopped or (check and check()):
+                            raise asyncio.CancelledError
+                        if (any(type(value) not in (int, float) or not math.isfinite(value) for value in (lo, hi))
+                                or abs(lo - batch_cursor) > .001 or not lo < hi <= record["end"] + .001
+                                or any(row.start < hi < row.end for row in source)):
+                            raise ValueError("Kết quả đoạn song song trùng hoặc sai khoảng thời gian sở hữu.")
+                        expected = [row for row in source if lo <= row.start < row.end <= hi + .001]
+                        from core.video_intelligence import VideoIntelligence
+                        result = VideoIntelligence._checked_checkpoint_result(result, expected, lo, hi)
+                        ids = set(result["segments"])
+                        if published_ids.intersection(ids):
+                            raise ValueError("Một câu thoại đã xuất hiện hai lần trong đoạn song song.")
+                        published_ids.update(ids)
+                        batch_cursor = hi
+                        batches.append((deepcopy(result), lo, hi))
+                    def invoke():
+                        try:
+                            result = engine.prepass(self.video_path, source,
+                                total_duration=self.total_duration, start_time=record["start"],
+                                end_time=record["end"], context_segments=context, previous_summary="",
+                                cancel_check=current_execution_context().cancel_check, chunk_callback=collect)
+                            if set(result.get("segments", {})) != {row.id for row in source}:
+                                raise ValueError("Đoạn dịch song song chưa trả đủ ID câu thoại.")
+                            if (abs(batch_cursor - record["end"]) > .001
+                                    or published_ids != {row.id for row in source}):
+                                raise ValueError("Đoạn dịch song song chưa xuất bản đủ kết quả đã kiểm định.")
+                            return batches, None
+                        except Exception as error:
+                            return batches, error
+                    try:
+                        return await self._run_blocking(invoke)
+                    finally:
+                        engine.screen_ocr.close()
+                job = ChunkWork(start, end, tuple(row.id for row in source), execute)
+                jobs.append(job)
+                metadata[(start, end)] = (record, owners)
+            self._persist_if_enabled()
+            try:
+                async with OrderedChunkRunner(workers, admission_event=self.pause_event,
+                                              is_current=current) as pool:
+                    async for outcome in pool.run(jobs):
+                        record, owners = metadata[(outcome.work.start, outcome.work.end)]
+                        batches, error = outcome.value if outcome.error is None else ([], outcome.error)
+                        published = set()
+                        for result, lo, hi in batches:
+                            await self._wait_for_edit_publication()
+                            # A manual edit/review committed after dispatch wins.
+                            # Timing-only revision changes do not invalidate text.
+                            stale = [self.segments[sid] for sid in result["segments"]
+                                if self._visual_review_state(self.segments[sid]) != owners[sid]
+                                or (self.segments[sid].verification or {}).get("status") == "manual"]
+                            result["segments"] = {sid: data for sid, data in result["segments"].items()
+                                if self._visual_review_state(self.segments[sid]) == owners[sid]
+                                and (self.segments[sid].verification or {}).get("status") != "manual"}
+                            await self._publish_visual_chunk(result, lo, hi,
+                                preserve_screen_intervals=[(row.start, row.end) for row in stale])
+                            published.update(result["segments"])
+                            published.update(row.id for row in stale if row.final_vi.strip() or row.confirmed_silence)
+                        if error is None and not batches:
+                            error = ValueError("Đoạn song song không xuất bản kết quả hợp lệ.")
+                        if error is None and published != set(outcome.work.source_ids):
+                            error = ValueError("Một câu nguồn đã đổi nhưng chưa có bản dịch thay thế hợp lệ.")
+                        attempts[record["id"]] = attempts.get(record["id"], 0) + 1
+                        if error is None:
+                            transition(record, "COMPLETED")
+                        else:
+                            transition(record, "RETRY_PENDING", type(error).__name__)
+                            if attempts[record["id"]] < 2:
+                                retry.append((record["start"], record["end"]))
+                            for sid in outcome.work.source_ids:
+                                row = self.segments[sid]
+                                if row.status in ("READY", "PLAYED") or row.translation_provider:
+                                    continue
+                                row.status, row.failed_stage = "FAILED", "TRANSLATING"
+                                row.error = "Đoạn này chưa dịch xong; đã lưu để thử lại độc lập."
+                                await self.emit("segment_update", row.to_dict())
+                            logging.getLogger("errors").warning(
+                                "CHUNK_RETRY_PENDING run_id=%s chunk_id=%s error_type=%s detail=%s traceback=%s",
+                                self.task_id, record["id"], type(error).__name__, redacted_detail(error),
+                                redacted_detail("".join(traceback.format_tb(error.__traceback__))))
+                        self._visual_scanned_seconds = max(self._visual_scanned_seconds, record["end"])
+                        self._visual_completed_seconds = contiguous_coverage(self._chunk_jobs, self._legacy_visual_prefix)
+                        try:
+                            self._persist_if_enabled()
+                        except Exception:
+                            # A completed owner is durable only after its commit
+                            # succeeds. Keep earlier persisted owners untouched.
+                            transition(record, "RETRY_PENDING", "checkpoint_failed")
+                            self._visual_completed_seconds = contiguous_coverage(
+                                self._chunk_jobs, self._legacy_visual_prefix)
+                            raise
+            finally:
+                for record, _ in metadata.values():
+                    if record["state"] == "RUNNING":
+                        transition(record, "RETRY_PENDING", "interrupted")
+                self._persist_if_enabled()
+            if source_blocked:
+                break
+
+    async def _complete_chunked_source(self):
         if self._chunk_followups is not None:
             await self._enqueue_chunk_followup(None)
             await self._chunk_followup_task

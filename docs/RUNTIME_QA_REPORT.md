@@ -1,5 +1,37 @@
 # Runtime QA report
 
+## Independent minute-range translation workers — October 12, 2026
+
+**Implementation and isolated regression verification only; production/provider acceptance NOT RUN.** The user explicitly requested code edits without starting/reloading Studio, opening browsers or controlling the desktop. No real Muse request, app/UI session or new MP4 is claimed for this change. The historical capacity-2 provider measurements below do not benchmark this new capacity-5 design.
+
+### Architecture and ownership
+
+Full visual OpenCode translation now plans measured time ranges with a default target of 60 seconds and up to five concurrent private translation workers. Available CPU/RAM and the shared provider cap can lower admission. A five-minute source can use roughly five workers; a sentence crossing a boundary stays whole in one owner, so ranges need not be exactly equal. Preview retains its existing short-prefix behavior. ASR/source IDs remain serial and deterministic; review/TTS still uses one timeline consumer. This is parallel chunk translation, not five copies of the entire pipeline or a measured fivefold speedup.
+
+`TRANSLATION_CHUNK_SECONDS` (15–90, default 60), `TRANSLATION_CHUNK_WORKERS` (1–8, default 5) and `OPENCODE_CONCURRENCY` (1–8, default 5) configure separate time-range and request limits. CPU/RAM admission is a conservative heuristic, not a benchmark. Native OCR has a separate two-owner limit, one CPU thread per owner, and releases ONNX models before waiting on Muse.
+
+Each worker receives a private `VideoIntelligence`/OCR instance and detached original-ASR context through its fixed measured end plus lookahead. Context can overlap; output ownership cannot. The bounded runner rejects intersecting intervals/duplicate IDs before dispatch, collects validated output, and publishes in timeline order. Every callback must cover its exact consecutive interval with all expected IDs. Partial valid batches survive later failures; only failed intervals retry. Existing ledger bounds and the durable planner marker survive worker/chunk-setting changes and restart. Stop cancels and joins native workers before returning; Pause blocks new source/worker admission.
+
+### Integration defects found and fixed
+
+1. Falling from parallel admission to one worker could replan a stopped `[0,60]` owner as `[0,24]`, producing overlapping checkpoints. Resume preserves the original planner/ranges even with one worker; the legacy serial planner also begins after reserved coverage.
+2. Neighbor timing reflow increments a general revision even when text is unchanged. Comparing that revision could discard a valid later translation and falsely complete its interval. Publication now compares content/review identity, accepts timing-only changes, and requires every owned ID to be published or legitimately replaced.
+3. Extending an interval for a crossing sentence could leave its initial lookahead shorter than Retry's context. Source preparation now fills lookahead through the measured end before dispatch.
+4. Missing, duplicated, gapped or foreign-ID callbacks could otherwise count as successful output. The integration reuses normalized schema validation and checks consecutive callback coverage before completing an owner.
+5. A durable write failure was caught as an ordinary retryable chunk error, allowing peers to continue without checkpoints. Fatal persistence state now stops admission/publication and cancels/drains native work. A failed completion commit also rolls back its in-memory owner/coverage to RETRY_PENDING, preserving earlier durable owners and already-produced valid speech.
+6. Wave preparation ignored Pause between source packets. Source admission now waits on Pause and checks Stop for each packet.
+7. Delayed drafts could overwrite edits/masks while the user was still synthesizing a manual edit. Publication waits for the atomic edit owner, rechecks content state, and preserves affected screen intervals.
+
+The failed-interval diagnostic includes run/chunk IDs, sanitized detail and traceback. No provider secret is written to this report. Source videos, existing projects and retained speech/checkpoints are preserved.
+
+### Acceptance boundary
+
+Final integrated isolated verification: **626 tests and 17 subtests passed in 56.32 s** across chunked preview/publication, parallel ownership/OCR admission, recovery/storage, progress/context, shared AI execution/OpenCode contracts, normalized visual output and pacing recovery. This includes a 300-second simulated timeline with five concurrently active workers, out-of-order finishes, exactly one owner per sentence and ordered synthesis; it is not a translated five-minute provider benchmark. Dedicated faults cover persistence failure before admission, while native work is active and after a completion transition; no late admission/ghost completion survives. Pause and an in-flight atomic manual edit/mask are also covered. Fixtures isolate provider/native-model responses. Twelve changed/new Python sources parsed successfully; Git whitespace checks passed. No TypeScript/npm production build or configured lint tool exists for this Python/static-JS change; no such PASS is asserted.
+
+Cleanup limitation: automatic approval review rejected the verified task-only removal of `workspace/temp/parallel-chunk-regression` with “blocked by policy”. That directory contains 1,635 isolated test files / 9,862,128 bytes. It remains; no alternate deletion route or retry was used. Normal pytest temporary fixtures also remain under the system temporary test root. No Studio/server/browser/watcher was started by this task, and all test processes finished.
+
+Real five-worker Muse throughput, rate limits, full translated-video output, UI restart/resume and multi-hour stress tests remain **NOT VERIFIED for this change**. They require a later authorized runtime test. This task does not resolve or approve historical uncertain speaker/address/timing content merely by increasing concurrency.
+
 ## Two concurrent Muse requests — October 12, 2026
 
 **PASS for two concurrent real Muse requests; full preview acceptance remains incomplete.** This scoped throughput change does not constitute acceptance of every historical translation, speaker/address or multi-hour-video issue. Both production preview/resume runs exceeded their separate 12-minute QA deadlines. Completed translated-prefix playback passed after restart; no completed preview or full export is claimed.

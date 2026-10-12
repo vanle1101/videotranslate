@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import math
 import re
+import threading
 import tempfile
 from pathlib import Path
 from typing import Any, Callable
@@ -21,8 +22,11 @@ class ScreenOCR:
     MAX_DIMENSION = 960
     MIN_CONFIDENCE = .75
 
-    def __init__(self, engine=None):
+    def __init__(self, engine=None, *, cpu_threads=4):
         self._engine = engine
+        if type(cpu_threads) is not int or not 1 <= cpu_threads <= 8:
+            raise ValueError("OCR CPU threads must be between 1 and 8")
+        self.cpu_threads = cpu_threads
 
     @staticmethod
     def _check_cancelled(cancel_check=None):
@@ -32,7 +36,7 @@ class ScreenOCR:
     def _get_engine(self):
         if self._engine is None:
             from rapidocr_onnxruntime import RapidOCR
-            self._engine = RapidOCR(intra_op_num_threads=4, inter_op_num_threads=1,
+            self._engine = RapidOCR(intra_op_num_threads=self.cpu_threads, inter_op_num_threads=1,
                                     text_score=self.MIN_CONFIDENCE, print_verbose=False)
         return self._engine
 
@@ -159,3 +163,23 @@ class ScreenOCR:
                     progress_callback(index + 1, len(frames))
             self._check_cancelled(cancel_check)
         return self.track_samples(samples, start, end)
+
+
+class ChunkScreenOCR(ScreenOCR):
+    """Allow many waiting AI chunks with at most two native OCR owners."""
+    _admission = threading.BoundedSemaphore(2)
+
+    def __init__(self):
+        super().__init__(cpu_threads=1)
+
+    def extract(self, *args, cancel_check=None, **kwargs):
+        while not self._admission.acquire(timeout=.1):
+            self._check_cancelled(cancel_check)
+        try:
+            self._check_cancelled(cancel_check)
+            return super().extract(*args, cancel_check=cancel_check, **kwargs)
+        finally:
+            # ONNX is released before this chunk waits on Muse, so memory is
+            # proportional to the OCR cap, not the number of chunk workers.
+            self.close()
+            self._admission.release()

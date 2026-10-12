@@ -101,7 +101,10 @@ class Settings(BaseSettings):
     OPENCODE_TIMEOUT: float = 60.0
     # Let the source producer overlap the independent review/TTS consumer.
     # Stage deadlines shorten, never extend, each adapter's request timeout.
-    OPENCODE_CONCURRENCY: int = Field(default=2, ge=1, le=4)
+    OPENCODE_CONCURRENCY: int = Field(default=5, ge=1, le=8)
+    # Independent time ranges for full translation; preview remains bounded.
+    TRANSLATION_CHUNK_SECONDS: float = Field(default=60.0, ge=15, le=90)
+    TRANSLATION_CHUNK_WORKERS: int = Field(default=5, ge=1, le=8)
     OPENCODE_QUEUE_LIMIT: int = Field(default=24, ge=1, le=256)
     # Queue admission is separate from a provider request deadline. It must
     # cover the longest bounded review request already ahead in the FIFO.
