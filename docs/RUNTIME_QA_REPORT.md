@@ -1,20 +1,23 @@
 # Runtime QA report
 
-## Live recovery run — October 12, 2026 (in progress; no completion claimed)
+## Live recovery and actual provider failures — October 12, 2026
 
-This is a status record for the real recovery currently running against saved task `76f5aa6b`. It is deliberately **not** an acceptance result: the full MP4 has not been produced or validated yet, and no end-to-end success is claimed while the run is still processing.
+**IN PROGRESS, not accepted as a completed video.** Saved project `76f5aa6b` uses the real 320.040635-second source `workspace/inputs/video_f68bfcb73b13425eb6fd838372765879.mp4`. No full final MP4 has yet passed this audit.
 
-| Item | Observed value |
-| --- | --- |
-| Source | `workspace/inputs/video_f68bfcb73b13425eb6fd838372765879.mp4`, 320.040635 s (5:20) |
-| Runtime path | Production history → saved task → Resume, backend `127.0.0.1:51074`; real Muse/provider and media storage |
-| Run identifier | `76f5aa6b` (harness session `69860`) |
-| Code loaded by the running process | `b167c25`; latest fixes through `8da6468` are on disk and require a later clean reload |
-| Current work observed | Semantic review/recovery groups are completing; rows 120, 121 and 135 have real translated/TTS artifacts; row 189 and other pending groups remain unresolved |
-| Output | No final output filename yet; full render/playback/ffprobe validation is still pending |
-| ETA | The live process still shows an older optimistic forecast. The stage-ETA correction in `8da6468` has not been loaded into this process |
+- Production path: offscreen Qt History → saved project → Resume. No mock HTTP/provider/media; no visible browser or desktop input. First backend `51074` was stopped through its normal Stop API after repeated real Edge empty-audio failures. Checkpoints survived restart. Current backend `63600`, harness `cleanup/eta-worker-tests/recovery-after-edge.txt`, loaded through `57c6d0f`.
+- Real Muse review recovered empty source-supported rows120/121/189. Full review finished with uncertainty retained, not converted into automatic verification. Row189's0.36-second slot produced complete real audio at1.1435x. Before editorial repairs,173/193 rows had audio.
+- Actual source contact sheets establish the father/daughter scene and name陈小满. Agent editorial corrections were saved through the production transcript editor, with real generated WAVs and durable-revision checks: IDs32,33,34,37,108,116,120,121,122,153,190,192. These are **agent editorial edits**, not human speaker confirmations or proof of automatic translation correctness. Existing manual-status wording is the editor's generic label. Suggested edits that failed timing/provider validation did not replace old text/audio.
+- After these repairs,180/193 rows had audio; current automatic recovery reached181/193 at20:42. Final export and full decode/playback remain pending. Remaining reviews and timing conflicts must not be described as resolved.
 
-The run is being allowed to continue so that existing checkpoints and successful audio are retained. If it reaches a terminal failure, the exact stage, segment IDs, provider response and checkpoint state must be recorded here before a targeted fix. The report may only be changed to **PASS** after a real complete MP4 is exported, decoded/readable, played through the production UI, and the saved task is reopened and rerun.
+| Reproduced issue | Actual evidence | Fix / verification |
+| --- | --- | --- |
+| Edge empty audio | Same voice/text WordBoundary returned0bytes/NoAudioReceived; SentenceBoundary returned20,016bytes in0.610s. ffprobe3.336s,24kHz mono and full decode PASS. Further probes show both modes sometimes fail, including close1006 before audio; this is not a guaranteed cure | cfcc4bb switches only empty-audio retry to supported sentence metadata, same voice/text/rate; no invented word timings.25tests PASS. Real editor row121 recovered on second attempt |
+| Editor hid cause | Real timing and Edge failures both displayed generic503 | 3d78503 maps safe known categories to actionable messages, retaining correlation ID and secret-safe stack locations;127transcript tests PASS |
+| Next failed row stays locked | After saving a row, progress still said can_repair_failed=false until reload | 57c6d0f emits fresh progress after edit ownership release;128transcript tests PASS |
+| Misleading ETA after resume | Cached stages trained fresh-work rates and difficult pacing consumed much longer than easy audio | 8da6468 holds ETA during timing recovery;387410c excludes checkpoint/API/raw/final speech-cache samples and versions the measurement profile.211+186relatedtests PASS; latest cache-rate fix requires next reload |
+| QA harness delayed error reporting | Editor error remained visible while harness waited180s for editor to close | 61f0b9a surfaces actual editor error immediately. No production behavior mocked |
+
+Integrated Edge/transcript/ETA regression:182tests PASS in13.16s. These regression results do not establish semantic accuracy or full MP4 acceptance. Current progress explicitly says it is repairing long sentences and recalculating MP4 time, rather than displaying an unsupported countdown.
 
 ## Selectable translation worker presets — October 12, 2026
 
