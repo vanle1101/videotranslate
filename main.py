@@ -1363,6 +1363,20 @@ async def edit_streaming_segment(task_id: str, segment_id: int, req: SegmentEdit
         raise HTTPException(status_code=422, detail="Nội dung hoặc thời lượng câu thoại không hợp lệ. Nhập từ 1 đến 2.000 ký tự.") from None
     except Exception as error:
         attempt_id = uuid.uuid4().hex[:12]
+        from core.engines.tts.edge_fallback import EdgeTTSRequestError
+        from core.engines.alignment.timing_aligner import SpeechBudgetError
+        hint = "Chưa tạo lại được giọng đọc."
+        if isinstance(error, EdgeTTSRequestError):
+            hint = {
+                "tts_empty_audio": "Dịch vụ Edge-TTS chưa trả về âm thanh sau các lần thử.",
+                "tts_timeout": "Dịch vụ Edge-TTS hết thời gian chờ.",
+                "tts_rate_limited": "Dịch vụ Edge-TTS đang giới hạn lượt gọi.",
+                "tts_tls_certificate": "Không xác minh được chứng chỉ Edge-TTS; kiểm tra ngày giờ máy và proxy/VPN.",
+                "tts_tls_handshake": "Kết nối bảo mật Edge-TTS thất bại; kiểm tra proxy/VPN.",
+                "tts_transport": "Kết nối tới Edge-TTS bị gián đoạn.",
+            }.get(error.code, "Dịch vụ Edge-TTS không tạo được giọng đọc.")
+        elif isinstance(error, SpeechBudgetError):
+            hint = "Lời đọc vượt thời lượng tự nhiên; hãy rút gọn câu hoặc chọn giọng khác."
         # Log frame locations rather than exception text/locals: provider
         # errors can echo transcript content or credentials. The attempt ID
         # links this user-visible failure to its actual runtime path.
@@ -1373,7 +1387,7 @@ async def edit_streaming_segment(task_id: str, segment_id: int, req: SegmentEdit
             "TRANSCRIPT_EDIT_FAILED run_id=%s segment_id=%s attempt_id=%s provider=%s error_type=%s trace=%s",
             task_id, segment_id, attempt_id, getattr(session, "tts_engine_name", "unknown"),
             type(error).__name__, trace)
-        raise HTTPException(status_code=503, detail="Chưa tạo lại được giọng đọc. Nội dung và âm thanh cũ vẫn được giữ; hãy thử lại. "
+        raise HTTPException(status_code=503, detail=hint + " Nội dung và âm thanh cũ vẫn được giữ; hãy thử lại. "
                             f"Mã lỗi: {attempt_id}.") from None
     return {"segment": session.caption_metadata(segment), "screen_texts": getattr(session, "screen_texts", [])}
 

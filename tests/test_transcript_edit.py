@@ -122,6 +122,29 @@ def test_manual_speech_failure_is_traceable_without_logging_secret_or_losing_old
     assert old_audio.read_bytes() == b'old audio'
 
 
+@pytest.mark.parametrize("category,hint", [("tts_empty_audio", "chưa trả về âm thanh"),
+    ("tts_rate_limited", "giới hạn lượt gọi"), ("tts_timeout", "hết thời gian chờ"),
+    ("timing", "vượt thời lượng")])
+def test_manual_edit_reports_safe_actionable_provider_category(session, caplog, category, hint):
+    from core.engines.tts.edge_fallback import EdgeTTSRequestError
+    from core.engines.alignment.timing_aligner import SpeechBudgetError
+    secret = "Authorization: Bearer private-test-key"
+    failure = (SpeechBudgetError(secret) if category == "timing" else
+               EdgeTTSRequestError(secret, code=category, retryable=True))
+    session.tts_engine.synthesize.side_effect = failure
+    before = session.segments[0].to_dict()
+    async def run():
+        async with client() as api:
+            response = await api.patch(route(session), json={"final_vi": "Lời mới"})
+            assert response.status_code == 503
+            assert hint in response.json()["detail"]
+            assert "Mã lỗi:" in response.json()["detail"]
+            assert "private-test-key" not in response.text
+    asyncio.run(run())
+    assert "private-test-key" not in caplog.text
+    assert session.segments[0].to_dict() == before
+
+
 @pytest.mark.parametrize("silence", [False, True])
 def test_edit_disk_failure_preserves_durable_text_audio_and_result(session, monkeypatch, silence):
     seg = session.segments[0]
