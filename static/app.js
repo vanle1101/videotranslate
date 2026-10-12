@@ -192,6 +192,23 @@ document.addEventListener("DOMContentLoaded", () => {
 
   // Session State
   let currentTaskId = null;
+  const lastTaskStorageKey = "studio.last-task-id";
+  const validTaskId = value => typeof value === "string" && /^[a-zA-Z0-9_-]{1,80}$/.test(value);
+  function rememberTask(taskId) {
+    if (!validTaskId(taskId)) return;
+    try { localStorage.setItem(lastTaskStorageKey, taskId); } catch (_) {}
+  }
+  function forgetTask(taskId = null) {
+    try {
+      if (taskId === null || localStorage.getItem(lastTaskStorageKey) === taskId) localStorage.removeItem(lastTaskStorageKey);
+    } catch (_) {}
+  }
+  function rememberedTask() {
+    try {
+      const taskId = localStorage.getItem(lastTaskStorageKey);
+      return validTaskId(taskId) ? taskId : null;
+    } catch (_) { return null; }
+  }
   let currentWs = null;
   let selectedFile = null;
   window.currentLocalFilePath = null;
@@ -2228,6 +2245,7 @@ document.addEventListener("DOMContentLoaded", () => {
     resetScreenTexts();
     translationReady = false;
     totalVideoDuration = 0;
+    forgetTask();
     currentTaskId = null;
     if (currentWs) currentWs.close();
     currentWs = null;
@@ -2812,6 +2830,7 @@ document.addEventListener("DOMContentLoaded", () => {
         return;
       }
       currentTaskId = data.task_id;
+      rememberTask(currentTaskId);
 
       if (data.video_url) setPreviewSource(data.video_url, { task_id: currentTaskId });
       else {
@@ -4200,7 +4219,7 @@ document.addEventListener("DOMContentLoaded", () => {
       if (!response.ok) throw new Error(data.detail || "Phiên dịch không còn tồn tại.");
       stopPreviewAudio();
       if (currentWs) currentWs.close();
-      currentWs = null; currentTaskId = taskId; currentProgress = null;
+      currentWs = null; currentTaskId = taskId; rememberTask(taskId); currentProgress = null;
       restoreSessionVoice(data, taskId);
       syncCaptionStyleTask();
       resetTaskResult();
@@ -4237,6 +4256,43 @@ document.addEventListener("DOMContentLoaded", () => {
       else alert("Hãy chờ thao tác hiện tại hoặc lưu lời thoại trước khi mở tác vụ.");
     } catch (error) { alert(error.message); }
   };
+  async function restoreRememberedTask() {
+    let taskId = rememberedTask();
+    if (!taskId) {
+      // Desktop builds may choose a new localhost port on restart, which
+      // gives localStorage a new origin. Recover the newest durable task from
+      // the server in that case; this is still read-only and never starts a
+      // provider request.
+      try {
+        const response = await fetch("/api/tasks", {cache: "no-store"});
+        if (response.ok) {
+          const data = await response.json();
+          const candidates = (Array.isArray(data.tasks) ? data.tasks : [])
+            .filter(task => validTaskId(task?.session_id || task?.task_id)
+              && !String(task.task_id || "").startsWith("export_")
+              && task.can_open !== false
+              && ["QUEUED", "RUNNING", "PAUSED", "PREVIEW_READY", "PREPARED", "FAILED", "STOPPED", "CANCELLED"].includes(task.status));
+          candidates.sort((a, b) => String(b.updated_at || b.created_at || "").localeCompare(String(a.updated_at || a.created_at || "")));
+          taskId = candidates[0] ? (candidates[0].session_id || candidates[0].task_id) : null;
+          if (taskId) rememberTask(taskId);
+        }
+      } catch (_) {}
+    }
+    if (!taskId || currentTaskId || pendingStart || pendingTaskAction) return false;
+    try {
+      const response = await fetch(`/api/streaming/${encodeURIComponent(taskId)}`, {cache: "no-store"});
+      if (response.status === 404) { forgetTask(taskId); return false; }
+      if (!response.ok) return false;
+      // Attach only reads the durable snapshot and opens the live stream. It
+      // never starts generation, retries, or plays media automatically.
+      return await window.studioAttachTask(taskId);
+    } catch (_) {
+      // Keep the id so a transient backend startup/port race can recover on
+      // the next poll or application launch.
+      return false;
+    }
+  }
+  window.restoreRememberedTask = restoreRememberedTask;
   window.studioRetry = async () => {
     if (!currentTaskId || !currentProgress?.can_retry || pendingTaskAction || btnRetryWorker.disabled) return;
     const taskId = currentTaskId;
@@ -4308,7 +4364,19 @@ document.addEventListener("DOMContentLoaded", () => {
   // 7. TASK MANAGER VIEW
   // =========================================================
   window.pauseTask = id => controlTask(id, "pause");
-  window.resumeTask = id => controlTask(id, "resume");
+  window.resumeTask = async id => {
+    if (!historyTaskId(id)) return;
+    // A stopped/failed saved session must be reattached before retrying. This
+    // preserves its checkpoint and prevents the history button from creating
+    // a second task through a fresh start request.
+    if (currentTaskId !== id) {
+      try {
+        if (!await window.studioAttachTask(id)) return;
+      } catch (error) { alert(error.message); return; }
+    }
+    if (currentTaskId === id && currentProgress?.can_retry) return window.studioRetry();
+    return controlTask(id, "resume");
+  };
   window.stopTask = id => controlTask(id, "stop");
 
   const expandedHistoryVideos = new Set();
@@ -4442,7 +4510,7 @@ document.addEventListener("DOMContentLoaded", () => {
     }
     if (historyTaskId(task.task_id)) {
       if (task.can_pause) actions += `<button onclick="window.pauseTask('${task.task_id}')" class="history-button history-button-pause">Tạm dừng</button>`;
-      if (task.can_resume) actions += `<button onclick="window.resumeTask('${task.task_id}')" class="history-button history-button-resume">Tiếp tục</button>`;
+      if (task.can_resume || (task.can_retry && ["STOPPED", "CANCELLED", "FAILED"].includes(task.status))) actions += `<button onclick="window.resumeTask('${task.session_id || task.task_id}')" class="history-button history-button-resume">Tiếp tục</button>`;
       if (task.can_stop) actions += `<button onclick="window.stopTask('${task.task_id}')" class="history-button history-button-stop">Dừng</button>`;
     }
     const outputUrl = task.status === "COMPLETED" ? historyOutputUrl(task) : "";
@@ -5313,4 +5381,8 @@ document.addEventListener("DOMContentLoaded", () => {
 
   loadSettingsForm();
   refreshDouyinCookies();
+  // Reconnect to the last durable session after the backend is available.
+  // This is intentionally read-only: no generation, retry, or autoplay is
+  // triggered by application startup.
+  void restoreRememberedTask();
 });

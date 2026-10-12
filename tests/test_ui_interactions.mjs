@@ -3056,6 +3056,36 @@ test('stopped history remains attached after repeated socket state and resumes t
   assert.equal(ui.requests.filter(r=>r.url.includes('/start-')).length,0);
 });
 
+test('startup reconnects the remembered task without retrying or autoplaying', async () => {
+  const snapshot = {initialized:true,duration:10,segments_count:1,video_url:'/saved.mp4',
+    progress:{status:'STOPPED',phase:'restored',can_retry:true,stage:'Đã dừng'},
+    telemetry:{ready_to_play:true},segments:[{id:0,start:0,end:5,duration:5,status:'READY',audio_url:'/kept.wav',final_vi:'Đã lưu'}]};
+  const ui = studio(undefined, {saved:{'studio.last-task-id':'saved-startup'}});
+  ui.replies.set('/api/streaming/saved-startup', snapshot);
+  await ui.flush();
+  assert.equal(ui.requests.filter(request => request.url.includes('/start-')).length, 0);
+  assert.equal(ui.requests.filter(request => request.url === '/api/streaming/saved-startup').length >= 1, true);
+  assert.equal(ui.el('video-player').playCount, 0);
+  assert.equal(ui.el('segments-count-badge').textContent, '1 câu');
+  assert.equal(ui.el('btn-retry-worker').classList.contains('hidden'), false);
+});
+
+test('startup falls back to newest durable task when localhost port changes', async () => {
+  const snapshot = {initialized:true,duration:10,segments_count:1,video_url:'/port-change.mp4',
+    progress:{status:'FAILED',phase:'tts',can_retry:true},telemetry:{ready_to_play:true},
+    segments:[{id:0,start:0,end:5,duration:5,status:'READY',audio_url:'/kept.wav',final_vi:'Đã lưu'}]};
+  const ui = studio();
+  ui.replies.set('/api/tasks', {tasks:[
+    {task_id:'old-complete',status:'COMPLETED',updated_at:'2026-01-01T00:00:00Z'},
+    {task_id:'latest-retry',status:'FAILED',can_retry:true,updated_at:'2026-01-02T00:00:00Z'}]});
+  ui.replies.set('/api/streaming/latest-retry', snapshot);
+  await ui.window.restoreRememberedTask();
+  assert.equal(ui.requests.filter(request => request.url === '/api/streaming/latest-retry').length >= 1, true);
+  assert.equal(ui.requests.filter(request => request.url.includes('/start-')).length, 0);
+  assert.equal(ui.el('video-player').playCount, 0);
+  assert.equal(ui.saved.get('studio.last-task-id'), 'latest-retry');
+});
+
 test('finished completion hides old loading overlay and clears worker activity; failures remain visible', async () => {
   const ui = studio(); await ui.start();
   const socket = ui.sockets.at(-1);
