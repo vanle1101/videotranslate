@@ -539,6 +539,8 @@ class StreamingPipelineSession:
             raise SegmentEditConflict("Chỉ tiếp tục khi tác vụ đã dừng do lỗi và không có thao tác khác đang chạy.")
         self._run_started_at = time.monotonic()
         self._run_ready_baseline = sum(row.status in ("READY", "PLAYED") for row in self.segments.values())
+        from core.streaming.progress_eta import reset_eta
+        reset_eta(self, now=self._run_started_at)
         if self._startup_failed:
             # Resume may advance source analysis from its durable cursor while
             # earlier speech failed. Explicit Retry must also schedule those
@@ -1546,6 +1548,8 @@ class StreamingPipelineSession:
             raise SegmentEditConflict("Kiểm tra lại miễn phí hiện dùng OpenCode trong Cài đặt.")
         self._run_started_at = time.monotonic()
         self._run_ready_baseline = sum(row.status in ("READY", "PLAYED") for row in self.segments.values())
+        from core.streaming.progress_eta import reset_eta
+        reset_eta(self, now=self._run_started_at)
         self.is_running = True
         self.review_summary = {"status": "running"}
         self._invalidate_output()
@@ -1686,6 +1690,7 @@ class StreamingPipelineSession:
                 rows = [row for row in self.segments.values()
                         if self._published_row(row) or admitted(row)]
         completed = 0
+        valid_ids = set()
         for row in rows:
             if row.status not in {"READY", "PLAYED"}:
                 continue
@@ -1695,8 +1700,20 @@ class StreamingPipelineSession:
                     str(value or "").strip() for value in (row.text_zh, row.asr_text, row.final_vi)))
             if silence or row.final_vi.strip() and self._has_valid_dub_audio(row):
                 completed += 1
+                valid_ids.add(row.id)
+        # Credit only the uninterrupted, actually playable source prefix.
+        # Later ready branches cannot jump over an unfinished sentence. Reuse
+        # the audio validation above rather than probing WAVs a second time.
+        ready_seconds = 0.
+        for row in sorted(self.segments.values(), key=lambda row: (row.start, row.id)):
+            if row.id not in valid_ids:
+                break
+            ready_seconds = row.end
+        ready_seconds = min(ready_seconds, self.total_duration,
+            self._source_prepared_seconds if self._chunked_source_started else self.total_duration)
         total = len(rows)
         return {"processing_scope": scope, "processing_total_known": total_known,
+                "processing_ready_seconds": ready_seconds,
                 "processing_completed_segments": completed, "processing_total_segments": total,
                 "processing_progress_pct": round(completed * 100 / total, 1)
                     if total_known and total else None}
@@ -1715,14 +1732,6 @@ class StreamingPipelineSession:
                         retry_chunks=sum(row["state"] == "RETRY_PENDING" for row in self._chunk_jobs))
         snapshot["elapsed_seconds"] = (max(0, time.monotonic() - self._run_started_at)
                                        if self._run_started_at is not None else None)
-        snapshot["eta_seconds"] = None
-        if self.is_running and not self.is_stopped and self._run_started_at is not None and self._visual_scanned_seconds >= self.total_duration > 0:
-            elapsed = snapshot["elapsed_seconds"]
-            ready = sum(row.status in {"READY", "PLAYED"} for row in self.segments.values())
-            produced = ready - self._run_ready_baseline
-            remaining = len(self.segments) - ready
-            if elapsed > 0 and produced >= 3 and remaining > 0 and counts["FAILED"] == 0:
-                snapshot["eta_seconds"] = elapsed * remaining / produced
         if settings.LLM_PROVIDER == "opencode":
             from core.engines.translation.opencode_client import _shared_execution_layer
             snapshot["ai_queue"] = _shared_execution_layer().snapshot()
@@ -1783,6 +1792,8 @@ class StreamingPipelineSession:
         snapshot["can_resume"] = bool(self.initialized and self.is_running and snapshot["status"] == "PAUSED")
         snapshot["can_stop"] = (snapshot["status"] in {"RUNNING", "PAUSED"}
                                 or bool(self.edit_tasks) and not getattr(self, "_stop_draining", False))
+        from core.streaming.progress_eta import processing_eta
+        snapshot.update(processing_eta(self, snapshot))
         return snapshot
 
     async def report_progress(self, phase: str, stage: str, progress_pct=None, **details):
@@ -1845,6 +1856,8 @@ class StreamingPipelineSession:
         self.start_task = asyncio.current_task()
         self._run_started_at = time.monotonic()
         self._run_ready_baseline = sum(row.status in {"READY", "PLAYED"} for row in self.segments.values())
+        from core.streaming.progress_eta import reset_eta
+        reset_eta(self, now=self._run_started_at)
         try:
             if self.is_stopped:
                 raise asyncio.CancelledError
@@ -4093,11 +4106,15 @@ class StreamingPipelineSession:
             await self.emit("finished", self.get_telemetry())
 
     def pause(self):
+        from core.streaming.progress_eta import pause_eta
+        pause_eta(self)
         self.is_paused = True
         self.pause_event.clear()
         self._persist_if_enabled()
 
     def resume(self):
+        from core.streaming.progress_eta import resume_eta
+        resume_eta(self)
         self.is_paused = False
         self.pause_event.set()
         self._persist_if_enabled()

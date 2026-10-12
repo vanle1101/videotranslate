@@ -175,6 +175,20 @@ def test_full_scope_counts_admitted_units_but_waits_for_complete_denominator(ses
     assert snapshot["processing_progress_pct"] == 33.3
 
 
+def test_playable_prefix_never_jumps_over_pending_or_invalid_audio(session):
+    session.translation_mode = "full"
+    first = row(session, 0, 0, 10, ready=True)
+    middle = row(session, 1, 10, 20)
+    row(session, 2, 20, 30, ready=True)
+    session._source_prepared_seconds = 40
+    session._chunk_jobs = [{"start": 0, "end": 40, "state": "RUNNING"}]
+    assert session._processing_progress_metadata()["processing_ready_seconds"] == 10
+    middle.confirmed_silence, middle.status = True, "READY"
+    assert session._processing_progress_metadata()["processing_ready_seconds"] == 30
+    first.audio_path = None
+    assert session._processing_progress_metadata()["processing_ready_seconds"] == 0
+
+
 def test_stage_completion_does_not_publish_overall_completion_before_validated_mp4(session):
     row(session, 0, 0, 2, ready=True)
     session.translation_mode = "full"

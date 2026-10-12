@@ -44,8 +44,13 @@ def records(root):
 
 
 def test_real_caption_only_export_skips_all_audio_processing_and_keeps_audio_bytes(media, monkeypatch):
+    from core.streaming import progress_eta
+    import sqlite3
     source, rows, root = media
     first = export(media)
+    with sqlite3.connect(progress_eta._database()) as db:
+        samples = db.execute("SELECT media, elapsed FROM samples").fetchall()
+    assert len(samples) == 1 and samples[0][0] == 1 and samples[0][1] > 0
     original = run_media(["ffmpeg", "-v", "error", "-i", first["output_path"], "-map", "0:a", "-f", "s16le", "pipe:1"], capture_output=True)
     assert len(records(root)) == 1
     exporter = HQExporter()
@@ -61,6 +66,8 @@ def test_real_caption_only_export_skips_all_audio_processing_and_keeps_audio_byt
     assert not any("Trích xuất" in stage or "Trộn giọng" in stage for stage in stages)
     assert len(records(root)) == 1
     reused = run_media(["ffmpeg", "-v", "error", "-i", result["output_path"], "-map", "0:a", "-f", "s16le", "pipe:1"], capture_output=True)
+    with sqlite3.connect(progress_eta._database()) as db:
+        assert db.execute("SELECT count(*) FROM samples").fetchone()[0] == 1, "Cached restyling must not bias a fresh full export estimate"
     assert original, 'First real export has no decoded audio'
     if original != reused:
         mismatch = next((i for i, pair in enumerate(zip(original, reused)) if pair[0] != pair[1]),
@@ -150,6 +157,7 @@ def test_deleted_or_corrupted_cache_regenerates_real_audio(media, monkeypatch, d
 
 @pytest.mark.parametrize("failure", ["cancel", "render", "validate", "publish"])
 def test_failed_or_cancelled_export_never_publishes_audio_cache(media, monkeypatch, failure):
+    from core.streaming import progress_eta
     exporter = HQExporter()
     cancelled = False
     if failure == "cancel":
@@ -168,6 +176,7 @@ def test_failed_or_cancelled_export_never_publishes_audio_cache(media, monkeypat
     with pytest.raises((RuntimeError, ValueError)):
         exporter.export("no-cache", media[0], media[1], 1, cancel_check=lambda: cancelled, publish_callback=publish)
     assert not records(media[2])
+    assert not progress_eta._database().exists(), "A failed export cannot train a successful-final-result ETA"
     assert not (media[2] / "douyin_translated_no-cache_hq.mp4").exists()
     assert not list(media[2].glob("hq_export_*"))
 

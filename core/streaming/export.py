@@ -115,7 +115,7 @@ class HQExporter:
         caption_style = normalize_caption_style(caption_style)
         if not math.isfinite(total_duration) or total_duration <= 0:
             raise ValueError("Thời lượng video phải lớn hơn 0.")
-        t0 = time.time()
+        t0 = time.monotonic()
 
         def _report(pct: int, stage: str):
             if progress_callback:
@@ -198,7 +198,10 @@ class HQExporter:
         # the MP4 commit succeeded, cache I/O cannot change its success state.
         commit_audio_cache(audio_identity, pending_audio)
 
-        elapsed = round(time.time() - t0, 1)
+        elapsed = round(time.monotonic() - t0, 1)
+        if reused is None:
+            from core.streaming.progress_eta import export_profile, record_validated_export
+            record_validated_export(export_profile(video_size, caption_style), total_duration, elapsed)
         _report(100, "Xuất video hoàn tất thành công!")
         return {
             "output_filename": output_filename,

@@ -720,6 +720,9 @@ async def list_tasks():
 
     # 2. HQ Export Tasks
     for export_id, exp in list(active_export_tasks.items()):
+        from core.streaming.progress_eta import export_eta
+        exp.update(export_eta(exp.get("_eta_expected_seconds"),
+            time.monotonic() - exp.get("_eta_started_at", time.monotonic()), exp.get("status")))
         owner_id = exp.get("parent_session_id") or (export_id[7:] if export_id.startswith("export_") else "")
         owner = active_streaming_sessions.get(owner_id)
         tasks.append({
@@ -734,6 +737,7 @@ async def list_tasks():
             "stage": exp.get("stage", "Đang xử lý..."),
             "duration": exp.get("duration", 0),
             "elapsed_seconds": round(time.time() - exp.get("start_time", time.time()), 1),
+            **{key: exp.get(key) for key in ("eta_seconds", "eta_scope", "eta_reason")},
             "video_url": exp.get("video_url", ""),
             "output_filename": exp.get("output_filename", ""),
             "output_video_url": exp.get("video_url", ""),
@@ -1447,16 +1451,27 @@ async def export_hq(req: ExportHQRequest):
         **review_result_details(session),
         "cancelled": False
     }
+    from core.streaming.progress_eta import estimated_export_seconds, export_profile, export_eta
+    active_export_tasks[export_id]["_eta_expected_seconds"] = estimated_export_seconds(
+        export_profile(getattr(session, "video_size", (1080, 1920)), getattr(session, "caption_style", {})),
+        session.total_duration)
+    active_export_tasks[export_id]["_eta_started_at"] = time.monotonic()
+    active_export_tasks[export_id].update(export_eta(active_export_tasks[export_id]["_eta_expected_seconds"], 0))
     session.export_task = asyncio.current_task()
 
     loop = asyncio.get_event_loop()
 
     def _prog_cb(pct, stage: str):
+        estimate = {}
         if export_id in active_export_tasks:
             active_export_tasks[export_id]["progress"] = pct
             active_export_tasks[export_id]["stage"] = stage
+            task = active_export_tasks[export_id]
+            estimate = export_eta(task.get("_eta_expected_seconds"),
+                time.monotonic() - task["_eta_started_at"], task.get("status"))
+            task.update(estimate)
         asyncio.run_coroutine_threadsafe(
-            broadcast_session_event(req.task_id, "export_progress", {"progress": pct, "stage": stage}),
+            broadcast_session_event(req.task_id, "export_progress", {"progress": pct, "stage": stage, **estimate}),
             loop
         )
 
@@ -1483,6 +1498,7 @@ async def export_hq(req: ExportHQRequest):
     try:
         await broadcast_session_event(req.task_id, "export_progress", {
             "progress": None, "stage": "Đang tạo video kết quả từ bản dịch đã xử lý...",
+            **{key: active_export_tasks[export_id].get(key) for key in ("eta_seconds", "eta_scope", "eta_reason")},
         })
         exporter = HQExporter()
         render_worker = asyncio.create_task(asyncio.to_thread(
@@ -1562,6 +1578,7 @@ async def export_hq(req: ExportHQRequest):
         metadata_warning = " ".join(filter(None, [metadata_warning, *save_warnings]))
         active_export_tasks[export_id].update(
             status="COMPLETED", progress=100,
+            eta_seconds=0, eta_scope="final", eta_reason="validated",
             updated_at=max(time.time(), getattr(session, "_history_updated_at", 0) or 0),
             stage=metadata_warning or "Xuất video hoàn tất thành công!",
             video_url=session.output_video_url, output_filename=session.output_filename,
@@ -1619,7 +1636,11 @@ async def get_export_hq_status(task_id: str):
     if session is not None:
         await validate_live_output(session)
     if export_id in active_export_tasks:
-        return active_export_tasks[export_id]
+        from core.streaming.progress_eta import export_eta
+        task = active_export_tasks[export_id]
+        task.update(export_eta(task.get("_eta_expected_seconds"),
+            time.monotonic() - task.get("_eta_started_at", time.monotonic()), task.get("status")))
+        return task
     raise HTTPException(status_code=404, detail="Không tìm thấy tác vụ export")
 
 @app.post("/api/streaming/export-hq/cancel/{task_id}")

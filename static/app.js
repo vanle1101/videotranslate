@@ -51,6 +51,7 @@ document.addEventListener("DOMContentLoaded", () => {
   const taskProgress = document.getElementById("task-progress");
   const taskProgressStage = document.getElementById("task-progress-stage");
   const taskProgressValue = document.getElementById("task-progress-value");
+  const taskProgressEta = document.getElementById("task-progress-eta");
   const taskProgressTrack = document.getElementById("task-progress-track");
   const taskProgressBar = document.getElementById("task-progress-bar");
   const taskProgressDetail = document.getElementById("task-progress-detail");
@@ -143,6 +144,7 @@ document.addEventListener("DOMContentLoaded", () => {
   const exportStatusText = document.getElementById("export-status-text");
   const exportProgressBar = document.getElementById("export-progress-bar");
   const exportProgressPct = document.getElementById("export-progress-pct");
+  const exportProgressEta = document.getElementById("export-progress-eta");
   const btnCancelExport = document.getElementById("btn-cancel-export");
   const exportResultBox = document.getElementById("export-result-box");
   const btnSaveAsNative = document.getElementById("btn-save-as-native");
@@ -697,6 +699,30 @@ document.addEventListener("DOMContentLoaded", () => {
     const hours = Math.floor(minutes / 60);
     const remainder = minutes % 60;
     return remainder ? `${hours} giờ ${remainder} phút` : `${hours} giờ`;
+  }
+
+  function taskEtaText(progress) {
+    if (String(progress?.status || "RUNNING").toUpperCase() !== "RUNNING") return "";
+    const seconds = progress?.eta_seconds;
+    if (typeof seconds !== "number" || !Number.isFinite(seconds) || seconds <= 0) {
+      return "Đang đo thời gian…";
+    }
+    // A task estimate is rounded up to minutes so a still-running operation
+    // cannot appear ready now. The backend owns its measurement and scope:
+    // sentence throughput alone never promises a final MP4 completion time.
+    const minutes = Math.ceil(seconds / 60);
+    const hours = Math.floor(minutes / 60), remainder = minutes % 60;
+    const duration = hours ? `${hours} giờ${remainder ? ` ${remainder} phút` : ""}` : `${minutes} phút`;
+    const scope = progress.eta_scope || "speech";
+    const labels = {final: "Còn khoảng", preview: "Giọng mẫu: khoảng", speech: "Lời & giọng: khoảng", export: "Xuất MP4: khoảng"};
+    return `${labels[scope] || "Công đoạn: khoảng"} ${duration}`;
+  }
+
+  function showEta(element, progress) {
+    if (!element) return;
+    const text = taskEtaText(progress);
+    element.textContent = text;
+    element.classList.toggle("hidden", !text);
   }
 
   function updateExportAvailability() {
@@ -1270,7 +1296,7 @@ document.addEventListener("DOMContentLoaded", () => {
     }
   }
 
-  function renderExportProgress(progress, stage) {
+  function renderExportProgress(progress, stage, metadata = {}) {
     const pct = measuredProgress(progress);
     if (exportProgressBar) {
       exportProgressBar.style.width = pct === null ? "100%" : `${pct}%`;
@@ -1278,6 +1304,7 @@ document.addEventListener("DOMContentLoaded", () => {
     }
     if (exportProgressPct) exportProgressPct.textContent = pct === null ? "" : formatProgressPercent(pct);
     if (exportStatusText && stage) exportStatusText.textContent = stage;
+    showEta(exportProgressEta, {status: "RUNNING", eta_scope: "export", ...metadata});
   }
 
   function pauseStoppedSession(progress = currentProgress, pausePlayback = true) {
@@ -1368,6 +1395,14 @@ document.addEventListener("DOMContentLoaded", () => {
     taskPollWarning = false;
     const previousPreparedSeconds = Number(currentProgress?.source_prepared_seconds);
     const previousStatus = currentProgress?.status;
+    if (currentProgress && ((progress.phase !== undefined && progress.phase !== currentProgress.phase) ||
+        (progress.status !== undefined && progress.status !== currentProgress.status) ||
+        (progress.translation_mode !== undefined && progress.translation_mode !== currentProgress.translation_mode)) &&
+        progress.eta_seconds === undefined) {
+      // A new run, scope or stage must not inherit the previous estimate while
+      // waiting for its first measured sample.
+      currentProgress = {...currentProgress, eta_seconds: null, eta_scope: null};
+    }
     // Stage-local measurements cannot carry across a new stage snapshot.
     // Partial patches within the same stage may still retain its last sample.
     if (progress.phase !== undefined && (progress.phase !== currentProgress?.phase ||
@@ -1424,6 +1459,7 @@ document.addEventListener("DOMContentLoaded", () => {
     taskProgressStage.textContent = `${status === "PAUSED" ? "Đã tạm dừng · " : ""}${currentProgress.stage || (isPreviewReady(status) ? "Đoạn xem trước đã sẵn sàng" : reviewInProgress() ? "AI đang kiểm tra lại bản dịch…" : "Đang xử lý video…")}`;
     bufferingAlert.dataset.state = status === "FAILED" ? "error" : status === "PAUSED" ? "paused" : "loading";
     taskProgressValue.textContent = terminal && pct === null ? "" : displayed.label;
+    showEta(taskProgressEta, currentProgress);
     taskProgressTrack.classList.toggle("hidden", terminal && pct === null);
     taskProgressTrack.dataset.indeterminate = String(pct === null);
     taskProgressTrack.setAttribute("aria-valuetext", `${taskProgressStage.textContent}${pct === null ? ": chưa có số liệu phần trăm" : `: ${displayed.label}`}`);
@@ -1464,8 +1500,6 @@ document.addEventListener("DOMContentLoaded", () => {
           currentProgress.configured_chunk_workers >= currentProgress.chunk_workers) {
         counters.push(`Giới hạn đoạn: ${currentProgress.chunk_workers}/${currentProgress.configured_chunk_workers} luồng`);
       }
-      const eta = formatEta(currentProgress.eta_seconds);
-      if (eta) counters.push(`ước tính còn ${eta}`);
       taskProgressDetail.textContent += ` ${counters.join(" · ")}.`;
     }
     const speakerFrames = currentProgress.speaker_completed_frames, speakerTotal = currentProgress.speaker_total_frames;
@@ -3111,12 +3145,14 @@ document.addEventListener("DOMContentLoaded", () => {
       else if (msg.type === "export_progress") {
         if (!exportingTaskId) {
           automaticExportActive = true;
-          showTaskProgress({status: "RUNNING", phase: "export", stage: msg.stage || "Đang xuất video kết quả…", progress_pct: msg.progress, can_review: false, can_pause: false});
+          showTaskProgress({status: "RUNNING", phase: "export", stage: msg.stage || "Đang xuất video kết quả…", progress_pct: msg.progress,
+            eta_seconds: msg.eta_seconds ?? null, eta_scope: msg.eta_scope || "export", can_review: false, can_pause: false});
         }
-        renderExportProgress(msg.progress, msg.stage);
+        renderExportProgress(msg.progress, msg.stage, msg);
       }
       else if (msg.type === "result_ready") {
         automaticExportActive = false;
+        showEta(exportProgressEta, {status: "COMPLETED"});
         if (!captionStyleDirty && !captionStyleRequest) captionOutputOutdated = false;
         showTaskResult(msg);
         showTaskProgress({status: "COMPLETED", phase: "complete", stage: "Video kết quả đã sẵn sàng", progress_pct: 100,
@@ -3128,6 +3164,7 @@ document.addEventListener("DOMContentLoaded", () => {
           ...(msg.review_summary ? {review_summary: msg.review_summary} : {})});
       }
       else if (msg.type === "result_error") {
+        showEta(exportProgressEta, {status: "FAILED"});
         showExportFailure(msg.message);
         showTaskProgress({status: "FAILED", phase: "export_error", stage: msg.message || "Chưa xuất được video kết quả", progress_pct: null});
       }
@@ -4367,6 +4404,7 @@ document.addEventListener("DOMContentLoaded", () => {
     const pct = displayed.pct;
     const terminalWithoutProgress = pct === null && ["COMPLETED", "PREVIEW_READY", "PREPARED", "FAILED", "STOPPED", "CANCELLED"].includes(task.status);
     const progressLabel = pct === null ? "Chưa có số liệu %" : displayed.label;
+    const etaLabel = taskEtaText(task);
     const sourceLabel = historySource(task);
     const videoTitle = historyDisplayTitle(task, sourceLabel, sessionId);
     const originalTitle = typeof task.title === "string" && task.title.trim() && task.title.trim() !== videoTitle
@@ -4405,7 +4443,7 @@ document.addEventListener("DOMContentLoaded", () => {
       <td class="history-progress-cell">${historyStatusBadge(task)}
         <div class="history-progress-content">
           ${terminalWithoutProgress ? "" : `<div class="history-progress-track" role="progressbar" aria-label="Tiến độ video"${pct === null ? ' aria-valuetext="Chưa có số liệu phần trăm" data-indeterminate="true"' : ` aria-valuemin="0" aria-valuemax="100" aria-valuenow="${pct}" data-indeterminate="false"`}><div class="history-progress-fill" style="width: ${pct === null ? 100 : pct}%"></div></div>`}
-          <span class="history-progress-label">${terminalWithoutProgress ? "" : `${escapeHtml(progressLabel)} · `}${escapeHtml(task.stage || "")}</span>
+          <span class="history-progress-label">${terminalWithoutProgress ? "" : `${escapeHtml(progressLabel)} · `}${etaLabel ? `${escapeHtml(etaLabel)} · ` : ""}${escapeHtml(task.stage || "")}</span>
         </div></td>
       <td class="history-duration-cell">${formatTime(task.duration)}</td>
       <td class="history-actions-cell"><div class="history-actions">${actions || '<span class="history-no-action">—</span>'}</div></td>
@@ -4451,6 +4489,7 @@ document.addEventListener("DOMContentLoaded", () => {
         automaticExportActive = true;
         activeTask = {...activeTask, phase: "export", status: automaticExport.status,
           progress_pct: automaticExport.progress_pct, stage: automaticExport.stage,
+          eta_seconds: automaticExport.eta_seconds ?? null, eta_scope: automaticExport.eta_scope || "export",
           output_video_url: "", output_filename: "", can_pause: false, can_resume: false, can_review: false, can_stop: false};
       } else if (automaticExportActive && automaticExport && ["COMPLETED", "FAILED", "CANCELLED"].includes(automaticExport.status)) {
         automaticExportActive = false;
@@ -4464,7 +4503,7 @@ document.addEventListener("DOMContentLoaded", () => {
       }
       if (activeTask) {
         const statusChanged = activeTask.status !== currentProgress?.status;
-        const progressChanged = ["phase", "stage", "progress_pct", "stage_progress_pct", "processing_progress_pct", "processing_completed_segments", "processing_total_segments", "processing_scope", "processing_total_known", "downloaded_bytes", "total_bytes", "speed", "eta", "can_retry", "can_repair_failed", "can_pause", "can_resume", "can_stop", "can_review", "review_count", "output_video_url", "output_filename", "translation_mode", "can_translate_full", "preview_seconds", "processed_seconds", "source_prepared_seconds", "total_seconds", "review_scope", "chunk_workers", "configured_chunk_workers"]
+        const progressChanged = ["phase", "stage", "progress_pct", "stage_progress_pct", "processing_progress_pct", "processing_completed_segments", "processing_total_segments", "processing_scope", "processing_total_known", "downloaded_bytes", "total_bytes", "speed", "eta", "eta_seconds", "eta_scope", "can_retry", "can_repair_failed", "can_pause", "can_resume", "can_stop", "can_review", "review_count", "output_video_url", "output_filename", "translation_mode", "can_translate_full", "preview_seconds", "processed_seconds", "source_prepared_seconds", "total_seconds", "review_scope", "chunk_workers", "configured_chunk_workers"]
           .some(key => activeTask[key] !== undefined && activeTask[key] !== currentProgress?.[key]) ||
           ["review_summary", "ai_queue"].some(key => activeTask[key] !== undefined &&
             JSON.stringify(activeTask[key]) !== JSON.stringify(currentProgress?.[key]));
@@ -5142,6 +5181,7 @@ document.addEventListener("DOMContentLoaded", () => {
       exportCancelled = true;
       btnCancelExport.disabled = true;
       if (exportStatusText) exportStatusText.textContent = "Đang hủy tác vụ xuất video...";
+      showEta(exportProgressEta, {status: "CANCELLING"});
       updateTasksTable();
     } catch (e) {
       alert("Lỗi hủy xuất: " + e.message);
@@ -5179,7 +5219,7 @@ document.addEventListener("DOMContentLoaded", () => {
         if (sRes.ok) {
           const sData = await sRes.json();
           if (!pollActive || taskId !== currentTaskId || exportingTaskId !== taskId) return;
-          renderExportProgress(sData.progress, sData.stage);
+          renderExportProgress(sData.progress, sData.stage, sData);
           if (["COMPLETED", "FAILED", "CANCELLED"].includes(sData.status)) stopExportPolling();
         }
       } catch (_) {} finally {
@@ -5199,7 +5239,7 @@ document.addEventListener("DOMContentLoaded", () => {
       const data = await res.json();
       if (!res.ok) throw new Error(data.detail || "Lỗi xuất video");
 
-      renderExportProgress(100, "Xuất video hoàn tất");
+      renderExportProgress(100, "Xuất video hoàn tất", {status: "COMPLETED"});
       exportStatusBox.classList.add("hidden");
       exportResultBox.classList.remove("hidden");
       lastExportedFileUrl = data.video_url;
@@ -5219,6 +5259,7 @@ document.addEventListener("DOMContentLoaded", () => {
       stopExportPolling();
       exportStatusBox.classList.remove("hidden");
       exportStatusText.textContent = exportCancelled ? "Đã hủy xuất video." : `Lỗi xuất video: ${e.message}`;
+      showEta(exportProgressEta, {status: exportCancelled ? "CANCELLED" : "FAILED"});
       btnConfirmExport.classList.remove("hidden");
     } finally {
       exportingTaskId = null;

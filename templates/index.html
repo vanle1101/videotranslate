@@ -77,7 +77,7 @@
           <label class="visual-translation-option" title="Đối chiếu lời nói với chữ trên video, rồi tự rà và sửa bản dịch trước khi tạo giọng."><input id="visual-translation" type="checkbox" aria-describedby="visual-translation-help" {% if settings.LLM_PROVIDER in ('gemini', 'openrouter-free', 'opencode') %}checked{% endif %}><span>AI kiểm tra bản dịch</span></label>
           <span id="visual-translation-help" class="sr-only">Đối chiếu lời nói với chữ trên video, rồi tự rà và sửa bản dịch trước khi tạo giọng.</span>
           <div id="task-progress" class="hidden task-progress" aria-label="Tiến độ xử lý video">
-            <div class="task-progress-heading" role="status" aria-live="polite"><span id="task-progress-stage">Đang gửi yêu cầu…</span><span id="task-progress-value">Chưa có %</span></div>
+            <div class="task-progress-heading" role="status" aria-live="polite"><span id="task-progress-stage">Đang gửi yêu cầu…</span><span class="flex flex-wrap items-baseline justify-end gap-x-2"><span id="task-progress-value">Chưa có %</span><span id="task-progress-eta" class="hidden text-gray-400"></span></span></div>
             <div id="task-progress-track" class="task-progress-track" role="progressbar" aria-label="Tiến độ bước hiện tại" aria-valuemin="0" aria-valuemax="100"><div id="task-progress-bar" class="task-progress-bar"></div></div>
             <p id="task-progress-detail" class="task-progress-detail">Phần trăm được tính riêng cho từng bước.</p>
             <p id="task-connection-status" role="status" class="hidden task-connection-status"></p>
@@ -548,7 +548,7 @@
             <span id="export-status-text" class="text-pink-300 font-medium flex items-center gap-2">
               <i class="fa-solid fa-spinner fa-spin text-pink-400"></i> Đang chuẩn bị xuất video...
             </span>
-            <span id="export-progress-pct" class="font-mono font-bold text-pink-400">0%</span>
+            <span class="flex flex-wrap items-baseline justify-end gap-x-2"><span id="export-progress-pct" class="font-mono font-bold text-pink-400">0%</span><span id="export-progress-eta" class="hidden text-gray-400"></span></span>
           </div>
           <div class="w-full bg-gray-800 h-2 rounded-full overflow-hidden">
             <div id="export-progress-bar" class="bg-gradient-to-r from-pink-500 via-rose-500 to-violet-500 h-full transition-all duration-300" style="width: 0%"></div>
