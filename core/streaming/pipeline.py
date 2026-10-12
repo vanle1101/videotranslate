@@ -3569,8 +3569,11 @@ class StreamingPipelineSession:
                 (self.segments.get(row["id"]).verification or {}).get("status") == "manual")
         } if preserve_manual_timing else set()
         if fixed_timing_ids:
-            capacity = max(duration, available_reflow_duration(
-                rows, seg.id, total_duration=known_duration, fixed_ids=fixed_timing_ids))
+            # Keep the provider's original fitting ceiling. Manual rows can
+            # only reduce the usable reflow space; a larger timeline capacity
+            # must not bypass the non-chunked +/-350ms speech contract.
+            capacity = min(capacity, max(duration, available_reflow_duration(
+                rows, seg.id, total_duration=known_duration, fixed_ids=fixed_timing_ids)))
         revision = {row["id"]: (row["revision"], row["dub_start"], row["dub_end"]) for row in rows}
         start, end = resolve_dub_timing(seg.to_dict())
         # The planner bounds both source endpoints to +/-350 ms and can borrow
