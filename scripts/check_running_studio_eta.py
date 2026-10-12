@@ -69,7 +69,10 @@ def main():
                 check_playback(page)
                 event('REAL_OUTPUT_VALIDATED', {'path':str(output.resolve()),'bytes':output.stat().st_size})
                 return 0
-            wait(3000)
+            # Full snapshots enrich every subtitle and may be large for a long
+            # project. The UI already receives WebSocket progress; avoid a
+            # second high-frequency poll adding load during the measurement.
+            wait(15000)
         event('DEADLINE', {'task':args.task})
         return 2
     finally:
