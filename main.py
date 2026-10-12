@@ -1021,9 +1021,16 @@ def _saved_project_candidates(*, source_url=None, video_path=None, voice, engine
             result.append((path.stem, data, saved_mode))
         except (OSError, ValueError, TypeError, KeyError):
             continue
-    # Prefer an exact mode, then the newest manifest.  This makes a full
-    # project win over an old preview when the UI defaults to preview.
-    return sorted(result, key=lambda item: (item[2] == translation_mode,
+    # A full project is the durable continuation of preview mode after a
+    # restart. Prefer it over a stale preview manifest; otherwise the freshly
+    # reopened UI would attach the wrong checkpoint and appear to start over.
+    def mode_priority(item):
+        saved_mode = item[2]
+        if translation_mode == "preview" and saved_mode == "full":
+            return 2
+        return 1 if saved_mode == translation_mode else 0
+    return sorted(result, key=lambda item: (mode_priority(item),
+
                                              item[1].get("updated_at", 0)), reverse=True)
 
 

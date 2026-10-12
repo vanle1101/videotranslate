@@ -249,7 +249,13 @@ def test_saved_full_project_is_selected_after_restart_even_when_request_is_previ
     project = isolated / "workspace" / "projects"
     project.mkdir(parents=True)
     (project / "265796c3.json").write_text("{}", encoding="utf-8")
-    monkeypatch.setattr(main, "read_saved_project", lambda task_id: manifest)
+    (project / "oldpreview.json").write_text("{}", encoding="utf-8")
+    def read(task_id):
+        if task_id == "oldpreview":
+            return {"updated_at": 999, "session": {**manifest["session"], "translation_mode": "preview"}}
+        return manifest
+    monkeypatch.setattr(main, "read_saved_project", read)
+
     found = main._saved_project_candidates(source_url=source_url, voice="vi-VN-HoaiMyNeural",
         engine="edge-tts", asr_engine="sensevoice", visual_translation=False,
         translation_mode="preview")
