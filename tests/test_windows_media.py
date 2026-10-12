@@ -57,7 +57,9 @@ def media():
         ffmpeg("-f", "lavfi", "-i", "sine=frequency=220:duration=1.2", bgm)
         ffmpeg("-f", "lavfi", "-i", "sine=frequency=880:duration=0.6", voice)
         SubtitleGenerator().generate_ass(
-            [{"start": 0, "end": 1.2, "vi_text": "Xin chào Việt Nam"}], subtitles
+            [{"start": 0, "end": 1.2, "vi_text": "Xin chào Việt Nam"}], subtitles,
+            video_size=(180, 320),
+            caption_style={"background_color": "#FFFFFF", "text_color": "#000000"},
         )
         yield folder, video, bgm, voice, subtitles
 
@@ -154,7 +156,13 @@ def test_repeated_alignment_duration_probes_stay_in_background(media, monkeypatc
     with background_launches("core.engines.alignment.timing_aligner.subprocess.run") as launch:
         durations = [aligner.get_audio_duration(path) for path in (voice, bgm, voice)]
     assert durations == pytest.approx([0.6, 1.2, 0.6], abs=0.03)
-    assert [call.args[0][0] for call in launch.call_args_list] == ["ffprobe"] * 3
+    # PCM headers now give the exact frame duration without spawning a process.
+    assert not launch.call_args_list
+    compressed = folder / "voice-probe.mp3"
+    ffmpeg("-i", voice, compressed)
+    with background_launches("core.engines.alignment.timing_aligner.subprocess.run") as launch:
+        assert aligner.get_audio_duration(compressed) > 0
+    assert [call.args[0][0] for call in launch.call_args_list] == ["ffprobe"]
 
 
 def test_sentence_segmentation_probes_and_detects_silence_in_background(media):
