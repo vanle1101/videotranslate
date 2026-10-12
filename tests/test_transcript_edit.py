@@ -804,6 +804,23 @@ def test_stopped_empty_review_row_can_be_repaired_without_restarting_job(session
     asyncio.run(run())
 
 
+def test_repair_release_broadcasts_admission_for_next_failed_row(session):
+    first = mark_failed_speech(session, stopped=True)
+    second = SegmentItem(1, 6, 9, 3)
+    second.status, second.failed_stage = "FAILED", "TTS"
+    second.text_zh, second.asr_text, second.final_vi = "第二句", "第二句", "Câu thứ hai"
+    second.error = "Measured speech does not fit"
+    session.segments[1] = second
+
+    asyncio.run(session.edit_segment(0, "Câu đầu đã sửa"))
+
+    assert first.status == "READY" and not session.edit_tasks
+    progress_events = [data for kind, data in session.events if kind == "progress"]
+    assert progress_events, "A later failed row needs a post-release admission update"
+    assert progress_events[-1]["can_repair_failed"] is True
+    assert progress_events[-1]["status"] == "STOPPED"
+
+
 def test_empty_review_repair_cannot_race_active_owner(session):
     row = session.segments[0]
     row.final_vi, row.needs_review = "", True

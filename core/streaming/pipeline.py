@@ -914,6 +914,19 @@ class StreamingPipelineSession:
             self._edit_cancellations.pop(task, None)
             if self.is_stopped or not self.is_running:
                 self._release_runtime(preserve_media=recovery_edit)
+            # The success event is published while this edit still owns
+            # ``edit_tasks``.  That makes the server correctly report the row
+            # as busy, but leaves the UI with can_repair_failed=false when
+            # another failed speech row is waiting.  Reconcile once ownership
+            # is actually released so a later repair becomes editable without
+            # requiring a page reload.  Avoid a redundant event for ordinary
+            # edits when no failed speech row is eligible.
+            if any(self._can_repair_failed_segment(row) for row in self.segments.values()):
+                try:
+                    await self.emit("progress", self.get_progress(), checkpoint=False)
+                except Exception:
+                    logging.getLogger("errors").warning(
+                        "[%s] Không gửi được tiến độ sau khi nhả quyền sửa lời", self.task_id)
 
     @contextmanager
     def _durable_edit_publication(self, segment, plan, staged_audio):
