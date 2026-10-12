@@ -238,6 +238,41 @@ def test_failed_startup_retries_same_task_without_redownloading(isolated, monkey
     asyncio.run(run())
 
 
+def test_saved_full_project_is_selected_after_restart_even_when_request_is_preview(isolated, monkeypatch):
+    """A restarted Studio must reuse the durable full project, never create a preview UUID."""
+    source_url = "https://www.douyin.com/video/265796c3"
+    monkeypatch.setattr(main.downloader, "source_identity", lambda value: "douyin:265796c3")
+    manifest = {"updated_at": 20, "session": {
+        "source_url": source_url, "voice": "vi-VN-HoaiMyNeural", "tts_engine_name": "edge-tts",
+        "asr_engine_name": "sensevoice", "visual_translation": False,
+        "translation_mode": "full", "video_path": str(isolated / "video.mp4")}}
+    project = isolated / "workspace" / "projects"
+    project.mkdir(parents=True)
+    (project / "265796c3.json").write_text("{}", encoding="utf-8")
+    monkeypatch.setattr(main, "read_saved_project", lambda task_id: manifest)
+    found = main._saved_project_candidates(source_url=source_url, voice="vi-VN-HoaiMyNeural",
+        engine="edge-tts", asr_engine="sensevoice", visual_translation=False,
+        translation_mode="preview")
+    assert found and found[0][0] == "265796c3"
+
+
+def test_start_url_restores_saved_task_id_instead_of_creating_new_preview(isolated, monkeypatch):
+    source_url = "https://www.douyin.com/video/265796c3"
+    restored = SimpleNamespace(task_id="265796c3", source_video_url="/api/inputs/video.mp4",
+        initial_buffer_seconds=10, is_running=False, can_retry=False,
+        get_progress=lambda: {"status": "STOPPED", "progress_pct": 97.9})
+    async def fake_restore(**kwargs):
+        return restored, False
+    monkeypatch.setattr(main, "_restore_matching_saved_project", fake_restore)
+    monkeypatch.setattr(main.downloader, "normalize_url", lambda value: value)
+    async def run():
+        result = await main.start_streaming_url(main.StreamUrlRequest(url=source_url))
+        assert result["task_id"] == "265796c3"
+        assert result["restored"] is True
+        assert result["resumed"] is False
+    asyncio.run(run())
+
+
 @pytest.mark.parametrize('name,value', [('LLM_PROVIDER', 'gemini'), ('GEMINI_MODEL', 'another-model'),
                                         ('GEMINI_API_KEY', 'changed-key'), ('SUPPRESSION_MODE', 'different-mode')])
 def test_changed_provider_configuration_creates_fresh_engines(isolated, monkeypatch, name, value):

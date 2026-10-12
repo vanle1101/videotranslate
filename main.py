@@ -42,7 +42,7 @@ from core.streaming.pipeline import (
     ProjectEditSaveError,
 )
 from core.streaming.export import HQExporter
-from core.streaming.session_store import list_saved_sessions, restore_saved_session
+from core.streaming.session_store import list_saved_sessions, restore_saved_session, _read as read_saved_project
 from core.streaming.video_history import group_video_history, source_metadata
 from core.history_thumbnail import (
     ThumbnailError, attach_history_thumbnails, history_thumbnail_cache, resolve_history_source,
@@ -967,6 +967,100 @@ def _retry_configuration_signature():
     return hashlib.sha256(json.dumps(values, sort_keys=True).encode("utf-8")).hexdigest()
 
 
+def _same_local_source(left, right):
+    """Compare local media paths without relying on basenames."""
+    try:
+        return Path(left).resolve() == Path(right).resolve()
+    except (OSError, TypeError, ValueError):
+        return False
+
+
+def _saved_project_candidates(*, source_url=None, video_path=None, voice, engine,
+                              asr_engine, visual_translation, translation_mode):
+    """Find durable projects which represent the requested source.
+
+    The in-memory registry is intentionally not enough: it is empty after a
+    desktop restart.  We inspect manifests directly, preserving the original
+    task id and mode instead of silently creating a new preview project.
+    """
+    root = settings.BASE_DIR / "workspace" / "projects"
+    if not root.exists():
+        return []
+    requested_identity = None
+    if source_url:
+        try:
+            requested_identity = downloader.source_identity(source_url)
+        except (OSError, TypeError, ValueError):
+            requested_identity = None
+    result = []
+    for path in root.glob("*.json"):
+        if not re.fullmatch(r"[A-Za-z0-9_-]{1,80}", path.stem):
+            continue
+        try:
+            data = read_saved_project(path.stem)
+            fields = data["session"]
+            if fields.get("voice") != voice or fields.get("tts_engine_name") != engine:
+                continue
+            if fields.get("asr_engine_name") != asr_engine or bool(fields.get("visual_translation")) != bool(visual_translation):
+                continue
+            saved_mode = fields.get("translation_mode", "full")
+            # A full project is the durable continuation of a preview request
+            # made by a freshly loaded UI.  The inverse is never accepted.
+            if translation_mode == "full" and saved_mode != "full":
+                continue
+            if translation_mode == "preview" and saved_mode not in {"preview", "full"}:
+                continue
+            if source_url:
+                saved_identity = downloader.source_identity(fields.get("source_url") or "")
+                if not requested_identity or saved_identity != requested_identity:
+                    continue
+            elif video_path and not _same_local_source(fields.get("video_path"), video_path):
+                continue
+            else:
+                continue
+            result.append((path.stem, data, saved_mode))
+        except (OSError, ValueError, TypeError, KeyError):
+            continue
+    # Prefer an exact mode, then the newest manifest.  This makes a full
+    # project win over an old preview when the UI defaults to preview.
+    return sorted(result, key=lambda item: (item[2] == translation_mode,
+                                             item[1].get("updated_at", 0)), reverse=True)
+
+
+async def _restore_matching_saved_project(*, source_url=None, video_path=None,
+                                          voice, engine, asr_engine,
+                                          visual_translation, translation_mode,
+                                          source_downloader=None):
+    candidates = _saved_project_candidates(source_url=source_url, video_path=video_path,
+                                           voice=voice, engine=engine, asr_engine=asr_engine,
+                                           visual_translation=visual_translation,
+                                           translation_mode=translation_mode)
+    for task_id, _data, _saved_mode in candidates:
+        if task_id in active_streaming_sessions:
+            continue
+        try:
+            session = await editable_session(task_id)
+        except (HTTPException, FileNotFoundError, OSError, ValueError, TypeError, KeyError):
+            continue
+        if session is None:
+            continue
+        if source_url:
+            session.source_url = source_url
+            session._source_downloader = source_downloader
+        if session.is_running:
+            raise HTTPException(status_code=409, detail="Video này đang xử lý. Mở tác vụ hiện tại để xem tiến độ.")
+        if session.can_retry:
+            try:
+                await session.retry_failed_synthesis()
+            except SegmentEditConflict:
+                continue
+            return session, True
+        # A completed/stopped project is still the canonical project. Return
+        # it so the caller can attach instead of duplicating the work.
+        return session, False
+    return None, False
+
+
 @app.post("/api/streaming/start-url")
 async def start_streaming_url(req: StreamUrlRequest):
     validate_visual_translation(req.visual_translation)
@@ -1002,6 +1096,21 @@ async def start_streaming_url(req: StreamUrlRequest):
             return {"task_id": existing.task_id, "video_url": existing.source_video_url,
                     "initial_buffer_seconds": existing.initial_buffer_seconds,
                     "progress": existing.get_progress(), "status": "started", "resumed": True}
+
+    # The runtime registry is empty after a desktop restart.  Reattach the
+    # newest durable project before creating anything, even when the UI sends
+    # its default preview mode for a project that was already promoted to full.
+    restored, resumed = await _restore_matching_saved_project(
+        source_url=url, voice=voice, engine=engine,
+        asr_engine=req.asr_engine or settings.ASR_ENGINE,
+        visual_translation=req.visual_translation,
+        translation_mode=req.translation_mode,
+        source_downloader=downloader)
+    if restored is not None:
+        return {"task_id": restored.task_id, "video_url": restored.source_video_url,
+                "initial_buffer_seconds": restored.initial_buffer_seconds,
+                "progress": restored.get_progress(), "status": "started",
+                "resumed": resumed, "restored": True}
     task_id = str(uuid.uuid4())[:8]
 
     # Create session
@@ -1271,7 +1380,9 @@ async def update_caption_style(task_id: str, req: CaptionStyleRequest):
 
 @app.post("/api/streaming/{task_id}/retry")
 async def retry_streaming_synthesis(task_id: str):
-    session = get_streaming_session(task_id)
+    # Retry is also a recovery entry point after process restart; restore the
+    # manifest on demand instead of requiring the history UI to open it first.
+    session = await editable_session(task_id)
     if not session:
         raise HTTPException(status_code=404, detail="Phiên dịch không còn tồn tại.")
     if active_export_tasks.get(f"export_{task_id}", {}).get("status") in {"RUNNING", "CANCELLING"}:
@@ -1704,6 +1815,16 @@ async def start_streaming_local_file(req: StreamLocalFileRequest):
         raise HTTPException(status_code=404, detail=f"File không tồn tại: {req.file_path}")
 
     engine, voice = validated_voice(req.voice_id, req.tts_engine, req.voice)
+    restored, resumed = await _restore_matching_saved_project(
+        video_path=p, voice=voice, engine=engine,
+        asr_engine=req.asr_engine or settings.ASR_ENGINE,
+        visual_translation=req.visual_translation,
+        translation_mode=req.translation_mode)
+    if restored is not None:
+        return {"task_id": restored.task_id, "video_url": restored.source_video_url,
+                "initial_buffer_seconds": restored.initial_buffer_seconds,
+                "status": "started", "progress": restored.get_progress(),
+                "resumed": resumed, "restored": True}
     task_id = str(uuid.uuid4())[:8]
     session = create_streaming_session(
         task_id=task_id,
