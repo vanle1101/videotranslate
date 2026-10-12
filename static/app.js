@@ -704,8 +704,8 @@ document.addEventListener("DOMContentLoaded", () => {
   function taskEtaText(progress) {
     if (String(progress?.status || "RUNNING").toUpperCase() !== "RUNNING") return "";
     const seconds = progress?.eta_seconds;
-    if (typeof seconds !== "number" || !Number.isFinite(seconds) || seconds <= 0) {
-      return "Đang đo thời gian…";
+    if (progress?.eta_scope !== "final" || typeof seconds !== "number" || !Number.isFinite(seconds) || seconds <= 0) {
+      return "Chưa đủ dữ liệu ước tính lúc có video";
     }
     // A task estimate is rounded up to minutes so a still-running operation
     // cannot appear ready now. The backend owns its measurement and scope:
@@ -713,9 +713,7 @@ document.addEventListener("DOMContentLoaded", () => {
     const minutes = Math.ceil(seconds / 60);
     const hours = Math.floor(minutes / 60), remainder = minutes % 60;
     const duration = hours ? `${hours} giờ${remainder ? ` ${remainder} phút` : ""}` : `${minutes} phút`;
-    const scope = progress.eta_scope || "speech";
-    const labels = {final: "Còn khoảng", preview: "Giọng mẫu: khoảng", speech: "Lời & giọng: khoảng", export: "Xuất MP4: khoảng"};
-    return `${labels[scope] || "Công đoạn: khoảng"} ${duration}`;
+    return `Có video sau khoảng ${duration}`;
   }
 
   function showEta(element, progress) {

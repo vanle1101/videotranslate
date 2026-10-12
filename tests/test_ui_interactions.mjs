@@ -14,24 +14,24 @@ test('measured final ETA appears beside percentage in minutes or hours without r
     socket.receive({type:'progress',status:'RUNNING',phase:'visual',progress_pct:37.5,
       eta_seconds:seconds,eta_scope:'final'});
     assert.equal(ui.el('task-progress-value').textContent,'37.5%');
-    assert.equal(ui.el('task-progress-eta').textContent,`Còn khoảng ${expected}`);
+    assert.equal(ui.el('task-progress-eta').textContent,`Có video sau khoảng ${expected}`);
     assert.equal(ui.el('task-progress-eta').classList.contains('hidden'),false);
   }
   assert.match(template, /id="task-progress-value"[^>]*>[^<]*<\/span><span id="task-progress-eta"/);
 });
 
-test('stage estimates retain their scope and unknown time never becomes an invented final-result ETA', async () => {
+test('only final-output estimates may appear beside percentage, never stage or unscoped estimates', async () => {
   const ui = studio(); await ui.start(); const socket = ui.sockets.at(-1);
-  for (const [scope,label] of [[undefined,'Lời & giọng'],['speech','Lời & giọng'],['preview','Giọng mẫu'],['export','Xuất MP4']]) {
+  for (const scope of [undefined,'speech','preview','export','unknown']) {
     socket.receive({type:'progress',status:'RUNNING',phase:'tts',progress_pct:20,
       eta_seconds:240,eta_scope:scope ?? null});
-    assert.equal(ui.el('task-progress-eta').textContent,`${label}: khoảng 4 phút`);
-    assert.doesNotMatch(ui.el('task-progress-eta').textContent,/Còn khoảng/);
+    assert.equal(ui.el('task-progress-eta').textContent,'Chưa đủ dữ liệu ước tính lúc có video');
+    assert.doesNotMatch(ui.el('task-progress-eta').textContent,/Có video sau khoảng/);
   }
   for (const invalid of [null,undefined,0,-10,'360',NaN,Infinity]) {
     socket.receive({type:'progress',status:'RUNNING',phase:'tts',progress_pct:20,
       eta_seconds:invalid ?? null,eta_scope:'final'});
-    assert.equal(ui.el('task-progress-eta').textContent,'Đang đo thời gian…');
+    assert.equal(ui.el('task-progress-eta').textContent,'Chưa đủ dữ liệu ước tính lúc có video');
     assert.doesNotMatch(ui.el('task-progress-eta').textContent,/phút|giờ|NaN|Infinity/);
   }
 });
@@ -40,10 +40,10 @@ test('pause, failure and completion remove ETA and a new phase cannot inherit th
   const ui=studio();await ui.start();const socket=ui.sockets.at(-1);
   socket.receive({type:'progress',status:'RUNNING',phase:'visual',eta_seconds:600,eta_scope:'final'});
   socket.receive({type:'progress',status:'RUNNING',phase:'review'});
-  assert.equal(ui.el('task-progress-eta').textContent,'Đang đo thời gian…');
+  assert.equal(ui.el('task-progress-eta').textContent,'Chưa đủ dữ liệu ước tính lúc có video');
   socket.receive({type:'progress',status:'PAUSED',phase:'review',eta_seconds:600,eta_scope:'final'});
   socket.receive({type:'progress',status:'RUNNING',phase:'review'});
-  assert.equal(ui.el('task-progress-eta').textContent,'Đang đo thời gian…');
+  assert.equal(ui.el('task-progress-eta').textContent,'Chưa đủ dữ liệu ước tính lúc có video');
   for(const status of ['PAUSED','CANCELLING','FAILED','STOPPED','CANCELLED','PREPARED','COMPLETED']) {
     socket.receive({type:'progress',status,phase:'review',eta_seconds:600,eta_scope:'final'});
     assert.equal(ui.el('task-progress-eta').textContent,'');
@@ -57,25 +57,25 @@ test('ETA-only polling updates and explicit unknown time reach Studio and groupe
   socket.receive({type:'progress',...task,eta_seconds:600});
   ui.replies.set('/api/tasks',{tasks:[{...task,eta_seconds:540}],videos:[{...task,eta_seconds:540}]});
   await ui.el('btn-refresh-tasks').click();
-  assert.equal(ui.el('task-progress-eta').textContent,'Còn khoảng 9 phút');
-  assert.match(ui.el('tasks-table-body').children[0].innerHTML,/30% · Còn khoảng 9 phút/);
+  assert.equal(ui.el('task-progress-eta').textContent,'Có video sau khoảng 9 phút');
+  assert.match(ui.el('tasks-table-body').children[0].innerHTML,/30% · Có video sau khoảng 9 phút/);
   ui.replies.set('/api/tasks',{tasks:[{...task,eta_seconds:null}],videos:[{...task,eta_seconds:null}]});
   await ui.el('btn-refresh-tasks').click();
-  assert.equal(ui.el('task-progress-eta').textContent,'Đang đo thời gian…');
-  assert.match(ui.el('tasks-table-body').children[0].innerHTML,/Đang đo thời gian…/);
+  assert.equal(ui.el('task-progress-eta').textContent,'Chưa đủ dữ liệu ước tính lúc có video');
+  assert.match(ui.el('tasks-table-body').children[0].innerHTML,/Chưa đủ dữ liệu ước tính lúc có video/);
 });
 
 test('automatic export uses its own measured ETA in Studio and MP4 modal, not stale speech timing', async () => {
   const ui=studio();await ui.start();const socket=ui.sockets.at(-1);
   socket.receive({type:'progress',status:'RUNNING',phase:'tts',eta_seconds:600,eta_scope:'speech'});
-  socket.receive({type:'export_progress',progress:40,stage:'Đang ghép MP4',eta_seconds:120,eta_scope:'export'});
+  socket.receive({type:'export_progress',progress:40,stage:'Đang ghép MP4',eta_seconds:120,eta_scope:'final'});
   assert.equal(ui.el('task-progress-value').textContent,'40%');
-  assert.equal(ui.el('task-progress-eta').textContent,'Xuất MP4: khoảng 2 phút');
-  assert.equal(ui.el('export-progress-eta').textContent,'Xuất MP4: khoảng 2 phút');
+  assert.equal(ui.el('task-progress-eta').textContent,'Có video sau khoảng 2 phút');
+  assert.equal(ui.el('export-progress-eta').textContent,'Có video sau khoảng 2 phút');
   ui.replies.set('/api/tasks',{tasks:[{task_id:'fixture',status:'RUNNING',phase:'tts',eta_seconds:600,eta_scope:'speech'},
     {task_id:'export_fixture',status:'RUNNING',phase:'export',progress_pct:50,eta_seconds:60,eta_scope:'final'}]});
   await ui.el('btn-refresh-tasks').click();
-  assert.equal(ui.el('task-progress-eta').textContent,'Còn khoảng 1 phút');
+  assert.equal(ui.el('task-progress-eta').textContent,'Có video sau khoảng 1 phút');
   socket.receive({type:'result_ready',output_video_url:'/api/outputs/final.mp4'});
   assert.equal(ui.el('task-progress-eta').textContent,'');
   assert.equal(ui.el('export-progress-eta').textContent,'');
@@ -90,7 +90,7 @@ test('manual MP4 status polling displays measured remaining time and clears it a
     eta_seconds:7260,eta_scope:'final'});
   const exporting=ui.el('btn-confirm-export').click();await ui.flush();await ui.tickIntervals(1000);
   assert.equal(ui.el('export-progress-pct').textContent,'25%');
-  assert.equal(ui.el('export-progress-eta').textContent,'Còn khoảng 2 giờ 1 phút');
+  assert.equal(ui.el('export-progress-eta').textContent,'Có video sau khoảng 2 giờ 1 phút');
   finishExport({ok:true,json:async()=>({video_url:'/api/outputs/final.mp4',output_filename:'final.mp4'})});
   await exporting;
   assert.equal(ui.el('export-progress-eta').textContent,'');
@@ -2442,7 +2442,7 @@ test('video history renders one source row while raw live, saved and export task
   assert.match(rows[0].innerHTML, /Một video/);
   assert.match(rows[0].innerHTML, />Douyin<\/div>/);
   assert.doesNotMatch(rows[0].innerHTML, /7692745161054506290/);
-  assert.match(rows[0].innerHTML, /50% giọng mẫu · Đang đo thời gian… · Đang rà lời thoại/);
+  assert.match(rows[0].innerHTML, /50% giọng mẫu · Chưa đủ dữ liệu ước tính lúc có video · Đang rà lời thoại/);
   assert.match(rows[0].innerHTML, /aria-valuenow="50"/);
   assert.doesNotMatch(rows[0].innerHTML, /Phiên đã lưu|Realtime Dubbing|HQ Export|<div[^>]*>fixture<\/div>/);
   assert.equal(ui.el('task-progress-value').textContent, '50% giọng mẫu');
