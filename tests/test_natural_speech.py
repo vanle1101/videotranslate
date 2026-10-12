@@ -96,6 +96,42 @@ def assert_no_scratch(output):
     assert list(output.parent.glob("speech-fit-*")) == []
 
 
+def test_pcm_duration_uses_exact_frames_without_a_probe_process(tmp_path, aligner, monkeypatch):
+    path = tmp_path / "voice.wav"
+    with wave.open(str(path), "wb") as audio:
+        audio.setparams((2, 2, 24000, 0, "NONE", "not compressed"))
+        audio.writeframes(b"\x01\x00" * 2 * 9601)
+    probe = Mock(side_effect=AssertionError("PCM WAV must not launch ffprobe"))
+    monkeypatch.setattr("core.engines.alignment.timing_aligner.subprocess.run", probe)
+    assert aligner.get_audio_duration(path) == 9601 / 24000
+    probe.assert_not_called()
+
+
+@pytest.mark.parametrize("missing_bytes", [1, 4, 100])
+def test_pcm_duration_rejects_truncated_audio_even_when_header_claims_full_length(
+        tmp_path, aligner, monkeypatch, missing_bytes):
+    path = tmp_path / "voice.wav"
+    with wave.open(str(path), "wb") as audio:
+        audio.setparams((2, 2, 24000, 0, "NONE", "not compressed"))
+        audio.writeframes(b"\x01\x00" * 2 * 9600)
+    with path.open("r+b") as handle:
+        handle.truncate(path.stat().st_size - missing_bytes)
+    probe = Mock(side_effect=AssertionError("Must not trust ffprobe's declared duration"))
+    monkeypatch.setattr("core.engines.alignment.timing_aligner.subprocess.run", probe)
+    with pytest.raises(RuntimeError, match="thiếu dữ liệu"):
+        aligner.get_audio_duration(path)
+    probe.assert_not_called()
+
+
+def test_non_pcm_duration_retains_probe_fallback(tmp_path, aligner, monkeypatch):
+    path = tmp_path / "voice.mp3"
+    path.write_bytes(b"not a PCM WAV")
+    probe = Mock(return_value=Mock(stdout="1.23\n"))
+    monkeypatch.setattr("core.engines.alignment.timing_aligner.subprocess.run", probe)
+    assert aligner.get_audio_duration(path) == 1.23
+    assert probe.call_args.args[0][0] == "ffprobe"
+
+
 def test_short_speech_keeps_normal_speed_without_rewrite(tmp_path, aligner):
     text = "Chào bạn."
     engine = RecordedSynthesizer(.65)

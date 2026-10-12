@@ -2,6 +2,7 @@ import subprocess
 import time
 import math
 import logging
+import wave
 from copy import deepcopy
 from pathlib import Path
 from typing import List, Dict, Any, Tuple, Optional
@@ -43,6 +44,25 @@ class TimingBudgetAligner(AlignmentEngine):
         }
 
     def get_audio_duration(self, audio_path: Path) -> float:
+        # TTS and alignment produce PCM WAVs. Probing each short sentence in a
+        # new ffprobe process dominates cached recovery on Windows; frame
+        # counts give the same exact duration without launching a process.
+        # Read the final frame as well: a truncated file's declared frame count
+        # must never be accepted as a complete voice artifact.
+        try:
+            with wave.open(str(audio_path), "rb") as audio:
+                if audio.getcomptype() == "NONE":
+                    frames, rate = audio.getnframes(), audio.getframerate()
+                    frame_bytes = audio.getnchannels() * audio.getsampwidth()
+                    if frames <= 0 or rate <= 0 or frame_bytes <= 0:
+                        return 0.0
+                    audio.setpos(frames - 1)
+                    if len(audio.readframes(1)) != frame_bytes:
+                        raise RuntimeError("File giọng đọc WAV bị thiếu dữ liệu.")
+                    return frames / rate
+        except (wave.Error, EOFError):
+            # Non-PCM containers keep the existing ffprobe path.
+            pass
         cmd = [
             "ffprobe", "-v", "error",
             "-show_entries", "format=duration",
