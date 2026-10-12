@@ -190,3 +190,62 @@ def test_measurement_cache_avoids_per_poll_sqlite_reads_and_refreshes(session, m
     monkeypatch.setattr(sqlite3, "connect", original)
     eta.record_validated_export("p", 10, 40)
     assert eta.estimated_export_seconds("p", 30) == 90
+
+
+def test_final_stage_forecast_during_review_accounts_for_rebuilt_speech(session):
+    session._visual_prepass_complete = True
+    session.segments = {i: SimpleNamespace(id=i, status="READY" if i < 3 else "WAITING",
+        verification={"status": "incomplete" if i < 4 else "verified"}) for i in range(9)}
+    session.review_summary = {"status": "incomplete", "incomplete": 4}
+    eta.record_validated_export(eta.processing_profile(session, "review"), 4, 80)
+    eta.record_validated_export(eta.processing_profile(session, "speech"), 1, 5)
+    eta.record_validated_export(eta.export_profile(session.video_size, session.caption_style), 60, 12)
+    result = eta.processing_eta(session, state(), now=130)
+    # Four pending reviews, six missing WAVs plus three reviewed READY WAVs
+    # potentially invalidated by corrected wording, and the final render.
+    assert result["eta_components"] == {"review": 80, "speech": 45, "export": 60}
+    assert result["eta_seconds"] == 185 and result["eta_scope"] == "final"
+    assert result["eta_conditional"] is True and result["eta_confidence"] == "approximate"
+
+
+def test_pending_reaudits_are_counted_even_with_previously_verified_wavs(session):
+    session._visual_prepass_complete = True
+    session.segments = {i: SimpleNamespace(id=i, status="READY", verification={"status": "verified"})
+                        for i in range(9)}
+    session._eta_review_pending_ids = {0, 1, 2, 999}
+    session.review_summary = {"status": "completed"}
+    eta.record_validated_export(eta.processing_profile(session, "review"), 1, 20)
+    eta.record_validated_export(eta.processing_profile(session, "speech"), 1, 5)
+    eta.record_validated_export(eta.export_profile(session.video_size, session.caption_style), 60, 12)
+    snapshot = state()
+    snapshot["processing_completed_segments"] = 9
+    result = eta.processing_eta(session, snapshot, now=130)
+    assert result["eta_components"] == {"review": 60, "speech": 15, "export": 60}
+
+
+def test_stage_forecast_identifies_missing_calibration_without_invented_final_eta(session):
+    session._visual_prepass_complete = True
+    session.review_summary = {"status": "incomplete", "incomplete": 4}
+    result = eta.processing_eta(session, state(), now=130)
+    assert result["eta_scope"] != "final" or result["eta_seconds"] is None
+    assert result["eta_missing_stages"] == ["review", "speech", "export"]
+
+
+def test_stage_measurements_reject_pause_stop_and_changed_run(session, monkeypatch):
+    monkeypatch.setattr(eta.time, "monotonic", lambda: 100.)
+    mark = eta.stage_measurement_start(session)
+    monkeypatch.setattr(eta.time, "monotonic", lambda: 120.)
+    session.is_paused = True
+    eta.record_processing_stage(session, "review", 4, mark)
+    session.is_paused = False
+    session.is_stopped = True
+    eta.record_processing_stage(session, "review", 4, mark)
+    session.is_stopped = False
+    session._run_started_at = 101.
+    eta.record_processing_stage(session, "review", 4, mark)
+    assert not eta._database().exists()
+    session._run_started_at = 100.
+    eta.record_processing_stage(session, "review", 4, mark)
+    assert eta.estimated_export_seconds(eta.processing_profile(session, "review"), 8) == 40
+    session.voice = "different-voice"
+    assert eta.estimated_export_seconds(eta.processing_profile(session, "review"), 8) is None

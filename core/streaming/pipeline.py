@@ -1166,9 +1166,15 @@ class StreamingPipelineSession:
                    "force_review": force_review}
         if segment_ids is not None:
             options["context_segments"] = deepcopy(list(self.segments.values()))
+        from core.streaming.progress_eta import stage_measurement_start, record_processing_stage
+        eta_review_started = stage_measurement_start(self)
         try:
             result = await self._run_blocking(
                 AutomaticTranslationReviewer().review, self.video_path, deepcopy(targets), deepcopy(self.screen_texts), **options)
+            successful_rows = sum((row.get("verification") or {}).get("status") in
+                                  {"verified", "corrected", "unresolved", "manual"}
+                                  for row in result.get("segments", {}).values())
+            record_processing_stage(self, "review", successful_rows, eta_review_started)
         finally:
             semantic_active = False
             self._review_scope = None
@@ -1464,6 +1470,7 @@ class StreamingPipelineSession:
                   and row.source_method == "text-ai" and row.translation_provider == "opencode"
                   and include(row)))),
             key=lambda row: (row.start, row.id))
+        self._eta_review_pending_ids = {row.id for row in pending}
         if synthesize_pending:
             # These rows already own accepted translation/review state. A
             # missing WAV must not wait behind unrelated slow Muse requests.
@@ -1518,6 +1525,8 @@ class StreamingPipelineSession:
                     row._retry_synthesis = True
                 await self.emit("segment_update", row.to_dict())
             self._refresh_review_counts()
+            self._eta_review_pending_ids.difference_update(row.id for row in group
+                if (row.verification or {}).get("status") not in {None, "pending", "incomplete"})
             self._persist_if_enabled()
             if synthesize_pending:
                 # Persist the reviewed text first, then publish this group's
@@ -3830,6 +3839,8 @@ class StreamingPipelineSession:
 
     async def _synthesize_segment(self, seg, *, pacing_recovery=None, allow_pacing=True):
         """Generate playable audio without approving an uncertain translation."""
+        from core.streaming.progress_eta import stage_measurement_start, record_processing_stage
+        eta_speech_started = stage_measurement_start(self)
         raw_tts_wav = self.cache_dir / f"tts_{seg.id}_raw.wav"
         pending_path = self.segments_dir / f"pending_{seg.id}_{uuid.uuid4().hex}.wav"
         dub_plan = {}
@@ -3936,6 +3947,7 @@ class StreamingPipelineSession:
                 seg._retry_synthesis = False
                 self._retire_speech_failure(seg)
                 self._refresh_processed_duration()
+            record_processing_stage(self, "speech", 1, eta_speech_started)
             for identity in dub_plan:
                 if identity != seg.id:
                     self._retire_superseded_speech(self.segments[identity])

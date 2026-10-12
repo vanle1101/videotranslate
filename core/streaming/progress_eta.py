@@ -16,6 +16,72 @@ _RATE_CACHE = {}
 _RATE_LOCK = threading.Lock()
 
 
+def processing_profile(session, stage):
+    """Rates belong to the real provider/voice/settings, not a global guess."""
+    payload = ["stage-eta-1", stage, settings.LLM_PROVIDER, settings.OPENCODE_MODEL,
+               getattr(session, "tts_engine_name", None), getattr(session, "voice", None),
+               getattr(getattr(session, "aligner", None), "max_speed", None)]
+    return "stage:" + hashlib.sha256(json.dumps(payload, sort_keys=True).encode()).hexdigest()
+
+
+def stage_measurement_start(session):
+    return (time.monotonic(), getattr(session, "_run_started_at", None),
+            getattr(session, "_eta_sample_started", None))
+
+
+def record_processing_stage(session, stage, units, measurement):
+    """Persist only successful work; interrupted/paused samples cannot train ETA."""
+    started, run, baseline = measurement
+    if (session.is_stopped or session.is_paused or run != getattr(session, "_run_started_at", None)
+            or baseline != getattr(session, "_eta_sample_started", None)):
+        return
+    record_validated_export(processing_profile(session, stage), units, time.monotonic() - started)
+
+
+def _stage_forecast(session, snapshot):
+    """Sum measured outstanding stages instead of extrapolating net READY rows.
+
+    Review can invalidate an existing WAV, so its outstanding rows are also
+    reserved for synthesis. This deliberately conservative forecast is not an
+    approval of unresolved wording, and never consumes a user's review time.
+    """
+    if not snapshot.get("processing_total_known") or not getattr(session, "_visual_prepass_complete", False):
+        return None
+    rows = list(getattr(session, "segments", {}).values())
+    pending_ids = set(getattr(session, "_eta_review_pending_ids", ()))
+    pending_ids.update(getattr(session, "_reviewing_segment_ids", ()))
+    for row in rows:
+        if (getattr(row, "verification", {}) or {}).get("status") in {None, "pending", "incomplete"}:
+            pending_ids.add(row.id)
+    pending_ids.intersection_update(row.id for row in rows)
+    pending_review = len(pending_ids)
+    # Tests/legacy sessions without row objects still expose the exact review
+    # backlog through their summary. Never silently treat it as zero.
+    review = getattr(session, "review_summary", {})
+    pending_review = max(pending_review, int(review.get("incomplete") or 0))
+    if not rows and review.get("status") != "completed" and not pending_review:
+        return None
+    missing_speech = max(0, snapshot["processing_total_segments"] - snapshot["processing_completed_segments"])
+    ready_review = sum(row.id in pending_ids and row.status in {"READY", "PLAYED"} for row in rows)
+    work = {"review": pending_review, "speech": missing_speech + ready_review}
+    components, missing = {}, []
+    for stage, units in work.items():
+        duration = estimated_export_seconds(processing_profile(session, stage), units) if units else 0.
+        if duration is None:
+            missing.append(stage)
+        else:
+            components[stage] = round(duration, 1)
+    render = estimated_export_seconds(export_profile(session.video_size, session.caption_style), session.total_duration)
+    if render is None:
+        missing.append("export")
+    else:
+        components["export"] = round(render, 1)
+    return {"eta_seconds": max(.1, round(sum(components.values()), 1)) if not missing else None,
+            "eta_scope": "final", "eta_reason": "measured_stages" if not missing else "calibrating_stages",
+            "eta_components": components, "eta_missing_stages": missing,
+            "eta_confidence": "approximate", "eta_conditional": True}
+
+
 def _positive(value):
     return type(value) in (int, float) and math.isfinite(value) and value > 0
 
@@ -44,11 +110,12 @@ def record_validated_export(profile, media_seconds, elapsed_seconds):
     try:
         path = _database()
         path.parent.mkdir(parents=True, exist_ok=True)
+        table = "stage_samples" if profile.startswith("stage:") else "samples"
         with closing(sqlite3.connect(path, timeout=.1)) as db, db:
-            db.execute("CREATE TABLE IF NOT EXISTS samples (id INTEGER PRIMARY KEY, profile TEXT, media REAL, elapsed REAL)")
-            db.execute("INSERT INTO samples(profile, media, elapsed) VALUES (?, ?, ?)",
+            db.execute(f"CREATE TABLE IF NOT EXISTS {table} (id INTEGER PRIMARY KEY, profile TEXT, media REAL, elapsed REAL)")
+            db.execute(f"INSERT INTO {table}(profile, media, elapsed) VALUES (?, ?, ?)",
                        (profile, media_seconds, elapsed_seconds))
-            db.execute("DELETE FROM samples WHERE id NOT IN (SELECT id FROM samples ORDER BY id DESC LIMIT 128)")
+            db.execute(f"DELETE FROM {table} WHERE id NOT IN (SELECT id FROM {table} ORDER BY id DESC LIMIT 128)")
     except (OSError, sqlite3.Error):
         logging.getLogger("pipeline").warning("EXPORT_ETA_SAMPLE_UNAVAILABLE")
 
@@ -67,7 +134,8 @@ def estimated_export_seconds(profile, media_seconds):
         # Progress runs on the backend event loop: never wait for an exporter
         # holding SQLite's write lock, nor query again on every UI poll.
         with closing(sqlite3.connect(path.as_uri() + "?mode=ro", uri=True, timeout=0)) as db:
-            rows = db.execute("SELECT media, elapsed FROM samples WHERE profile=? ORDER BY id DESC LIMIT 5",
+            table = "stage_samples" if profile.startswith("stage:") else "samples"
+            rows = db.execute(f"SELECT media, elapsed FROM {table} WHERE profile=? ORDER BY id DESC LIMIT 5",
                               (profile,)).fetchall()
         rates = [elapsed / media for media, elapsed in rows if _positive(media) and _positive(elapsed)]
         rate = statistics.median(rates) if rates else None
@@ -150,6 +218,13 @@ def processing_eta(session, snapshot, *, now=None):
     counts = snapshot.get("segment_states", {})
     if counts.get("FAILED", 0) or counts.get("RETRY_PENDING", 0) or snapshot.get("retry_chunks", 0):
         return {**result, "eta_reason": "retry_pending"}
+    if not preview and getattr(session, "auto_export_result", False):
+        forecast = _stage_forecast(session, snapshot)
+        if forecast is not None and forecast["eta_seconds"] is not None:
+            return forecast
+        if forecast is not None:
+            result.update(eta_components=forecast["eta_components"],
+                          eta_missing_stages=forecast["eta_missing_stages"])
     completed = snapshot["processing_completed_segments"]
     remaining = snapshot["processing_total_segments"] - completed
     produced = completed - getattr(session, "_eta_ready_baseline", 0)
