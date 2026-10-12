@@ -560,6 +560,7 @@ class StudioMainWindow(QMainWindow):
 # -------------------------------------------------------------
 
 def main():
+    start_in_tray = "--start-in-tray" in sys.argv
     configure_windows_identity()
     app = QApplication(sys.argv)
     app.setApplicationName("Douyin2TikTok AI Studio")
@@ -572,7 +573,7 @@ def main():
     local_socket.connectToServer(SINGLE_INSTANCE_SERVER)
     if local_socket.waitForConnected(400):
         # Already running: signal existing instance to activate
-        local_socket.write(b"ACTIVATE\n")
+        local_socket.write(b"PING\n" if start_in_tray else b"ACTIVATE\n")
         local_socket.flush()
         local_socket.waitForBytesWritten(500)
         local_socket.disconnectFromServer()
@@ -585,7 +586,8 @@ def main():
 
     # 2. Show Splash Screen
     splash = StudioSplashScreen()
-    splash.show()
+    if not start_in_tray:
+        splash.show()
 
     # 3. Launch Startup Worker
     worker = StartupWorker()
@@ -599,7 +601,8 @@ def main():
         main_win = StudioMainWindow(port)
         main_window_holder["window"] = main_win
         splash.close()
-        main_win.show()
+        if not start_in_tray:
+            main_win.show()
 
         # Listen for secondary instance activations
         def handle_new_connection():
