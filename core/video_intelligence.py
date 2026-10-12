@@ -46,6 +46,23 @@ def _capture_visual_revision():
 _PROCESS_VISUAL_REVISION = _capture_visual_revision()
 
 
+def _checkpoint_fs_path(path):
+    """Use Windows extended paths for disk access without changing cache keys.
+
+    Two SHA-256 names can put a checkpoint past MAX_PATH even when the user's
+    workspace itself is short. The prefix is only an OS I/O detail: persisted
+    source identities and existing checkpoint locations remain unchanged.
+    """
+    if os.name != "nt":
+        return Path(path)
+    absolute = os.path.abspath(os.fspath(path))
+    if absolute.startswith(("\\\\?\\", "\\\\.\\")):
+        return Path(absolute)
+    if absolute.startswith("\\\\"):
+        return Path("\\\\?\\UNC\\" + absolute[2:])
+    return Path("\\\\?\\" + absolute)
+
+
 VISUAL_TRANSLATION_PROMPT = """Bạn biên dịch chính xác video tiếng Trung sang tiếng Việt.
 Video đính kèm gồm hình ảnh và âm thanh liên tục. Đối chiếu lời nói với phụ đề để
 sửa nhận dạng sai; không dựa vào phụ đề tiêu đề để bịa thêm lời thoại. Dùng toàn
@@ -280,7 +297,7 @@ class VideoIntelligence:
             stat = Path(source["path"]).stat()
             if stat.st_size != source["size"] or stat.st_mtime_ns != source["mtime_ns"]:
                 raise VideoIntelligenceError("Video nguồn đã thay đổi khi đang xử lý; hãy chạy lại với file mới.")
-            path = context["directory"] / (self._checkpoint_digest(stage) + ".json")
+            path = _checkpoint_fs_path(context["directory"] / (self._checkpoint_digest(stage) + ".json"))
             if path.stat().st_size > 32_000_000:
                 return None
             record = json.loads(path.read_text(encoding="utf-8"))
@@ -303,7 +320,7 @@ class VideoIntelligence:
             stat = Path(source["path"]).stat()
             if stat.st_size != source["size"] or stat.st_mtime_ns != source["mtime_ns"]:
                 raise VideoIntelligenceError("Video nguồn đã thay đổi khi đang xử lý; hãy chạy lại với file mới.")
-            directory = context["directory"]
+            directory = _checkpoint_fs_path(context["directory"])
             directory.mkdir(parents=True, exist_ok=True)
             record = {"version": self.CHECKPOINT_VERSION, "key": context["key"], "stage": stage,
                       "digest": self._checkpoint_digest(payload), "payload": payload}
