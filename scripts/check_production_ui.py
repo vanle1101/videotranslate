@@ -181,7 +181,11 @@ def save_edit(page, base, task_id, sid, text):
     selector = f"#seg-row-{sid} .transcript-editor-actions button"
     assert evaluate(page, "(() => {const b=document.querySelector(" + json.dumps(selector) +
         ");if(!b||b.disabled)return false;b.click();return true;})()")
-    until(page, f"document.getElementById('seg-row-{sid}').dataset.editing==='false'", timeout=180)
+    until(page, f"document.getElementById('seg-row-{sid}').dataset.editing==='false' || "
+          f"document.querySelector('#seg-row-{sid} .transcript-edit-message').dataset.error==='true'", timeout=180)
+    message = evaluate(page, f"(() => {{const e=document.querySelector('#seg-row-{sid} .transcript-edit-message');"
+                       "return {failed:e.dataset.error==='true',text:e.textContent};})()")
+    assert not message['failed'], message['text']
     snapshot = backend(base, f"/api/streaming/{task_id}")
     row = next(row for row in snapshot['segments'] if row['id'] == sid)
     assert row['final_vi'] == text and row['status'] in {'READY', 'PLAYED'}
