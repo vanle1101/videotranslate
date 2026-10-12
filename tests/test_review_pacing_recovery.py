@@ -184,6 +184,42 @@ async def _no_speaker_recovery(session):
     return None
 
 
+def test_empty_supported_draft_recovery_is_bounded_across_resume(reviewed_session, monkeypatch):
+    from core.streaming.session_store import restore_saved_session
+    session = reviewed_session
+    monkeypatch.setattr(settings, "LLM_PROVIDER", "opencode")
+    focus = source_scope_recovery_row(session)
+    focus.status, focus.failed_stage, focus.final_vi = "READY", None, ""
+    focus.asr_text = focus.text_zh = "我"
+    focus.audio_path = None
+    focus.verification = {"status": "unresolved", "source_supported": True,
+        "semantic_verified": False, "review_gate_revision": AutomaticTranslationReviewer.REVIEW_GATE_REVISION}
+    calls = []
+    def review(*args, **kwargs):
+        calls.append([row.id for row in args[2]])
+        row = args[2][0]
+        result = source_scope_terminal_response(session, "unresolved")
+        result["segments"][row.id]["verification"]["missing_translation_recovery"] = (
+            AutomaticTranslationReviewer.missing_translation_recovery_identity(
+                row, kwargs["context_segments"]))
+        return result
+    monkeypatch.setattr(AutomaticTranslationReviewer, "review", review)
+    asyncio.run(session._resume_pending_chunk_reviews())
+    session.persist()
+    restored = restore_saved_session(session.task_id)
+    try:
+        asyncio.run(restored._resume_pending_chunk_reviews())
+        assert calls == [[112]]
+        assert restored.segments[112].verification["status"] == "unresolved"
+        assert restored.segments[112].final_vi == ""
+        # Fresh source evidence may justify another bounded attempt.
+        restored.segments[113].text_zh = "爸爸"
+        asyncio.run(restored._resume_pending_chunk_reviews())
+        assert calls == [[112], [112]]
+    finally:
+        pipeline.active_streaming_sessions.pop(session.task_id, None)
+
+
 @pytest.mark.parametrize("failure", ["incomplete", "provider", "source_changed_during_review",
                                      "video_changed_during_review", "cancelled", "forged_stamp"])
 def test_interrupted_or_changed_review_cannot_publish_source_scope_stamp(reviewed_session, monkeypatch, failure):

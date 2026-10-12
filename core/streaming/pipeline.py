@@ -1458,12 +1458,21 @@ class StreamingPipelineSession:
                      and isinstance(item.get("text_zh"), str) and item["text_zh"].strip()]
             keys = {comparable_audio_chinese(item["text_zh"]) for item in valid}
             return len({item["engine"] for item in valid}) == 2 and len(keys) == 1 and "" not in keys
+        def needs_missing_translation_recovery(row):
+            audit = row.verification or {}
+            return (audit.get("status") == "unresolved"
+                and audit.get("source_supported") is True
+                and bool((row.text_zh or "").strip()) and not (row.final_vi or "").strip()
+                and audit.get("missing_translation_recovery") !=
+                    AutomaticTranslationReviewer.missing_translation_recovery_identity(
+                        row, self.segments.values()))
         def include(row):
             if stale_address_only:
                 return needs_address_source_recheck(row)
             return ((row.verification or {}).get("status") in (None, "pending", "incomplete")
                     or needs_source_scope_recheck(row) or needs_address_source_recheck(row)
-                    or needs_obsolete_gate_recheck(row) or needs_numeric_audio_recheck(row))
+                    or needs_obsolete_gate_recheck(row) or needs_numeric_audio_recheck(row)
+                    or needs_missing_translation_recovery(row))
         pending = sorted((row for row in self.segments.values()
             if (row.speaker_review_pending or
                  (self._chunked_source_started and self.visual_translation and self._published_row(row)

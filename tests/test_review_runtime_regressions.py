@@ -61,6 +61,45 @@ def test_repeated_nested_review_json_failure_cannot_become_validated_output():
     assert client.translate.call_count == 3
 
 
+@pytest.mark.parametrize("recovered", [False, True])
+def test_missing_translation_recovery_keeps_uncertainty_and_bounds_attempt(recovered):
+    client, scanner, prompts = components()
+    original = {**source(), "final_vi": "", "natural_vi": "", "literal_vi": "",
+                "needs_review": True}
+    respond = client.translate.side_effect
+    def uncertain(prompt, **kwargs):
+        value = respond(prompt, **kwargs)
+        for row in value["segments"]:
+            row.update(final_vi="Xin chào" if recovered else "", needs_review=True,
+                semantic_verified=False, review_reason="Còn thiếu sắc thái nguồn.")
+        return value
+    client.translate.side_effect = uncertain
+    reviewer = AutomaticTranslationReviewer(client, scanner, audio_evidence=False)
+    row = reviewer.review("unused", [original], [])["segments"][0]
+    assert client.translate.call_count == 2
+    assert all("KHÔI PHỤC LỜI DỊCH CÒN THIẾU" in prompt for prompt in prompts)
+    assert row["final_vi"] == ("Xin chào" if recovered else "")
+    assert row["needs_review"] and row["verification"]["status"] == "unresolved"
+    assert row["verification"]["semantic_verified"] is False
+    assert row["verification"]["missing_translation_recovery"] == (
+        reviewer.missing_translation_recovery_identity(row, [row]))
+
+
+def test_missing_translation_recovery_identity_ignores_speech_and_tracks_source_model(monkeypatch):
+    from copy import deepcopy
+    original = {**source(), "final_vi": "", "speaker_id": "voice-1"}
+    identity = AutomaticTranslationReviewer.missing_translation_recovery_identity
+    key = identity(original, [original, source(1)])
+    retry = {**deepcopy(original), "status": "FAILED", "tts_duration": 4,
+             "revision": 9, "verification": {"status": "unresolved"}}
+    assert key == identity(retry, [retry, source(1)])
+    assert key != identity(retry, [retry, {**source(1), "text_zh": "妈妈"}])
+    retry["speaker_confirmation"] = {"self_address": "con"}
+    assert key != identity(retry, [retry, source(1)])
+    monkeypatch.setattr(settings, "OPENCODE_MODEL", "changed-model")
+    assert key != identity(original, [original, source(1)])
+
+
 @pytest.fixture(autouse=True)
 def provider(monkeypatch):
     monkeypatch.setattr(settings, "LLM_PROVIDER", "opencode")
