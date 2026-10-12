@@ -298,3 +298,65 @@ def test_unrelated_forward_shift_does_not_disable_preceding_backwards_room():
     assert set(plan) == {0, 1}
     assert plan[0]["dub_end"] <= plan[1]["dub_start"] + 1e-9
     assert plan[1]["dub_end"] <= 2.85 + 1e-9
+
+
+def test_fixed_manual_predecessor_does_not_force_successor_past_end_ceiling():
+    rows = [
+        row(153, 216.47, 217.33, .849458, dub_start=216.773375, dub_end=217.630958,
+            verification={"status": "manual"}),
+        row(154, 217.33, 218.29, dub_start=217.630958, dub_end=218.590958),
+        row(155, 218.29, 219.07, .829042, dub_start=218.590958, dub_end=219.42,
+            verification={"status": "corrected"}),
+    ]
+    duration = 1.0523
+    plan = plan_reflow(rows, 154, duration, total_duration=219.63, fixed_ids={153})
+    # The successor already reaches its original end+350ms ceiling and
+    # therefore cannot move later; a shorter following waveform would free
+    # that space without moving the manual predecessor.
+    assert plan is None
+
+
+def test_fixed_manual_predecessor_uses_available_forward_capacity():
+    rows = [row(0, 1, 2, 1), row(1, 2, 2.5), row(2, 2.5, 3.5, .5)]
+    plan = plan_reflow(rows, 1, .7, total_duration=4, fixed_ids={0})
+    assert plan is not None
+    assert plan[1] == pytest.approx({"dub_start": 2, "dub_end": 2.7})
+    assert plan[2]["dub_start"] == pytest.approx(2.7)
+    assert 0 not in plan
+
+
+def test_fixed_manual_predecessor_reports_only_real_gap_capacity():
+    rows = [
+        row(153, 216.47, 217.33, .849458, dub_start=216.773375, dub_end=217.630958),
+        row(154, 217.33, 218.29, dub_start=217.630958, dub_end=218.590958),
+        row(155, 218.29, 219.07, .829042, dub_start=218.590958, dub_end=219.42),
+    ]
+    capacity = available_reflow_duration(rows, 154, total_duration=219.63, fixed_ids={153})
+    assert capacity == pytest.approx(.96, abs=1e-6)
+    assert plan_reflow(rows, 154, capacity + .0001, total_duration=219.63, fixed_ids={153}) is None
+
+
+def test_fixed_manual_successor_cannot_be_pushed_by_reflow():
+    rows = [row(0, 1, 2, 1), row(1, 2, 2.5), row(2, 2.5, 3.5, .5)]
+    before = deepcopy(rows)
+    assert available_reflow_duration(rows, 1, total_duration=4, fixed_ids={0, 2}) == .5
+    assert plan_reflow(rows, 1, .7, total_duration=4, fixed_ids={0, 2}) is None
+    assert rows == before
+
+
+def test_fixed_predecessor_blocks_backshift_without_modifying_input():
+    rows = [row(0, 1, 2, 1), row(1, 2, 2.5)]
+    before = deepcopy(rows)
+    assert plan_backshift(rows, 1, .7) is not None
+    assert plan_backshift(rows, 1, .7, fixed_ids={0}) is None
+    assert rows == before
+
+
+def test_fixed_focus_only_accepts_existing_interval():
+    rows = [row(0, 1, 2, 1), row(1, 2, 2.5)]
+    assert available_reflow_duration(rows, 1, total_duration=3, fixed_ids={1}) == .5
+    assert plan_reflow(rows, 1, .7, total_duration=3, fixed_ids={1}) is None
+    assert plan_backshift(rows, 1, .7, fixed_ids={1}) is None
+    expected = {1: {"dub_start": 2, "dub_end": 2.5}}
+    assert plan_backshift(rows, 1, .4, fixed_ids={1}) == expected
+    assert plan_reflow(rows, 1, .4, total_duration=3, fixed_ids={1}) == expected

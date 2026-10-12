@@ -107,7 +107,7 @@ def _end_limit(rows, focus_index, total_duration=None):
     return end
 
 
-def plan_backshift(rows, focus_id, required_duration, max_shift=0.35):
+def plan_backshift(rows, focus_id, required_duration, max_shift=0.35, *, fixed_ids=()):
     """Return an atomic ``id -> {dub_start, dub_end}`` plan, or ``None``.
 
     Rows are in source order and contain immutable ``id/start/end``. Optional
@@ -121,14 +121,21 @@ def plan_backshift(rows, focus_id, required_duration, max_shift=0.35):
     The focus may expand up to its original source end, subject to the following
     row's existing dub start. Only the necessary contiguous predecessors move;
     no row moves later. The returned plan always includes the focus and includes
-    previous rows only when their timing must change. Input rows are untouched.
+    previous rows only when their timing must change. ``fixed_ids`` reserve
+    exact current intervals (for example, manually edited dialogue).
+    Input rows are untouched.
     """
     required_duration = _number(required_duration)
+    fixed_ids = set(fixed_ids or ())
     prepared = _prepare(rows, focus_id, max_shift)
     if prepared is None or required_duration is None or required_duration <= 0:
         return None
     records, focus_index, max_shift = prepared
     focus = records[focus_index]
+    if focus.id in fixed_ids:
+        if required_duration > focus.dub_end - focus.dub_start + _EPSILON:
+            return None
+        return {focus.id: {"dub_start": focus.dub_start, "dub_end": focus.dub_end}}
     start = min(focus.dub_start, _end_limit(records, focus_index) - required_duration)
     if start < max(0.0, focus.start - max_shift) - _EPSILON:
         return None
@@ -139,6 +146,11 @@ def plan_backshift(rows, focus_id, required_duration, max_shift=0.35):
     plan = {focus.id: {"dub_start": start, "dub_end": end}}
     cursor = start
     for row in reversed(records[:focus_index]):
+        if row.id in fixed_ids:
+            if row.dub_end > cursor + _EPSILON:
+                return None
+            cursor = row.dub_start
+            continue
         if row.audio_duration is None:
             # Missing audio cannot justify borrowing any portion
             # of this source slot, even if a previous dub timing was shorter.
@@ -228,7 +240,7 @@ def _limits(row, duration, max_shift, total_duration, *, reserved=False):
     return start_min, start_max, end_min, end_max
 
 
-def _reflow_bounds(prepared, total_duration):
+def _reflow_bounds(prepared, total_duration, fixed_ids=()):
     """Earliest focus start and latest focus end from chain constraints.
 
     Predecessors push only to the right in the earliest schedule; successors
@@ -237,8 +249,15 @@ def _reflow_bounds(prepared, total_duration):
     """
     records, focus_index, max_shift = prepared
     focus = records[focus_index]
+    if focus.id in fixed_ids:
+        return focus.dub_start, focus.dub_end
     cursor = 0.0
     for row in records[:focus_index]:
+        if row.id in fixed_ids:
+            if row.dub_start < cursor - _EPSILON:
+                return None
+            cursor = row.dub_end
+            continue
         duration = row.audio_duration or row.dub_end - row.dub_start
         low, high, end_low, end_high = _limits(row, duration, max_shift, total_duration,
                                                reserved=row.audio_duration is None)
@@ -250,6 +269,11 @@ def _reflow_bounds(prepared, total_duration):
     earliest = max(cursor, 0.0, focus.start - max_shift)
     cursor = total_duration
     for row in reversed(records[focus_index + 1:]):
+        if row.id in fixed_ids:
+            if row.dub_end > cursor + _EPSILON:
+                return None
+            cursor = row.dub_start
+            continue
         duration = row.audio_duration or row.dub_end - row.dub_start
         low, high, end_low, end_high = _limits(row, duration, max_shift, total_duration,
                                                reserved=row.audio_duration is None)
@@ -272,8 +296,8 @@ def _reflow_bounds(prepared, total_duration):
     return earliest, latest
 
 
-def _plan_general(prepared, required_duration, total_duration):
-    bounds = _reflow_bounds(prepared, total_duration)
+def _plan_general(prepared, required_duration, total_duration, fixed_ids=()):
+    bounds = _reflow_bounds(prepared, total_duration, fixed_ids=fixed_ids)
     if bounds is None:
         return None
     earliest, latest = bounds
@@ -291,6 +315,11 @@ def _plan_general(prepared, required_duration, total_duration):
     plan = {focus.id: {"dub_start": start, "dub_end": end}}
     cursor = start
     for row in reversed(records[:focus_index]):
+        if row.id in fixed_ids:
+            if row.dub_end > cursor + _EPSILON:
+                return None
+            cursor = row.dub_start
+            continue
         if row.dub_end <= cursor + _EPSILON:
             break
         duration = row.audio_duration or row.dub_end - row.dub_start
@@ -308,6 +337,8 @@ def _plan_general(prepared, required_duration, total_duration):
     for row in records[focus_index + 1:]:
         if cursor <= row.dub_start + _EPSILON:
             break
+        if row.id in fixed_ids:
+            return None
         duration = row.audio_duration or row.dub_end - row.dub_start
         new_start = max(row.dub_start, cursor)
         new_end = (new_start + duration if row.audio_duration is None
@@ -342,7 +373,7 @@ def _tail_plan_valid(prepared, plan, total_duration):
     return True
 
 
-def plan_reflow(rows, focus_id, required_duration, max_shift=0.35, *, total_duration):
+def plan_reflow(rows, focus_id, required_duration, max_shift=0.35, *, total_duration, fixed_ids=()):
     """Prefer backward borrowing, then solve bounded bidirectional reflow.
 
     Start AND end stay within ``max_shift`` of their original source timestamps.
@@ -350,7 +381,8 @@ def plan_reflow(rows, focus_id, required_duration, max_shift=0.35, *, total_dura
     collisions to preceding/following rows. Unknown audio keeps its complete
     reserved duration; measured READY
     or PLAYED audio always retains every sample regardless of semantic flags.
-    The source timeline and all input rows remain unchanged.
+    Rows in ``fixed_ids`` keep their exact current interval. The source
+    timeline and all input rows remain unchanged.
     """
     required_duration = _number(required_duration)
     try:
@@ -363,14 +395,17 @@ def plan_reflow(rows, focus_id, required_duration, max_shift=0.35, *, total_dura
     focus = prepared[0][prepared[1]]
     if required_duration <= focus.dub_end - focus.dub_start + _EPSILON:
         return {focus.id: {"dub_start": focus.dub_start, "dub_end": focus.dub_end}}
-    backward = plan_backshift(rows, focus_id, required_duration, max_shift)
+    fixed_ids = set(fixed_ids or ())
+    if focus.id in fixed_ids:
+        return None
+    backward = plan_backshift(rows, focus_id, required_duration, max_shift, fixed_ids=fixed_ids)
     if backward is not None and _tail_plan_valid(prepared, backward, total_duration):
         return backward
-    general = _plan_general(prepared, required_duration, total_duration)
+    general = _plan_general(prepared, required_duration, total_duration, fixed_ids=fixed_ids)
     return general if general is not None and _tail_plan_valid(prepared, general, total_duration) else None
 
 
-def available_reflow_duration(rows, focus_id, max_shift=0.35, *, total_duration):
+def available_reflow_duration(rows, focus_id, max_shift=0.35, *, total_duration, fixed_ids=()):
     """Maximum budget usable by ``plan_reflow`` without publishing any shifts."""
     try:
         rows = list(rows)
@@ -379,5 +414,6 @@ def available_reflow_duration(rows, focus_id, max_shift=0.35, *, total_duration)
     prepared = _prepare_reflow(rows, focus_id, max_shift, total_duration)
     if prepared is None:
         return 0.0
-    bounds = _reflow_bounds(prepared, total_duration)
+    fixed_ids = set(fixed_ids or ())
+    bounds = _reflow_bounds(prepared, total_duration, fixed_ids=fixed_ids)
     return max(0.0, bounds[1] - bounds[0]) if bounds is not None else 0.0
