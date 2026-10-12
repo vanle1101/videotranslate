@@ -203,7 +203,7 @@ class AutomaticTranslationReviewer:
         }[diagnostic["code"]]
 
     @staticmethod
-    def _validated_review_request(client, prompt, batch, lo, hi, check, extra_validate=None):
+    def _validated_review_request(client, prompt, batch, lo, hi, check, extra_validate=None, *, checkpoint=None):
         # Retry malformed structured replies without repeating the local OCR.
         # Authentication/transport errors propagate; invalid data never passes.
         syntax_location = None
@@ -220,6 +220,25 @@ class AutomaticTranslationReviewer:
         schema_id = ("semantic-review-ocr-v1"
             if extra_validate is AutomaticTranslationReviewer._require_ocr_semantic_fields
             else "semantic-review-v1" if extra_validate else "timed-translation-v1")
+        # Keep each validated pass, including a repaired reply, under its
+        # original exact inputs. Provider caching uses the augmented repair
+        # prompt; without this checkpoint Resume first repeats the original
+        # rejected request, and interruption in pass two loses pass one's work.
+        # This is schema-valid audit data, never a VERIFIED verdict: the
+        # independent second pass and evidence/address gates still run below.
+        stage = {"kind": "semantic_request", "schema": schema_id, "prompt": prompt,
+                 "rows": batch, "start": lo, "end": hi}
+        saved = checkpoint.load(stage) if checkpoint else None
+        if saved is not None:
+            check()
+            try:
+                restored = validate(saved)
+            except (VideoIntelligenceError, ValueError):
+                pass
+            else:
+                logging.getLogger("ai").info("REVIEW_PASS_CHECKPOINT_HIT run_id=%s segment_ids=%s",
+                    current_execution_context().run_id, [row["id"] for row in batch])
+                return restored
         for attempt in range(attempts):
             check()
             try:
@@ -246,6 +265,8 @@ class AutomaticTranslationReviewer:
                     schema_id=schema_id,
                     task_kind="semantic_review", max_tokens=10000, attempt=attempt + 1)
                 check()
+                if checkpoint:
+                    checkpoint.store(stage, data)
                 return data, validated
             except VideoIntelligenceError as error:
                 check()
@@ -669,7 +690,7 @@ class AutomaticTranslationReviewer:
             context = dialogue_context(semantic_source, sources)
             semantics = VideoIntelligence._semantic_context(semantic_source, sources)
             try:
-                address_reading = self._address_reading(client, sources, context, check,
+                address_reading = self._address_reading(client, sources, context, check, checkpoint,
                     semantic_source=semantic_source)
                 prompt = (VIETNAMESE_ADDRESS_POLICY + "\n" + SEMANTIC_TRANSLATION_POLICY + "\n" +
                     "Bạn kiểm định lại bản dịch Trung-Việt dựa trên hai bộ nhận giọng tại máy độc lập "
@@ -700,7 +721,7 @@ class AutomaticTranslationReviewer:
                 check()
                 data, validated = self._validated_review_request(client, prompt, sources,
                     min(row["start"] for row in sources), max(row["end"] for row in sources), check,
-                    self._require_semantic_fields)
+                    self._require_semantic_fields, checkpoint=checkpoint)
                 audits = {row["id"]: row for row in data["segments"]}
                 if any(not isinstance(row.get("semantic_verified"), bool)
                        or not isinstance(row.get("verification_reason"), str) for row in audits.values()):
@@ -716,7 +737,7 @@ class AutomaticTranslationReviewer:
                     + json.dumps(data["segments"], ensure_ascii=False))
                 checked, checked_validated = self._validated_review_request(client, recheck, sources,
                     min(row["start"] for row in sources), max(row["end"] for row in sources), check,
-                    self._require_semantic_fields)
+                    self._require_semantic_fields, checkpoint=checkpoint)
                 checked_audits = {row["id"]: row for row in checked["segments"]}
                 if any(not isinstance(row.get("semantic_verified"), bool)
                        or not isinstance(row.get("verification_reason"), str)
@@ -1209,7 +1230,7 @@ class AutomaticTranslationReviewer:
                     current_execution_context().run_id, [row["id"] for row in batch])
             else:
                 data, validated = self._validated_review_request(client, prompt, batch, lo, hi, check,
-                    self._require_ocr_semantic_fields)
+                    self._require_ocr_semantic_fields, checkpoint=checkpoint)
                 first_data = deepcopy(data)
             audit_rows = {item["id"]: item for item in data["segments"]}
             # Run a separate semantic pass over the same measured evidence.
@@ -1225,7 +1246,8 @@ class AutomaticTranslationReviewer:
                     "sửa nếu cần theo nguồn/OCR và giữ needs_review=true nếu còn nghi ngờ. Trả đúng schema, đủ ID.\n"
                     + json.dumps(data["segments"], ensure_ascii=False))
                 checked_data, checked_validated = (cached_pair if cached_pair else self._validated_review_request(
-                    client, recheck_prompt, batch, lo, hi, check, self._require_ocr_semantic_fields))
+                    client, recheck_prompt, batch, lo, hi, check, self._require_ocr_semantic_fields,
+                    checkpoint=checkpoint))
                 checked_rows = {item["id"]: item for item in checked_data["segments"]}
                 if all(isinstance(row.get("semantic_verified"), bool)
                        and isinstance(row.get("verification_reason"), str)
