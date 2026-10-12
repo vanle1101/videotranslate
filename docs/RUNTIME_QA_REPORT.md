@@ -1,5 +1,21 @@
 # Runtime QA report
 
+## Live recovery run — October 12, 2026 (in progress; no completion claimed)
+
+This is a status record for the real recovery currently running against saved task `76f5aa6b`. It is deliberately **not** an acceptance result: the full MP4 has not been produced or validated yet, and no end-to-end success is claimed while the run is still processing.
+
+| Item | Observed value |
+| --- | --- |
+| Source | `workspace/inputs/video_f68bfcb73b13425eb6fd838372765879.mp4`, 320.040635 s (5:20) |
+| Runtime path | Production history → saved task → Resume, backend `127.0.0.1:51074`; real Muse/provider and media storage |
+| Run identifier | `76f5aa6b` (harness session `69860`) |
+| Code loaded by the running process | `b167c25`; latest fixes through `8da6468` are on disk and require a later clean reload |
+| Current work observed | Semantic review/recovery groups are completing; rows 120, 121 and 135 have real translated/TTS artifacts; row 189 and other pending groups remain unresolved |
+| Output | No final output filename yet; full render/playback/ffprobe validation is still pending |
+| ETA | The live process still shows an older optimistic forecast. The stage-ETA correction in `8da6468` has not been loaded into this process |
+
+The run is being allowed to continue so that existing checkpoints and successful audio are retained. If it reaches a terminal failure, the exact stage, segment IDs, provider response and checkpoint state must be recorded here before a targeted fix. The report may only be changed to **PASS** after a real complete MP4 is exported, decoded/readable, played through the production UI, and the saved task is reopened and rerun.
+
 ## Selectable translation worker presets — October 12, 2026
 
 **Code and isolated regression verification only. Production UI/provider acceptance NOT RUN.** This task did not launch, reload or stop Studio, open a browser, control the desktop, call Muse or create an MP4. The running application, if any, has not loaded these edits.
