@@ -206,8 +206,9 @@ def resume_eta(session, *, now=None):
 def processing_eta(session, snapshot, *, now=None):
     """The live sample includes real queue/review/TTS latency, never idle pause.
 
-    A final ETA is only possible once source/review dependencies are resolved
-    and a validated comparable export supplies the remaining media cost.
+    Once source translation coverage is known, independently measured review,
+    synthesis and validated export costs permit a conditional final forecast
+    before review finishes. Missing stage measurements remain explicit.
     Otherwise expose the measured speech/preview estimate with its true scope.
     """
     now = time.monotonic() if now is None else now
