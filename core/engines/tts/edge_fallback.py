@@ -183,15 +183,16 @@ class EdgeTTSFallbackEngine(TTSEngine):
                 # The service sometimes ends a valid request without audio. A
                 # Communicate stream is single-use, so retry with a new instance
                 # and discard any partial file before requesting the same voice.
+                boundary_mode = "WordBoundary"
                 for attempt in range(3):
                     check_cancel()
                     started = time.monotonic()
                     try:
                         boundaries.clear()
-                        logger.info("TTS_REQUEST run_id=%s request_id=%s provider=edge-tts voice=%s attempt=%d text_chars=%d",
-                                    execution.run_id, request_id, chosen_voice, attempt + 1, len(text))
+                        logger.info("TTS_REQUEST run_id=%s request_id=%s provider=edge-tts voice=%s attempt=%d text_chars=%d boundary=%s",
+                                    execution.run_id, request_id, chosen_voice, attempt + 1, len(text), boundary_mode)
                         com = edge_tts.Communicate(text, chosen_voice, rate=rate_str,
-                                                   boundary="WordBoundary", connect_timeout=10, receive_timeout=30)
+                                                   boundary=boundary_mode, connect_timeout=10, receive_timeout=30)
                         await _await_cancellable(com.save(str(mp3_path), str(metadata_path)),
                                                  execution.cancel_check, EDGE_REQUEST_TIMEOUT)
                         if not mp3_path.is_file() or not mp3_path.stat().st_size:
@@ -222,6 +223,14 @@ class EdgeTTSFallbackEngine(TTSEngine):
                                        int((time.monotonic() - started) * 1000))
                         if not _retryable(error):
                             raise _provider_error(error) from None
+                        # Some service deployments return no speech with word
+                        # metadata enabled, while the same voice/text succeeds
+                        # with sentence metadata. Retry only this empty-audio
+                        # condition in the SDK's supported alternate mode. Do
+                        # not invent word timings from a sentence boundary:
+                        # downstream keeps its explicit alignment fallback.
+                        if isinstance(error, edge_tts.exceptions.NoAudioReceived):
+                            boundary_mode = "SentenceBoundary"
                         mp3_path.unlink(missing_ok=True)
                         metadata_path.unlink(missing_ok=True)
                         if attempt == 2:
