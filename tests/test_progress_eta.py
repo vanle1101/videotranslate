@@ -231,6 +231,13 @@ def test_stage_forecast_identifies_missing_calibration_without_invented_final_et
     assert result["eta_missing_stages"] == ["review", "speech", "export"]
 
 
+def test_empty_unresolved_speech_without_pending_repair_has_no_final_countdown(session):
+    session._visual_prepass_complete = True
+    session.segments = {0: SimpleNamespace(id=0, status="READY", verification={"status": "unresolved"})}
+    snapshot = state(missing_speech_ids=[0])
+    assert eta.processing_eta(session, snapshot, now=130)["eta_reason"] == "content_blocked"
+
+
 def test_stage_measurements_reject_pause_stop_and_changed_run(session, monkeypatch):
     monkeypatch.setattr(eta.time, "monotonic", lambda: 100.)
     mark = eta.stage_measurement_start(session)

@@ -54,6 +54,9 @@ def _stage_forecast(session, snapshot):
         if (getattr(row, "verification", {}) or {}).get("status") in {None, "pending", "incomplete"}:
             pending_ids.add(row.id)
     pending_ids.intersection_update(row.id for row in rows)
+    if any(identity not in pending_ids for identity in snapshot.get("missing_speech_ids", ())):
+        return {"eta_seconds": None, "eta_scope": "final", "eta_reason": "content_blocked",
+                "eta_components": {}, "eta_missing_stages": []}
     pending_review = len(pending_ids)
     # Tests/legacy sessions without row objects still expose the exact review
     # backlog through their summary. Never silently treat it as zero.
@@ -221,6 +224,8 @@ def processing_eta(session, snapshot, *, now=None):
         return {**result, "eta_reason": "retry_pending"}
     if not preview and getattr(session, "auto_export_result", False):
         forecast = _stage_forecast(session, snapshot)
+        if forecast is not None and forecast["eta_reason"] == "content_blocked":
+            return forecast
         if forecast is not None and forecast["eta_seconds"] is not None:
             return forecast
         if forecast is not None:
