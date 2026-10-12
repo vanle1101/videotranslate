@@ -762,6 +762,42 @@ def mark_failed_speech(session, stage="ALIGNING", *, stopped=False):
     return row
 
 
+def test_stopped_empty_review_row_can_be_repaired_without_restarting_job(session):
+    row = session.segments[0]
+    row.final_vi, row.audio_path, row.audio_url = "", None, None
+    row.needs_review = True
+    row.verification = {"status": "unresolved", "source_supported": True}
+    session.is_stopped = True
+    async def run():
+        assert session._can_repair_failed_segment(row)
+        async with client() as api:
+            response = await api.patch(route(session), json={"final_vi": "Lời đã đối chiếu"})
+            assert response.status_code == 200, response.text
+            repaired = response.json()["segment"]
+            assert repaired["final_vi"] == "Lời đã đối chiếu"
+            assert repaired["status"] == "READY"
+            assert repaired["verification"]["status"] == "manual"
+        assert session.is_stopped and not session.is_running
+    asyncio.run(run())
+
+
+def test_empty_review_repair_cannot_race_active_owner(session):
+    row = session.segments[0]
+    row.final_vi, row.needs_review = "", True
+    session.is_stopped = True
+    async def run():
+        session.worker_task = asyncio.create_task(asyncio.sleep(1))
+        try:
+            assert not session._can_repair_failed_segment(row)
+            async with client() as api:
+                response = await api.patch(route(session), json={"final_vi": "Lời sửa"})
+                assert response.status_code == 409
+        finally:
+            session.worker_task.cancel()
+            await asyncio.gather(session.worker_task, return_exceptions=True)
+    asyncio.run(run())
+
+
 @pytest.mark.parametrize("stage", ["TTS", "ALIGNING"])
 @pytest.mark.parametrize("stopped", [False, True])
 @pytest.mark.parametrize("same_text", [False, True])

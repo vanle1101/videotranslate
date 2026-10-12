@@ -327,11 +327,16 @@ class StreamingPipelineSession:
     def _can_repair_failed_segment(self, segment):
         owners = (self.start_task, self.worker_task, self.review_task, self._chunk_followup_task,
                   getattr(self, "export_task", None), getattr(self, "auto_export_task", None))
+        failed_speech = (segment.status == "FAILED" and segment.failed_stage in {"TTS", "ALIGNING"}
+                         and bool(segment.final_vi.strip()))
+        missing_translation = (segment.status in {"READY", "PLAYED", "NEEDS_REVIEW"}
+                               and not segment.final_vi.strip() and segment.needs_review
+                               and not segment.confirmed_silence)
         return bool(self.initialized and not self.is_running and not self.is_editing
                     and not getattr(self, "_stop_draining", False)
                     and not any(owner is not None and not owner.done() for owner in owners)
-                    and segment.status == "FAILED" and segment.failed_stage in {"TTS", "ALIGNING"}
-                    and (segment.text_zh.strip() or segment.asr_text.strip()) and segment.final_vi.strip())
+                    and (failed_speech or missing_translation)
+                    and (segment.text_zh.strip() or segment.asr_text.strip()))
 
     def _execution_cancelled(self, owner=None):
         if owner is None:
