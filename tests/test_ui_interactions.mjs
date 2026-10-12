@@ -779,7 +779,9 @@ function studio(cookieReply = { configured: false, count: 0, message: '' }, voic
   }
   const replies = new Map([
     ['/api/hardware', {}], ['/api/tasks', { tasks: [] }],
-    ['/api/settings', { buffer_target: '15', ducking_level: '-18', opencode_free_models: [], gemini_model: 'gemini-fixture' }],
+    ['/api/settings', { buffer_target: '15', ducking_level: '-18', opencode_free_models: [],
+      opencode_model: 'muse-spark-1.3-contributor-free', openrouter_model: 'inclusionai/ling-3.0-flash-sante:free',
+      gemini_model: 'gemini-fixture', translation_chunk_workers: 5 }],
     ['/api/muse/status', {}],
     ['/api/douyin/cookies', cookieReply],
     ['/api/voices', voiceConfig.catalog || {}],
@@ -1217,6 +1219,121 @@ test('saved buffer and arbitrary configured model are displayed and sent to back
   assert.equal(ui.el('buffer-select').value, '15');
   const request = ui.requests.find(req => req.url.includes('start-local-file'));
   assert.equal(JSON.parse(request.options.body).initial_buffer_seconds, 15);
+});
+
+test('parallel translation worker presets are visible outside the collapsed OpenCode settings and restore the saved value', async () => {
+  const select = template.match(/<select\b[^>]*id="settings-translation-workers"[^>]*>[\s\S]*?<\/select>/)?.[0];
+  assert.ok(select, 'Settings must expose the worker selector');
+  assert.match(template, /<label\b[^>]*for="settings-translation-workers"[^>]*>Luồng dịch song song<\/label>/);
+  assert.match(select, /aria-describedby="settings-translation-workers-help"/);
+  assert.match(select, /\{% for workers in \[1, 3, 5, 10, 15, 20\] %\}/);
+  const help = template.match(/<p\b[^>]*id="settings-translation-workers-help"[^>]*>([^<]+)<\/p>/)?.[1];
+  assert.match(help, /Dịch toàn bộ/);
+  assert.match(help, /tự giảm theo CPU\/RAM/);
+  assert.match(help, /Bản xem trước vẫn dịch đoạn ngắn/);
+  const collapsedSections = [...template.matchAll(/<details\b[^>]*>[\s\S]*?<\/details>/g)].map(match => match[0]);
+  assert.ok(collapsedSections.some(section => /settings-opencode-model/.test(section)));
+  assert.ok(collapsedSections.every(section => !/settings-translation-workers/.test(section)), 'Worker choice must remain visible when provider details are collapsed');
+
+  const ui = studio(); await ui.flush();
+  assert.equal(ui.el('settings-translation-workers').tagName, 'SELECT');
+  assert.equal(ui.el('settings-translation-workers').value, '5');
+  ui.replies.set('/api/settings', {...ui.replies.get('/api/settings'), translation_chunk_workers: 15});
+  await ui.el('tab-settings').click();
+  await ui.flush();
+  assert.equal(ui.el('settings-translation-workers').value, '15');
+});
+
+test('each parallel translation preset saves a numeric value and restores the acknowledged backend setting', async () => {
+  for (const workers of [1, 3, 5, 10, 15, 20]) {
+    const ui = studio(); await ui.flush();
+    const cfg = {...ui.replies.get('/api/settings')};
+    const select = ui.el('settings-translation-workers');
+    select.value = String(workers);
+    let savedWorkers;
+    ui.replies.set('/api/settings', options => {
+      if (options.method === 'POST') {
+        savedWorkers = JSON.parse(options.body).translation_chunk_workers;
+        assert.equal(typeof savedWorkers, 'number');
+        assert.equal(savedWorkers, workers);
+        assert.equal(options.headers['Content-Type'], 'application/json');
+        // A stale local value must be replaced by the subsequent GET rather
+        // than merely displaying the value typed before Save.
+        select.value = '';
+        return {ok: true, json: async () => ({message: 'Đã lưu cấu hình.'})};
+      }
+      return {ok: true, json: async () => ({...cfg, translation_chunk_workers: savedWorkers})};
+    });
+    await ui.el('btn-save-settings').click();
+    assert.equal(select.value, String(workers));
+    const settingsRequests = ui.requests.filter(request => request.url === '/api/settings');
+    assert.equal(settingsRequests.filter(request => request.options.method === 'POST').length, 1);
+    assert.equal(settingsRequests.at(-1).options.method, undefined, 'Successful save must reload the persisted config');
+    assert.match(ui.el('btn-save-settings').innerHTML, /Đã lưu thành công/);
+    await ui.tickTimeouts(2000);
+    assert.equal(ui.el('btn-save-settings').disabled, false);
+    assert.equal(ui.requests.some(request => /\/streaming\/start|\/api\/test-/.test(request.url)), false);
+  }
+});
+
+test('invalid parallel translation worker values focus the selector and never submit settings', async () => {
+  for (const value of ['', '0', '2', '21', '5.5', 'invalid']) {
+    const ui = studio(); await ui.flush();
+    const select = ui.el('settings-translation-workers');
+    select.value = value;
+    await ui.el('btn-save-settings').click();
+    assert.equal(ui.document.activeElement, select, value);
+    assert.equal(ui.requests.some(request => request.url === '/api/settings' && request.options.method === 'POST'), false, value);
+    assert.equal(ui.el('btn-save-settings').disabled, false, value);
+    assert.match(ui.alerts.at(-1), /1, 3, 5, 10, 15 hoặc 20/, value);
+    assert.doesNotMatch(ui.el('btn-save-settings').innerHTML, /Đã lưu thành công/, value);
+  }
+});
+
+test('worker settings save rejection preserves the selected preset and allows retry without false success', async () => {
+  for (const [status, detail] of [[409, 'Hãy chờ tác vụ hiện tại dừng.'], [500, 'Chưa lưu được cấu hình xuống đĩa.']]) {
+    const ui = studio(); await ui.flush();
+    const select = ui.el('settings-translation-workers');
+    const save = ui.el('btn-save-settings');
+    const originalLabel = save.innerHTML;
+    select.value = '20';
+    let finish;
+    ui.replies.set('/api/settings', () => new Promise(resolve => { finish = resolve; }));
+    const pending = save.click();
+    await ui.flush();
+    assert.equal(save.disabled, true, `HTTP ${status}`);
+    assert.match(save.innerHTML, /Đang lưu/, `HTTP ${status}`);
+    finish({ok: false, status, json: async () => ({detail})});
+    await pending;
+    assert.equal(select.value, '20', `HTTP ${status}`);
+    assert.equal(save.disabled, false, `HTTP ${status}`);
+    assert.equal(save.innerHTML, originalLabel, `HTTP ${status}`);
+    assert.equal(ui.requests.filter(request => request.url === '/api/settings' && request.options.method !== 'POST').length, 1, 'Failed save must not overwrite the selection with a fresh GET');
+    assert.equal(ui.alerts.at(-1), `Lỗi lưu cấu hình: ${detail}`);
+    assert.equal(ui.alerts.some(message => /thành công/.test(message)), false);
+  }
+});
+
+test('translation worker progress shows effective and configured counts from socket and refreshes count-only polling changes', async () => {
+  const ui = studio(); await ui.start();
+  const initial = {status: 'RUNNING', phase: 'translate', stage: 'Đang dịch các đoạn',
+    progress_pct: 25, chunk_workers: 3, configured_chunk_workers: 10,
+    translation_mode: 'full', segment_states: {COMPLETED: 1, REVIEW_REQUIRED: 0, FAILED: 0, RETRY_PENDING: 0}};
+  ui.sockets.at(-1).receive({type: 'progress', ...initial});
+  assert.match(ui.el('task-progress-detail').textContent, /Giới hạn đoạn: 3\/10 luồng/);
+  ui.replies.set('/api/tasks', {tasks: [{task_id: 'fixture', ...initial, chunk_workers: 5, configured_chunk_workers: 20}]});
+  await ui.el('btn-refresh-tasks').click();
+  assert.match(ui.el('task-progress-detail').textContent, /Giới hạn đoạn: 5\/20 luồng/);
+  assert.doesNotMatch(ui.el('task-progress-detail').textContent, /3\/10 luồng/);
+  assert.equal(ui.el('task-progress-value').textContent, '25%');
+  ui.replies.set('/api/tasks', {tasks: [{task_id: 'fixture', ...initial, chunk_workers: 5, configured_chunk_workers: 15}]});
+  await ui.el('btn-refresh-tasks').click();
+  assert.match(ui.el('task-progress-detail').textContent, /Giới hạn đoạn: 5\/15 luồng/);
+  ui.replies.set('/api/tasks', {tasks: [{task_id: 'fixture', ...initial, chunk_workers: 3, configured_chunk_workers: 15}]});
+  await ui.el('btn-refresh-tasks').click();
+  assert.match(ui.el('task-progress-detail').textContent, /Giới hạn đoạn: 3\/15 luồng/);
+  ui.sockets.at(-1).receive({type: 'progress', ...initial, translation_mode: 'preview'});
+  assert.doesNotMatch(ui.el('task-progress-detail').textContent, /Giới hạn đoạn:/, 'The configured full-run count must not claim the short preview runs in parallel');
 });
 
 test('library selection previews an existing local video and waits for an explicit start', async () => {

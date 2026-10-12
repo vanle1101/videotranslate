@@ -439,6 +439,16 @@
           <span id="opencode-test-result" role="status" class="block text-xs text-gray-400"></span>
         </details>
 
+        <div>
+          <label for="settings-translation-workers" class="text-xs text-gray-300 block mb-1">Luồng dịch song song</label>
+          <select id="settings-translation-workers" aria-describedby="settings-translation-workers-help" class="w-full bg-[#08090d] border border-gray-700 rounded-xl px-3 py-2 text-xs text-gray-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-pink-500">
+            {% for workers in [1, 3, 5, 10, 15, 20] %}
+            <option value="{{ workers }}" {% if settings.TRANSLATION_CHUNK_WORKERS == workers %}selected{% endif %}>{{ workers }} luồng</option>
+            {% endfor %}
+          </select>
+          <p id="settings-translation-workers-help" class="text-[11px] text-gray-400 mt-1">Số đoạn dịch đồng thời tối đa khi Dịch toàn bộ; tự giảm theo CPU/RAM. Các đoạn chạy song song dài khoảng 1 phút. Bản xem trước vẫn dịch đoạn ngắn.</p>
+        </div>
+
         <div class="border-t border-gray-800 pt-3">
           <label class="text-xs text-gray-300 block mb-1">DeepSeek API Key (Tùy chọn):</label>
           <input type="password" id="settings-deepseek-key" placeholder="sk-..." class="w-full bg-[#08090d] border border-gray-700 rounded-xl px-3 py-2 text-xs text-gray-100 focus:outline-none focus:border-pink-500 font-mono">

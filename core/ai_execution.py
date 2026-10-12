@@ -7,7 +7,7 @@ explicit retryable outcomes, never empty/placeholder provider responses.
 from __future__ import annotations
 
 from collections import deque
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 import hashlib
 import json
 import logging
@@ -190,6 +190,20 @@ class AIExecutionLayer:
         self._half_open = False
         self._requests = self._retries = self._cache_hits = 0
 
+    def set_concurrency(self, concurrency: int) -> None:
+        """Change admission capacity without replacing active work or circuit state.
+
+        Lowering the cap lets already admitted requests finish; new admission
+        waits until their count is below the new limit. Increasing it wakes
+        queued callers immediately. Cache policy fields are unchanged.
+        """
+        if isinstance(concurrency, bool) or not isinstance(concurrency, int) or concurrency < 1:
+            raise ValueError("concurrency must be a positive integer")
+        with self._condition:
+            if concurrency != self.policy.concurrency:
+                self.policy = replace(self.policy, concurrency=concurrency)
+                self._condition.notify_all()
+
     @staticmethod
     def _cancel(cancel_check):
         if cancel_check is not None and cancel_check():
@@ -347,6 +361,7 @@ class AIExecutionLayer:
     def snapshot(self):
         with self._condition:
             return {"active_requests": self._active, "queued_requests": len(self._queue),
+                    "concurrency": self.policy.concurrency,
                     "requests": self._requests, "retry_requests": self._retries,
                     "cache_hits": self._cache_hits, "consecutive_failures": self._failures,
                     "circuit_retry_after": max(0, self._open_until - time.monotonic()),

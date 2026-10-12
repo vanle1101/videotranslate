@@ -10,6 +10,7 @@ import logging
 import traceback
 import re
 import threading
+import tempfile
 from pathlib import Path
 from urllib.parse import quote
 from typing import Dict, Any, Optional, List, Literal
@@ -19,9 +20,9 @@ from core.services.file_response import FileResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from fastapi.requests import Request
-from pydantic import BaseModel, Field, ConfigDict
+from pydantic import BaseModel, Field, ConfigDict, field_validator
 
-from config import settings
+from config import settings, TRANSLATION_CHUNK_WORKER_OPTIONS
 from core.downloader import VideoDownloader
 from core.douyin_cookies import (
     DouyinCookieError, import_douyin_cookies, get_douyin_cookie_status,
@@ -175,9 +176,25 @@ class ConfigRequest(BaseModel):
     suppression_mode: Optional[str] = None
     ducking_level: Optional[str] = None
     buffer_target: Optional[str] = None
+    translation_chunk_workers: Optional[int] = Field(default=None, strict=True)
+
+    @field_validator("translation_chunk_workers")
+    @classmethod
+    def validate_translation_chunk_workers(cls, value):
+        if value is not None and value not in TRANSLATION_CHUNK_WORKER_OPTIONS:
+            raise ValueError("Số luồng dịch phải là 1, 3, 5, 10, 15 hoặc 20")
+        return value
+
+
+_ENV_UPDATE_LOCK = threading.RLock()
 
 def update_env_file(updates: Dict[str, str]):
     """Safely updates or adds configuration keys in .env file on disk."""
+    with _ENV_UPDATE_LOCK:
+        _write_env_updates(updates)
+
+
+def _write_env_updates(updates: Dict[str, str]):
     env_path = settings.BASE_DIR / ".env"
     lines = []
     if env_path.exists():
@@ -200,7 +217,18 @@ def update_env_file(updates: Dict[str, str]):
         if k not in updated_keys:
             new_lines.append(f"{k}={v}")
 
-    env_path.write_text("\n".join(new_lines) + "\n", encoding="utf-8")
+    # Publish both limits together. A failed write must preserve the previous
+    # .env and must not leave a half-written file for the next app launch.
+    fd, temporary_name = tempfile.mkstemp(prefix=".env-", suffix=".tmp", dir=env_path.parent)
+    temporary_path = Path(temporary_name)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8", newline="\n") as stream:
+            stream.write("\n".join(new_lines) + "\n")
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(temporary_path, env_path)
+    finally:
+        temporary_path.unlink(missing_ok=True)
 
 @app.get("/", response_class=HTMLResponse)
 async def index(request: Request):
@@ -301,7 +329,9 @@ async def get_settings():
         "deepseek_configured": bool(settings.DEEPSEEK_API_KEY or os.getenv("DEEPSEEK_API_KEY")),
         "suppression_mode": getattr(settings, "SUPPRESSION_MODE", "AUTO"),
         "ducking_level": f"{settings.BGM_VOLUME_DUCKED_DB:g}",
-        "buffer_target": f"{settings.INITIAL_BUFFER_SECONDS:g}"
+        "buffer_target": f"{settings.INITIAL_BUFFER_SECONDS:g}",
+        "translation_chunk_workers": settings.TRANSLATION_CHUNK_WORKERS,
+        "translation_chunk_worker_options": list(TRANSLATION_CHUNK_WORKER_OPTIONS),
     }
 
 
@@ -366,6 +396,10 @@ async def update_settings(req: ConfigRequest):
         if value is not None and ("\n" in value or "\r" in value):
             raise HTTPException(status_code=422, detail="Cấu hình không được chứa ký tự xuống dòng")
     env_updates = {}
+    if req.translation_chunk_workers is not None:
+        selected_workers = str(req.translation_chunk_workers)
+        env_updates["TRANSLATION_CHUNK_WORKERS"] = selected_workers
+        env_updates["OPENCODE_CONCURRENCY"] = selected_workers
     if req.suppression_mode is not None:
         if req.suppression_mode not in {"AUTO", "DSP_MONO_ADAPTIVE_FORMANT", "DSP_STEREO_CENTER_CANCEL"}:
             raise HTTPException(status_code=422, detail="Chế độ tách thoại không hợp lệ")
@@ -420,7 +454,13 @@ async def update_settings(req: ConfigRequest):
         except OSError:
             raise HTTPException(status_code=500, detail="Không thể ghi cấu hình vào .env") from None
         for name, value in env_updates.items():
-            setattr(settings, name, float(value) if name in {"BGM_VOLUME_DUCKED_DB", "INITIAL_BUFFER_SECONDS"} else value)
+            if name in {"BGM_VOLUME_DUCKED_DB", "INITIAL_BUFFER_SECONDS"}:
+                active_value = float(value)
+            elif name in {"TRANSLATION_CHUNK_WORKERS", "OPENCODE_CONCURRENCY"}:
+                active_value = int(value)
+            else:
+                active_value = value
+            setattr(settings, name, active_value)
             if name in {"GEMINI_API_KEY", "DEEPSEEK_API_KEY"}:
                 os.environ[name] = value
 

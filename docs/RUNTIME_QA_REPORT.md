@@ -1,5 +1,39 @@
 # Runtime QA report
 
+## Selectable translation worker presets — October 12, 2026
+
+**Code and isolated regression verification only. Production UI/provider acceptance NOT RUN.** This task did not launch, reload or stop Studio, open a browser, control the desktop, call Muse or create an MP4. The running application, if any, has not loaded these edits.
+
+Settings now exposes **Luồng dịch song song** with exactly the selectable presets **1, 3, 5, 10, 15, 20**, outside the collapsed provider details. GET restores the saved integer; POST validates the preset and persists both `TRANSLATION_CHUNK_WORKERS` and `OPENCODE_CONCURRENCY`. Environment bounds are now 1–20. Existing intermediate environment values remain supported by the backend; saving the form requires choosing a supported preset.
+
+The preset is a maximum, not a promised number of active requests or a speed multiplier. Existing admission remains `min(selected, provider_limit, max(1, logical_cpus - 1), max(1, floor((available_RAM - 2 GiB) / 1 GiB)))`. A five-minute source normally has about five minute ranges, so selecting 20 cannot create twenty independent minute ranges. OCR keeps its separate two-owner bound; ASR, review and TTS retain their existing limits. A fresh effective single-worker full run retains the serial approximately 24-second planner; resumed parallel projects preserve their existing minute owners even at one worker. Preview remains short and does not claim the full-run worker count.
+
+### Root causes and fixes
+
+1. No visible settings/API field selected chunk capacity; config validation capped it at eight. Added the six presets, strict integer validation, persisted/reloaded selection and bounds up to twenty. Saving while processing still returns 409 rather than changing an active run's configuration.
+2. Shared OpenCode queues were keyed by the whole policy. Changing concurrency created a second queue while resumed clients retained the old one. Concurrency no longer changes queue identity; synchronized updates preserve active request keys, queued callers, cache and circuit state. Existing clients refresh the shared limit before their next request. Explicitly injected test/benchmark layers stay isolated.
+3. Direct `.env` writing could publish a partial configuration. A locked sibling temporary file, flush/fsync and atomic replacement now publish both limits together. A failed write leaves the old file and live limits intact; no backup is created.
+4. Progress did not distinguish selected and effective worker limits. Full mode now shows `Giới hạn đoạn: effective/configured luồng`, separately from actual active/queued Muse requests. Polling detects count-only changes and compares queue snapshots by value, avoiding false redraws on unchanged JSON objects.
+5. The broader suite exposed a stale reconnect assertion expecting a white caption background. The unchanged caption implementation and dedicated caption suite already use the previously requested stable yellow palette. Updated this assertion and checked both preview layouts; no caption behavior changed in this task.
+
+### Isolated scenarios and results
+
+| Steps | Expected / actual |
+| --- | --- |
+| Render production template through TestClient for each preset; read settings | **PASS**: six options, matching selected value, visible label and accessible help. This is server rendering, not browser/manual QA. |
+| Save each preset through `/api/settings` and `/api/config`; instantiate settings from the isolated `.env` | **PASS**: both limits are the chosen integers; unrelated configuration preserved; next render/GET restores selection. |
+| Submit strings, booleans, unsupported counts; save during work; inject failed atomic publish | **PASS**: 422/409/500 as appropriate, no false success, no mutation of persisted/live configuration on rejection. |
+| Retain old client, select 20, construct a new client, resume old client | **PASS**: one shared admission ledger/cache/circuit, updated limit for both. Shrink drains existing work; expansion wakes waiting callers. |
+| Resource-permitted capacities for all six presets; constrain CPU, RAM or provider cap | **PASS**: exact requested capacity when possible, truthful lower admission when constrained. Resources are injected, not a hardware benchmark. |
+| Real `OrderedChunkRunner` → production `_run_blocking` bridge → `AIExecutionLayer` with 23 isolated operations at selected 20 | **PASS**: twenty admitted simultaneously, remaining operations wait, no duplicate IDs, ordered publication, run context preserved, all executor threads joined. No provider/model/media operation is invoked. |
+| Execute production JavaScript in the isolated DOM harness; save/restore/errors; socket and count-only polling updates | **PASS**: numeric preset submitted, persisted value restored, invalid selection focused, failed save retryable, effective/configured counts accurate and absent from preview. |
+
+Integrated Python suites: **635 passed, 1 skipped, 32 subtests passed in 32.10 seconds**, including settings/API, queue, preview/chunks, ownership/OCR, persistence/edit, progress/context and caption contracts. The skip is the existing Windows symlink privilege case. After adding the final bridge/runner test, the focused settings/execution suites passed **65 tests in 8.31 seconds**; these counts overlap and are not summed. Final JavaScript UI regression: **251 passed**. Changed Python source syntax, JavaScript syntax and `git diff --check` passed. No configured TypeScript/npm production build applies to this Python/Qt project.
+
+Actual Muse throughput/rate limiting at 10/15/20 and visible production selection after loading remain **unverified** under the user's explicit no-launch/no-control instruction. No long-video translation or end-to-end success is claimed by these isolated tests. Existing videos, projects, scripts, audio and checkpoints remain preserved.
+
+Cleanup: the automatic approval review rejected the single verified-path native PowerShell removal of this task's `workspace/temp/worker-selection-regression` with **“blocked by policy”**. The command did not execute and this directory remains; no alternative deletion route or retry was attempted. The previously rejected `parallel-chunk-regression` directory was not touched. All task-owned test processes exited; no app/server/watcher was started.
+
 ## Independent minute-range translation workers — October 12, 2026
 
 **Implementation and isolated regression verification only; production/provider acceptance NOT RUN.** The user explicitly requested code edits without starting/reloading Studio, opening browsers or controlling the desktop. No real Muse request, app/UI session or new MP4 is claimed for this change. The historical capacity-2 provider measurements below do not benchmark this new capacity-5 design.

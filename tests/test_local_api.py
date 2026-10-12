@@ -415,7 +415,10 @@ class LocalAPITests(unittest.TestCase):
         self.assertEqual(snapshot["caption_bottom_layout"], session.segment_snapshot(segment)["caption_bottom_layout"])
         cue = snapshot["caption_layout"]["cues"][0]
         self.assertEqual((cue["start"], cue["end"], cue["text"]), (.15, .8, "Xin chào"))
-        self.assertEqual(cue["background"], "white")
+        # The stable palette migration already made yellow the default on
+        # both preview paths, including text-only provider reconnections.
+        self.assertEqual(cue["background"], "yellow")
+        self.assertEqual(snapshot["caption_bottom_layout"]["cues"][0]["background"], "yellow")
         self.assertEqual(snapshot["caption_layout"]["video_size"], [1080, 1920])
         self.assertNotIn("audio_path", snapshot)
 

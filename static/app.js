@@ -163,6 +163,8 @@ document.addEventListener("DOMContentLoaded", () => {
   const settingsSuppressionMode = document.getElementById("settings-suppression-mode");
   const settingsDuckingLevel = document.getElementById("settings-ducking-level");
   const settingsBufferTarget = document.getElementById("settings-buffer-target");
+  const settingsTranslationWorkers = document.getElementById("settings-translation-workers");
+  const translationWorkerChoices = [1, 3, 5, 10, 15, 20];
   const btnToggleGeminiKey = document.getElementById("btn-toggle-gemini-key");
   const btnTestGemini = document.getElementById("btn-test-gemini");
   const geminiTestResult = document.getElementById("gemini-test-result");
@@ -1456,6 +1458,11 @@ document.addEventListener("DOMContentLoaded", () => {
       }
       if (currentProgress.ai_queue && Number.isInteger(currentProgress.ai_queue.active_requests)) {
         counters.push(`Muse: ${currentProgress.ai_queue.active_requests} đang chạy, ${currentProgress.ai_queue.queued_requests || 0} chờ`);
+      }
+      if (currentProgress.translation_mode === "full" && Number.isInteger(currentProgress.chunk_workers) &&
+          currentProgress.chunk_workers > 0 && Number.isInteger(currentProgress.configured_chunk_workers) &&
+          currentProgress.configured_chunk_workers >= currentProgress.chunk_workers) {
+        counters.push(`Giới hạn đoạn: ${currentProgress.chunk_workers}/${currentProgress.configured_chunk_workers} luồng`);
       }
       const eta = formatEta(currentProgress.eta_seconds);
       if (eta) counters.push(`ước tính còn ${eta}`);
@@ -4457,9 +4464,10 @@ document.addEventListener("DOMContentLoaded", () => {
       }
       if (activeTask) {
         const statusChanged = activeTask.status !== currentProgress?.status;
-        const progressChanged = ["phase", "stage", "progress_pct", "stage_progress_pct", "processing_progress_pct", "processing_completed_segments", "processing_total_segments", "processing_scope", "processing_total_known", "downloaded_bytes", "total_bytes", "speed", "eta", "can_retry", "can_repair_failed", "can_pause", "can_resume", "can_stop", "can_review", "review_count", "output_video_url", "output_filename", "translation_mode", "can_translate_full", "preview_seconds", "processed_seconds", "source_prepared_seconds", "total_seconds", "review_scope"]
+        const progressChanged = ["phase", "stage", "progress_pct", "stage_progress_pct", "processing_progress_pct", "processing_completed_segments", "processing_total_segments", "processing_scope", "processing_total_known", "downloaded_bytes", "total_bytes", "speed", "eta", "can_retry", "can_repair_failed", "can_pause", "can_resume", "can_stop", "can_review", "review_count", "output_video_url", "output_filename", "translation_mode", "can_translate_full", "preview_seconds", "processed_seconds", "source_prepared_seconds", "total_seconds", "review_scope", "chunk_workers", "configured_chunk_workers"]
           .some(key => activeTask[key] !== undefined && activeTask[key] !== currentProgress?.[key]) ||
-          (activeTask.review_summary !== undefined && JSON.stringify(activeTask.review_summary) !== JSON.stringify(currentProgress?.review_summary));
+          ["review_summary", "ai_queue"].some(key => activeTask[key] !== undefined &&
+            JSON.stringify(activeTask[key]) !== JSON.stringify(currentProgress?.[key]));
         if (taskPollWarning || streamDisconnected || statusChanged || progressChanged) {
           showTaskProgress(activeTask);
           if (streamDisconnected && !["COMPLETED", "PREVIEW_READY", "PREPARED", "FAILED", "STOPPED", "CANCELLED"].includes(activeTask.status)) {
@@ -4899,6 +4907,9 @@ document.addEventListener("DOMContentLoaded", () => {
             : "Chưa tìm thấy key. Mở OpenCode → /connect → OpenCode Zen rồi tải lại tab Cài đặt.";
         }
         if (settingsSuppressionMode && cfg.suppression_mode) settingsSuppressionMode.value = cfg.suppression_mode;
+        if (settingsTranslationWorkers && Number.isInteger(cfg.translation_chunk_workers)) {
+          settingsTranslationWorkers.value = String(cfg.translation_chunk_workers);
+        }
         setSelectValue(settingsDuckingLevel, cfg.ducking_level, `${cfg.ducking_level} dB`);
         setSelectValue(settingsBufferTarget, cfg.buffer_target, `${cfg.buffer_target}s`);
         setSelectValue(bufferSelect, cfg.buffer_target, `${cfg.buffer_target} giây`);
@@ -5027,7 +5038,14 @@ document.addEventListener("DOMContentLoaded", () => {
   });
 
   btnSaveSettings?.addEventListener("click", async () => {
+    const translationWorkers = Number(settingsTranslationWorkers?.value);
+    if (settingsTranslationWorkers && !translationWorkerChoices.includes(translationWorkers)) {
+      alert("Hãy chọn 1, 3, 5, 10, 15 hoặc 20 luồng dịch.");
+      settingsTranslationWorkers.focus();
+      return;
+    }
     const payload = {
+      translation_chunk_workers: settingsTranslationWorkers ? translationWorkers : undefined,
       llm_provider: settingsLlmProvider?.value || "opencode",
       openrouter_model: settingsOpenRouterModel?.value.trim() || "inclusionai/ling-3.0-flash-sante:free",
       opencode_model: settingsOpenCodeModel?.value || "muse-spark-1.3-contributor-free",

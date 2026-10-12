@@ -9,6 +9,7 @@ writes credentials into this repository.
 from __future__ import annotations
 
 import json
+from dataclasses import replace
 import logging
 import math
 import os
@@ -59,11 +60,16 @@ def _shared_execution_layer():
     # Queue identity needs lexical normalization only. Resolving filesystem
     # links on every progress read can itself fail under Windows memory/handle
     # pressure, turning an otherwise readable checkpoint into HTTP 500.
-    identity = (policy, os.path.normcase(os.path.abspath(cache_root)))
+    # A worker preset changes admission, not queue ownership. Older/resumed
+    # clients must retain the same circuit/cache/in-flight request ledger as
+    # newly created chunk clients instead of opening a second provider queue.
+    identity = (replace(policy, concurrency=1), os.path.normcase(os.path.abspath(cache_root)))
     with _execution_layers_lock:
         if identity not in _execution_layers:
             _execution_layers[identity] = AIExecutionLayer(policy, cache_root=cache_root)
-        return _execution_layers[identity]
+        layer = _execution_layers[identity]
+        layer.set_concurrency(policy.concurrency)
+        return layer
 
 
 class OpenCodeClientError(RuntimeError):
@@ -400,6 +406,7 @@ class OpenCodeZenClient:
         self.max_retries = max(0, min(int(max_retries), 2))
         try:
             from config import settings
+            self._uses_shared_execution_layer = execution_layer is None
             self.execution_layer = execution_layer or _shared_execution_layer()
             configured = getattr(settings, "OPENCODE_TASK_TIMEOUTS", {})
             # A stage policy may shorten existing adapter deadlines, never
@@ -547,6 +554,10 @@ class OpenCodeZenClient:
                     if trace["finished"] is None:
                         trace["finished"] = time.monotonic()
 
+            if self._uses_shared_execution_layer:
+                # A saved preset also applies to an idle session's existing
+                # reviewer/translator when that project is resumed later.
+                self.execution_layer = _shared_execution_layer()
             answer = self.execution_layer.execute(
                 operation,
                 identity={"provider": "opencode", "model": selected, "system": system,
