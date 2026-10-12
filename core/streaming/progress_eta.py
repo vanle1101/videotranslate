@@ -45,7 +45,10 @@ def _stage_forecast(session, snapshot):
     reserved for synthesis. This deliberately conservative forecast is not an
     approval of unresolved wording, and never consumes a user's review time.
     """
-    if not snapshot.get("processing_total_known") or not getattr(session, "_visual_prepass_complete", False):
+    translated_all = (getattr(session, "_visual_prepass_complete", False)
+                      or session.total_duration > 0 and getattr(session, "_visual_completed_seconds", 0)
+                      >= session.total_duration - .05)
+    if not snapshot.get("processing_total_known") or not translated_all:
         return None
     rows = list(getattr(session, "segments", {}).values())
     pending_ids = set(getattr(session, "_eta_review_pending_ids", ()))

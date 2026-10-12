@@ -238,6 +238,19 @@ def test_empty_unresolved_speech_without_pending_repair_has_no_final_countdown(s
     assert eta.processing_eta(session, snapshot, now=130)["eta_reason"] == "content_blocked"
 
 
+def test_recovery_forecast_starts_before_prepass_review_finishes(session):
+    session._visual_prepass_complete = False
+    session._visual_completed_seconds = session.total_duration
+    session.review_summary = {"status": "incomplete", "incomplete": 4}
+    eta.record_validated_export(eta.processing_profile(session, "review"), 4, 80)
+    eta.record_validated_export(eta.processing_profile(session, "speech"), 1, 5)
+    eta.record_validated_export(eta.export_profile(session.video_size, session.caption_style), 60, 12)
+    result = eta.processing_eta(session, state(), now=130)
+    assert result["eta_scope"] == "final" and result["eta_seconds"] == 170
+    session._visual_completed_seconds = 200
+    assert eta.processing_eta(session, state(), now=130)["eta_scope"] != "final"
+
+
 def test_stage_measurements_reject_pause_stop_and_changed_run(session, monkeypatch):
     monkeypatch.setattr(eta.time, "monotonic", lambda: 100.)
     mark = eta.stage_measurement_start(session)
