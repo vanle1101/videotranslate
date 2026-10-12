@@ -987,13 +987,16 @@ def test_pipeline_blocking_context_propagates_and_cancellation_reaches_adapter()
 
 
 def test_validated_response_cache_skips_cli_and_invalidates_changed_config(isolated, monkeypatch, caplog):
+    from core.runtime_context import observe_cache_usage
     start = Mock(return_value=make_process(json.dumps({"type": "text", "part": {"text": '{"text":"valid"}'}})))
     monkeypatch.setattr(oc.subprocess, "Popen", start)
     client = oc.OpenCodeZenClient(api_key="fixture-key")
     validate = lambda raw: isinstance(json.loads(raw)["text"], str)
     with caplog.at_level(logging.INFO, logger="ai"):
-        for _ in range(2):
-            assert client.translate("hello", response_validator=validate, schema_id="text-v1") == '{"text":"valid"}'
+        for cached in (False, True):
+            with observe_cache_usage() as observed:
+                assert client.translate("hello", response_validator=validate, schema_id="text-v1") == '{"text":"valid"}'
+            assert observed.is_set() is cached
     assert start.call_count == 1 and "AI_CACHE_HIT" in caplog.text
     client.translate("hello", response_validator=validate, schema_id="text-v2")
     client.translate("hello", response_validator=validate, schema_id="text-v2", use_cache=False)

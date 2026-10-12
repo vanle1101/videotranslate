@@ -69,6 +69,8 @@ def synthesize_natural_speech(*, text, source, duration, output_path, engine, al
     if cache_identity is not None:
         cached = load_speech_cache(cache_identity, output_path, cancel_check=execution.cancel_check)
         if cached is not None:
+            from core.runtime_context import record_cache_usage
+            record_cache_usage()
             logger.info("PACING_CACHE_HIT run_id=%s speech_id=%s", execution.run_id, speech_id)
             return cached
     raw_budget = duration * aligner.max_speed
@@ -108,6 +110,8 @@ def synthesize_natural_speech(*, text, source, duration, output_path, engine, al
                         cancel_check=execution.cancel_check)
                     logger.info("TTS_RAW_CACHE_STORED run_id=%s speech_id=%s saved=%s", execution.run_id, speech_id, saved)
             else:
+                from core.runtime_context import record_cache_usage
+                record_cache_usage()
                 boundaries = raw_cached["boundaries"]
                 logger.info("TTS_RAW_CACHE_HIT run_id=%s speech_id=%s", execution.run_id, speech_id)
             trim_offset = trim_tts_padding(raw)

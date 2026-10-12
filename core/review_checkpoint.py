@@ -159,6 +159,8 @@ class ReviewCheckpoint:
                         or record.get("payload_sha256") != digest(payload)):
                     return None
                 self.check()
+                from core.runtime_context import record_cache_usage
+                record_cache_usage()
                 return payload
         except (OSError, TypeError, ValueError, KeyError):
             return None

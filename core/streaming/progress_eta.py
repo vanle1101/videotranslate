@@ -18,7 +18,7 @@ _RATE_LOCK = threading.Lock()
 
 def processing_profile(session, stage):
     """Rates belong to the real provider/voice/settings, not a global guess."""
-    payload = ["stage-eta-2", stage, settings.LLM_PROVIDER, settings.OPENCODE_MODEL,
+    payload = ["stage-eta-3", stage, settings.LLM_PROVIDER, settings.OPENCODE_MODEL,
                getattr(session, "tts_engine_name", None), getattr(session, "voice", None),
                getattr(getattr(session, "aligner", None), "max_speed", None)]
     return "stage:" + hashlib.sha256(json.dumps(payload, sort_keys=True).encode()).hexdigest()
@@ -29,10 +29,11 @@ def stage_measurement_start(session):
             getattr(session, "_eta_sample_started", None))
 
 
-def record_processing_stage(session, stage, units, measurement):
+def record_processing_stage(session, stage, units, measurement, *, cache_usage=None):
     """Persist only successful work; interrupted/paused samples cannot train ETA."""
     started, run, baseline = measurement
-    if (not getattr(session, "_persistence_enabled", False)
+    if ((cache_usage is not None and cache_usage.is_set())
+            or not getattr(session, "_persistence_enabled", False)
             or session.is_stopped or session.is_paused or run != getattr(session, "_run_started_at", None)
             or baseline != getattr(session, "_eta_sample_started", None)):
         return

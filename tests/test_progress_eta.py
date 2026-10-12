@@ -280,6 +280,42 @@ def test_nonpersistent_test_session_cannot_write_live_performance_samples(sessio
     assert not eta._database().exists()
 
 
+def test_cache_observation_crosses_production_worker_but_does_not_contaminate_peer(session, monkeypatch):
+    import asyncio
+    from core.runtime_context import observe_cache_usage, record_cache_usage
+    from core.streaming.pipeline import StreamingPipelineSession
+    owner = SimpleNamespace(task_id="eta-cache-test", is_stopped=False)
+    session._persistence_enabled = True
+    monkeypatch.setattr(eta.time, "monotonic", lambda: 100.)
+    mark = eta.stage_measurement_start(session)
+    async def operation(cached):
+        with observe_cache_usage() as observed:
+            await StreamingPipelineSession._run_blocking(owner, record_cache_usage if cached else lambda: None)
+            return observed
+    async def run():
+        return await asyncio.gather(operation(True), operation(False))
+    hit, fresh = asyncio.run(run())
+    assert hit.is_set() and not fresh.is_set()
+    monkeypatch.setattr(eta.time, "monotonic", lambda: 120.)
+    eta.record_processing_stage(session, "speech", 1, mark, cache_usage=hit)
+    assert not eta._database().exists()
+    eta.record_processing_stage(session, "speech", 1, mark, cache_usage=fresh)
+    assert eta.estimated_export_seconds(eta.processing_profile(session, "speech"), 2) == 40
+
+
+def test_cache_observation_restored_after_failure_and_nested_scope():
+    from core.runtime_context import observe_cache_usage, record_cache_usage
+    with observe_cache_usage() as parent:
+        with pytest.raises(RuntimeError), observe_cache_usage() as child:
+            record_cache_usage()
+            raise RuntimeError("interrupted work")
+        assert child.is_set() and not parent.is_set()
+        record_cache_usage()
+        assert parent.is_set()
+    with observe_cache_usage() as next_stage:
+        assert not next_stage.is_set()
+
+
 def test_pending_timing_conflict_does_not_use_fast_successful_speech_rate(session):
     session._visual_prepass_complete = True
     session.segments = {0: SimpleNamespace(id=0, status="WAITING", failed_stage="ALIGNING")}

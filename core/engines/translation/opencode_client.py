@@ -574,6 +574,8 @@ class OpenCodeZenClient:
             )
             _check_cancelled(context)
             if cache_hit[0]:
+                from core.runtime_context import record_cache_usage
+                record_cache_usage()
                 trace["admission_wait"] = time.monotonic() - request_started
                 record("AI_CACHE_HIT", len(answer))
                 return answer

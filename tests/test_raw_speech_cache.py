@@ -218,6 +218,7 @@ def fixture_synthesizer(engine, monkeypatch, calls, durations):
 
 
 def test_two_pass_resume_reuses_raw_pcm_but_rechecks_and_synthesizes_verified_shorter_text(production_types, tmp_path, monkeypatch):
+    from core.runtime_context import observe_cache_usage
     original, shorter = "Lời nguyên vẹn.", "Lời ngắn."
     engine, calls, aligner = EdgeTTSFallbackEngine(), [], PcmAligner()
     fixture_synthesizer(engine, monkeypatch, calls, {original: 1.8, shorter: .5})
@@ -233,7 +234,9 @@ def test_two_pass_resume_reuses_raw_pcm_but_rechecks_and_synthesizes_verified_sh
         reviews.append(args)
         return {"final_vi": shorter, "pacing_verification": proof}
     monkeypatch.setattr(translator, "rewrite_for_pacing", rewrite)
-    result = synthesize_natural_speech(**{**options, "engine": fresh}, translator=translator, output_path=tmp_path / "second.wav")
+    with observe_cache_usage() as cached:
+        result = synthesize_natural_speech(**{**options, "engine": fresh}, translator=translator, output_path=tmp_path / "second.wav")
+    assert cached.is_set(), "Partly reused speech must not train an uncached ETA rate"
     assert calls == [original, shorter] and len(reviews) == 1
     assert result["text"] == shorter and result["pacing_verification"] == proof
     assert result["speed_ratio"] == 1.

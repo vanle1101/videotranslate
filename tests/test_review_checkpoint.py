@@ -38,6 +38,7 @@ def test_address_policy_only_change_invalidates_prior_review(tmp_path, monkeypat
 
 
 def test_changed_dialogue_context_cannot_reuse_prior_review(tmp_path):
+    from core.runtime_context import observe_cache_usage
     video = tmp_path / "source.mp4"
     video.write_bytes(b"offline-source-identity")
     checkpoint = cache.ReviewCheckpoint(video, "offline-model", directory=tmp_path / "checkpoints",
@@ -45,7 +46,12 @@ def test_changed_dialogue_context_cannot_reuse_prior_review(tmp_path):
     before = {"kind": "review_batch", "rows": [{"text_zh": "这话应该我来问吧"}], "context": []}
     assert checkpoint.store(before, {"final_vi": "Câu này phải để tôi hỏi mới đúng chứ."})
     after = {**before, "context": [{"text_zh": "拜托姐", "source_status": "corroborated"}]}
-    assert checkpoint.load(after) is None
+    with observe_cache_usage() as miss:
+        assert checkpoint.load(after) is None
+    assert not miss.is_set()
+    with observe_cache_usage() as hit:
+        assert checkpoint.load(before) is not None
+    assert hit.is_set()
 
 
 def test_loaded_review_revision_is_a_defensive_copy():

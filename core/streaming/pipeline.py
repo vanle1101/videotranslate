@@ -1185,14 +1185,16 @@ class StreamingPipelineSession:
         if segment_ids is not None:
             options["context_segments"] = deepcopy(list(self.segments.values()))
         from core.streaming.progress_eta import stage_measurement_start, record_processing_stage
+        from core.runtime_context import observe_cache_usage
         eta_review_started = stage_measurement_start(self)
         try:
-            result = await self._run_blocking(
-                AutomaticTranslationReviewer().review, self.video_path, deepcopy(targets), deepcopy(self.screen_texts), **options)
+            with observe_cache_usage() as review_cache_usage:
+                result = await self._run_blocking(
+                    AutomaticTranslationReviewer().review, self.video_path, deepcopy(targets), deepcopy(self.screen_texts), **options)
             successful_rows = sum((row.get("verification") or {}).get("status") in
                                   {"verified", "corrected", "unresolved", "manual"}
                                   for row in result.get("segments", {}).values())
-            record_processing_stage(self, "review", successful_rows, eta_review_started)
+            record_processing_stage(self, "review", successful_rows, eta_review_started, cache_usage=review_cache_usage)
         finally:
             semantic_active = False
             self._review_scope = None
@@ -3561,6 +3563,14 @@ class StreamingPipelineSession:
 
     async def _fit_dub(self, seg, *, text, source, output_path, translator=None, context=None, on_stage=None, neighbor_rescue=False, pacing_verification=None, preserve_manual_timing=False):
         rows, duration, capacity, known_duration, tail_limit = self._dub_fit_window(seg, self._dub_rows())
+        fixed_timing_ids = {
+            row["id"] for row in rows
+            if (row.get("id") != seg.id and
+                (self.segments.get(row["id"]).verification or {}).get("status") == "manual")
+        } if preserve_manual_timing else set()
+        if fixed_timing_ids:
+            capacity = max(duration, available_reflow_duration(
+                rows, seg.id, total_duration=known_duration, fixed_ids=fixed_timing_ids))
         revision = {row["id"]: (row["revision"], row["dub_start"], row["dub_end"]) for row in rows}
         start, end = resolve_dub_timing(seg.to_dict())
         # The planner bounds both source endpoints to +/-350 ms and can borrow
@@ -3613,7 +3623,8 @@ class StreamingPipelineSession:
             measured = self._dub_audio_duration(output_path)
             plan = {}
             if measured > duration + 1e-9:
-                plan = plan_reflow(rows, seg.id, measured, total_duration=known_duration)
+                plan = plan_reflow(rows, seg.id, measured, total_duration=known_duration,
+                                   fixed_ids=fixed_timing_ids)
                 if plan is None:
                     raise SpeechBudgetError("Không còn khoảng nghỉ phù hợp để căn đủ lời thoại.")
                 if tail_limit is not None:
@@ -3867,6 +3878,7 @@ class StreamingPipelineSession:
     async def _synthesize_segment(self, seg, *, pacing_recovery=None, allow_pacing=True):
         """Generate playable audio without approving an uncertain translation."""
         from core.streaming.progress_eta import stage_measurement_start, record_processing_stage
+        from core.runtime_context import observe_cache_usage
         eta_speech_started = stage_measurement_start(self)
         raw_tts_wav = self.cache_dir / f"tts_{seg.id}_raw.wav"
         pending_path = self.segments_dir / f"pending_{seg.id}_{uuid.uuid4().hex}.wav"
@@ -3930,14 +3942,15 @@ class StreamingPipelineSession:
                 # reference: seg_ID.wav may still hold the retained prior audio.
                 final_path = self.segments_dir / (f"seg_{seg.id}_{uuid.uuid4().hex}.wav"
                     if self._persistence_enabled or seg.tts_voice_outdated and old_audio_path else f"seg_{seg.id}.wav")
-                spoken, timing, dub_plan = await self._fit_dub(seg,
-                    text=pacing_recovery["candidate"] if pacing_recovery else seg.final_vi,
-                    source=seg.text_zh, output_path=pending_path,
-                    translator=self.translator if allow_pacing and pacing_recovery is None
-                        and (seg.verification or {}).get("status") != "manual" else None, on_stage=speech_stage,
-                    context=context, neighbor_rescue=allow_pacing and pacing_recovery is None
-                        and (seg.verification or {}).get("status") != "manual",
-                    **({"pacing_verification": pacing_recovery["proof"], "preserve_manual_timing": True} if pacing_recovery else {}))
+                with observe_cache_usage() as speech_cache_usage:
+                    spoken, timing, dub_plan = await self._fit_dub(seg,
+                        text=pacing_recovery["candidate"] if pacing_recovery else seg.final_vi,
+                        source=seg.text_zh, output_path=pending_path,
+                        translator=self.translator if allow_pacing and pacing_recovery is None
+                            and (seg.verification or {}).get("status") != "manual" else None, on_stage=speech_stage,
+                        context=context, neighbor_rescue=allow_pacing and pacing_recovery is None
+                            and (seg.verification or {}).get("status") != "manual",
+                        **({"pacing_verification": pacing_recovery["proof"], "preserve_manual_timing": True} if pacing_recovery else {}))
             # Fitting already emitted ALIGNING. Publish the complete WAV and
             # every changed timing without yielding to a concurrent edit/Stop.
             tts_dur, ratio, boundaries = spoken["tts_duration"], spoken["speed_ratio"], spoken["boundaries"]
@@ -3978,7 +3991,7 @@ class StreamingPipelineSession:
                 seg._retry_synthesis = False
                 self._retire_speech_failure(seg)
                 self._refresh_processed_duration()
-            record_processing_stage(self, "speech", 1, eta_speech_started)
+            record_processing_stage(self, "speech", 1, eta_speech_started, cache_usage=speech_cache_usage)
             for identity in dub_plan:
                 if identity != seg.id:
                     self._retire_superseded_speech(self.segments[identity])

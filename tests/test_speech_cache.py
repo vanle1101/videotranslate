@@ -382,6 +382,7 @@ def install_fixture_synthesizer(monkeypatch, engine, *, long_text=None):
 
 
 def test_second_natural_speech_call_reuses_audio_and_proof_without_synthesis_or_rewrite(production_identity_environment, tmp_path, monkeypatch):
+    from core.runtime_context import observe_cache_usage
     from core.engines.alignment.natural_speech import synthesize_natural_speech
     from core.engines.tts.edge_fallback import EdgeTTSFallbackEngine
     from core.engines.translation.semantic_translator import SemanticTranslator
@@ -397,7 +398,9 @@ def test_second_natural_speech_call_reuses_audio_and_proof_without_synthesis_or_
     options = dict(source="我还没做。", text=original, duration=1, engine=engine,
                    aligner=PcmAligner(), translator=translator, voice=engine.voice)
     first_output = tmp_path / "first.wav"
-    first = synthesize_natural_speech(**options, output_path=first_output)
+    with observe_cache_usage() as uncached:
+        first = synthesize_natural_speech(**options, output_path=first_output)
+    assert not uncached.is_set()
     assert calls == [original, shorter]
     assert len(reviewed) == 1
     assert first["pacing_verification"] == proof
@@ -409,8 +412,10 @@ def test_second_natural_speech_call_reuses_audio_and_proof_without_synthesis_or_
     monkeypatch.setattr(fresh_engine, "synthesize", forbidden)
     monkeypatch.setattr(fresh_translator, "rewrite_for_pacing", forbidden)
     second_output = tmp_path / "second.wav"
-    second = synthesize_natural_speech(**{**options, "engine": fresh_engine, "translator": fresh_translator},
-                                       output_path=second_output)
+    with observe_cache_usage() as cached:
+        second = synthesize_natural_speech(**{**options, "engine": fresh_engine, "translator": fresh_translator},
+                                           output_path=second_output)
+    assert cached.is_set()
     assert second == first
     assert first_output.read_bytes() == second_output.read_bytes()
 
