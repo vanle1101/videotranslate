@@ -4381,6 +4381,7 @@ document.addEventListener("DOMContentLoaded", () => {
       } catch (error) { alert(error.message); return; }
     }
     if (currentTaskId === id && currentProgress?.can_retry) return window.studioRetry();
+    if (currentProgress?.can_resume !== true) return;
     return controlTask(id, "resume");
   };
   window.stopTask = id => controlTask(id, "stop");
@@ -4516,7 +4517,7 @@ document.addEventListener("DOMContentLoaded", () => {
     }
     if (historyTaskId(task.task_id)) {
       if (task.can_pause) actions += `<button onclick="window.pauseTask('${task.task_id}')" class="history-button history-button-pause">Tạm dừng</button>`;
-      if (task.can_resume || (task.can_retry && ["STOPPED", "CANCELLED", "FAILED"].includes(task.status))) actions += `<button onclick="window.resumeTask('${task.session_id || task.task_id}')" class="history-button history-button-resume">Tiếp tục</button>`;
+      if (task.can_resume || ((task.can_retry || (task.saved && task.can_open !== false)) && ["STOPPED", "CANCELLED", "FAILED"].includes(task.status))) actions += `<button onclick="window.resumeTask('${historyTaskId(sessionId) ? sessionId : task.task_id}')" class="history-button history-button-resume">Tiếp tục</button>`;
       if (task.can_stop) actions += `<button onclick="window.stopTask('${task.task_id}')" class="history-button history-button-stop">Dừng</button>`;
     }
     const outputUrl = task.status === "COMPLETED" ? historyOutputUrl(task) : "";
