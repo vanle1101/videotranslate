@@ -209,6 +209,7 @@ def processing_eta(session, snapshot, *, now=None):
     preview = session.translation_mode == "preview"
     result = {"eta_seconds": None, "eta_scope": "preview" if preview else "final",
               "eta_reason": "insufficient_samples"}
+    forecast = None
     if snapshot.get("status") == "COMPLETED" and getattr(session, "output_filename", "") and not session.caption_output_outdated:
         return {**result, "eta_seconds": 0, "eta_scope": "final", "eta_reason": "validated"}
     if snapshot.get("status") == "PREVIEW_READY":
@@ -258,7 +259,7 @@ def processing_eta(session, snapshot, *, now=None):
                     and not getattr(session, "_reviewing_segment_ids", [])
                     and getattr(session, "_visual_prepass_complete", False))
     if not review_ready or not total_known:
-        return {**result, "eta_reason": "review_pending"}
+        return {**result, "eta_reason": "calibrating_stages" if forecast is not None else "review_pending"}
     if (estimate is not None or remaining == 0) and getattr(session, "auto_export_result", False):
         expected_export = estimated_export_seconds(export_profile(session.video_size, session.caption_style), session.total_duration)
         if expected_export is not None:
@@ -266,4 +267,6 @@ def processing_eta(session, snapshot, *, now=None):
                           eta_reason="measured_processing_and_export")
         elif result["eta_seconds"] is None:
             result["eta_reason"] = "awaiting_export_sample"
+    if forecast is not None:
+        result["eta_reason"] = "calibrating_stages"
     return result
