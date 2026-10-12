@@ -1209,3 +1209,22 @@ Final-result estimates require completed source/review dependencies and a compar
 Verification: 257 JavaScript UI tests passed. Integrated Python run passed 234 tests before the final partial-source/pause-baseline improvements; subsequent focused checks are recorded below when final verification finishes. Fresh real offscreen production history/restart acceptance passed, all 13 manifests unchanged and QA backend shut down; this checks UI loading/history, not a real running translation ETA. No visible browser or desktop input occurred.
 
 A real no-cache Muse translation-only benchmark is in progress on the retained 320.040635-second source and all 193 original ASR rows. It reuses ASR and does not perform semantic verification, TTS or MP4 export. Results will be appended only after the actual run ends; no speedup is asserted here.
+
+Final integrated regression on the committed code: **238 Python tests passed in 76.63 s** (ETA, processing progress, automatic export, real tiny FFmpeg export/cache, history API, benchmark safety, parallel ownership and preview pipeline). **257 UI tests passed**. Changed Python files parsed successfully; JavaScript syntax and Git whitespace checks passed. These are regression/contract results, not semantic-quality or whole-video acceptance. No TypeScript/npm build applies to this Python/Qt project. Temporary QA artifacts from pytest-1138/1139/1140 were moved into cleanup/eta-worker-tests (about13 MB), following the user preference for manual deletion.
+
+### Real Muse benchmark result — selected 1 versus selected 20
+
+**Real translation requests: PASS. Parallel speedup: NOT ESTABLISHED (resource-limited to1). Full-video MP4 benchmark: NOT PERFORMED.**
+
+Read-only source project `76f5aa6b`, duration320.040635s, all193 original ASR rows through314.43s. Six exclusive measured timeline chunks; each prompt carries the same full source context and at most8 target rows. Production OpenCode adapter, Muse `muse-spark-1.3-contributor-free`,60s per-request deadline, retries/cache off. Strict schema, target IDs and nonempty Vietnamese output checked; this does not certify semantics. Source ASR/OCR, review, TTS and rendering were not timed.
+
+| Selected workers | Effective workers / peak requests | Validated rows | Requests | Elapsed | Errors / retries / cache hits |
+| --- | --- | --- | --- | --- | --- |
+|1|1 /1|193/193|27|702.937s (11m43s)|0 /0 /0|
+|20|1 /1|193/193|27|682.297s (11m22s)|0 /0 /0|
+
+The second run took20.640s less (2.94%), but **both were serial**, so the difference cannot be attributed to20 workers. Available RAM at round starts was1,986,433,024 and1,978,195,968 bytes, below the scheduler reserve;12 logical CPUs were present. Six minute-sized chunks also cannot use20 chunk workers even without this RAM limit. Request latency varied from12.094s to57.766s. One fixed-order pair is insufficient to quantify provider variance or a general speedup.
+
+All54 calls passed. Prompt hashes matched between rounds, no source ID was omitted/duplicated, both queues drained and no benchmark threads remained. All13 project manifests stayed byte-identical; source size/mtime stayed unchanged. No new user MP4 was created. Sanitized measurement record: `docs/reports/muse-workers-2026-10-12.json`; local raw translated responses are retained under `workspace/temp/long-concurrency-result.json` and were not committed. The executable harness was hardened during this measurement; the running process used its launch-time version with bounded60s requests and no aggregate round deadline. Current committed harness also has an1800s aggregate deadline and strict original-ASR provenance. Both actual measured rounds completed normally.
+
+Remaining limits: no actual20-way run on this memory-constrained machine; no5:20 full pipeline/export timing; no real running-production ETA calibration was performed. The fresh offscreen history UI loaded successfully, while ETA behavior was checked by production-JavaScript/API/clock regression tests. The normal application was not launched/restarted or driven; changed code loads on its next normal startup.
