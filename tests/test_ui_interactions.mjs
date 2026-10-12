@@ -20,6 +20,22 @@ test('measured final ETA appears beside percentage in minutes or hours without r
   assert.match(template, /id="task-progress-value"[^>]*>[^<]*<\/span><span id="task-progress-eta"/);
 });
 
+test('ETA explains calibration, recovery and exceeded estimates instead of promising a false finish', async () => {
+  const ui = studio(); await ui.start(); const socket = ui.sockets.at(-1);
+  socket.receive({type:'progress',status:'RUNNING',eta_seconds:null,eta_scope:'final',
+    eta_reason:'calibrating_stages',eta_missing_stages:['review','export']});
+  assert.equal(ui.el('task-progress-eta').textContent,'Đang đo thời gian rà bản dịch, xuất MP4');
+  socket.receive({type:'progress',status:'RUNNING',eta_seconds:240,eta_scope:'final',eta_reason:'measured_stages'});
+  assert.equal(ui.el('task-progress-eta').textContent,'Có video sau khoảng 4 phút');
+  assert.match(ui.el('task-progress-eta').title,/MP4 tải được/);
+  for (const [reason,text] of [['retry_pending','Đang phục hồi lỗi; sẽ tính lại thời gian'],
+    ['content_blocked','Cần sửa câu chưa có lời dịch trước khi ước tính MP4'],
+    ['estimate_exceeded','Lâu hơn dự kiến; đang tiếp tục xử lý']]) {
+    socket.receive({type:'progress',status:'RUNNING',eta_seconds:null,eta_scope:'final',eta_reason:reason});
+    assert.equal(ui.el('task-progress-eta').textContent,text);
+  }
+});
+
 test('only final-output estimates may appear beside percentage, never stage or unscoped estimates', async () => {
   const ui = studio(); await ui.start(); const socket = ui.sockets.at(-1);
   for (const scope of [undefined,'speech','preview','export','unknown']) {

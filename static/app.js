@@ -705,6 +705,14 @@ document.addEventListener("DOMContentLoaded", () => {
     if (String(progress?.status || "RUNNING").toUpperCase() !== "RUNNING") return "";
     const seconds = progress?.eta_seconds;
     if (progress?.eta_scope !== "final" || typeof seconds !== "number" || !Number.isFinite(seconds) || seconds <= 0) {
+      if (progress?.eta_reason === "content_blocked") return "Cần sửa câu chưa có lời dịch trước khi ước tính MP4";
+      if (progress?.eta_reason === "calibrating_stages") {
+        const labels = {review: "rà bản dịch", speech: "tạo giọng", export: "xuất MP4"};
+        const stages = (progress.eta_missing_stages || []).map(stage => labels[stage]).filter(Boolean);
+        return stages.length ? `Đang đo thời gian ${stages.join(", ")}` : "Đang đo thời gian đến khi có MP4";
+      }
+      if (progress?.eta_reason === "retry_pending") return "Đang phục hồi lỗi; sẽ tính lại thời gian";
+      if (progress?.eta_reason === "estimate_exceeded") return "Lâu hơn dự kiến; đang tiếp tục xử lý";
       return "Chưa đủ dữ liệu ước tính lúc có video";
     }
     // A task estimate is rounded up to minutes so a still-running operation
@@ -720,6 +728,9 @@ document.addEventListener("DOMContentLoaded", () => {
     if (!element) return;
     const text = taskEtaText(progress);
     element.textContent = text;
+    element.title = progress?.eta_scope === "final" && progress?.eta_seconds > 0
+      ? "Ước tính đến khi có MP4 tải được, gồm rà bản dịch, tạo giọng và xuất/kiểm tra video. Thời gian có thể đổi khi AI thử lại hoặc có câu cần sửa."
+      : "Thời gian được tính từ tốc độ xử lý đã đo; chưa đủ dữ liệu thì ứng dụng sẽ nêu công đoạn đang đo.";
     element.classList.toggle("hidden", !text);
   }
 
@@ -1399,7 +1410,7 @@ document.addEventListener("DOMContentLoaded", () => {
         progress.eta_seconds === undefined) {
       // A new run, scope or stage must not inherit the previous estimate while
       // waiting for its first measured sample.
-      currentProgress = {...currentProgress, eta_seconds: null, eta_scope: null};
+      currentProgress = {...currentProgress, eta_seconds: null, eta_scope: null, eta_reason: null, eta_missing_stages: []};
     }
     // Stage-local measurements cannot carry across a new stage snapshot.
     // Partial patches within the same stage may still retain its last sample.
@@ -3144,7 +3155,8 @@ document.addEventListener("DOMContentLoaded", () => {
         if (!exportingTaskId) {
           automaticExportActive = true;
           showTaskProgress({status: "RUNNING", phase: "export", stage: msg.stage || "Đang xuất video kết quả…", progress_pct: msg.progress,
-            eta_seconds: msg.eta_seconds ?? null, eta_scope: msg.eta_scope || "export", can_review: false, can_pause: false});
+            eta_seconds: msg.eta_seconds ?? null, eta_scope: msg.eta_scope || "export",
+            eta_reason: msg.eta_reason ?? null, eta_missing_stages: [], can_review: false, can_pause: false});
         }
         renderExportProgress(msg.progress, msg.stage, msg);
       }
@@ -4488,6 +4500,7 @@ document.addEventListener("DOMContentLoaded", () => {
         activeTask = {...activeTask, phase: "export", status: automaticExport.status,
           progress_pct: automaticExport.progress_pct, stage: automaticExport.stage,
           eta_seconds: automaticExport.eta_seconds ?? null, eta_scope: automaticExport.eta_scope || "export",
+          eta_reason: automaticExport.eta_reason ?? null, eta_missing_stages: [],
           output_video_url: "", output_filename: "", can_pause: false, can_resume: false, can_review: false, can_stop: false};
       } else if (automaticExportActive && automaticExport && ["COMPLETED", "FAILED", "CANCELLED"].includes(automaticExport.status)) {
         automaticExportActive = false;
@@ -4501,7 +4514,7 @@ document.addEventListener("DOMContentLoaded", () => {
       }
       if (activeTask) {
         const statusChanged = activeTask.status !== currentProgress?.status;
-        const progressChanged = ["phase", "stage", "progress_pct", "stage_progress_pct", "processing_progress_pct", "processing_completed_segments", "processing_total_segments", "processing_scope", "processing_total_known", "downloaded_bytes", "total_bytes", "speed", "eta", "eta_seconds", "eta_scope", "can_retry", "can_repair_failed", "can_pause", "can_resume", "can_stop", "can_review", "review_count", "output_video_url", "output_filename", "translation_mode", "can_translate_full", "preview_seconds", "processed_seconds", "source_prepared_seconds", "total_seconds", "review_scope", "chunk_workers", "configured_chunk_workers"]
+        const progressChanged = ["phase", "stage", "progress_pct", "stage_progress_pct", "processing_progress_pct", "processing_completed_segments", "processing_total_segments", "processing_scope", "processing_total_known", "downloaded_bytes", "total_bytes", "speed", "eta", "eta_seconds", "eta_scope", "eta_reason", "eta_missing_stages", "can_retry", "can_repair_failed", "can_pause", "can_resume", "can_stop", "can_review", "review_count", "output_video_url", "output_filename", "translation_mode", "can_translate_full", "preview_seconds", "processed_seconds", "source_prepared_seconds", "total_seconds", "review_scope", "chunk_workers", "configured_chunk_workers"]
           .some(key => activeTask[key] !== undefined && activeTask[key] !== currentProgress?.[key]) ||
           ["review_summary", "ai_queue"].some(key => activeTask[key] !== undefined &&
             JSON.stringify(activeTask[key]) !== JSON.stringify(currentProgress?.[key]));

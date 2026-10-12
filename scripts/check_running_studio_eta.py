@@ -20,6 +20,8 @@ def main():
     parser.add_argument('--task', required=True)
     parser.add_argument('--timeout', type=int, default=1800)
     args = parser.parse_args()
+    if not 1 <= args.timeout <= 7200:
+        parser.error('--timeout must be between 1 and 7200 seconds')
     base = f'http://127.0.0.1:{args.port}'
     app = QApplication.instance() or QApplication([])
     assert app.platformName() == 'offscreen'
@@ -48,7 +50,8 @@ def main():
             state = evaluate(page, "({status:document.getElementById('task-progress').dataset.status,eta:document.getElementById('task-progress-eta').textContent,percent:document.getElementById('task-progress-value').textContent})")
             current = {'status':progress['status'],'stage':progress.get('stage'),
                 'states':progress.get('segment_states'),'eta_seconds':progress.get('eta_seconds'),
-                'eta_scope':progress.get('eta_scope'),'ui':state}
+                'eta_scope':progress.get('eta_scope'),'eta_reason':progress.get('eta_reason'),
+                'eta_components':progress.get('eta_components'), 'ui':state}
             if current != previous:
                 event('REAL_PROGRESS', current)
                 previous = current
@@ -76,20 +79,24 @@ def main():
         event('DEADLINE', {'task':args.task})
         return 2
     finally:
-        if started:
-            tasks = backend(base, '/api/tasks')['tasks']
-            if any(t['task_id']==args.task and t['status'] in {'RUNNING','PAUSED'} for t in tasks):
-                request = urllib.request.Request(base+f'/api/tasks/{args.task}/stop', data=b'', method='POST')
-                with urllib.request.urlopen(request, timeout=60) as response:
-                    event('CHECKPOINT_STOP', json.load(response))
-        window.web_view.stop()
-        window.web_view.setUrl(QUrl('about:blank'))
-        wait(200)
-        window.hide()
-        window.deleteLater()
-        QCoreApplication.sendPostedEvents(None, QEvent.Type.DeferredDelete)
-        app.processEvents()
-        event('QA_WINDOW_CLOSED', True)
+        try:
+            if started:
+                tasks = backend(base, '/api/tasks')['tasks']
+                for task in tasks:
+                    if (task['task_id'] in {args.task, 'export_' + args.task}
+                            and task['status'] in {'RUNNING','PAUSED'}):
+                        request = urllib.request.Request(base+f"/api/tasks/{task['task_id']}/stop", data=b'', method='POST')
+                        with urllib.request.urlopen(request, timeout=60) as response:
+                            event('CHECKPOINT_STOP', json.load(response))
+        finally:
+            window.web_view.stop()
+            window.web_view.setUrl(QUrl('about:blank'))
+            wait(200)
+            window.hide()
+            window.deleteLater()
+            QCoreApplication.sendPostedEvents(None, QEvent.Type.DeferredDelete)
+            app.processEvents()
+            event('QA_WINDOW_CLOSED', True)
 
 
 if __name__ == '__main__':
