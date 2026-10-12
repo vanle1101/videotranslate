@@ -203,7 +203,8 @@ class AutomaticTranslationReviewer:
         }[diagnostic["code"]]
 
     @staticmethod
-    def _validated_review_request(client, prompt, batch, lo, hi, check, extra_validate=None, *, checkpoint=None):
+    def _validated_review_request(client, prompt, batch, lo, hi, check, extra_validate=None, *,
+                                  checkpoint=None, checkpoint_inputs=None):
         # Retry malformed structured replies without repeating the local OCR.
         # Authentication/transport errors propagate; invalid data never passes.
         syntax_location = None
@@ -226,8 +227,10 @@ class AutomaticTranslationReviewer:
         # rejected request, and interruption in pass two loses pass one's work.
         # This is schema-valid audit data, never a VERIFIED verdict: the
         # independent second pass and evidence/address gates still run below.
-        stage = {"kind": "semantic_request", "schema": schema_id, "prompt": prompt,
-                 "rows": batch, "start": lo, "end": hi}
+        stage = {"kind": "semantic_request", "schema": schema_id,
+                 "inputs": checkpoint_inputs if checkpoint_inputs is not None else prompt,
+                 "start": lo, "end": hi,
+                 "rows": [{key: row[key] for key in ("id", "start", "end")} for row in batch]}
         saved = checkpoint.load(stage) if checkpoint else None
         if saved is not None:
             check()
@@ -719,9 +722,12 @@ class AutomaticTranslationReviewer:
                     + json.dumps([{key: row[key] for key in ("id", "start", "end")} for row in sources])
                     + ". Không xuất lại các hàng ngữ cảnh.")
                 check()
+                pass_inputs = {"kind": "audio_review", "rows": payload, "context": context,
+                    "address_context": list(address_reading.values()), "semantic_context": semantics,
+                    "semantic_policy": SEMANTIC_TRANSLATION_POLICY}
                 data, validated = self._validated_review_request(client, prompt, sources,
                     min(row["start"] for row in sources), max(row["end"] for row in sources), check,
-                    self._require_semantic_fields, checkpoint=checkpoint)
+                    self._require_semantic_fields, checkpoint=checkpoint, checkpoint_inputs=pass_inputs)
                 audits = {row["id"]: row for row in data["segments"]}
                 if any(not isinstance(row.get("semantic_verified"), bool)
                        or not isinstance(row.get("verification_reason"), str) for row in audits.values()):
@@ -737,7 +743,8 @@ class AutomaticTranslationReviewer:
                     + json.dumps(data["segments"], ensure_ascii=False))
                 checked, checked_validated = self._validated_review_request(client, recheck, sources,
                     min(row["start"] for row in sources), max(row["end"] for row in sources), check,
-                    self._require_semantic_fields, checkpoint=checkpoint)
+                    self._require_semantic_fields, checkpoint=checkpoint,
+                    checkpoint_inputs={"first": pass_inputs, "draft": data["segments"], "pass": 2})
                 checked_audits = {row["id"]: row for row in checked["segments"]}
                 if any(not isinstance(row.get("semantic_verified"), bool)
                        or not isinstance(row.get("verification_reason"), str)
@@ -1230,7 +1237,7 @@ class AutomaticTranslationReviewer:
                     current_execution_context().run_id, [row["id"] for row in batch])
             else:
                 data, validated = self._validated_review_request(client, prompt, batch, lo, hi, check,
-                    self._require_ocr_semantic_fields, checkpoint=checkpoint)
+                    self._require_ocr_semantic_fields, checkpoint=checkpoint, checkpoint_inputs=stage)
                 first_data = deepcopy(data)
             audit_rows = {item["id"]: item for item in data["segments"]}
             # Run a separate semantic pass over the same measured evidence.
@@ -1247,7 +1254,8 @@ class AutomaticTranslationReviewer:
                     + json.dumps(data["segments"], ensure_ascii=False))
                 checked_data, checked_validated = (cached_pair if cached_pair else self._validated_review_request(
                     client, recheck_prompt, batch, lo, hi, check, self._require_ocr_semantic_fields,
-                    checkpoint=checkpoint))
+                    checkpoint=checkpoint,
+                    checkpoint_inputs={"first": stage, "draft": data["segments"], "pass": 2}))
                 checked_rows = {item["id"]: item for item in checked_data["segments"]}
                 if all(isinstance(row.get("semantic_verified"), bool)
                        and isinstance(row.get("verification_reason"), str)

@@ -107,6 +107,56 @@ def test_resume_reuses_verified_work_but_force_review_runs_again(tmp_path):
     assert scanner.extract.call_count == 2
 
 
+def test_repaired_semantic_pass_resumes_without_repeating_original_bad_request(tmp_path):
+    from core.review_checkpoint import ReviewCheckpoint
+    video = tmp_path / "input.mp4"
+    video.write_bytes(b"source-identity")
+    checkpoint = ReviewCheckpoint(video, "offline-model", directory=tmp_path / "checkpoints",
+                                  runtime_revision={"test": True})
+    row = source()
+    reply = {"segments": [{**row, "semantic_verified": False,
+        "verification_reason": "Chưa đủ căn cứ."}], "screen_texts": [], "summary": ""}
+    client = Mock(translate=Mock(side_effect=['{"segments":[{]', reply]))
+    request = lambda prompt="first pass": AutomaticTranslationReviewer._validated_review_request(
+        client, prompt, [row], 0, 1, lambda: None,
+        AutomaticTranslationReviewer._require_semantic_fields, checkpoint=checkpoint)
+    first = request()
+    assert request() == first
+    assert client.translate.call_count == 2
+    assert first[0]["segments"][0]["semantic_verified"] is False
+    # The second pass and any context change have different exact identities.
+    client.translate.side_effect = None
+    client.translate.return_value = reply
+    request("independent second pass")
+    request("first pass with corrected source context")
+    assert client.translate.call_count == 4
+
+
+def test_interrupted_second_semantic_pass_preserves_first_but_never_approves(tmp_path):
+    video = tmp_path / "input.mp4"
+    video.write_bytes(b"source-identity")
+    client, scanner, prompts = components()
+    respond = client.translate.side_effect
+    second_calls = 0
+    def fail_second_once(prompt, **kwargs):
+        nonlocal second_calls
+        if "ĐÂY LÀ LƯỢT KIỂM TRA NGỮ NGHĨA THỨ HAI" in prompt:
+            second_calls += 1
+            if second_calls == 1:
+                raise TimeoutError("offline injected timeout")
+        return respond(prompt, **kwargs)
+    client.translate.side_effect = fail_second_once
+    reviewer = AutomaticTranslationReviewer(client, scanner, audio_evidence=False,
+                                             checkpoint_dir=tmp_path / "checkpoints")
+    first = reviewer.review(video, [source()], [])
+    assert first["segments"][0]["verification"]["status"] == "incomplete"
+    assert first["segments"][0]["needs_review"] is True
+    resumed = reviewer.review(video, [source()], [])
+    assert resumed["segments"][0]["verification"]["status"] == "corrected"
+    assert client.translate.call_count == 3  # first, failed second, retried second
+    assert scanner.extract.call_count == 1
+
+
 def test_audio_failure_retains_safe_diagnostic_and_segment_ids(caplog):
     client, scanner, _ = components()
     audio = Mock()
