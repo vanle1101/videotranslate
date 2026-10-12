@@ -2,6 +2,7 @@
 import asyncio
 import threading
 import time
+import wave
 from pathlib import Path
 from unittest.mock import AsyncMock, Mock
 
@@ -250,9 +251,13 @@ def test_saved_full_project_is_selected_after_restart_even_when_request_is_previ
     project.mkdir(parents=True)
     (project / "265796c3.json").write_text("{}", encoding="utf-8")
     (project / "oldpreview.json").write_text("{}", encoding="utf-8")
+    (project / "emptyfull.json").write_text("{}", encoding="utf-8")
+    manifest["segments"] = [{"status": "READY", "final_vi": "Con đã về."}]
     def read(task_id):
         if task_id == "oldpreview":
             return {"updated_at": 999, "session": {**manifest["session"], "translation_mode": "preview"}}
+        if task_id == "emptyfull":
+            return {"updated_at": 999, "session": dict(manifest["session"]), "segments": []}
         return manifest
     monkeypatch.setattr(main, "read_saved_project", read)
 
@@ -276,6 +281,57 @@ def test_start_url_restores_saved_task_id_instead_of_creating_new_preview(isolat
         assert result["task_id"] == "265796c3"
         assert result["restored"] is True
         assert result["resumed"] is False
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("route", ["url", "local-file"])
+def test_restart_keeps_195_row_manifest_and_retries_only_three_missing_rows(isolated, monkeypatch, route):
+    source = isolated / "source.mp4"
+    source.write_bytes(b"persisted source fixture")
+    source_url = "https://www.douyin.com/video/7692745161054506290"
+    old = main.create_streaming_session("265796c3", source, translation_mode="full")
+    old.source_url = source_url
+    old.initialized, old.total_duration = True, 390
+    old.is_stopped = True
+    missing = {130, 148, 163}
+    for index in range(195):
+        row = SegmentItem(index, index * 2, index * 2 + 2, 2)
+        row.text_zh, row.final_vi = "你好", "Xin chào."
+        row.status = "WAITING" if index in missing else "PLAYED" if index < 128 else "READY"
+        if index not in missing:
+            row.audio_path = str(old.segments_dir / f"seg_{index}.wav")
+            with wave.open(row.audio_path, "wb") as audio:
+                audio.setparams((1, 2, 24000, 0, "NONE", "not compressed"))
+                audio.writeframes(b"\x01\x00" * 2400)
+        old.segments[index] = row
+    old.persist()
+    prior_files = {row.id: Path(row.audio_path).read_bytes() for row in old.segments.values() if row.audio_path}
+    main.active_streaming_sessions.clear()
+    started = []
+    async def worker(session):
+        while not session.queue.empty():
+            _, segment_id = session.queue.get_nowait()
+            started.append(segment_id)
+            session.queue.task_done()
+        session.is_running = False
+    monkeypatch.setattr(StreamingPipelineSession, "_worker_loop", worker)
+    monkeypatch.setattr(StreamingPipelineSession, "_resume_pending_chunk_reviews", AsyncMock())
+    forbidden_asr = AsyncMock(side_effect=AssertionError("Restart must not rerun source ASR"))
+    monkeypatch.setattr(StreamingPipelineSession, "_start", forbidden_asr)
+    async def run():
+        if route == "url":
+            result = await main.start_streaming_url(main.StreamUrlRequest(url=source_url,
+                voice=old.voice, tts_engine=old.tts_engine_name, asr_engine=old.asr_engine_name))
+        else:
+            result = await main.start_streaming_local_file(main.StreamLocalFileRequest(file_path=str(source),
+                voice=old.voice, tts_engine=old.tts_engine_name, asr_engine=old.asr_engine_name))
+        assert result["task_id"] == old.task_id and result["resumed"]
+        session = main.active_streaming_sessions[old.task_id]
+        await session.worker_task
+        assert session.translation_mode == "full" and len(session.segments) == 195
+        assert set(started) == missing and len(started) == 3
+        assert all(Path(session.segments[index].audio_path).read_bytes() == data for index, data in prior_files.items())
+        forbidden_asr.assert_not_awaited()
     asyncio.run(run())
 
 

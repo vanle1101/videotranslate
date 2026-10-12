@@ -11,6 +11,7 @@ import traceback
 import re
 import threading
 import tempfile
+import weakref
 from pathlib import Path
 from urllib.parse import quote
 from typing import Dict, Any, Optional, List, Literal
@@ -44,6 +45,7 @@ from core.streaming.pipeline import (
 from core.streaming.export import HQExporter
 from core.streaming.session_store import list_saved_sessions, restore_saved_session, _read as read_saved_project
 from core.streaming.video_history import group_video_history, source_metadata
+from core.streaming.source_identity import processing_signature, local_file_signature
 from core.history_thumbnail import (
     ThumbnailError, attach_history_thumbnails, history_thumbnail_cache, resolve_history_source,
 )
@@ -68,6 +70,12 @@ _stream_send_states = {}
 STREAM_SEND_TIMEOUT_SECONDS = 2.0
 STREAM_CLOSE_TIMEOUT_SECONDS = 0.5
 downloader = VideoDownloader()
+_source_start_locks = weakref.WeakKeyDictionary()
+
+
+def _source_start_lock():
+    loop = asyncio.get_running_loop()
+    return _source_start_locks.setdefault(loop, asyncio.Lock())
 
 @app.get("/api/health")
 async def health():
@@ -999,6 +1007,22 @@ def _saved_project_candidates(*, source_url=None, video_path=None, voice, engine
         try:
             data = read_saved_project(path.stem)
             fields = data["session"]
+            saved_config = fields.get("_processing_signature")
+            if saved_config and saved_config != processing_signature():
+                continue
+            if fields.get("_source_file_signature") and fields.get("video_path"):
+                if local_file_signature(fields["video_path"]) != fields["_source_file_signature"]:
+                    continue
+            if not saved_config:
+                # Legacy manifests retain provider provenance on translated
+                # rows. Do not treat an explicitly different provider/model
+                # as the same request merely because the voice matches.
+                model = {"opencode": settings.OPENCODE_MODEL, "gemini": settings.GEMINI_MODEL,
+                         "openrouter": settings.OPENROUTER_MODEL}.get(settings.LLM_PROVIDER)
+                sources = fields.get("translation_sources", [])
+                if any(item.get("provider") != settings.LLM_PROVIDER or
+                       (model and item.get("model") and item["model"] != model) for item in sources):
+                    continue
             if fields.get("voice") != voice or fields.get("tts_engine_name") != engine:
                 continue
             if fields.get("asr_engine_name") != asr_engine or bool(fields.get("visual_translation")) != bool(visual_translation):
@@ -1014,8 +1038,9 @@ def _saved_project_candidates(*, source_url=None, video_path=None, voice, engine
                 saved_identity = downloader.source_identity(fields.get("source_url") or "")
                 if not requested_identity or saved_identity != requested_identity:
                     continue
-            elif video_path and not _same_local_source(fields.get("video_path"), video_path):
-                continue
+            elif video_path:
+                if not _same_local_source(fields.get("video_path"), video_path):
+                    continue
             else:
                 continue
             result.append((path.stem, data, saved_mode))
@@ -1029,22 +1054,66 @@ def _saved_project_candidates(*, source_url=None, video_path=None, voice, engine
         if translation_mode == "preview" and saved_mode == "full":
             return 2
         return 1 if saved_mode == translation_mode else 0
-    return sorted(result, key=lambda item: (mode_priority(item),
-
-                                             item[1].get("updated_at", 0)), reverse=True)
+    def progress_priority(item):
+        data = item[1]
+        fields = data["session"]
+        rows = data.get("segments", [])
+        ready = sum(row.get("status") in {"READY", "PLAYED"} for row in rows)
+        translated = sum(bool(str(row.get("final_vi", "")).strip()) for row in rows)
+        return (mode_priority(item), ready, translated,
+                fields.get("_visual_completed_seconds", 0), bool(fields.get("initialized")),
+                data.get("updated_at", 0))
+    return sorted(result, key=progress_priority, reverse=True)
 
 
 async def _restore_matching_saved_project(*, source_url=None, video_path=None,
                                           voice, engine, asr_engine,
                                           visual_translation, translation_mode,
                                           source_downloader=None):
-    candidates = _saved_project_candidates(source_url=source_url, video_path=video_path,
+    candidates = await asyncio.to_thread(_saved_project_candidates, source_url=source_url, video_path=video_path,
                                            voice=voice, engine=engine, asr_engine=asr_engine,
                                            visual_translation=visual_translation,
                                            translation_mode=translation_mode)
+    # A just-created owner may not have written its first manifest yet. The
+    # serialized start path must still see it before allocating another UUID.
+    known = {item[0] for item in candidates}
+    for owner in list(active_streaming_sessions.values()):
+        if getattr(owner, "task_id", None) in known:
+            continue
+        if (getattr(owner, "voice", None) != voice or getattr(owner, "tts_engine_name", None) != engine
+                or getattr(owner, "asr_engine_name", None) != asr_engine
+                or bool(getattr(owner, "visual_translation", False)) != bool(visual_translation)):
+            continue
+        mode = getattr(owner, "translation_mode", "full")
+        if mode != translation_mode and not (translation_mode == "preview" and mode == "full"):
+            continue
+        same_source = (source_url and getattr(owner, "source_url", None)
+            and downloader.source_identity(owner.source_url) == downloader.source_identity(source_url))
+        if not same_source and not (video_path and _same_local_source(getattr(owner, "video_path", None), video_path)):
+            continue
+        candidates.insert(0, (owner.task_id, {}, mode))
     for task_id, _data, _saved_mode in candidates:
         if task_id in active_streaming_sessions:
-            continue
+            session = active_streaming_sessions[task_id]
+            signature = getattr(session, "_retry_config_signature", None)
+            if signature is not None and signature != _retry_configuration_signature():
+                continue
+            if (session.is_running or getattr(session, "_stop_draining", False) or getattr(session, "is_editing", False)
+                    or (not session.initialized and not session.error and not getattr(session, "is_stopped", False))):
+                raise HTTPException(status_code=409, detail="Video này đang xử lý. Mở tác vụ hiện tại để xem tiến độ.")
+            if not getattr(session, "is_stopped", False):
+                if session.can_retry:
+                    await session.retry_failed_synthesis()
+                    return session, True
+                return session, False
+            # Stop persists all completed media before draining its workers.
+            # Recreate only the idle stopped owner from that same manifest so
+            # WAITING/in-flight rows enter the existing recovery normalization.
+            workers = (getattr(session, name, None) for name in
+                       ("start_task", "worker_task", "review_task", "export_task", "auto_export_task", "_chunk_followup_task"))
+            if any(worker is not None and not worker.done() for worker in workers):
+                raise HTTPException(status_code=409, detail="Tác vụ đang dừng; hãy chờ lưu xong trước khi tiếp tục.")
+            active_streaming_sessions.pop(task_id, None)
         try:
             session = await editable_session(task_id)
         except (HTTPException, FileNotFoundError, OSError, ValueError, TypeError, KeyError):
@@ -1059,8 +1128,8 @@ async def _restore_matching_saved_project(*, source_url=None, video_path=None,
         if session.can_retry:
             try:
                 await session.retry_failed_synthesis()
-            except SegmentEditConflict:
-                continue
+            except SegmentEditConflict as exc:
+                raise HTTPException(status_code=409, detail=str(exc)) from None
             return session, True
         # A completed/stopped project is still the canonical project. Return
         # it so the caller can attach instead of duplicating the work.
@@ -1070,6 +1139,11 @@ async def _restore_matching_saved_project(*, source_url=None, video_path=None,
 
 @app.post("/api/streaming/start-url")
 async def start_streaming_url(req: StreamUrlRequest):
+    async with _source_start_lock():
+        return await _start_streaming_url_owned(req)
+
+
+async def _start_streaming_url_owned(req: StreamUrlRequest):
     validate_visual_translation(req.visual_translation)
     if not req.url:
         raise HTTPException(status_code=400, detail="Vui lòng cung cấp link video")
@@ -1135,6 +1209,7 @@ async def start_streaming_url(req: StreamUrlRequest):
     session.auto_export_result = bool(req.visual_translation and settings.LLM_PROVIDER == "opencode")
     session.source_url, session._source_downloader = url, downloader
     session._retry_config_signature = config_signature
+    session._processing_signature = processing_signature()
 
     async def start_source():
         try:
@@ -1226,6 +1301,7 @@ async def start_streaming_upload(
         event_callback=lambda event_type, data: broadcast_session_event(task_id, event_type, data)
     )
     session.auto_export_result = bool(visual_translation and settings.LLM_PROVIDER == "opencode")
+    session._processing_signature = processing_signature()
 
     asyncio.create_task(run_session(session))
 
@@ -1815,6 +1891,11 @@ def reject_private_media_path(path):
 
 @app.post("/api/streaming/start-local-file")
 async def start_streaming_local_file(req: StreamLocalFileRequest):
+    async with _source_start_lock():
+        return await _start_streaming_local_file_owned(req)
+
+
+async def _start_streaming_local_file_owned(req: StreamLocalFileRequest):
     validate_visual_translation(req.visual_translation)
     reject_private_media_path(req.file_path)
     p = Path(req.file_path)
@@ -1846,6 +1927,7 @@ async def start_streaming_local_file(req: StreamLocalFileRequest):
     )
     session.source_video_url = f"/api/local-file?path={quote(p.as_posix(), safe='')}"
     session.auto_export_result = bool(req.visual_translation and settings.LLM_PROVIDER == "opencode")
+    session._processing_signature = processing_signature()
     asyncio.create_task(run_session(session))
 
     return {

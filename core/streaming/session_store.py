@@ -81,6 +81,7 @@ SESSION_FIELDS = frozenset((
     " translation_mode preview_seconds _chunked_source_started _source_prepared_seconds _preview_ready"
     " _chunked_source_identity _visual_context_summary"
     " _chunk_jobs _visual_scanned_seconds _legacy_visual_prefix _parallel_chunk_planning"
+    " _source_file_signature _processing_signature"
 ).split())
 PATH_FIELDS = ("video_path", "ref_audio", "raw_audio_16k", "bgm_audio_path")
 META_FIELDS = frozenset((
@@ -518,6 +519,11 @@ def save_session(session):
 
 def _save_session(session):
     target = _project_path(session.task_id)
+    from core.streaming.source_identity import local_file_signature
+    if not getattr(session, "_source_file_signature", None) and getattr(session, "video_path", None):
+        signature = local_file_signature(session.video_path)
+        if signature:
+            session._source_file_signature = signature
     fields = {key: _clean(getattr(session, key)) for key in SESSION_FIELDS if hasattr(session, key)}
     for key in PATH_FIELDS:
         path = getattr(session, key, None)
@@ -613,6 +619,9 @@ def _validate_project(data, task_id):
     for key in ("output_filename", "review_filename"):
         fields[key] = _filename(fields.get(key))
     fields["source_url"] = _source_url(fields.get("source_url"))
+    for key in ("_source_file_signature", "_processing_signature"):
+        if key in fields and (not isinstance(fields[key], str) or not re.fullmatch(r"[0-9a-f]{64}", fields[key])):
+            raise ValueError("Dấu nhận diện dự án không hợp lệ.")
     duration = fields.get("total_duration", 0)
     if not _finite(duration) or duration > 86400:
         raise ValueError("Thời lượng dự án không hợp lệ.")
