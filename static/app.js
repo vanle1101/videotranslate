@@ -4257,6 +4257,9 @@ document.addEventListener("DOMContentLoaded", () => {
     } catch (error) { alert(error.message); }
   };
   async function restoreRememberedTask() {
+    const sourceRevision = progressRevision;
+    const stillIdle = () => sourceRevision === progressRevision && !currentTaskId &&
+      !pendingStart && !pendingTaskAction && !selectedFile && !window.currentLocalFilePath && !videoUrlInput.value.trim();
     let taskId = rememberedTask();
     if (!taskId) {
       // Desktop builds may choose a new localhost port on restart, which
@@ -4272,17 +4275,20 @@ document.addEventListener("DOMContentLoaded", () => {
               && !String(task.task_id || "").startsWith("export_")
               && task.can_open !== false
               && ["QUEUED", "RUNNING", "PAUSED", "PREVIEW_READY", "PREPARED", "FAILED", "STOPPED", "CANCELLED"].includes(task.status));
-          candidates.sort((a, b) => String(b.updated_at || b.created_at || "").localeCompare(String(a.updated_at || a.created_at || "")));
+          const timestamp = task => {
+            const value = task.updated_at || task.created_at || 0;
+            return typeof value === "number" ? value : (Date.parse(value) || 0) / 1000;
+          };
+          candidates.sort((a, b) => timestamp(b) - timestamp(a));
           taskId = candidates[0] ? (candidates[0].session_id || candidates[0].task_id) : null;
-          if (taskId) rememberTask(taskId);
         }
       } catch (_) {}
     }
-    if (!taskId || currentTaskId || pendingStart || pendingTaskAction) return false;
+    if (!taskId || !stillIdle()) return false;
     try {
       const response = await fetch(`/api/streaming/${encodeURIComponent(taskId)}`, {cache: "no-store"});
       if (response.status === 404) { forgetTask(taskId); return false; }
-      if (!response.ok) return false;
+      if (!response.ok || !stillIdle()) return false;
       // Attach only reads the durable snapshot and opens the live stream. It
       // never starts generation, retries, or plays media automatically.
       return await window.studioAttachTask(taskId);
