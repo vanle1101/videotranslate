@@ -1,5 +1,25 @@
 # Runtime QA report
 
+## Restart recovery acceptance — October 12, 2026, 21:58
+
+**PASS for restoring the existing project; full MP4 remains BLOCKED.** The reported E: project `265796c3` is not present on this machine. Its exact media/provider outcome is not claimed.
+
+Root causes: URL start searched only runtime owners and excluded STOPPED; saved full mode differed from the UI default preview; local-source matching had an incorrect conditional; frontend forgot its current task on reload and localhost port changes. A newer empty duplicate could supersede meaningful saved progress. Fixes scan durable manifests off the event loop, prefer progressed full checkpoints, preserve IDs/mode/audio, serialize start ownership, reject draining/conflicting owners, compare source/configuration signatures, and reconnect the UI without autoplay or generation. History continuation restores before retrying. Browser multipart upload deduplication is not implemented by this fix.
+
+| Test / exact steps | Expected | Actual / retest |
+| --- | --- | --- |
+| Persist 195-row STOPPED/full project with PCM files; clear runtime registry; start same URL or local file with default preview | Same ID265796c3; only IDs130/148/163 queued; existing audio intact; no ASR startup | PASS, isolated recovery regression using real persisted test manifests/WAVs and injected worker. Also covers attached and stopped owners. This is not the E: user job |
+| Production offscreen Qt startup and page reload against real task76f5aa6b | Attach same193-row task; no autoplay | PASS, startup-restore-ui.txt |
+| Stop old idle Studio; launch updated production in tray on new port49192 | Durable project retained | PASS; source and193 rows restored |
+| Production UI Stop → select same local489,511,802-byte source → Start → Stop | Same task and full mode; no new preview or source ASR; completed media retained | PASS: task76f5aa6b,193 rows,186 existing WAVs byte-identical; real-restart-recovery.txt. No mock provider/media used in this UI test |
+| Full automatic recovery and editorial retry | Valid full320.04-second MP4 | BLOCKED:186/193 have audio, seven remaining timing conflicts IDs39,87,119,135,143,145,146.38 unresolved content reviews remain; no full MP4 claimed |
+
+Validation: full Python suite before latest restart additions3261passed/2skipped/127subtests; final focused recovery/storage/history/local/transcript suite403passed/1skipped/15subtests; latest URL ownership suite43passed; JavaScript UI260passed. Counts overlap and are not summed. No TypeScript/npm build applies. Visual checkpoint long-path regression46passed/1skip; caption-warning deduplication41passed.
+
+Files changed for restart recovery: main.py, core/streaming/session_store.py, core/streaming/source_identity.py, static/app.js, tests/test_url_progress.py, tests/test_ui_interactions.mjs. Other audited fixes: core/video_intelligence.py, tests/test_visual_checkpoint_paths.py, core/subtitle_cues.py, tests/test_subtitle_cues.py, timing/media tests described below. Changes pushed to main through cdbcc48.
+
+Actual remaining constraint: required speech exceeds measured legal timeline capacity; e.g row87 needs1.705s versus1.139s. Do not loosen natural-speed limits, cut words, overlap speakers, or mark uncertain translation verified to manufacture export success. Failed editorial attempts retained prior text/audio. Row88 was successfully edited through the real editor with real TTS. All QA UI workers exited and the task was stopped with checkpoints preserved; normal production Studio remains in tray. Disposable QA artifacts remain under cleanup; automatic approval review rejected removal of cleanup/vcp and cleanup/vcp2 with “blocked by policy”, and no alternate deletion was attempted.
+
 ## Live recovery and actual provider failures — October 12, 2026
 
 **IN PROGRESS, not accepted as a completed video.** Saved project `76f5aa6b` uses the real 320.040635-second source `workspace/inputs/video_f68bfcb73b13425eb6fd838372765879.mp4`. No full final MP4 has yet passed this audit.
