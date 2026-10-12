@@ -1095,6 +1095,12 @@ async def _restore_matching_saved_project(*, source_url=None, video_path=None,
     for task_id, _data, _saved_mode in candidates:
         if task_id in active_streaming_sessions:
             session = active_streaming_sessions[task_id]
+            durable_config = getattr(session, "_processing_signature", None)
+            if durable_config and durable_config != processing_signature():
+                continue
+            fingerprint = getattr(session, "_source_file_signature", None)
+            if fingerprint and local_file_signature(getattr(session, "video_path", None)) != fingerprint:
+                continue
             signature = getattr(session, "_retry_config_signature", None)
             if signature is not None and signature != _retry_configuration_signature():
                 continue

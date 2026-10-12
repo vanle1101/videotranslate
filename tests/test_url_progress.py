@@ -284,7 +284,7 @@ def test_start_url_restores_saved_task_id_instead_of_creating_new_preview(isolat
     asyncio.run(run())
 
 
-@pytest.mark.parametrize("route", ["url", "local-file"])
+@pytest.mark.parametrize("route", ["url", "local-file", "already-attached", "live-stopped"])
 def test_restart_keeps_195_row_manifest_and_retries_only_three_missing_rows(isolated, monkeypatch, route):
     source = isolated / "source.mp4"
     source.write_bytes(b"persisted source fixture")
@@ -307,6 +307,10 @@ def test_restart_keeps_195_row_manifest_and_retries_only_three_missing_rows(isol
     old.persist()
     prior_files = {row.id: Path(row.audio_path).read_bytes() for row in old.segments.values() if row.audio_path}
     main.active_streaming_sessions.clear()
+    if route == "already-attached":
+        main.restore_saved_session(old.task_id)
+    elif route == "live-stopped":
+        main.active_streaming_sessions[old.task_id] = old
     started = []
     async def worker(session):
         while not session.queue.empty():
@@ -319,7 +323,7 @@ def test_restart_keeps_195_row_manifest_and_retries_only_three_missing_rows(isol
     forbidden_asr = AsyncMock(side_effect=AssertionError("Restart must not rerun source ASR"))
     monkeypatch.setattr(StreamingPipelineSession, "_start", forbidden_asr)
     async def run():
-        if route == "url":
+        if route != "local-file":
             result = await main.start_streaming_url(main.StreamUrlRequest(url=source_url,
                 voice=old.voice, tts_engine=old.tts_engine_name, asr_engine=old.asr_engine_name))
         else:
@@ -333,6 +337,27 @@ def test_restart_keeps_195_row_manifest_and_retries_only_three_missing_rows(isol
         assert all(Path(session.segments[index].audio_path).read_bytes() == data for index, data in prior_files.items())
         forbidden_asr.assert_not_awaited()
     asyncio.run(run())
+
+
+@pytest.mark.parametrize("change", ["voice", "engine", "asr", "visual", "provider", "model", "source"])
+def test_restart_matching_rejects_incompatible_checkpoint(isolated, monkeypatch, change):
+    from core.streaming.source_identity import processing_signature
+    source = isolated / "matching.mp4"
+    source.write_bytes(b"original bytes")
+    session = main.create_streaming_session("match-config", source)
+    session._processing_signature = processing_signature()
+    session.persist()
+    expected = dict(video_path=source, voice=session.voice, engine=session.tts_engine_name,
+        asr_engine=session.asr_engine_name, visual_translation=False, translation_mode="preview")
+    assert main._saved_project_candidates(**expected)
+    if change == "voice": expected["voice"] = "another-voice"
+    elif change == "engine": expected["engine"] = "another-engine"
+    elif change == "asr": expected["asr_engine"] = "another-asr"
+    elif change == "visual": expected["visual_translation"] = True
+    elif change == "provider": monkeypatch.setattr(settings, "LLM_PROVIDER", "changed-provider")
+    elif change == "model": monkeypatch.setattr(settings, "OPENCODE_MODEL", "changed-model")
+    elif change == "source": source.write_bytes(b"different source bytes")
+    assert main._saved_project_candidates(**expected) == []
 
 
 @pytest.mark.parametrize('name,value', [('LLM_PROVIDER', 'gemini'), ('GEMINI_MODEL', 'another-model'),
