@@ -15,6 +15,21 @@ from core.streaming.export import HQExporter
 from core.video_composer import _escape_filter_filename
 
 
+def test_repeated_screen_invalidation_keeps_one_copy_of_each_reason():
+    pending = "Lời thoại chồng lên vùng chữ chưa được AI kiểm tra xong; giữ chữ gốc."
+    original = "Vùng phụ đề chưa khớp lời thoại nguồn tại cùng thời điểm."
+    rows = [{"start": 1, "end": 2, "kind": "subtitle", "text_vi": "Chào bố.",
+             "review_reason": " · ".join([original, pending, pending]),
+             "source_region_verified": False}]
+    segments = [{"start": 1, "end": 2, "needs_review": True}]
+    for _ in range(100):
+        rows = invalidate_screen_texts_for_segments(rows, segments)
+    assert rows[0]["review_reason"] == original + " · " + pending
+    assert rows[0]["needs_review"] is True
+    assert rows[0]["source_region_verified"] is False
+    assert rows[0]["text_vi"] == "Chào bố."
+
+
 def test_measured_speech_cues_keep_the_allocated_dub_tail_without_mutating_source():
     segment = {"start": 1, "end": 1.62, "dub_start": .9, "dub_end": 1.8,
                "speech_start": .94, "speech_end": 1.77,

@@ -269,7 +269,11 @@ def invalidate_screen_texts_for_segments(screen_texts, segments):
             row["needs_review"] = True
             reason = str(row.get("review_reason") or "").strip()
             pending_reason = "Lời thoại chồng lên vùng chữ chưa được AI kiểm tra xong; giữ chữ gốc."
-            row["review_reason"] = " · ".join(dict.fromkeys(value for value in (reason, pending_reason) if value))
+            # This projection runs again on every saved/edit/review snapshot.
+            # Deduplicate individual reasons, including legacy accumulated ones,
+            # rather than treating the previous joined string as a new reason.
+            reasons = [value.strip() for value in reason.split(" · ") if value.strip()]
+            row["review_reason"] = " · ".join(dict.fromkeys([*reasons, pending_reason]))
         output.append(row)
     return output
 
