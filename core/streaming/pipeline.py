@@ -4,6 +4,7 @@ import contextvars
 from contextlib import contextmanager, nullcontext
 import time
 import subprocess
+import shutil
 import functools
 import logging
 import hashlib
@@ -32,7 +33,8 @@ from core.voice_catalog import resolve_voice
 from core.engines.alignment.timing_aligner import TimingBudgetAligner, SpeechBudgetError
 from core.engines.alignment.natural_speech import synthesize_natural_speech
 from core.engines.separator.realtime_suppressor import RealtimeVocalSuppressor
-from core.engines.alignment.speech_timing import build_speech_timing, take_tts_word_boundaries, trim_tts_padding
+from core.engines.alignment.speech_timing import (build_speech_timing, take_tts_word_boundaries,
+    trim_tts_padding, compact_tts_edge_padding, retime_tts_word_boundaries)
 from core.streaming.audio_cache import resolve_dub_timing
 from core.streaming.output_gate import final_output_metadata, preview_output_metadata, missing_spoken_output_ids, missing_speech_message
 from core.engines.alignment.dub_timing import available_reflow_duration, plan_reflow, MAX_TAIL_LIMIT_EXTENSION
@@ -3488,6 +3490,67 @@ class StreamingPipelineSession:
                     staged.pop(sid, None)
                 if capacity() >= required_duration:
                     return shadow, staged
+            # Successful neighbors may still contain digital-silence padding.
+            # Reclaim only these outer samples with the same 20 ms guards as
+            # focus fitting; never edit manual speech or borrow spoken words.
+            # Stage copies so cancellation/revision conflicts retain originals.
+            for sid in nearby:
+                item = self.segments[sid]
+                if not eligible(item):
+                    continue
+                row = next(row for row in shadow if row["id"] == sid)
+                measured = row.get("audio_duration")
+                if not measured:
+                    continue
+                previous = staged.get(sid)
+                source_path = Path(previous["audio_path"] if previous else item.audio_path)
+                path = self.segments_dir / f"seg_{sid}_{uuid.uuid4().hex}.wav"
+                staged[sid] = {"audio_path": str(path.resolve())}
+                try:
+                    await self._run_blocking(shutil.copyfile, source_path, path)
+                    cuts = await self._run_blocking(compact_tts_edge_padding, path,
+                        max(.001, measured - max(.001, required_duration - capacity())))
+                    if not cuts:
+                        path.unlink(missing_ok=True)
+                        if previous is None:
+                            staged.pop(sid, None)
+                        else:
+                            staged[sid] = previous
+                        continue
+                    if previous:
+                        spoken = dict(previous["spoken"])
+                        # Previous staged tempo already transformed this PCM.
+                        # Put its timing metadata in that PCM's coordinates
+                        # before applying the edge-cut map.
+                        ratio = spoken.get("timing_ratio", spoken["speed_ratio"])
+                        boundaries = [{**word, "start": word["start"] / ratio,
+                                       "end": word["end"] / ratio}
+                                      for word in spoken["boundaries"]]
+                    else:
+                        start, _ = resolve_dub_timing(item.to_dict())
+                        boundaries = [{"text": word["text"], "start": word["start"] - start,
+                                       "end": word["end"] - start}
+                                      for cue in item.subtitle_cues for word in cue.get("words", [])]
+                        spoken = {"text": item.final_vi, "tts_duration": item.tts_duration,
+                            "speed_ratio": item.speed_ratio, "pacing_verification": None}
+                    spoken.update(boundaries=retime_tts_word_boundaries(boundaries, removed_intervals=cuts),
+                                  timing_ratio=1.)
+                    if not await stage(item, path, spoken):
+                        if previous is None:
+                            staged.pop(sid, None)
+                        else:
+                            staged[sid] = previous
+                        continue
+                    if previous:
+                        source_path.unlink(missing_ok=True)
+                except BaseException:
+                    # Outer cleanup owns the new path; also retire the old
+                    # staged copy if a failed replacement hid it from the map.
+                    if previous:
+                        source_path.unlink(missing_ok=True)
+                    raise
+                if capacity() >= required_duration:
+                    return shadow, staged
             # At most one nearby translation changes, only after the same
             # independent source/meaning/address check used for focus rewrites.
             for sid in [ordered[pos] for pos in (index - 1, index - 2) if pos >= 0]:
@@ -3506,14 +3569,33 @@ class StreamingPipelineSession:
                 feedback = {"raw_budget_seconds": budget * self.aligner.max_speed,
                             "measured_candidates": [{"text": item.final_vi, "measured_seconds": item.tts_duration}]}
                 proposal = None
-                for _ in range(3):
+                for rewrite_attempt in range(3):
+                    logging.getLogger("pipeline").info(
+                        "PACING_NEIGHBOR_REWRITE run_id=%s focus_id=%s neighbor_id=%s attempt=%d",
+                        self.task_id, focus.id, item.id, rewrite_attempt + 1)
                     try:
                         proposal = await self._run_blocking(self.translator.rewrite_for_pacing,
                             item.text_zh, item.final_vi, budget * self.aligner.max_speed * .98,
                             context, measured_duration=item.tts_duration, feedback=feedback)
+                        logging.getLogger("pipeline").info(
+                            "PACING_NEIGHBOR_REWRITE_ACCEPTED run_id=%s focus_id=%s neighbor_id=%s attempt=%d",
+                            self.task_id, focus.id, item.id, rewrite_attempt + 1)
                         break
                     except PacingReviewRejected as exc:
+                        logging.getLogger("pipeline").info(
+                            "PACING_NEIGHBOR_REWRITE_REJECTED run_id=%s focus_id=%s neighbor_id=%s attempt=%d code=%s",
+                            self.task_id, focus.id, item.id, rewrite_attempt + 1, exc.code)
                         feedback.update(exc.feedback)
+                    except asyncio.CancelledError:
+                        logging.getLogger("pipeline").info(
+                            "PACING_NEIGHBOR_REWRITE_CANCELLED run_id=%s focus_id=%s neighbor_id=%s attempt=%d",
+                            self.task_id, focus.id, item.id, rewrite_attempt + 1)
+                        raise
+                    except Exception as exc:
+                        logging.getLogger("pipeline").warning(
+                            "PACING_NEIGHBOR_REWRITE_FAILED run_id=%s focus_id=%s neighbor_id=%s attempt=%d error_type=%s",
+                            self.task_id, focus.id, item.id, rewrite_attempt + 1, type(exc).__name__)
+                        raise
                 if proposal is None:
                     continue
                 proof = proposal.get("pacing_verification")

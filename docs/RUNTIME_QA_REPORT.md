@@ -1,5 +1,11 @@
 # Runtime QA report
 
+## Neighbor-silence recovery correction — October 14, 2026
+
+Root cause: a failed focus row already reclaimed its own PCM padding, but neighbor rescue only tried tempo changes and semantic rewrites. Successful neighboring WAVs could still reserve unused digital edge padding. `_prepare_dub_rescue` now stages compaction of that padding before proposing neighbor rewrites, preserving the existing20msguard and skipping manual rows. Word timing is transformed through tempo and cut maps in order; the combined speed cap remains1.15. Originals are kept until the existing revision-checked publication. Cancellation cleans staged files only. No duration guard or semantic approval was loosened.
+
+Five focused regressions PASS, including actual FFmpeg tempo/PCM compaction, preservation of spoken samples, manual rows/original state, cancellation cleanup and bounded rewrite logs without dialogue. Agent's related timing/natural-speech/recovery suite:221PASS before the final logging regression. These are code/PCM checks; production recovery on the193-row project is still running older loaded code and is not evidence that this correction has repaired that project. Real retained-data measurements and a fresh-process recovery retest remain pending.
+
 ## Mixed-language review/export retest finished — October 14, 2026, 22:14
 
 **PASS for the24s fixture's complete production UI flow.** Fresh offscreen Studio restored `00b293c5`, clicked Review, used real local recognition and Muse, regenerated only changed speech and automatically exported a new MP4. Four source rows remain: twoEnglish and twoChinese; review-required fell from3 to0 without changing approval flags manually. The source crop fix restored `Good morning`; Muse selected contextually elliptical Vietnamese for the two ambiguous `we/我们` sentences, avoiding an unsupported inclusive/exclusive pronoun choice. Those two rows have revision1 and fresh audio. Semantic judgments remain model assessments, not absolute proof of language quality.
