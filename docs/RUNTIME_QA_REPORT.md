@@ -33,6 +33,12 @@ the unchanged output decoded and survived reload. Harness exit 0; owned
 backend stopped. Six task-owned fixture MP3/PNG components were removed;
 the source fixture MP4, checkpoint and final MP4 remain for review/resume.
 
+Read-only scan of retained project manifests found no remaining cross-script
+source recovery candidates under the new guard. Cleanup of current-turn pytest
+directories `pytest-1292`, `pytest-1293`, `pytest-1294` was rejected by automatic
+approval with `blocked by policy`; they were left in place and no alternative
+deletion route was attempted. This does not alter runtime acceptance.
+
 ## Korean speech / Chinese-caption source ownership — October 15, 2026
 
 **Real-provider runtime test: FAIL.** The offscreen production UI created QA
