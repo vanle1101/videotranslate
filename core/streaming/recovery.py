@@ -91,7 +91,7 @@ def scheduled_segment_ids(rows, retry_records, chunks=()):
     if not retry_records:
         return set()
     rows = list(rows)
-    ids = {row.id for row in rows}
+    by_id = {row.id: row for row in rows}
     intervals = {chunk["id"]: chunk for chunk in chunks}
     scheduled = set()
     for record in retry_records:
@@ -102,7 +102,10 @@ def scheduled_segment_ids(rows, retry_records, chunks=()):
                 sid = int(record["scope_id"])
             except (ValueError, TypeError):
                 continue
-            if sid in ids:
+            # A review timer cannot repair a terminal speech/timing failure.
+            # Keep that failure visible unless a speech retry owns it too.
+            row = by_id.get(sid)
+            if row is not None and not (record["stage"] == "review" and row.status == "FAILED"):
                 scheduled.add(sid)
         elif record["stage"] == "source":
             chunk = intervals.get(record["scope_id"])

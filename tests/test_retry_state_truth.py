@@ -64,6 +64,19 @@ def test_empty_ledger_does_not_scan_project_rows():
     assert scheduled_segment_ids(rows(), []) == set()
 
 
+def test_review_retry_does_not_hide_unrecoverable_speech_failure(session):
+    row = session.segments[0]
+    row.status, row.failed_stage = "FAILED", "ALIGNING"
+    row.error = "TIMING_CONFLICT"
+    schedule_retry(session, "review", str(row.id), TimeoutError(), "a" * 64, now=0)
+    assert session.segment_snapshot(row)["processing_state"] == "FAILED"
+    assert session.get_progress()["segment_states"]["FAILED"] == 1
+    assert session.get_progress()["retry_pending_count"] == 1
+    # A real speech retry remains independently representable.
+    schedule_retry(session, "speech", str(row.id), TimeoutError(), "b" * 64, now=0)
+    assert session.segment_snapshot(row)["processing_state"] == "RETRY_PENDING"
+
+
 def test_terminal_source_error_preserves_explicit_retry_without_fake_schedule(preview, monkeypatch):
     owner, *_ = preview
     def fail(*args, **kwargs):

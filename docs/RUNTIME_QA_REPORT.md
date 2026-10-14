@@ -1,5 +1,26 @@
 # Runtime QA report
 
+## Live recovery continues under rate limit — October 15, 2026, 06:59
+
+After the first detected rejection, source request
+`e439d2ec17b54d6789277b0a2d8dd611` retried automatically at06:57:59, respecting
+the saved cooldown. It again received a real rate limit after6.547s on its first
+attempt. No immediate retries or orphaned CLI processes followed. Independent
+cached translations and real Edge-TTS progressed from26 to48audio rows;71/75
+rows have Vietnamese text. The full MP4 remains blocked by missing speech and
+source work, with23review scopes and1source scope durably retry-pending.
+
+A fresh attached production UI showed `64% lời & giọng`, the actual rate-limit
+error,24pending scopes and a retry countdown explicitly distinguished from
+time to MP4. **Visible retry diagnostics PASS**. This page was closed afterward.
+
+Another telemetry defect was reproduced: an independent review retry masked
+a terminal ALIGNING failure as RETRY_PENDING. A review timer now cannot hide
+that failure; a genuine speech retry may still own RETRY_PENDING.22focused
+recovery/telemetry tests passed. No timing validation or speech-speed limit was
+relaxed. UI JavaScript suites also passed343tests (15workspace +328other),
+including the clarified source/translation tabs; these are not media acceptance.
+
 ## Rate-limit diagnosis and execution fix — October 15, 2026, 06:52
 
 **Real production retest:** backend56405/PID27252 restored the same75 source
