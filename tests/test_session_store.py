@@ -21,6 +21,86 @@ def timing_issue():
         "max_speed": 1.15, "remedy": "Chọn cách diễn đạt/giọng phù hợp; không cắt từ hoặc chồng tiếng."}
 
 
+@pytest.mark.parametrize("compressed", [False, True])
+@pytest.mark.parametrize("intent, eligible", [("retry_pending", True), ("shutdown", True),
+                                            ("user_stopped", False), ("paused", False)])
+def test_retry_wave_and_restart_intent_survive_plain_or_compressed_manifest(persisted, monkeypatch, compressed, intent, eligible):
+    from core.streaming import session_store as store
+    from core.streaming.retry_schedule import schedule_retry, mark_intent
+    monkeypatch.setattr(store, "COMPRESS_AFTER_BYTES", 1 if compressed else 100_000_000)
+    schedule_retry(persisted, "translation", "segment:113", TimeoutError("private"), "a" * 64, now=100)
+    mark_intent(persisted, intent)
+    persisted.is_stopped = True
+    persisted.persist()
+    encoded = _project_path(persisted.task_id).read_text(encoding="utf-8")
+    assert (json.loads(encoded).get("storage") == "zlib-project-1") is compressed
+    for _ in range(2):
+        restored = restore_saved_session(persisted.task_id)
+        assert restored._retry_schedule[0]["next_attempt_at"] == 400
+        assert restored._retry_schedule[0]["rounds"] == 1
+        assert restored._restart_intent == intent and restored._restart_auto_resume is eligible
+        assert not restored.is_running  # Reading history itself never starts providers.
+        restored.persist()
+        active_streaming_sessions.pop(persisted.task_id)
+
+
+def test_invalid_retry_metadata_does_not_replace_previous_checkpoint(persisted):
+    from core.streaming import session_store as store
+    from core.streaming.retry_schedule import schedule_retry
+    schedule_retry(persisted, "translation", "segment:113", TimeoutError(), "a" * 64, now=100)
+    persisted.persist()
+    previous = _project_path(persisted.task_id).read_bytes()
+    persisted._retry_schedule[0]["next_attempt_at"] = 101
+    with pytest.raises(ValueError):
+        store.save_session(persisted)
+    assert _project_path(persisted.task_id).read_bytes() == previous
+
+
+def test_disk_failure_preserves_previous_retry_deadline(persisted, monkeypatch):
+    from core.streaming import session_store as store
+    from core.streaming.retry_schedule import schedule_retry
+    schedule_retry(persisted, "translation", "segment:113", TimeoutError(), "a" * 64, now=100)
+    persisted.persist()
+    previous = _project_path(persisted.task_id).read_bytes()
+    schedule_retry(persisted, "translation", "segment:113", TimeoutError(), "a" * 64, now=500)
+    def fail(*args):
+        raise OSError("simulated disk failure")
+    monkeypatch.setattr(store, "_replace_project_with_retry", fail)
+    with pytest.raises(OSError):
+        store.save_session(persisted)
+    assert _project_path(persisted.task_id).read_bytes() == previous
+    assert not list(_project_path(persisted.task_id).parent.glob("*.tmp"))
+
+
+@pytest.mark.parametrize("intent, expected", [("active", True), ("retry_pending", True), ("shutdown", True),
+    ("user_stopped", False), ("paused", False), ("completed", False), ("halted", False)])
+def test_restart_candidates_only_include_explicit_running_intent(persisted, monkeypatch, intent, expected):
+    from core.streaming import session_store as store
+    persisted._restart_intent = intent
+    persisted.persist()
+    monkeypatch.setattr(store, "_availability", lambda *a: pytest.fail("startup discovery must not probe media"))
+    result = store.list_restart_candidates()
+    assert bool(result) is expected
+    if result:
+        assert result[0]["task_id"] == persisted.task_id
+    assert not active_streaming_sessions
+    assert store.list_restart_candidates(excluded_task_ids=[persisted.task_id]) == []
+
+
+def test_interrupted_retry_wave_restores_with_new_cooldown(persisted, monkeypatch):
+    from core.streaming.retry_schedule import schedule_retry, begin_retry
+    from core.streaming import retry_schedule
+    schedule_retry(persisted, "translation", "segment:113", TimeoutError(), "a" * 64, now=100)
+    assert begin_retry(persisted, "translation", "segment:113", "a" * 64, now=400)
+    persisted.persist()
+    monkeypatch.setattr(retry_schedule.time, "time", lambda: 500)
+    restored = restore_saved_session(persisted.task_id)
+    assert restored._restart_auto_resume
+    row = restored._retry_schedule[0]
+    assert row["state"] == "RETRY_PENDING" and row["next_attempt_at"] == 800
+    assert row["rounds"] == 1 and row["error_code"] == "interrupted"
+
+
 def test_measured_timing_conflict_and_real_failure_reason_survive_repeated_restore(persisted):
     segment = persisted.segments[0]
     segment.status, segment.failed_stage = "FAILED", "ALIGNING"

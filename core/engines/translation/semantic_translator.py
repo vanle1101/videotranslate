@@ -271,11 +271,11 @@ class SemanticTranslator(TranslationEngine):
         except OpenCodeClientError as exc:
             if isinstance(exc.__cause__, StructuredResponseError):
                 raise exc.__cause__
-            raise RuntimeError(f"{exc} Hãy thử lại hoặc đổi cấu hình dịch.") from None
+            raise RuntimeError(f"{exc} Hãy thử lại hoặc đổi cấu hình dịch.") from exc
         except (GeminiError, MuseError, OpenRouterClientError) as exc:
-            raise RuntimeError(f"{exc} Hãy thử lại hoặc đổi cấu hình dịch.") from None
-        except Exception:
-            raise RuntimeError("API không dịch được. Hãy thử lại hoặc đổi cấu hình dịch.") from None
+            raise RuntimeError(f"{exc} Hãy thử lại hoặc đổi cấu hình dịch.") from exc
+        except Exception as exc:
+            raise RuntimeError("API không dịch được. Hãy thử lại hoặc đổi cấu hình dịch.") from exc
 
     def _translation_error(self, message: str, *, code="semantic_content", path="$") -> RuntimeError:
         label = {"gemini": "Gemini", "muse": "Muse", "opencode": "OpenCode", "openrouter-free": "OpenRouter"}.get(self.provider, "AI")

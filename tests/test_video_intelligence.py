@@ -287,14 +287,18 @@ def test_fallback_batches_large_ocr_result_without_changing_measured_ids(config,
     observed = [measured_screen(f"o{i}") for i in range(30)]
     client = Mock(has_credentials=True, model="free-model")
     client.translate.side_effect = [
-        json.dumps({"segments": [], "screen_texts": [translated_screen(f"o{i}") for i in range(24)], "summary": "tóm tắt 1"}),
-        json.dumps({"segments": [], "screen_texts": [translated_screen(f"o{i}") for i in range(24)], "summary": "tóm tắt 1"}),
-        json.dumps({"segments": [], "screen_texts": [translated_screen(f"o{i}") for i in range(24, 30)], "summary": "tóm tắt 2"}),
-        json.dumps({"segments": [], "screen_texts": [translated_screen(f"o{i}") for i in range(24, 30)], "summary": "tóm tắt 2"}),
+        json.dumps({"segments": [], "screen_texts": [translated_screen(f"o{i}")
+            for i in range(offset, min(offset + 8, 30))], "summary": f"tóm tắt {offset // 8 + 1}"})
+        for offset in range(0, 30, 8) for _ in range(2)
     ]
     monkeypatch.setattr("core.video_intelligence.OpenRouterFreeClient", Mock(return_value=client))
     result = VideoIntelligence(client=Mock())._text_fallback([], observed, "", 3, 5, GeminiError("quota"))
-    assert client.translate.call_count == 4
+    assert client.translate.call_count == 8  # Four bounded batches, two independent passes each.
+    for call in client.translate.call_args_list:
+        prompt = call.args[0]
+        marker = "ID OCR cần xuất, vị trí/thời gian cố định: "
+        requested = json.loads(next(line[len(marker):] for line in prompt.splitlines() if line.startswith(marker)))
+        assert len(requested) <= 8
     assert [screen["id"] for screen in result["screen_texts"]] == [f"o{i}" for i in range(30)]
     assert all(screen["bbox"] == observed[0]["bbox"] for screen in result["screen_texts"])
     assert result["translation_sources"] == [{"provider": "openrouter-free", "model": "free-model", "evidence_mode": "asr-ocr-text"}]

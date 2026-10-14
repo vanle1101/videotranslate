@@ -1,5 +1,28 @@
 # Runtime QA report
 
+## Durable retries and asynchronous export — October 15, 2026
+
+**Full acceptance remains INCOMPLETE.** No new full 320-second MP4 is claimed.
+
+Root causes reproduced and fixed:
+
+- Successful serial source recovery retained an obsolete retry record. Its success transaction now retires the exact source revision; source/configuration changes also discard obsolete ownership.
+- Exhausted temporary failures only had finite local retries. A manifest-backed ledger now schedules subsequent rounds at least 300 seconds apart, honors longer Retry-After, and preserves completed siblings. Only typed transport/service failures qualify; authentication, malformed content and deterministic timing conflicts do not loop automatically.
+- Provider wrappers erased typed errors, making timeouts look like invalid content. Visual translation retains transport exceptions and semantic translation preserves their causes.
+- Retry waiting could overwrite explicit Pause intent, while closing the app was indistinguishable from Stop. Durable intent now distinguishes both; startup discovery restores only interrupted active/retrying jobs and validates source/configuration. Cooling speech remains pending, manual edits win, and successful retries clear obsolete warnings.
+- Export held one HTTP request throughout rendering. Production UI now submits an accepted job then polls status, preserving existing atomic publication and validation.
+- Combined speech/OCR targets could exceed eight and reviewers used twelve-row batches. Both now cap eight total targets, with explicit read-only neighbors and versioned supplied terminology context. Persisted shared glossary population is still outstanding.
+
+| Test / exact action | Expected | Actual / retest |
+| --- | --- | --- |
+| Offscreen production Qt, saved QA project `00b293c5`, Export HQ, play fresh result | Accepted submission, real render, fresh playable MP4 | PASS: 238,136 bytes, 24.008 seconds, 640×360, Qt readyState4, advancing playback, no UI/media errors; backend stopped. Reused saved real-provider speech; not a new generation run. |
+| Actual queue methods with controlled temporary failures and advanced test clock | At least 300-second cooldown, independent work retained, unlimited rounds until Stop | PASS: queue/source/revision/intent regressions. Simulated faults, not provider throughput evidence. |
+| Startup coordinator with controlled manifests | Same task ID, stopped/paused remain idle, changed source blocks, one failure does not block siblings | 8 PASS; not a full desktop crash/restart acceptance test. |
+| Preview chunk and retry coordinator suites | Successful source retries retire ledger; missing output never completes | 115 PASS. |
+| Persistence, schema, visual translation, review, pacing, accepted export and restart suites | No regression in saved media/uncertainty contracts | 389 PASS (overlaps other suites; do not sum). |
+
+Remaining: retained project `76f5aa6b` still has six timing failures (87,119,135,143,145,146), 187 valid WAVs of 193 rows. Real recovery and full export remain required. Named E: projects remain unavailable on this host. Multi-hour/new-language acceptance, saturated real Muse concurrency, shared glossary persistence, and broader regression acceptance are not established by these results.
+
 ## Per-video admission, bounded schema recovery and draft policy — October 14, 2026, 23:38
 
 **Overall acceptance remains INCOMPLETE.** These changes implement part of the newly agreed long-video objective, not completion of all recovery/stress requirements.

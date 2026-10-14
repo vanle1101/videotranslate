@@ -5,6 +5,7 @@ import base64
 import zlib
 from contextlib import contextmanager
 from contextvars import ContextVar
+from copy import deepcopy
 import math
 import numbers
 import os
@@ -82,6 +83,7 @@ SESSION_FIELDS = frozenset((
     " _chunked_source_identity _visual_context_summary"
     " _chunk_jobs _visual_scanned_seconds _legacy_visual_prefix _parallel_chunk_planning"
     " _source_file_signature _processing_signature"
+    " _retry_schedule _restart_intent"
 ).split())
 PATH_FIELDS = ("video_path", "ref_audio", "raw_audio_16k", "bgm_audio_path")
 META_FIELDS = frozenset((
@@ -534,7 +536,12 @@ def _save_session(session):
         signature = local_file_signature(session.video_path)
         if signature:
             session._source_file_signature = signature
-    fields = {key: _clean(getattr(session, key)) for key in SESSION_FIELDS if hasattr(session, key)}
+    fields = {key: _clean(getattr(session, key)) for key in SESSION_FIELDS
+              if key != "_retry_schedule" and hasattr(session, key)}
+    from core.streaming.retry_schedule import validate_schedule, restart_intent
+    # Retry metadata has its own strict schema. Generic semantic metadata
+    # filtering must not silently drop its scheduling fields.
+    fields["_retry_schedule"] = deepcopy(validate_schedule(getattr(session, "_retry_schedule", [])))
     for key in PATH_FIELDS:
         path = getattr(session, key, None)
         fields[key] = _local_path(str(Path(path).resolve()), generated=key in ("raw_audio_16k", "bgm_audio_path")) if path else None
@@ -563,6 +570,7 @@ def _save_session(session):
                "state": "STOPPED" if session.is_stopped or getattr(session, "_restored_interrupted", False) else "FAILED" if session.error else
                "RUNNING" if session.is_running or session.is_editing else "READY",
                "session": fields, "segments": rows}
+    fields["_restart_intent"] = restart_intent(fields, payload["state"])
     _validate(payload, session.task_id)
     encoded = _encode_project(payload)
     target.parent.mkdir(parents=True, exist_ok=True)
@@ -628,6 +636,9 @@ def _validate_project(data, task_id):
     fields, rows = data["session"], data["segments"]
     if not isinstance(fields, dict) or set(fields) - (SESSION_FIELDS | set(PATH_FIELDS) | {"source_url", "output_filename", "review_filename", "last_runtime_error"}):
         raise ValueError("Cấu hình dự án không hợp lệ.")
+    from core.streaming.retry_schedule import validate_schedule, restart_intent
+    validate_schedule(fields.get("_retry_schedule", []))
+    restart_intent(fields, data["state"])
     saved_error = fields.get("last_runtime_error")
     if saved_error is not None and (not isinstance(saved_error, str) or len(saved_error) > 2000):
         raise ValueError("Chi tiết lỗi đã lưu không hợp lệ.")
@@ -793,7 +804,7 @@ def _validate_project(data, task_id):
             raise ValueError("Khoảng nghỉ lồng tiếng chưa được chuẩn bị hoặc trùng câu kế tiếp.")
     # Bounded tree and finite numbers; do not permit manifest-injected credentials.
     for key, value in fields.items():
-        fields[key] = _clean(value)
+        fields[key] = deepcopy(validate_schedule(value)) if key == "_retry_schedule" else _clean(value)
     for row in rows:
         for key, value in row.items():
             row[key] = _clean_segment_field(key, value)
@@ -1101,6 +1112,36 @@ def _availability(data):
             "missing_audio_ids": absent_audio, "output_filename": output if valid_output and ready else ""}
 
 
+def list_restart_candidates(*, excluded_task_ids=()):
+    """Read restart intent without restoring engines, probing media or starting work.
+
+    The startup coordinator must restore each candidate, honor its retry deadline
+    and validate dependencies before dispatch. Invalid files remain visible in
+    ordinary history but never receive speculative automatic execution.
+    """
+    from core.streaming.retry_schedule import restart_intent, AUTO_INTENTS
+    excluded = frozenset(excluded_task_ids)
+    root = _project_path("index").parent
+    candidates = []
+    if not root.exists():
+        return candidates
+    for path in root.glob("*.json"):
+        if path.stem in excluded or not ID_PATTERN.fullmatch(path.stem):
+            continue
+        try:
+            data = _read(path.stem)
+            fields = data["session"]
+            intent = restart_intent(fields, data["state"])
+            if intent not in AUTO_INTENTS:
+                continue
+            records = fields.get("_retry_schedule", [])
+            candidates.append({"task_id": path.stem, "restart_intent": intent,
+                "updated_at": data["updated_at"], "retry_schedule": deepcopy(records)})
+        except (OSError, ValueError, TypeError, KeyError):
+            continue
+    return sorted(candidates, key=lambda row: row["updated_at"])
+
+
 def list_saved_sessions(*, excluded_task_ids=()):
     # The task list already has live/runtime rows for these IDs. Skip their
     # manifests before decompression, schema validation and WAV inspection.
@@ -1169,6 +1210,12 @@ def _restore_saved_session_owned(task_id, event_callback=None):
     for key in SESSION_FIELDS:
         if key in fields:
             setattr(session, key, fields[key])
+    from core.streaming.retry_schedule import recover_schedule, restart_intent, can_auto_resume
+    session._retry_schedule = recover_schedule(fields.get("_retry_schedule", []))
+    session._restart_intent = restart_intent(fields, data["state"])
+    # Loading history remains read-only with respect to execution. Startup may
+    # explicitly consume this hint; a saved user Stop/Pause never qualifies.
+    session._restart_auto_resume = can_auto_resume(session)
     # A new session knows the current renderer, but a restored old render must
     # retain its provenance until the user actually exports a new MP4.
     session.caption_renderer_version = fields.get("caption_renderer_version")

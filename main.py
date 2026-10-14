@@ -78,6 +78,65 @@ def _source_start_lock():
     loop = asyncio.get_running_loop()
     return _source_start_locks.setdefault(loop, asyncio.Lock())
 
+
+_restart_discovery_task = None
+
+
+async def resume_interrupted_projects():
+    """Startup-only recovery: history reads and explicit Stop never start work."""
+    from core.streaming.session_store import list_restart_candidates
+    from core.streaming.retry_schedule import mark_intent, can_auto_resume
+    candidates = await asyncio.to_thread(list_restart_candidates,
+        excluded_task_ids=tuple(active_streaming_sessions))
+    for candidate in candidates:
+        task_id = candidate["task_id"]
+        try:
+            async with _source_start_lock():
+                if task_id in active_streaming_sessions:
+                    continue
+                session = await editable_session(task_id)
+                if (session is None or not getattr(session, "_restart_auto_resume", False)
+                        or not can_auto_resume(session) or session.is_running or session.is_stopped):
+                    continue
+                fingerprint = getattr(session, "_source_file_signature", None)
+                config = getattr(session, "_processing_signature", None)
+                if ((fingerprint and local_file_signature(session.video_path) != fingerprint)
+                        or (config and config != processing_signature())):
+                    mark_intent(session, "halted")
+                    session.error = "Nguồn hoặc cấu hình đã đổi; mở dự án để xác nhận trước khi tiếp tục."
+                    session._persist_if_enabled()
+                    continue
+                if session.can_retry:
+                    await session.retry_failed_synthesis()
+                    logging.getLogger("pipeline").info("PROJECT_AUTO_RESUMED run_id=%s", task_id)
+                else:
+                    # Nothing executable, missing source, or an exclusive owner:
+                    # preserve data instead of guessing a new pipeline request.
+                    mark_intent(session, "halted" if session.error else "completed")
+                    session._persist_if_enabled()
+        except asyncio.CancelledError:
+            raise
+        except Exception as error:
+            logging.getLogger("errors").error("PROJECT_AUTO_RESUME_FAILED run_id=%s error_type=%s",
+                                               task_id, type(error).__name__)
+
+
+async def _start_restart_discovery():
+    global _restart_discovery_task
+    _restart_discovery_task = asyncio.create_task(resume_interrupted_projects())
+
+
+async def _stop_restart_discovery():
+    global _restart_discovery_task
+    task, _restart_discovery_task = _restart_discovery_task, None
+    if task is not None and not task.done():
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+
+
+app.add_event_handler("startup", _start_restart_discovery)
+app.add_event_handler("shutdown", _stop_restart_discovery)
+
 @app.get("/api/health")
 async def health():
     return {"status": "ok", "ffmpeg": bool(shutil.which("ffmpeg")),
@@ -492,6 +551,7 @@ async def update_settings(req: ConfigRequest):
 # TASK MANAGER API
 # -------------------------------------------------------------
 active_export_tasks: Dict[str, Dict[str, Any]] = {}
+_accepted_export_owners: Dict[str, asyncio.Task] = {}
 task_history: List[Dict[str, Any]] = []
 
 
@@ -1626,8 +1686,41 @@ async def streaming_seek(req: SeekRequest):
     await session.seek(req.time)
     return {"status": "ok", "seek_time": req.time}
 
+@app.post("/api/streaming/export-hq/start", status_code=202)
+async def start_export_hq(req: ExportHQRequest):
+    """Accept a render without holding an HTTP request for its full duration.
+
+    The existing renderer owns validation, cancellation, atomic publication and
+    durable output metadata. This endpoint only owns its asyncio transport task.
+    """
+    export_id = f"export_{req.task_id}"
+    owner = _accepted_export_owners.get(export_id)
+    if (owner is not None and not owner.done()) or active_export_tasks.get(export_id, {}).get("status") in {"RUNNING", "CANCELLING"}:
+        raise HTTPException(status_code=409, detail="Video này đang được xuất. Hãy theo dõi tác vụ hiện tại.")
+    owner = asyncio.create_task(export_hq(req), name=export_id)
+    _accepted_export_owners[export_id] = owner
+
+    def release(completed):
+        if _accepted_export_owners.get(export_id) is completed:
+            _accepted_export_owners.pop(export_id, None)
+        if not completed.cancelled():
+            completed.exception()  # Failures are already recorded by export_hq.
+
+    owner.add_done_callback(release)
+    # export_hq performs preflight and registers session.export_task before its
+    # first await. Yield once to return immediate validation errors as normal.
+    await asyncio.sleep(0)
+    if owner.done():
+        await owner
+    return {"status": "ACCEPTED", "export_id": export_id, "task_id": req.task_id,
+            "status_url": f"/api/streaming/export-hq/status/{req.task_id}"}
+
+
 @app.post("/api/streaming/export-hq")
 async def export_hq(req: ExportHQRequest):
+    accepted_owner = _accepted_export_owners.get(f"export_{req.task_id}")
+    if accepted_owner is not None and not accepted_owner.done() and accepted_owner is not asyncio.current_task():
+        raise HTTPException(status_code=409, detail="Video này đang được xuất. Hãy chờ tác vụ hiện tại kết thúc.")
     session = get_streaming_session(req.task_id)
     if not session:
         raise HTTPException(status_code=404, detail="Session not found")

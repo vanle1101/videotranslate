@@ -129,14 +129,13 @@ test('automatic export uses its own measured ETA in Studio and MP4 modal, not st
 test('manual MP4 status polling displays measured remaining time and clears it after success', async () => {
   const ui=studio();await ui.start();const socket=ui.sockets.at(-1);
   socket.receive({type:'progress',status:'COMPLETED',phase:'complete'});
-  let finishExport;
-  ui.replies.set('/api/streaming/export-hq',()=>new Promise(resolve=>{finishExport=resolve;}));
   ui.replies.set('/api/streaming/export-hq/status/fixture',{status:'RUNNING',progress:25,stage:'Đang xuất',
     eta_seconds:7260,eta_scope:'final'});
   const exporting=ui.el('btn-confirm-export').click();await ui.flush();await ui.tickIntervals(1000);
   assert.equal(ui.el('export-progress-pct').textContent,'25%');
   assert.equal(ui.el('export-progress-eta').textContent,'Có video sau khoảng 2 giờ 1 phút');
-  finishExport({ok:true,json:async()=>({video_url:'/api/outputs/final.mp4',output_filename:'final.mp4'})});
+  ui.replies.set('/api/streaming/export-hq/status/fixture',{status:'COMPLETED',video_url:'/api/outputs/final.mp4',output_filename:'final.mp4'});
+  await ui.tickIntervals(1000);
   await exporting;
   assert.equal(ui.el('export-progress-eta').textContent,'');
   assert.equal(ui.el('export-progress-eta').classList.contains('hidden'),true);
@@ -1047,6 +1046,8 @@ function studio(cookieReply = { configured: false, count: 0, message: '' }, voic
     ['/api/settings', { buffer_target: '15', ducking_level: '-18', opencode_free_models: [],
       opencode_model: 'muse-spark-1.3-contributor-free', openrouter_model: 'inclusionai/ling-3.0-flash-sante:free',
       gemini_model: 'gemini-fixture', translation_chunk_workers: 5 }],
+    ['/api/streaming/export-hq/start',{status:'ACCEPTED',task_id:'fixture',export_id:'export_fixture'}],
+    ['/api/streaming/export-hq/status/fixture',{status:'RUNNING',progress:null}],
     ['/api/muse/status', {}],
     ['/api/douyin/cookies', cookieReply],
     ['/api/voices', voiceConfig.catalog || {}],
@@ -2168,15 +2169,14 @@ test('worker errors do not pretend pause succeeded; success updates Studio from 
 
 test('reopening export cannot create a duplicate export', async () => {
   const ui = studio(); await ui.start();
-  let finish;
-  ui.replies.set('/api/streaming/export-hq', () => new Promise(resolve => { finish = resolve; }));
   const exporting = ui.el('btn-confirm-export').click();
   await ui.flush();
   await ui.el('btn-export-hq').click();
   assert.equal(ui.el('btn-confirm-export').classList.contains('hidden'), true);
   await ui.el('btn-confirm-export').click();
-  assert.equal(ui.requests.filter(req => req.url === '/api/streaming/export-hq').length, 1);
-  finish({ ok: true, json: async () => ({ video_url: '/out.mp4', output_filename: 'out.mp4' }) });
+  assert.equal(ui.requests.filter(req => req.url === '/api/streaming/export-hq/start').length, 1);
+  ui.replies.set('/api/streaming/export-hq/status/fixture',{status:'COMPLETED',video_url:'/api/outputs/out.mp4',output_filename:'out.mp4'});
+  await ui.tickIntervals(1000);
   await exporting;
 });
 
@@ -3822,8 +3822,8 @@ test('completed caption controls update measured preview and invalidate old MP4 
   assert.equal(ui.el('screen-text-overlay').children.length, 0);
   ui.sockets.at(-1).receive({type: 'progress', status: 'COMPLETED', output_video_url: '/api/outputs/before.mp4'});
   assert.equal(ui.el('btn-save-result').disabled, true, 'old progress cannot restore stale output');
-  ui.replies.set('/api/streaming/export-hq', {video_url: '/api/outputs/after.mp4', output_filename: 'after.mp4'});
-  await ui.el('btn-export-hq').click(); await ui.el('btn-confirm-export').click();
+  ui.replies.set('/api/streaming/export-hq/status/fixture', {status:'COMPLETED',video_url: '/api/outputs/after.mp4', output_filename: 'after.mp4'});
+  await ui.el('btn-export-hq').click(); const exporting=ui.el('btn-confirm-export').click(); await ui.flush(); await ui.tickIntervals(1000); await exporting;
   assert.equal(ui.el('btn-save-result').disabled, false);
   assert.match(ui.el('task-result-link').href, /after\.mp4$/);
 });
@@ -4295,9 +4295,9 @@ test('caption export sends the position mode while the source mask stays false',
     const summary = ui.el('export-screen-text-summary').textContent;
     assert.match(summary, positioned ? /giữ sub Trung.*nền vàng/i : /Giữ nguyên chữ và hình nguồn/);
     assert.doesNotMatch(summary, /che vùng|làm mờ/i);
-    ui.replies.set('/api/streaming/export-hq', { video_url: '/outputs/final.mp4' });
-    await ui.el('btn-confirm-export').click();
-    const request = ui.requests.find(item => item.url === '/api/streaming/export-hq');
+    ui.replies.set('/api/streaming/export-hq/status/fixture', {status:'COMPLETED',video_url:'/api/outputs/final.mp4',output_filename:'final.mp4'});
+    const exporting=ui.el('btn-confirm-export').click();await ui.flush();await ui.tickIntervals(1000);await exporting;
+    const request = ui.requests.find(item => item.url === '/api/streaming/export-hq/start');
     const body = JSON.parse(request.options.body);
     assert.equal(body.translate_screen_text, positioned);
     assert.equal(body.mask_chinese, false);
@@ -4712,14 +4712,12 @@ test('AI review cannot overwrite unsaved transcript edits or run alongside an ex
   assert.equal(ui.requests.filter(item=>item.url.endsWith('/review')).length,0);
   assert.equal(ui.el('seg-input-0').value,'Bản đang sửa');
   await ui.el('seg-row-0').querySelector('.transcript-editor-actions').children[1].click();
-  let finish;
-  ui.replies.set('/api/streaming/export-hq',()=>new Promise(resolve=>{finish=resolve;}));
   await ui.el('btn-export-hq').click();
   const pending=ui.el('btn-confirm-export').click();
   assert.equal(ui.el('btn-review-worker').disabled,true);
   await ui.window.studioReview();
   assert.equal(ui.requests.filter(item=>item.url.endsWith('/review')).length,0);
-  finish({ok:true,json:async()=>({video_url:'/result.mp4'})}); await pending;
+  ui.replies.set('/api/streaming/export-hq/status/fixture',{status:'COMPLETED',video_url:'/api/outputs/result.mp4',output_filename:'result.mp4'});await ui.flush();await ui.tickIntervals(1000);await pending;
   assert.equal(ui.el('btn-review-worker').disabled,false);
 });
 
@@ -5178,24 +5176,52 @@ test('task polling exposes missed export failure and cancellation while allowing
   }
 });
 
-test('manual export polling is serial and ignores an in-flight read after successful export', async () => {
+test('manual export polling is serial and stops after its terminal result', async () => {
   const ui = studio(); await ui.start();
   ui.sockets.at(-1).receive({type: 'progress', status: 'COMPLETED', phase: 'complete'});
-  let finishExport, finishPoll;
-  ui.replies.set('/api/streaming/export-hq', () => new Promise(resolve => { finishExport = resolve; }));
+  let finishPoll;
   ui.replies.set('/api/streaming/export-hq/status/fixture', () => new Promise(resolve => { finishPoll = resolve; }));
   const exporting = ui.el('btn-confirm-export').click(); await ui.flush();
   assert.equal(ui.el('export-progress-pct').textContent, '');
   const polling = ui.tickIntervals(1000); await ui.flush();
   await ui.tickIntervals(1000);
   assert.equal(ui.requests.filter(request => request.url.includes('/export-hq/status/')).length, 1);
-  finishExport({ok: true, json: async () => ({video_url: '/api/outputs/done.mp4', output_filename: 'done.mp4'})});
-  await exporting;
-  finishPoll({ok: true, json: async () => ({status: 'RUNNING', progress: 35, stage: 'Old progress'})});
-  await polling;
+  finishPoll({ok:true,json:async()=>({status:'COMPLETED',video_url:'/api/outputs/done.mp4',output_filename:'done.mp4'})});
+  await polling;await exporting;
+  await ui.tickIntervals(1000);
+  assert.equal(ui.requests.filter(request=>request.url.includes('/export-hq/status/')).length,1);
   assert.equal(ui.el('export-progress-pct').textContent, '100%');
   assert.doesNotMatch(ui.el('export-status-text').textContent, /Old/);
   assert.equal(ui.el('export-result-box').classList.contains('hidden'), false);
+});
+
+test('accepted export reports terminal failure and cancellation without showing a result', async () => {
+  for (const status of ['FAILED','CANCELLED']) {
+    const ui=studio();await ui.start();
+    ui.replies.set('/api/streaming/export-hq/status/fixture',{status,stage:'Render không hoàn tất'});
+    const pending=ui.el('btn-confirm-export').click();await ui.flush();await ui.tickIntervals(1000);await pending;
+    assert.match(ui.el('export-status-text').textContent,/Render không hoàn tất/);
+    assert.equal(ui.el('btn-confirm-export').classList.contains('hidden'),false);
+    assert.equal(ui.el('btn-cancel-export').disabled,true);
+  }
+});
+
+test('pagehide detaches accepted export polling without cancelling the backend render', async () => {
+  const ui=studio();await ui.start();
+  const pending=ui.el('btn-confirm-export').click();await ui.flush();
+  await ui.window.emit('pagehide');await pending;await ui.tickIntervals(1000);
+  assert.equal(ui.requests.some(item=>item.url.includes('/export-hq/cancel/')),false);
+  assert.equal(ui.requests.some(item=>item.url.includes('/export-hq/status/')),false);
+});
+
+test('accepted export retains polling after a transient status network failure', async () => {
+  const ui=studio();await ui.start();
+  ui.replies.set('/api/streaming/export-hq/status/fixture',()=>Promise.reject(Error('network')));
+  const pending=ui.el('btn-confirm-export').click();await ui.flush();await ui.tickIntervals(1000);
+  assert.match(ui.el('export-status-text').textContent,/Tạm mất kết nối/);
+  ui.replies.set('/api/streaming/export-hq/status/fixture',{status:'COMPLETED',video_url:'/api/outputs/ok.mp4',output_filename:'ok.mp4'});
+  await ui.tickIntervals(1000);await pending;
+  assert.equal(ui.el('export-result-box').classList.contains('hidden'),false);
 });
 
 test('null export stage progress never appears as a fabricated percentage in modal or Studio', async () => {

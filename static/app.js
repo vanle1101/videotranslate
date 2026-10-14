@@ -5482,7 +5482,7 @@ document.addEventListener("DOMContentLoaded", () => {
     updateExportAvailability();
     updateTranscriptReviewAvailability();
     exportCancelled = false;
-    btnCancelExport.disabled = false;
+    btnCancelExport.disabled = true;
     btnConfirmExport.classList.add("hidden");
     exportStatusBox.classList.remove("hidden");
     exportResultBox.classList.add("hidden");
@@ -5491,13 +5491,22 @@ document.addEventListener("DOMContentLoaded", () => {
     // Ignore reads from a completed run, including responses already in flight.
     let pollActive = true;
     let pollController = null;
+    let exportAccepted = false;
+    let resolveExport;
+    const exportResult = new Promise(resolve => { resolveExport = resolve; });
     const stopExportPolling = () => {
       pollActive = false;
       clearInterval(pollInterval);
       pollController?.abort();
     };
+    const detachExport = () => {
+      stopExportPolling();
+      resolveExport({status: "DETACHED"});
+    };
+    window.addEventListener("pagehide", detachExport);
     const pollInterval = setInterval(async () => {
-      if (!pollActive || pollController) return;
+      if (!pollActive || !exportAccepted || pollController) return;
+      if (taskId !== currentTaskId || exportingTaskId !== taskId) { detachExport(); return; }
       const controller = new AbortController();
       pollController = controller;
       const timeout = setTimeout(() => controller.abort(), 8000);
@@ -5507,24 +5516,46 @@ document.addEventListener("DOMContentLoaded", () => {
           const sData = await sRes.json();
           if (!pollActive || taskId !== currentTaskId || exportingTaskId !== taskId) return;
           renderExportProgress(sData.progress, sData.stage, sData);
-          if (["COMPLETED", "FAILED", "CANCELLED"].includes(sData.status)) stopExportPolling();
+          if (["COMPLETED", "FAILED", "CANCELLED"].includes(sData.status)) {
+            stopExportPolling();
+            resolveExport(sData);
+          }
+        } else if (sRes.status === 404) {
+          stopExportPolling();
+          resolveExport({status: "FAILED", stage: "Không còn thấy lượt xuất đang theo dõi. Mở lịch sử để kiểm tra video đã lưu trước khi xuất lại."});
+        } else {
+          exportStatusText.textContent = "Chưa đọc được tiến độ xuất; đang kết nối lại. Tác vụ xuất vẫn được giữ.";
         }
-      } catch (_) {} finally {
+      } catch (_) {
+        if (pollActive) exportStatusText.textContent = "Tạm mất kết nối tiến độ; đang thử lại. Không cần bắt đầu xuất lần nữa.";
+      } finally {
         clearTimeout(timeout);
         if (pollController === controller) pollController = null;
       }
     }, 1000);
 
     try {
-      const res = await fetch("/api/streaming/export-hq", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ task_id: taskId, mask_chinese: false,
-          translate_screen_text: toggleScreenText.checked })
-      });
-      stopExportPolling();
-      const data = await res.json();
-      if (!res.ok) throw new Error(data.detail || "Lỗi xuất video");
+      const submitController = new AbortController();
+      const submitTimeout = setTimeout(() => submitController.abort(), 15000);
+      let res;
+      try {
+        res = await fetch("/api/streaming/export-hq/start", {
+          method: "POST", signal: submitController.signal,
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ task_id: taskId, mask_chinese: false,
+            translate_screen_text: toggleScreenText.checked })
+        });
+      } finally { clearTimeout(submitTimeout); }
+      const accepted = await res.json();
+      if (!res.ok) throw new Error(accepted.detail || "Lỗi xuất video");
+      if (accepted.status !== "ACCEPTED" || accepted.task_id !== taskId)
+        throw new Error("Phản hồi bắt đầu xuất không hợp lệ; kiểm tra lịch sử trước khi xuất lại.");
+      exportAccepted = true;
+      btnCancelExport.disabled = false;
+      const data = await exportResult;
+      if (data.status === "DETACHED") return;
+      if (data.status !== "COMPLETED") throw new Error(data.stage || "Chưa xuất được video");
+      if (!data.video_url || !data.output_filename) throw new Error("Tác vụ đã kết thúc nhưng thiếu video kết quả; mở lịch sử để kiểm tra.");
 
       renderExportProgress(100, "Xuất video hoàn tất", {status: "COMPLETED"});
       exportStatusBox.classList.add("hidden");
@@ -5544,12 +5575,17 @@ document.addEventListener("DOMContentLoaded", () => {
 
     } catch (e) {
       stopExportPolling();
+      if (taskId !== currentTaskId) return;
       exportStatusBox.classList.remove("hidden");
-      exportStatusText.textContent = exportCancelled ? "Đã hủy xuất video." : `Lỗi xuất video: ${e.message}`;
+      exportStatusText.textContent = exportCancelled ? "Đã hủy xuất video." : e.name === "AbortError"
+        ? "Chưa nhận được xác nhận xuất. Tác vụ có thể vẫn chạy; mở lịch sử để theo dõi trước khi xuất lại."
+        : `Lỗi xuất video: ${e.message}`;
       showEta(exportProgressEta, {status: exportCancelled ? "CANCELLED" : "FAILED"});
       btnConfirmExport.classList.remove("hidden");
     } finally {
-      exportingTaskId = null;
+      stopExportPolling();
+      window.removeEventListener?.("pagehide", detachExport);
+      if (exportingTaskId === taskId) exportingTaskId = null;
       updateExportAvailability();
       updateTranscriptReviewAvailability();
       btnCancelExport.disabled = true;

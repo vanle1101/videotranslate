@@ -37,6 +37,8 @@ from core.engines.separator.realtime_suppressor import RealtimeVocalSuppressor
 from core.engines.alignment.speech_timing import (build_speech_timing, take_tts_word_boundaries,
     trim_tts_padding, compact_tts_edge_padding, retime_tts_word_boundaries)
 from core.streaming.audio_cache import resolve_dub_timing
+from core.streaming.retry_schedule import (schedule_retry, finish_retry, begin_retry,
+    mark_intent, due_entries)
 from core.streaming.output_gate import final_output_metadata, preview_output_metadata, missing_spoken_output_ids, missing_speech_message
 from core.engines.alignment.dub_timing import available_reflow_duration, plan_reflow, MAX_TAIL_LIMIT_EXTENSION
 
@@ -555,6 +557,7 @@ class StreamingPipelineSession:
         if (not self.can_retry or (self.worker_task and not self.worker_task.done())
                 or (self.start_task and not self.start_task.done())):
             raise SegmentEditConflict("Chỉ tiếp tục khi tác vụ đã dừng do lỗi và không có thao tác khác đang chạy.")
+        mark_intent(self, "active")
         self._run_started_at = time.monotonic()
         self._run_ready_baseline = sum(row.status in ("READY", "PLAYED") for row in self.segments.values())
         from core.streaming.progress_eta import reset_eta
@@ -1339,6 +1342,9 @@ class StreamingPipelineSession:
         for row in ordered:
             if row.status != "WAITING" or not self._published_row(row):
                 continue
+            if any(r["stage"] == "speech" and r["scope_id"] == str(row.id)
+                   and r["state"] == "RETRY_PENDING" for r in getattr(self, "_retry_schedule", [])):
+                continue
             await self.pause_event.wait()
             if self.is_stopped or not self.is_running:
                 raise asyncio.CancelledError
@@ -1368,7 +1374,7 @@ class StreamingPipelineSession:
                     # work is published, rather than retrying here recursively.
                     row.status, row.error, row.failed_stage = "WAITING", str(error), "TTS"
                     row._retry_synthesis = True
-                    deferred.append((row, revision))
+                    self._schedule_speech_retry(row, error)
                     warning = f"Câu {row.id + 1} chưa tạo được giọng; giữ phần đã xong và tiếp tục các câu sau."
                     if warning not in self.warnings:
                         self.warnings.append(warning)
@@ -1380,6 +1386,7 @@ class StreamingPipelineSession:
                     continue
                 row.failed_stage = row.status if row.status in {"TTS", "ALIGNING"} else "TTS"
                 row.status, row.error = "FAILED", str(error)
+                self._schedule_speech_retry(row, error)
                 warning = f"Câu {row.id + 1} chưa tạo được giọng; giữ phần đã xong và tiếp tục các câu sau."
                 if warning not in self.warnings:
                     self.warnings.append(warning)
@@ -1421,6 +1428,7 @@ class StreamingPipelineSession:
                     continue
                 row.failed_stage = row.status if row.status in {"TTS", "ALIGNING"} else "TTS"
                 row.status, row.error = "FAILED", str(error)
+                self._schedule_speech_retry(row, error)
                 warning = f"Câu {row.id + 1} chưa tạo được giọng; giữ phần đã xong và tiếp tục các câu sau."
                 if warning not in self.warnings:
                     self.warnings.append(warning)
@@ -1861,6 +1869,10 @@ class StreamingPipelineSession:
         snapshot.update(segment_states=counts, completed_chunks=sum(row["state"] == "COMPLETED" for row in self._chunk_jobs),
                         total_chunks=len(self._chunk_jobs), scanned_seconds=self._visual_scanned_seconds,
                         retry_chunks=sum(row["state"] == "RETRY_PENDING" for row in self._chunk_jobs))
+        retry_records = getattr(self, "_retry_schedule", [])
+        snapshot.update(retry_pending_count=sum(r["state"] == "RETRY_PENDING" for r in retry_records),
+                        retry_next_attempt_at=min((r["next_attempt_at"] for r in retry_records
+                            if r["state"] == "RETRY_PENDING"), default=None))
         snapshot["elapsed_seconds"] = (max(0, time.monotonic() - self._run_started_at)
                                        if self._run_started_at is not None else None)
         if settings.LLM_PROVIDER == "opencode":
@@ -1993,6 +2005,7 @@ class StreamingPipelineSession:
             if self.is_stopped:
                 raise asyncio.CancelledError
             self.is_running = True
+            mark_intent(self, "active")
             if not self.start_wall_time:
                 self.start_wall_time = time.time()
             self._persist_if_enabled()
@@ -2027,6 +2040,7 @@ class StreamingPipelineSession:
             raise
         except Exception as exc:
             self.is_running = False
+            mark_intent(self, "halted")
             self.error = str(exc)
             self._startup_failed = (not self._visual_prepass_complete if self._chunked_source_started
                                     else self._visual_result is None if self.visual_translation else not self.initialized)
@@ -2695,7 +2709,7 @@ class StreamingPipelineSession:
                 # Finish those owners before retrying their source interval;
                 # READY speech then survives publication of the repeated draft.
                 await self._drain_chunk_followups()
-                cursor, nominal_end = retry_intervals.pop(0)
+                cursor, nominal_end = await self._next_retry_interval(retry_intervals)
             if not await self._prepare_source_until(nominal_end):
                 break
             end = min(nominal_end, self._source_prepared_seconds)
@@ -2717,6 +2731,7 @@ class StreamingPipelineSession:
                              "model": settings.OPENCODE_MODEL, "visual": self.visual_translation,
                              "source_language": self.source_language}
             interval = reserve(self._chunk_jobs, cursor, end, input_hash(source_rows, configuration))
+            self._reconcile_source_retry(interval)
             transition(interval, "RUNNING")
             self._persist_if_enabled()
             if not self.visual_translation:
@@ -2745,6 +2760,7 @@ class StreamingPipelineSession:
                 self._visual_completed_seconds = end
                 self._visual_scanned_seconds = max(self._visual_scanned_seconds, end)
                 transition(interval, "COMPLETED")
+                finish_retry(self, "source", interval["id"], interval["input_hash"])
                 await self._update_ready()
                 self._persist_if_enabled()
                 continue
@@ -2805,6 +2821,7 @@ class StreamingPipelineSession:
                             and self.segments[row.id].translation_provider) for row in source_rows):
                     raise ValueError("Đoạn dịch chưa được xuất bản vào checkpoint câu thoại.")
                 transition(interval, "COMPLETED")
+                finish_retry(self, "source", interval["id"], interval["input_hash"])
             except asyncio.CancelledError:
                 transition(interval, "RETRY_PENDING", "cancelled")
                 self._persist_if_enabled()
@@ -2813,8 +2830,11 @@ class StreamingPipelineSession:
                 if getattr(self, "_persistence_capacity_failed", False):
                     raise
                 transition(interval, "RETRY_PENDING", type(error).__name__)
-                if interval["attempts"] < 2 and (cursor, end) not in retry_intervals:
+                scheduled = schedule_retry(self, "source", interval["id"], error, interval["input_hash"])
+                if scheduled and (cursor, end) not in retry_intervals:
                     retry_intervals.append((cursor, end))
+                elif not scheduled:
+                    finish_retry(self, "source", interval["id"], interval["input_hash"])
                 for source in source_rows:
                     row = self.segments[source.id]
                     if row.status in {"READY", "PLAYED"} or row.source_method in {"text-ai", "video-ai"}:
@@ -2899,7 +2919,10 @@ class StreamingPipelineSession:
                 if retry_wave:
                     if not retry:
                         break
-                    start, end = retry.pop(0)
+                    interval_pair = await self._next_retry_interval(retry, may_wait=not wave)
+                    if interval_pair is None:
+                        break
+                    start, end = interval_pair
                 else:
                     if cursor >= target - .001:
                         break
@@ -2932,6 +2955,7 @@ class StreamingPipelineSession:
                     "provider": settings.LLM_PROVIDER, "model": settings.OPENCODE_MODEL,
                     "visual": True, "parallel_context_version": 1, "source_language": self.source_language})
                 record = reserve(self._chunk_jobs, start, end, signature)
+                self._reconcile_source_retry(record)
                 if record["state"] == "COMPLETED":
                     continue
                 owners = {row.id: self._visual_review_state(self.segments[row.id]) for row in source}
@@ -3017,10 +3041,14 @@ class StreamingPipelineSession:
                         attempts[record["id"]] = attempts.get(record["id"], 0) + 1
                         if error is None:
                             transition(record, "COMPLETED")
+                            finish_retry(self, "source", record["id"], record["input_hash"])
                         else:
                             transition(record, "RETRY_PENDING", type(error).__name__)
-                            if attempts[record["id"]] < 2:
+                            scheduled = schedule_retry(self, "source", record["id"], error, record["input_hash"])
+                            if scheduled:
                                 retry.append((record["start"], record["end"]))
+                            else:
+                                finish_retry(self, "source", record["id"], record["input_hash"])
                             for sid in outcome.work.source_ids:
                                 row = self.segments[sid]
                                 if row.status in ("READY", "PLAYED") or row.translation_provider:
@@ -4256,25 +4284,138 @@ class StreamingPipelineSession:
         count = sum(s.needs_review for s in self.segments.values())
         return {"review_count": count, "review_message": self._review_message() if count else None}
 
+    def _speech_retry_hash(self, row):
+        import json
+        values = [row.id, row.start, row.end, row.revision, row.asr_text, row.text_zh,
+                  row.final_vi, self._segment_voice(row), self.tts_engine_name]
+        return hashlib.sha256(json.dumps(values, ensure_ascii=False).encode("utf-8")).hexdigest()
+
+    def _schedule_speech_retry(self, row, error):
+        record = schedule_retry(self, "speech", str(row.id), error, self._speech_retry_hash(row))
+        if record:
+            row._retry_synthesis = row.failed_stage in {"TTS", "ALIGNING"}
+            if row._retry_synthesis:
+                row.status = "WAITING"
+            self._persist_if_enabled()
+        return record
+
+    async def _retry_delay(self, record):
+        """Wait cooperatively without occupying an AI/native worker slot."""
+        while record["next_attempt_at"] > time.time():
+            if self.is_stopped:
+                raise asyncio.CancelledError
+            await self.pause_event.wait()
+            if self.is_stopped:
+                raise asyncio.CancelledError
+            mark_intent(self, "retry_pending")
+            await asyncio.sleep(min(.25, max(.001, record["next_attempt_at"] - time.time())))
+        await self.pause_event.wait()
+        if self.is_stopped:
+            raise asyncio.CancelledError
+
+    def _reconcile_source_retry(self, current):
+        for saved in list(getattr(self, "_retry_schedule", [])):
+            if (saved["stage"] == "source" and saved["scope_id"] == current["id"]
+                    and (saved["input_hash"] != current["input_hash"] or current["state"] == "COMPLETED")):
+                finish_retry(self, "source", current["id"], saved["input_hash"])
+                self._persist_if_enabled()
+
+    async def _next_retry_interval(self, intervals, *, may_wait=True):
+        """Choose runnable source first; a cooling owner cannot block its siblings."""
+        from core.streaming.recovery import interval_id
+        for current in getattr(self, "_chunk_jobs", []):
+            self._reconcile_source_retry(current)
+        schedules = {r["scope_id"]: r for r in getattr(self, "_retry_schedule", [])
+                     if r["stage"] == "source"}
+        intervals.sort(key=lambda pair: schedules.get(interval_id(*pair), {}).get("next_attempt_at", 0))
+        pair = intervals[0]
+        record = schedules.get(interval_id(*pair))
+        if record:
+            if not may_wait and record["next_attempt_at"] > time.time():
+                return None
+            await self._retry_delay(record)
+            current = next((r for r in getattr(self, "_chunk_jobs", []) if r["id"] == record["scope_id"]), None)
+            if current and (current["input_hash"] != record["input_hash"] or current["state"] == "COMPLETED"):
+                self._reconcile_source_retry(current)
+                return intervals.pop(0)
+            if not begin_retry(self, "source", record["scope_id"], record["input_hash"]):
+                raise asyncio.CancelledError
+            self._persist_if_enabled()
+        return intervals.pop(0)
+
+    async def _queue_due_speech_retries(self):
+        """One durable owner runs later waves; successes and manual edits stay intact."""
+        while self.is_running and not self.is_stopped:
+            pending = []
+            for record in list(getattr(self, "_retry_schedule", [])):
+                if record["stage"] != "speech":
+                    continue
+                row = self.segments.get(int(record["scope_id"]))
+                if (row is None or row.status in {"READY", "PLAYED"}
+                        or self._speech_retry_hash(row) != record["input_hash"]):
+                    finish_retry(self, "speech", record["scope_id"], record["input_hash"])
+                    self._persist_if_enabled()
+                    continue
+                pending.append(record)
+            if not pending:
+                return False
+            record = min(pending, key=lambda r: r["next_attempt_at"])
+            await self.pause_event.wait()
+            if self.is_stopped:
+                raise asyncio.CancelledError
+            mark_intent(self, "retry_pending")
+            self._persist_if_enabled()
+            await self.report_progress("retry", "Dịch vụ tạm lỗi; giữ tiến độ và chờ đợt thử lại.", None)
+            await self._retry_delay(record)
+            for ready in due_entries(self):
+                if ready["stage"] != "speech":
+                    continue
+                row = self.segments.get(int(ready["scope_id"]))
+                if (row is None or row.status in {"READY", "PLAYED"}
+                        or self._speech_retry_hash(row) != ready["input_hash"]):
+                    finish_retry(self, "speech", ready["scope_id"], ready["input_hash"])
+                    continue
+                if begin_retry(self, "speech", ready["scope_id"], ready["input_hash"]):
+                    row.status, row.error = "WAITING", None
+                    self.queue.put_nowait((row.start, row.id))
+            self._persist_if_enabled()
+            if not self.queue.empty():
+                return True
+        return False
+
     async def _worker_loop(self):
         try:
             # Videos with no speech must still become playable.
             await self._update_ready()
-            while self.is_running and not self.queue.empty():
+            while self.is_running:
+                if self.queue.empty() and not await self._queue_due_speech_retries():
+                    break
                 await self.pause_event.wait()
                 if not self.is_running:
                     break
                 _, seg_id = await self.queue.get()
                 seg = self.segments.get(seg_id)
+                admitted_hash = self._speech_retry_hash(seg) if seg else None
                 try:
+                    if any(r["stage"] == "speech" and r["scope_id"] == str(seg_id)
+                           and r["state"] == "RETRY_PENDING" for r in getattr(self, "_retry_schedule", [])):
+                        continue
                     if seg and seg.status not in ("READY", "PLAYED"):
                         if seg._retry_synthesis:
                             await self._synthesize_segment(seg)
                         else:
                             await self._process_segment(seg)
+                        finish_retry(self, "speech", str(seg.id), admitted_hash)
+                        warning = f"Câu {seg.id + 1} chưa tạo được giọng; giữ phần đã xong và tiếp tục các câu sau."
+                        self.warnings[:] = [item for item in self.warnings if item != warning]
+                        self._persist_if_enabled()
                 except Exception as exc:
                     if getattr(self, "_persistence_capacity_failed", False):
                         raise
+                    if seg is not None and self._speech_retry_hash(seg) != admitted_hash:
+                        finish_retry(self, "speech", str(seg.id), admitted_hash)
+                        self._persist_if_enabled()
+                        continue
                     message = str(exc)
                     # SDK exception strings can contain prompts or credentials.
                     # Keep a useful task/stage/type diagnostic without raw text.
@@ -4286,8 +4427,12 @@ class StreamingPipelineSession:
                         seg.failed_stage = seg.status
                         seg.status = "FAILED"
                         seg.error = message
+                        scheduled = (self._schedule_speech_retry(seg, exc)
+                                     if self._speech_retry_hash(seg) == admitted_hash else None)
+                        if not scheduled:
+                            finish_retry(self, "speech", str(seg.id), admitted_hash)
                         await self.emit("segment_update", seg.to_dict())
-                    if self._chunked_source_started:
+                    if self._chunked_source_started or (seg and scheduled):
                         # Recovery uses this queue too. A failed earlier row
                         # must not strand healthy later rows on a saved run.
                         warning = f"Câu {seg_id + 1} chưa tạo được giọng; giữ phần đã xong và tiếp tục các câu sau."
@@ -4371,12 +4516,16 @@ class StreamingPipelineSession:
                     await self.report_progress("complete", stage, 100)
             else:
                 await self.emit("progress", self.get_progress())
+            if not self.is_stopped and not self.is_paused:
+                mark_intent(self, "halted" if self.error else "completed")
+                self._persist_if_enabled()
             await self.emit("finished", self.get_telemetry())
 
     def pause(self):
         from core.streaming.progress_eta import pause_eta
         pause_eta(self)
         self.is_paused = True
+        mark_intent(self, "paused")
         self.pause_event.clear()
         self._persist_if_enabled()
 
@@ -4384,6 +4533,7 @@ class StreamingPipelineSession:
         from core.streaming.progress_eta import resume_eta
         resume_eta(self)
         self.is_paused = False
+        mark_intent(self, "active")
         self.pause_event.set()
         self._persist_if_enabled()
 
@@ -4398,7 +4548,7 @@ class StreamingPipelineSession:
                   getattr(self, "export_task", None), getattr(self, "auto_export_task", None),
                   *self.edit_tasks]
         if self.is_running or self.is_editing or any(owner is not None and not owner.done() for owner in owners):
-            self.stop()
+            self.stop(_shutdown=True)
             return
         self._persist_if_enabled()
         self._release_runtime()
@@ -4407,7 +4557,7 @@ class StreamingPipelineSession:
             if active_streaming_sessions.get(self.task_id) is self:
                 active_streaming_sessions.pop(self.task_id, None)
 
-    def stop(self):
+    def stop(self, *, _shutdown=False):
         # Desktop shutdown may call from another thread after normal processing
         # has completed, while a transcript edit still owns the backend loop.
         owner = next(iter(self.edit_tasks), None)
@@ -4417,10 +4567,12 @@ class StreamingPipelineSession:
             except RuntimeError:
                 current_loop = None
             if owner.get_loop().is_running() and owner.get_loop() is not current_loop:
-                owner.get_loop().call_soon_threadsafe(self.stop)
+                owner.get_loop().call_soon_threadsafe(functools.partial(self.stop, _shutdown=_shutdown))
                 return
         if self.is_stopped and not self.edit_tasks:
             return
+        mark_intent(self, "shutdown" if _shutdown and not self.is_paused else
+                    "paused" if _shutdown else "user_stopped")
         for cancellation, _ in self._edit_cancellations.values():
             cancellation.set()
         self.is_stopped = True

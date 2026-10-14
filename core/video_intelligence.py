@@ -879,6 +879,43 @@ class VideoIntelligence:
         return [dict(row) for row in rows[max(0, lo - 3):lo] + rows[hi + 1:hi + 4]
                 if row.get("id") not in ids]
 
+    @classmethod
+    def _versioned_terminology_context(cls, source_rows, glossary=None):
+        """Version supplied terminology and source evidence; infer no relations.
+
+        The streaming path has no persisted glossary yet. An empty table is
+        explicit rather than inventing names by aligning whole draft sentences.
+        """
+        terms = []
+        supplied = glossary.get("terms", []) if isinstance(glossary, dict) else []
+        if isinstance(supplied, list):
+            for item in supplied[:500]:
+                if (not isinstance(item, dict) or any(not isinstance(item.get(key), str)
+                        or not item[key].strip() or len(item[key]) > 2000 for key in ("src", "tgt"))):
+                    continue
+                terms.append({"src": item["src"].strip(), "tgt": item["tgt"].strip(),
+                              "note": str(item.get("note", ""))[:2000]})
+        terms = sorted({cls._checkpoint_digest(row): row for row in terms}.values(),
+                       key=lambda row: (row["src"], row["tgt"], row["note"]))
+        source = [{key: row[key] for key in ("id", "start", "end", "text_zh", "asr_text", "revision") if key in row}
+                  for row in source_rows if isinstance(row, dict)]
+        source.sort(key=lambda row: (row.get("start", 0), str(row.get("id", ""))))
+        return {"version": cls._checkpoint_digest({"schema": 1, "terms": terms, "source": source}),
+                "terms": terms, "provenance": "supplied-table" if terms else "no-supplied-table",
+                "policy": "Reference spellings only; not evidence of speaker identity, kinship or correct translation."}
+
+    @staticmethod
+    def _bounded_translation_targets(payload, screens, speech_limit=8):
+        """Eight total output rows, including OCR, without duplicate ownership."""
+        batches, speech_cursor, screen_cursor = [], 0, 0
+        while speech_cursor < len(payload) or screen_cursor < len(screens):
+            speech = payload[speech_cursor:speech_cursor + min(8, speech_limit)]
+            speech_cursor += len(speech)
+            screen = screens[screen_cursor:screen_cursor + 8 - len(speech)]
+            screen_cursor += len(screen)
+            batches.append((speech, screen))
+        return batches or [([], [])]
+
     def _request_text_result(self, client, prompt, payload, observed, start, end, cancel_check=None):
         """Checkpoint exact successful subrequests; split only invalid structure.
 
@@ -1147,14 +1184,13 @@ class VideoIntelligence:
             # Bound response size even when rapid subtitle changes produce many
             # local OCR IDs. Every requested ID belongs to exactly one batch.
             speech_limit = min(8, self.OPENCODE_SPEECH_BATCH_SIZE if provider == "opencode" else 8)
-            screen_limit = self.OPENCODE_SCREEN_BATCH_SIZE if provider == "opencode" else 24
-            batches = max(1, math.ceil(len(payload) / speech_limit), math.ceil(len(representatives) / screen_limit))
+            target_batches = self._bounded_translation_targets(payload, representatives, speech_limit)
+            batches = len(target_batches)
             source_dialogue = [dict(row) for row in (getattr(self, "_source_dialogue", []) or payload)
                                if isinstance(row, dict)]
             for index in range(batches):
                 self._check_cancelled(cancel_check)
-                batch_payload = payload[index * speech_limit:(index + 1) * speech_limit]
-                batch_screens = representatives[index * screen_limit:(index + 1) * screen_limit]
+                batch_payload, batch_screens = target_batches[index]
                 source_evidence, truncated_evidence = (self._source_batch_evidence(batch_payload, observed)
                     if provider == "opencode" else (observed, set()))
                 context_screens = {row["id"]: row for row in [*source_evidence, *batch_screens]}
@@ -1162,6 +1198,8 @@ class VideoIntelligence:
                                                 "asr_text": row.get("asr_text", "")} for row in payload],
                                    "wider_source_dialogue": dialogue_context(source_dialogue, payload),
                                    "readonly_source_neighbors": self._batch_readonly_context(source_dialogue, batch_payload),
+                                   "terminology_context": self._versioned_terminology_context(
+                                       source_dialogue, getattr(self, "glossary", None)),
                                    "semantic_context": self._semantic_context(source_dialogue, batch_payload),
                                    "ocr": [{"start": row["start"], "end": row["end"],
                                              "text_zh": row["text_zh"]} for row in context_screens.values()],
@@ -1214,6 +1252,8 @@ class VideoIntelligence:
                 # remains tied to the pre-correction request inputs.
                 context_payload["wider_source_dialogue"] = dialogue_context(source_dialogue, payload)
                 context_payload["readonly_source_neighbors"] = self._batch_readonly_context(source_dialogue, batch_payload)
+                context_payload["terminology_context"] = self._versioned_terminology_context(
+                    source_dialogue, getattr(self, "glossary", None))
                 context_payload["semantic_context"] = self._semantic_context(source_dialogue, batch_payload)
                 context = json.dumps(context_payload, ensure_ascii=False)
                 corrected_payload = [{**row, "corrected_text_zh": corrections[row["id"]]["text_zh"],
@@ -1320,8 +1360,12 @@ class VideoIntelligence:
             return self._with_provenance(combined, provider, model)
         except (OpenCodeClientError, OpenRouterClientError, GeminiError, VideoIntelligenceError) as exc:
             self._check_cancelled(cancel_check)
+            if not isinstance(exc, VideoIntelligenceError):
+                # The request adapter owns transport attempts. Preserve its
+                # typed failure for the durable retry-wave coordinator.
+                raise
             prefix = "Gemini hết hạn mức và bộ dịch dự phòng không hoàn tất" if quota_fallback else "Dịch ASR + OCR miễn phí chưa hoàn tất"
-            raise VideoIntelligenceError(f"{prefix}: {exc}") from None
+            raise VideoIntelligenceError(f"{prefix}: {exc}", code=exc.code) from exc
 
     @staticmethod
     def _fallback_segments(payload):

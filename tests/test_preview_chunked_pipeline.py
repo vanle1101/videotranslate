@@ -19,6 +19,28 @@ from core.streaming.chunked_source import owned_boundary, prepare_interval, publ
 from core.streaming.pipeline import SegmentEditConflict, SegmentItem, StreamingPipelineSession
 
 
+def advance_retry_clock(session, monkeypatch, before_due=None):
+    """Advance only retry wall clocks, retaining the real 300s schedule check."""
+    from core.streaming import pipeline, retry_schedule
+    class Clock:
+        now = time.time()
+        def time(self): return self.now
+        def __getattr__(self, name): return getattr(time, name)
+    clock = Clock()
+    monkeypatch.setattr(pipeline, 'time', clock)
+    monkeypatch.setattr(retry_schedule, 'time', clock)
+    waits = []
+    async def due(record):
+        assert record['next_attempt_at'] - record['updated_at'] >= 300
+        waits.append(deepcopy(record))
+        assert len(waits) <= 8, 'Unexpected unbounded retry in a bounded fixture'
+        if before_due: before_due(record)
+        clock.now = max(clock.now, record['next_attempt_at'] + .001)
+        await asyncio.sleep(0)
+    monkeypatch.setattr(session, '_retry_delay', due)
+    return waits
+
+
 def wav(path, seconds=.5):
     path.parent.mkdir(parents=True, exist_ok=True)
     with wave.open(str(path), "wb") as handle:
@@ -254,25 +276,25 @@ def test_provider_hole_does_not_block_later_intervals_and_resume_reuses_success(
             raise TimeoutError("injected provider timeout")
         return original(path, rows, **options)
     monkeypatch.setattr(session.video_intelligence, "prepass", prepass)
-    async def run():
+    healthy = {}
+    def recover(record):
         nonlocal broken
-        await session.start()
-        await session.worker_task
-        assert requests == [0, 24, 48, 0]
+        assert requests == [0, 24, 48]
         assert session._visual_scanned_seconds == 64 and session._visual_completed_seconds == 0
         assert session.get_progress()["retry_chunks"] == 1
-        assert session.get_progress()["status"] == "FAILED" and session.can_retry
         assert all(session.segments[sid].status == "READY" for sid in range(3, 8))
-        healthy = {sid: Path(session.segments[sid].audio_path).read_bytes() for sid in range(3, 8)}
+        healthy.update({sid: Path(session.segments[sid].audio_path).read_bytes() for sid in range(3, 8)})
         broken = False
-        await session.retry_failed_synthesis()
-        await session.start_task
+    waits = advance_retry_clock(session, monkeypatch, recover)
+    async def run():
+        await asyncio.wait_for(session.start(), 10)
         await session.worker_task
-        assert requests == [0, 24, 48, 0, 0], "Completed intervals must not call the provider again"
+        assert requests == [0, 24, 48, 0], "Completed intervals must not call the provider again"
         assert session._visual_completed_seconds == 64
         assert all(row.status == "READY" for row in session.segments.values())
         assert all(Path(session.segments[sid].audio_path).read_bytes() == data for sid, data in healthy.items())
     asyncio.run(run())
+    assert len(waits) == 1 and not session._retry_schedule
 
 
 def test_new_full_visual_request_uses_bounded_source_pipeline(preview):
@@ -364,23 +386,25 @@ def test_parallel_interval_retry_is_independent_and_resume_reuses_completed_owne
                 raise TimeoutError("injected interval failure")
             return original(path, rows, **options)
     monkeypatch.setattr(session, "_new_chunk_intelligence", PrivateEngine)
-    async def run():
-        nonlocal broken
-        await session.start()
-        await session.worker_task
+    healthy = {}
+    prior_bounds = []
+    later_calls = 0
+    def recover(record):
+        nonlocal broken, later_calls
         successful = next(row for row in session._chunk_jobs if row["start"] != 0)
         assert successful["state"] == "COMPLETED" and successful["attempts"] == 1
         assert session._visual_completed_seconds == 0
         assert session.segments[0].status == "READY"
-        healthy = {sid: Path(row.audio_path).read_bytes() for sid, row in session.segments.items() if row.status == "READY"}
-        prior_bounds = [(row["start"], row["end"]) for row in session._chunk_jobs]
+        healthy.update({sid: Path(row.audio_path).read_bytes() for sid, row in session.segments.items() if row.status == "READY"})
+        prior_bounds.extend((row["start"], row["end"]) for row in session._chunk_jobs)
         later_calls = attempts[successful["start"]]
         monkeypatch.setattr(settings, "TRANSLATION_CHUNK_SECONDS", 30)
         broken = False
-        await session.retry_failed_synthesis()
-        await session.start_task
+    advance_retry_clock(session, monkeypatch, recover)
+    async def run():
+        await asyncio.wait_for(session.start(), 10)
         await session.worker_task
-        assert attempts[successful["start"]] == later_calls
+        assert attempts[next(row["start"] for row in session._chunk_jobs if row["start"] != 0)] == later_calls
         assert [(row["start"], row["end"]) for row in session._chunk_jobs] == prior_bounds
         assert all(Path(session.segments[sid].audio_path).read_bytes() == content for sid, content in healthy.items())
         assert all(row.status == "READY" for row in session.segments.values())
@@ -462,12 +486,14 @@ def test_provider_result_without_published_output_is_not_completed(preview, monk
         assert session._visual_completed_seconds == 0
         assert session.get_progress()["status"] == "FAILED"
         assert session._chunk_jobs[0]["state"] == "RETRY_PENDING"
-        assert session._chunk_jobs[0]["attempts"] == 2
+        assert session._chunk_jobs[0]["attempts"] == 1
+        assert not session._retry_schedule, "Invalid content must require repair, not transport retry"
     asyncio.run(run())
 
 
 def test_partial_source_retry_waits_for_owned_speech_and_preserves_ready_rows(preview, monkeypatch):
     session, prepared, analyzed, speech, _ = preview
+    advance_retry_clock(session, monkeypatch)
     session.total_duration = 24
     original_prepass = session.video_intelligence.prepass
     original_synthesize = session._synthesize_segment
@@ -1897,6 +1923,11 @@ def test_transient_tts_exhaustion_retries_late_after_independent_siblings(previe
     session.segments[1].status = "WAITING"
     original = session._synthesize_segment
     calls = []
+    def before_due(record):
+        assert calls == [(1, False), (2, False), (3, False)]
+        assert speech == [2, 3] and session.queue.empty()
+        assert record["state"] == "RETRY_PENDING" and record["rounds"] == 1
+    waits = advance_retry_clock(session, monkeypatch, before_due)
     async def synthesize(row, *, allow_pacing=True):
         calls.append((row.id, allow_pacing))
         if row.id == 1 and not allow_pacing:
@@ -1906,7 +1937,12 @@ def test_transient_tts_exhaustion_retries_late_after_independent_siblings(previe
             assert speech == [2, 3], "Transient row retried before independent audio was published"
         await original(row)
     monkeypatch.setattr(session, "_synthesize_segment", synthesize)
-    asyncio.run(session._resume_speech_rows(session.segments.values()))
+    async def run():
+        await session._resume_speech_rows(session.segments.values())
+        assert calls == [(1, False), (2, False), (3, False)]
+        assert len(session._retry_schedule) == 1
+        await asyncio.wait_for(session._worker_loop(), 5)
+    asyncio.run(run())
     assert calls == [(1, False), (2, False), (3, False), (1, True)]
     pending = [payload for event, payload in events if event == "segment_update" and payload.get("id") == 1
                and payload.get("status") == "WAITING"]
@@ -1914,6 +1950,7 @@ def test_transient_tts_exhaustion_retries_late_after_independent_siblings(previe
     assert session.segments[1].status == "READY" and session.segments[1].error is None
     assert all("Câu 2 chưa tạo" not in warning for warning in session.warnings)
     assert session.get_progress()["segment_states"]["RETRY_PENDING"] == 0
+    assert len(waits) == 1 and not session._retry_schedule
 
 
 @pytest.mark.parametrize("permanent", ["auth", "tls", "configuration", "untyped"])
@@ -1940,7 +1977,7 @@ def test_permanent_tts_errors_never_enter_late_retry_but_siblings_continue(previ
     assert session.segments[1].status == "FAILED" and session.segments[1].failed_stage == "TTS"
 
 
-def test_repeated_transient_tts_failure_is_one_extra_round_without_recursion(preview, monkeypatch):
+def test_repeated_transient_tts_failure_schedules_unlimited_rounds_until_stopped(preview, monkeypatch):
     from core.engines.tts.edge_fallback import EdgeTTSRequestError
     session, _, _, speech, _ = preview
     saved_full_queue(session)
@@ -1948,6 +1985,13 @@ def test_repeated_transient_tts_failure_is_one_extra_round_without_recursion(pre
     session.segments[1].status = "WAITING"
     original = session._synthesize_segment
     calls = []
+    def before_due(record):
+        assert speech == [2, 3] and session.queue.empty()
+        assert all(session.segments[sid].status == "READY" for sid in (2, 3))
+        if record["rounds"] == 3:
+            session.stop()
+            raise asyncio.CancelledError
+    waits = advance_retry_clock(session, monkeypatch, before_due)
     async def synthesize(row, *, allow_pacing=True):
         calls.append((row.id, allow_pacing))
         if row.id == 1:
@@ -1959,10 +2003,17 @@ def test_repeated_transient_tts_failure_is_one_extra_round_without_recursion(pre
         deferred = await session._resume_speech_rows(session.segments.values(), defer_pacing=True)
         assert session.segments[1].to_dict()["processing_state"] == "RETRY_PENDING"
         await session._resume_deferred_speech_rows(deferred + deferred)
+        assert calls == [(1, False), (2, False), (3, False)], "Cooling failures are not pacing work"
+        with pytest.raises(asyncio.CancelledError):
+            await asyncio.wait_for(session._worker_loop(), 5)
     asyncio.run(run())
-    assert calls == [(1, False), (2, False), (3, False), (1, True)] and speech == [2, 3]
-    assert session.segments[1].status == "FAILED" and session.segments[1].error == "Safe rate limit"
-    assert session.get_progress()["segment_states"]["RETRY_PENDING"] == 0
+    assert calls == [(1, False), (2, False), (3, False), (1, True), (1, True)] and speech == [2, 3]
+    assert [record["rounds"] for record in waits] == [1, 2, 3]
+    assert all(later["next_attempt_at"] >= earlier["next_attempt_at"] + 300
+               for earlier, later in zip(waits, waits[1:]))
+    assert session.is_stopped and len(session._retry_schedule) == 1
+    assert session._retry_schedule[0]["state"] == "RETRY_PENDING"
+    assert session.get_progress()["segment_states"]["RETRY_PENDING"] == 1, session.segments[1].to_dict()
     assert any("Câu 2 chưa tạo" in warning for warning in session.warnings)
 
 
@@ -1996,7 +2047,11 @@ def test_transient_late_retry_preserves_stop_and_newer_manual_revision(preview, 
         assert calls == [(1, False), (2, False)]
         assert session.segments[1].status == "WAITING" and session.segments[3].status == "WAITING"
     else:
-        asyncio.run(session._resume_speech_rows(session.segments.values()))
+        async def run():
+            await session._resume_speech_rows(session.segments.values())
+            assert not await session._queue_due_speech_retries()
+            assert not session._retry_schedule and session.queue.empty()
+        asyncio.run(run())
         assert calls == [(1, False), (2, False), (3, False)]
         assert session.segments[1].final_vi == "Lời vừa sửa tay."
         assert session.segments[1].verification["status"] == "manual"
@@ -2099,6 +2154,7 @@ def test_parallel_pending_owners_resume_with_one_worker_without_replanning(previ
 
 def test_parallel_extended_boundary_prepares_stable_lookahead_before_retry(preview, monkeypatch):
     session, *_ = preview
+    advance_retry_clock(session, monkeypatch)
     session.translation_mode, session.total_duration = "full", 130
     session._parallel_chunk_planning = True
     monkeypatch.setattr(session, "_parallel_chunk_capacity", lambda: 1)
@@ -2193,8 +2249,8 @@ def test_parallel_invalid_callback_coverage_keeps_owner_pending_and_healthy_peer
 
     asyncio.run(run())
     failed, healthy = session._chunk_jobs
-    assert failed["state"] == "RETRY_PENDING" and failed["attempts"] == 2
+    assert failed["state"] == "RETRY_PENDING" and failed["attempts"] == 1
     assert healthy["state"] == "COMPLETED" and healthy["attempts"] == 1
-    assert attempts == {0.: 2, 60.: 1}
+    assert attempts == {0.: 1, 60.: 1}
     assert all(row.status == "READY" for row in session.segments.values() if row.start >= 60)
     assert len(speech) == len(set(speech)), "Partial successful callback batches must not synthesize twice"
