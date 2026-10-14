@@ -1,5 +1,34 @@
 # Runtime QA report
 
+## Real Stop / fresh-runtime Resume — October 15, 2026, 06:25
+
+The long run was intentionally stopped through the production UI while a real
+Muse address request was on attempt4 after three 90-second timeouts. A separate
+offscreen page attached to the existing backend, opened task `5bea8fe5` and
+clicked its visible Stop button. **Stop acknowledged in3.375s**; the adapter
+logged `PROVIDER_CANCELLED` at06:24:47. Five seconds later all75 source IDs,
+453.508934s prepared-source coverage and SHA256 of all24 retained WAVs matched.
+The checkpoint was STOPPED/user_stopped. Its backend exited; PID28236 was absent.
+The original full-run harness therefore exits FAIL/interrupted, not MP4 success.
+
+A fresh production backend53169/process21292 loaded the new code. The actual
+UI reopened the same task and clicked Retry/Continue. Before that click the
+harness checked every saved source ID/start/end/ASR text, prepared coverage,
+manual edits and all24 retained WAV hashes: **PASS**. It resumed six unfinished
+owners from saved visual checkpoints, without restarting source ASR. Actual UI
+phase now showed parallel analysis instead of stale preparation. At06:25:46,
+the real backend exposed two owned CLI processes and the new RAM diagnostics;
+42 translations and24 audio rows existed. Full rendering remains unverified.
+
+Shutdown emitted a Uvicorn cancellation traceback for an outstanding media
+transfer when the second attached page was still present. The backend did exit;
+this was not a lost checkpoint or failed provider cancellation. Quiet shutdown
+with multiple attached media clients remains a separate limitation to inspect.
+
+Current-test temporary cleanup (`pytest-1306` through `pytest-1308`) was rejected
+by automatic approval review as `blocked by policy`. Those directories remain;
+no alternate deletion route was attempted.
+
 ## Live adapter retest and downstream bottleneck — October 15, 2026, 06:17
 
 Fresh code made one uncached real Muse call under run ID
