@@ -264,3 +264,16 @@ def test_explicit_fixed_neighbor_is_not_rewritten_or_compacted(rescue):
         rows, rescue.segments[1], .6, fixed_ids={0}))
     assert not staged
     assert shadow == rows
+
+
+def test_timing_conflict_reports_capacity_with_manual_intervals_fixed(rescue):
+    for sid in (0, 2):
+        rescue.segments[sid].verification = {"status": "manual"}
+        rescue.segments[sid].dub_start = rescue.segments[sid].start
+        rescue.segments[sid].dub_end = rescue.segments[sid].end
+    focus = rescue.segments[1]
+    error = SpeechBudgetError("Offline timing conflict")
+    error.required_dub_duration = .7
+    rescue._remember_pacing_failure(focus, error, [])
+    assert focus.timing_issue["available_seconds"] == pytest.approx(.5)
+    assert focus.timing_issue["required_seconds"] == .7

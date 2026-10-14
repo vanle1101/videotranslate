@@ -30,6 +30,9 @@ missing fitted speech; it must not be called a successful full export.
   inconsistency. It now retains a draft candidate only when its independent
   semantic gate passed, without promoting its review status. Timing/recovery
   regression: **71 passed**, including rejected unverified candidates.
+- Timing-conflict diagnostics now use the same fixed manual-neighbor intervals
+  as synthesis. Previously a failed row could report more available time than
+  the actual fitting engine permitted. Focused timing/recovery suite: **72 passed**.
 
 Files: `core/review_retry.py`, `core/translation_review.py`,
 `core/streaming/pipeline.py`, `tests/conftest.py`,

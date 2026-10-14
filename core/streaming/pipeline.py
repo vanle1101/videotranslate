@@ -4060,7 +4060,12 @@ class StreamingPipelineSession:
         candidate = getattr(error, "candidate_text", None)
         proof = getattr(error, "pacing_verification", None)
         if type(required) in (int, float) and math.isfinite(required) and required > 0:
-            _, _, capacity, _, _ = self._dub_fit_window(seg, self._dub_rows())
+            timing_rows, _, capacity, known_duration, _ = self._dub_fit_window(seg, self._dub_rows())
+            fixed_ids = {row["id"] for row in timing_rows if row["id"] != seg.id
+                         and (self.segments[row["id"]].verification or {}).get("status") == "manual"}
+            if fixed_ids:
+                capacity = min(capacity, available_reflow_duration(timing_rows, seg.id,
+                    total_duration=known_duration, fixed_ids=fixed_ids))
             seg.timing_issue = {
                 "code": "TIMING_CONFLICT", "required_seconds": float(required),
                 "available_seconds": capacity, "max_speed": self.aligner.max_speed,
