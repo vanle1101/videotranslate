@@ -1556,6 +1556,10 @@ class StreamingPipelineSession:
                 and bool(audit["address_stale_source_ids"]))
         def needs_obsolete_gate_recheck(row):
             audit = row.verification or {}
+            if AutomaticTranslationReviewer.needs_measured_source_recovery(row, self.source_language):
+                # Revisit only contaminated source, not every historical
+                # review. Measured ASR remains available; no ASR restart.
+                return True
             # A target-only spelling policy must not invalidate every existing
             # semantic review. Revisit only an unexamined ASCII draft; retain a
             # recorded unresolved spelling decision until its wording changes.

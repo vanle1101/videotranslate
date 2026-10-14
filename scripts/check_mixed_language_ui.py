@@ -31,7 +31,7 @@ def click_ready(page, element_id, timeout=30):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('source', type=Path)
-    parser.add_argument('--expect-source', choices=['mixed', 'zh'], default='mixed',
+    parser.add_argument('--expect-source', choices=['mixed', 'zh', 'ko'], default='mixed',
         help='Assert the observed source scripts; default retains the mixed-language check.')
     parser.add_argument('--resume', help='Resume only a QA project for this exact source')
     parser.add_argument('--review', action='store_true', help='Run real review of the restored QA project through its UI')
@@ -135,7 +135,11 @@ def main():
         assert rows and all(row.get('final_vi','').strip() or row.get('confirmed_silence') for row in rows)
         assert all(row.get('status') in {'READY','PLAYED'} or row.get('confirmed_silence') for row in rows), rows
         assert snapshot.get('final_output_blocked') is False, {'output_gate':snapshot.get('final_output_blocked'),'rows':rows}
-        assert any(any('\u4e00' <= c <= '\u9fff' for c in row.get('text_zh','')) for row in rows), rows
+        if args.expect_source == 'ko':
+            assert any(any('\uac00' <= c <= '\ud7a3' for c in row.get('text_zh','')) for row in rows), rows
+            assert not any(any('\u4e00' <= c <= '\u9fff' for c in row.get('text_zh','')) for row in rows), rows
+        else:
+            assert any(any('\u4e00' <= c <= '\u9fff' for c in row.get('text_zh','')) for row in rows), rows
         if args.expect_source == 'mixed':
             assert any(any(c.isascii() and c.isalpha() for c in row.get('text_zh','')) for row in rows), rows
         event('TRANSLATION_ROWS',[{k:row.get(k) for k in ('id','text_zh','final_vi','status','needs_review','audio_url')} for row in rows])

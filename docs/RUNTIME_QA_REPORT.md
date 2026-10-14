@@ -1,5 +1,52 @@
 # Runtime QA report
 
+## Korean speech / Chinese-caption source ownership — October 15, 2026
+
+**Real-provider runtime test: FAIL.** The offscreen production UI created QA
+task `34e42f42` from `cleanup/qa/korean-caption-qa.mp4`, detected speech with
+source language Auto, generated Vietnamese speech, promoted Preview to Full,
+and published a 296,901-byte MP4. The harness then rejected the result because
+review had replaced Korean source speech with Chinese caption text in IDs 2
+and 3. ID 2 was incorrectly marked source-supported and corrected. Output
+existence and the UI's Completed label therefore did not satisfy acceptance.
+
+Reproduction: run `scripts/check_mixed_language_ui.py
+cleanup/qa/korean-caption-qa.mp4 --expect-source ko --timeout 1200`. The added
+Korean assertion requires Hangul and rejects Han-only replacement of this
+known Korean-only speech fixture. All four measured `asr_text` rows remained
+Korean; the final source fields for IDs 2/3 became `这里有很多有趣的书。` and
+`明天会和朋友再来。`. The original manifest/audio were retained. The harness
+shut down its backend after the assertion failure.
+
+Root cause: the review prompt still described Chinese-to-Vietnamese review;
+more importantly, the local acceptance gate considered a matching subtitle
+region and exact OCR coverage sufficient to change source speech, without
+checking script ownership against measured ASR.
+
+Fix applied: both primary source correction and independent review reject
+incompatible OCR scripts against measured ASR. Review restores contaminated
+saved source as an unverified measured draft; manual edits and genuinely
+matching dual-ASR proof retain their ownership. Resume selects affected rows
+without restarting ASR or invalidating every old review. Prompts and cache
+identities carry source language. Matching scripts are not proof of language
+or meaning. Existing narrow metre spellings (`100m`/`100米`) remain equivalent.
+Validation: 124 focused review/resume/source tests passed in 10.72s; 146
+multilingual-source/Chinese-evidence regressions passed in 5.28s. Real UI
+review of the retained task is running; its retest verdict remains pending.
+
+Separately, pacing may freshly validate one shortest eligible historical
+candidate before requesting another rewrite, within the existing five-proposal
+budget. Historical approval alone never permits synthesis. Current audio is
+measured again; manual mode, changed identities and substantive rejections
+remain excluded. The agent ran 121 pacing tests successfully. Old code-revision
+history is intentionally not migrated, so this change alone is not evidence
+that the two remaining long-video timing conflicts have been solved.
+
+Provenance: the 24-second input is **synthetic Korean Edge-TTS speech with
+Chinese captions**, not a natural Douyin clip. Muse, Vietnamese TTS, rendering
+and production UI execution were real. This does not satisfy natural Korean
+video acceptance, and the emitted MP4 is not a passed deliverable.
+
 ## Long recovery result and fresh-runtime acceptance — October 15, 2026, 04:52
 
 **Long full export: FAIL / timing conflicts remain.** Real production UI recovery

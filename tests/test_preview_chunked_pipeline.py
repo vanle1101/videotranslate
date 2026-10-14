@@ -1271,6 +1271,40 @@ def test_obsolete_negative_gates_are_reviewed_once_without_force_approval(previe
     assert all(row.final_vi == "Lời đã lưu." for row in session.segments.values())
 
 
+def test_cross_script_source_recovery_only_revisits_affected_nonmanual_rows(preview, monkeypatch):
+    from core.translation_review import AutomaticTranslationReviewer
+    session, *_ = preview
+    session._chunked_source_started = True
+    session._visual_completed_seconds = 24
+    session.source_language = "auto"
+    session.segments = {}
+    for sid in range(3):
+        row = SegmentItem(sid, sid * 2, sid * 2 + 1, 1)
+        row.status, row.asr_text, row.text_zh, row.final_vi = "READY", "안녕하세요", "你好", "Xin chào."
+        row.source_method, row.translation_provider = "text-ai", "opencode"
+        row.verification = {"status": "manual" if sid == 1 else "verified", "source_supported": True}
+        if sid == 2:
+            row.text_zh = row.asr_text
+        session.segments[sid] = row
+    original = deepcopy(session.segments[1].to_dict())
+    calls = []
+    async def review(**options):
+        calls.append(options)
+        for sid in options["segment_ids"]:
+            row = session.segments[sid]
+            row.text_zh = row.asr_text
+            row.verification = {"status": "unresolved", "source_supported": False,
+                "review_gate_revision": AutomaticTranslationReviewer.REVIEW_GATE_REVISION}
+    monkeypatch.setattr(session, "_review_translations", review)
+    async def run():
+        await session._resume_pending_chunk_reviews()
+        await session._resume_pending_chunk_reviews()
+    asyncio.run(run())
+    assert calls == [{"regenerate_audio": True, "segment_ids": {0}}]
+    assert session.segments[0].verification["source_supported"] is False
+    assert session.segments[1].to_dict() == original
+
+
 def test_orthography_recheck_targets_only_unexamined_ascii_draft(preview, monkeypatch):
     from core.translation_review import AutomaticTranslationReviewer
     session, *_ = preview

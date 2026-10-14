@@ -106,7 +106,7 @@ def _capture_visual_revision():
     try:
         return [hashlib.sha256(Path(__file__).with_name(name).read_bytes()).hexdigest()
                 for name in ("video_intelligence.py", "screen_ocr.py", "chinese_text.py", "translation_context.py",
-                             "structured_response.py", "semantic_segments.py")]
+                             "structured_response.py", "semantic_segments.py", "source_language.py")]
     except OSError:
         return None
 
@@ -291,6 +291,8 @@ class VideoIntelligence:
         return result
 
     def __init__(self, client: Optional[GeminiClient] = None, *, source_language="zh"):
+        from core.source_language import validate_source_language
+        self.source_language = validate_source_language(source_language)
         self.provider = validate_visual_provider()
         self.client = (client or GeminiClient(timeout=120)) if self.provider == "gemini" else None
         self._video_duration: Optional[float] = None
@@ -347,6 +349,7 @@ class VideoIntelligence:
             if isinstance(actual_model, str):
                 config["client_model"] = actual_model
             identity = {"version": self.CHECKPOINT_VERSION, "source": source,
+                        "source_language": getattr(self, "source_language", "auto"),
                         "config": config, "provider": self.provider,
                         "duration": total_duration,
                         "segments": [{name: self._get(seg, name, None) for name in
@@ -767,6 +770,8 @@ class VideoIntelligence:
         prompt = (
             "You are repairing machine-recognized source speech in its ORIGINAL language, NOT translating yet. The legacy text_zh field can contain any language. ASR is not definitive. "
             "Compare simultaneous locally measured OCR and adjacent sentences. Distinguish visible claims/questions "
+            "from translated captions: subtitles in a different language are context only, never a replacement "
+            "for the measured spoken language. In auto mode each utterance keeps its own spoken language. "
             "from spoken rebuttals. Restore recognition errors only when cited same-time OCR supports the correction; "
             "do not invent missing clauses, names, actions, conclusions, or spoken words from a title. "
             "Preserve negation, numeric scope and what duration modifies. If evidence cannot determine the source, "
@@ -828,6 +833,11 @@ class VideoIntelligence:
                 text, refs = source.get("asr_text", ""), []
                 reason = "AI dẫn chứng chữ ở sai thời điểm; giữ bản nhận giọng để nghe lại."
             original = source.get("asr_text", "")
+            from core.source_language import source_ocr_script_conflict
+            if source_ocr_script_conflict(original, text, getattr(self, "source_language", "auto")):
+                text, refs = original, []
+                reason = "Chữ trên hình khác hệ chữ của lời nói; giữ nguồn nhận giọng, cần đối chiếu âm thanh."
+                invalid_evidence = True
             changed = self._compact_text(text) != self._compact_text(original)
             source_supported = not changed
             if changed and refs:
