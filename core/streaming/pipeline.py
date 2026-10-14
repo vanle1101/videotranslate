@@ -1544,6 +1544,14 @@ class StreamingPipelineSession:
                 and bool(audit["address_stale_source_ids"]))
         def needs_obsolete_gate_recheck(row):
             audit = row.verification or {}
+            # A target-only spelling policy must not invalidate every existing
+            # semantic review. Revisit only an unexamined ASCII draft; retain a
+            # recorded unresolved spelling decision until its wording changes.
+            orthography = audit.get("target_orthography") or {}
+            if (AutomaticTranslationReviewer._target_orthography_candidate(row.to_dict())
+                    and (orthography.get("original") != row.final_vi
+                         or orthography.get("status") == "failed")):
+                return True
             # Gate/schema fixes cannot repair a historical negative verdict
             # by flipping a boolean. Re-audit each obsolete unresolved verdict
             # once, using current evidence; a current negative stays negative.

@@ -100,13 +100,13 @@ META_FIELDS = frozenset((
     "tts_seconds slot_seconds fit_ratio semantic_status acoustic_status source_region_verified "
     "reference_zh reference_vi equivalent different_source same_meaning text_preserved "
     "mode input_duration output_duration sample_rate channels elapsed_seconds rtf "
-    "diagnostic audio_evidence audio_consensus audio_audit_status review_gate_revision missing_translation_recovery"
+    "diagnostic audio_evidence audio_consensus audio_audit_status review_gate_revision missing_translation_recovery target_orthography"
     " state attempts input_hash error_code updated_at focus_ids"
     " scope_id confirmation_id code required_seconds available_seconds max_speed remedy"
     " speaker_evidence speaker_confirmation utterance_id utterance_evidence source_asr_row_id source_asr_start source_asr_end source_piece_index source_piece_count"
 ).split())
 DIAGNOSTIC_STAGES = frozenset((
-    "semantic_request semantic_schema semantic_second_pass ocr_evidence audio_evidence audio_semantic_review"
+    "semantic_request semantic_schema semantic_second_pass ocr_evidence audio_evidence audio_semantic_review target_orthography"
 ).split())
 DIAGNOSTIC_CODES = frozenset((
     "invalid_response provider_configuration provider_model provider_timeout asr_timeout "
@@ -431,6 +431,24 @@ def _clean(value, *, depth=0):
                 continue
             if key == "diagnostic":
                 result[key] = _clean_diagnostic(item, depth=depth + 1)
+            elif key == "target_orthography":
+                if (not isinstance(item, dict)
+                        or item.get("status") not in {"draft_corrected", "unchanged", "review_required", "failed"}):
+                    raise ValueError("Kết quả rà chính tả bản Việt không hợp lệ.")
+                cleaned = {"status": item["status"]}
+                for field in ("original", "proposal", "reason", "provider", "model"):
+                    if field in item:
+                        text = item[field]
+                        if not isinstance(text, str) or len(text) > 2000 or "\x00" in text:
+                            raise ValueError("Nội dung rà chính tả bản Việt không hợp lệ.")
+                        cleaned[field] = _clean(text, depth=depth + 1)
+                if "probabilistic" in item:
+                    if item["probabilistic"] is not True:
+                        raise ValueError("Rà chính tả AI phải giữ nhãn đánh giá xác suất.")
+                    cleaned["probabilistic"] = True
+                if "diagnostic" in item:
+                    cleaned["diagnostic"] = _clean_diagnostic(item["diagnostic"], depth=depth + 1)
+                result[key] = cleaned
             elif key == "audio_evidence":
                 result[key] = _clean_audio_evidence(item, depth=depth + 1)
             elif key == "address_context_sources":

@@ -12,6 +12,8 @@ from difflib import SequenceMatcher
 import json
 import math
 import logging
+import re
+import unicodedata
 from pathlib import Path
 
 from config import settings
@@ -868,6 +870,135 @@ class AutomaticTranslationReviewer:
         return result
 
     @staticmethod
+    def _unaccented(value):
+        return "".join(char for char in unicodedata.normalize("NFD", value)
+                       if not unicodedata.combining(char)).replace("đ", "d").replace("Đ", "D")
+
+    @staticmethod
+    def _target_orthography_candidate(row):
+        text = row.get("final_vi", "")
+        return (isinstance(text, str) and len(text) <= 2000 and text.isascii()
+            and len(re.findall(r"[A-Za-z]+", text)) >= 4
+            and (row.get("verification") or {}).get("status") != "manual")
+
+    @classmethod
+    def _orthography_only(cls, original, candidate):
+        """A spelling constraint, never evidence of meaning or source accuracy."""
+        if cls._unaccented(candidate) != original or candidate == original:
+            return False
+        old_words, new_words = re.findall(r"\w+", original), re.findall(r"\w+", candidate)
+        if len(old_words) != len(new_words):
+            return False
+        for index, (old, new) in enumerate(zip(old_words, new_words)):
+            if old == new:
+                continue
+            # Restoring a name or an ambiguous address (ba/bà, co/cô, etc.)
+            # would need a separate source/relationship decision. Keep it for
+            # review instead of treating the accent-free skeleton as proof.
+            if (index > 0 and old[:1].isupper()) or contains_address_expression(new):
+                return False
+        return True
+
+    def _repair_target_orthography(self, result, originals, context_rows, client, check, checkpoint=None):
+        """Independently repair an ASCII Vietnamese draft, retaining uncertainty.
+
+        Never copy the translation from a rejected source rewrite. Two bounded
+        target-only judgements must agree, and neither can verify the retained
+        source, speaker, relationship, or meaning. Ambiguous wording stays put.
+        """
+        originals = {row["id"]: row for row in originals}
+        schema = {"type": "object", "required": ["final_vi", "orthography_only", "ambiguous", "reason"],
+            "properties": {"final_vi": {"type": "string", "maxLength": 2000},
+                "orthography_only": {"type": "boolean"}, "ambiguous": {"type": "boolean"},
+                "reason": {"type": "string", "maxLength": 1000}}}
+        for sid, row in result["segments"].items():
+            original = originals.get(sid, {})
+            text = row.get("final_vi", "")
+            if (not self._target_orthography_candidate(row)
+                    or (original.get("verification") or {}).get("status") == "manual"):
+                continue
+            check()
+            context = dialogue_context(context_rows, [row])
+            stage = {"kind": "target_orthography_v1", "id": sid, "text": text, "context": context}
+            prompt = (
+                "Chỉ rà chính tả tiếng Việt của bản nháp được giữ lại, KHÔNG dịch lại hoặc sửa nguồn. "
+                "Thêm dấu tiếng Việt nếu ngữ pháp tiếng Việt đủ rõ; giữ nguyên từng từ, thứ tự, "
+                "dấu câu, khoảng trắng, chữ hoa và số. Không đoán tên riêng, vai, cách xưng hô. "
+                "Nguồn và bản dịch trong ngữ cảnh đều có thể sai, không dùng nguồn chưa xác minh "
+                "để chọn một nghĩa. Nếu có nhiều cách thêm dấu hợp lý hoặc cần đoán nghĩa, "
+                "ambiguous=true và giữ nguyên bản nháp. orthography_only=true chỉ khi không thay "
+                "đổi ý của bản nháp. Đây là sửa bản nháp, KHÔNG xác minh bản dịch hoặc nguồn. "
+                "Trả JSON đúng các trường final_vi (string), orthography_only (boolean), "
+                "ambiguous (boolean), reason (string).\n"
+                + json.dumps({"draft": text, "context_unverified": context}, ensure_ascii=False))
+
+            def validate(raw):
+                data = VideoIntelligence._parse_json(raw)
+                validate_schema(data, schema, error_type=VideoIntelligenceError)
+                if not data["reason"].strip():
+                    raise VideoIntelligenceError("Thiếu lý do rà chính tả.", code="invalid_content")
+                return data
+
+            try:
+                saved = checkpoint.load(stage) if checkpoint else None
+                if isinstance(saved, dict) and set(saved) == {"first", "second"}:
+                    try:
+                        first, second = validate(saved["first"]), validate(saved["second"])
+                    except (ValueError, VideoIntelligenceError):
+                        saved = None
+                else:
+                    saved = None
+                if saved is None:
+                    _, first = request_structured(client, prompt, validate,
+                        schema_id="target-orthography-v1", task_kind="semantic_review", max_tokens=2000)
+                    check()
+                    # The critic sees the retained draft and its uncertainty,
+                    # never the unsupported source proposal from another pass.
+                    _, second = request_structured(client, prompt
+                        + "\nRà độc lập đề xuất sau. Nếu có thay đổi ý, đoán cách xưng hô/tên hoặc "
+                        "còn nhập nhằng thì ambiguous=true. Không đồng ý chỉ vì đề xuất có dấu: "
+                        + json.dumps(first, ensure_ascii=False), validate,
+                        schema_id="target-orthography-v1", task_kind="semantic_review", max_tokens=2000)
+                    check()
+                    if checkpoint:
+                        checkpoint.store(stage, {"first": first, "second": second})
+                accepted = (all(item["orthography_only"] and not item["ambiguous"]
+                                for item in (first, second))
+                    and first["final_vi"] == second["final_vi"]
+                    and self._orthography_only(text, second["final_vi"]))
+                unchanged = (all(item["orthography_only"] and not item["ambiguous"]
+                                 and item["final_vi"] == text for item in (first, second)))
+                row.setdefault("verification", {})["target_orthography"] = {
+                    "status": "draft_corrected" if accepted else "unchanged" if unchanged else "review_required",
+                    "original": text, "proposal": second["final_vi"],
+                    "reason": second["reason"], "probabilistic": True,
+                    "provider": "opencode", "model": str(getattr(client, "model", ""))[:200]}
+                if not unchanged:
+                    if accepted:
+                        row["final_vi"] = second["final_vi"]
+                    # Literal/natural drafts and source remain intact. All
+                    # semantic/address approval belongs to the old text pair.
+                    row["needs_review"] = True
+                    audit = row["verification"]
+                    audit.update(status="unresolved", semantic_verified=False,
+                                 address_verified=False)
+                    if accepted:
+                        audit["translation_changed"] = True
+                    reason = ("Đã thêm dấu cho bản nháp; nguồn, nghĩa và xưng hô vẫn cần kiểm tra."
+                        if accepted else "Chính tả bản Việt còn nhập nhằng; giữ bản nháp để kiểm tra.")
+                    row["review_reason"] = ((row.get("review_reason") or "") + " " + reason).strip()
+                    audit["reason"] = row["review_reason"]
+            except Exception as error:
+                check()  # Cancellation must never be converted to a draft.
+                retain_failure(result, error, [row])
+                row.setdefault("verification", {})["target_orthography"] = {
+                    "status": "failed", "diagnostic": self._diagnostic(error, "target_orthography", [row])}
+                row["needs_review"] = True
+                row["verification"].update(status="incomplete", semantic_verified=False, address_verified=False)
+                row["review_reason"] = "Chưa rà được dấu tiếng Việt của bản nháp; hãy kiểm tra lại."
+        return self._summarize(result)
+
+    @staticmethod
     def _windows(rows):
         windows = []
         for row in sorted(rows, key=lambda item: item["start"]):
@@ -1131,11 +1262,13 @@ class AutomaticTranslationReviewer:
             f"Ngữ cảnh lân cận (không tạo thêm ID): {json.dumps(context, ensure_ascii=False)}"
         )
 
-    @staticmethod
-    def _qualified_context(original, accepted):
+    @classmethod
+    def _qualified_context(cls, original, accepted):
         audit = accepted.get("verification") or {}
         if (not accepted.get("needs_review") and audit.get("status") in {"verified", "corrected"}
-                and audit.get("source_supported") is True and audit.get("semantic_verified") is True):
+                and audit.get("source_supported") is True and audit.get("semantic_verified") is True
+                and (not cls._target_orthography_candidate(accepted)
+                     or (audit.get("target_orthography") or {}).get("status") == "unchanged")):
             return accepted
         return original
 
@@ -1444,8 +1577,13 @@ class AutomaticTranslationReviewer:
                 progress_callback(round(30 + 45 * (index + 1) / batches, 1))
         result["translation_sources"].append(provenance)
         result = self.resolve_audio_uncertainty(video_path, result, cancel_check,
-            (lambda value: progress_callback(75 + .25 * value)) if progress_callback else None,
+            (lambda value: progress_callback(75 + .25 * value) if value < 100 else None)
+                if progress_callback else None,
             context_segments=wider_rows.values(), checkpoint=checkpoint, force_review=force_review)
+        result = self._repair_target_orthography(result, rows,
+            {**wider_rows, **result["segments"]}.values(), client, check, checkpoint)
+        if progress_callback:
+            progress_callback(100.0)
         for row in result["segments"].values():
             audit = row.get("verification") or {}
             if audit.get("status") in {"verified", "corrected", "unresolved"}:

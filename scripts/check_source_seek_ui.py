@@ -16,7 +16,10 @@ from core.media_process import run_media
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('source', type=Path)
+    parser.add_argument('--port', type=int, help='Attach read-only to an already running local QA backend')
     args = parser.parse_args()
+    if args.port is not None and not 1 <= args.port <= 65535:
+        parser.error('--port must be a valid local port')
     source = args.source.resolve(strict=True)
     probe = json.loads(run_media(['ffprobe','-v','error','-show_format','-of','json',str(source)],capture_output=True))
     duration = float(probe['format']['duration'])
@@ -34,7 +37,7 @@ def main():
           t.dispatchEvent(new MouseEvent('click',{bubbles:true,clientX:r.left+r.width*"""+
           str(seconds+.3)+"/"+str(duration)+"}));return true;})()")
     try:
-        port = service_manager.start_backend(timeout=30)
+        port = args.port or service_manager.start_backend(timeout=30)
         window = StudioMainWindow(port)
         window.resize(1366,860)
         page = window.web_view.page()
@@ -72,7 +75,8 @@ def main():
             window.hide();window.deleteLater()
             QCoreApplication.sendPostedEvents(None,QEvent.Type.DeferredDelete)
             app.processEvents()
-        service_manager.shutdown_all()
+        if args.port is None:
+            service_manager.shutdown_all()
 
 
 if __name__ == '__main__':

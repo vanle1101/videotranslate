@@ -21,6 +21,27 @@ def timing_issue():
         "max_speed": 1.15, "remedy": "Chọn cách diễn đạt/giọng phù hợp; không cắt từ hoặc chồng tiếng."}
 
 
+@pytest.mark.parametrize("failed", [False, True])
+def test_target_orthography_audit_survives_repeated_restore_without_semantic_approval(persisted, failed):
+    audit = ({"status": "failed", "diagnostic": {"stage": "target_orthography",
+        "code": "provider_timeout", "run_id": "audit-run", "segment_ids": [0]}} if failed else
+        {"status": "draft_corrected", "original": "Hom nay troi dep qua.",
+         "proposal": "Hôm nay trời đẹp quá.", "probabilistic": True,
+         "reason": "Chỉ thêm dấu; chưa xác nhận nguồn.", "provider": "opencode", "model": "muse"})
+    persisted.segments[0].verification = {"status": "unresolved", "source_supported": False,
+        "semantic_verified": False, "address_verified": False, "target_orthography": audit}
+    persisted.segments[0].needs_review = True
+    persisted.persist()
+    for _ in range(2):
+        restored = restore_saved_session(persisted.task_id)
+        saved = restored.segments[0].verification
+        assert saved["target_orthography"] == audit
+        assert saved["semantic_verified"] is saved["address_verified"] is saved["source_supported"] is False
+        assert restored.segments[0].needs_review is True
+        restored.persist()
+        active_streaming_sessions.pop(persisted.task_id, None)
+
+
 @pytest.mark.parametrize("compressed", [False, True])
 @pytest.mark.parametrize("intent, eligible", [("retry_pending", True), ("shutdown", True),
                                             ("user_stopped", False), ("paused", False)])

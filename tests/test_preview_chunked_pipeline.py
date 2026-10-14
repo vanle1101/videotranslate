@@ -1271,6 +1271,36 @@ def test_obsolete_negative_gates_are_reviewed_once_without_force_approval(previe
     assert all(row.final_vi == "Lời đã lưu." for row in session.segments.values())
 
 
+def test_orthography_recheck_targets_only_unexamined_ascii_draft(preview, monkeypatch):
+    from core.translation_review import AutomaticTranslationReviewer
+    session, *_ = preview
+    session._chunked_source_started = True
+    session._visual_completed_seconds = 24
+    session.segments = {}
+    for sid, text in enumerate(["Lời đã lưu.", "Hom nay troi dep qua.", "Hom nay troi dep qua."]):
+        row = SegmentItem(sid, sid * 2, sid * 2 + 1, 1)
+        row.status, row.text_zh, row.final_vi = "READY", "今天", text
+        row.source_method, row.translation_provider = "text-ai", "opencode"
+        row.verification = {"status": "unresolved", "audio_evidence": [],
+            "review_gate_revision": AutomaticTranslationReviewer.REVIEW_GATE_REVISION}
+        if sid == 2:
+            row.verification["target_orthography"] = {"original": text, "status": "review_required"}
+        session.segments[sid] = row
+    calls = []
+    async def review(**options):
+        calls.append(options)
+        for sid in options["segment_ids"]:
+            session.segments[sid].verification["target_orthography"] = {
+                "original": session.segments[sid].final_vi, "status": "review_required"}
+    monkeypatch.setattr(session, "_review_translations", review)
+    async def run():
+        await session._resume_pending_chunk_reviews()
+        await session._resume_pending_chunk_reviews()
+    asyncio.run(run())
+    assert calls == [{"regenerate_audio": True, "segment_ids": {1}}]
+    assert all(row.verification["status"] == "unresolved" for row in session.segments.values())
+
+
 def test_resume_reaudits_exact_numeric_audio_false_negative_without_approving_content(preview, monkeypatch):
     from core.translation_review import AutomaticTranslationReviewer
     session, *_ = preview

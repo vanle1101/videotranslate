@@ -1,5 +1,31 @@
 # Runtime QA report
 
+## Independent target spelling and source seeking — October 15, 2026, 04:47
+
+Added bounded target-only spelling review for retained ASCII Vietnamese drafts.
+Two provider judgments must agree, with local word/punctuation/name/address
+guards; accepted accent corrections remain probabilistic REVIEW_REQUIRED and
+clear semantic approval. Unsupported source corrections are never imported.
+Metadata survives save/restore. Typed transport failures enter the existing
+review retry ledger. Recovery selects only unexamined target drafts rather than
+invalidating every prior semantic verdict. **398 focused tests passed in
+55.23s**, then **51 spelling/review-retry tests passed in 4.76s**.
+
+Real Muse target-only diagnostic of retained row 9: **64.5s, REVIEW_REQUIRED**.
+Muse identified multiple plausible accent readings and retained the original
+draft. Source/text was not mutated; semantic_verified stayed false. This is a
+correctly withheld uncertain repair, not a recovered translation. No row-specific
+wording was hardcoded. Existing short-output quality therefore remains limited.
+
+Read-only production Qt UI seeking attached to the ongoing QA backend passed:
+160s uncached seek 5.031s; 162s same window 0.109s; backward 5s seek 0.235s;
+return to 160s 0.234s. Playback crossed the 168s decoder boundary and remained
+playing at clock 02:49; rapid 240/20/60s requests ended at 01:00, readyState 4.
+The separate test window exited without stopping the recovery backend.
+Offscreen Chromium emitted GPU-context warnings but no player media error.
+This backend predates the final file-transfer cleanup fix; final-code seek
+verification still needs a fresh backend after the active recovery exits.
+
 ## Neighbor recovery history — October 15, 2026, 04:38
 
 Root cause: the separate neighboring-cue rescue loop recreated rejection and
