@@ -151,6 +151,10 @@ document.addEventListener('DOMContentLoaded', () => {
     advanced.hidden = index !== 2;
     transcript.setAttribute('aria-labelledby', tabs[index === 1 ? 1 : 0].id);
     transcript.dataset.mode = index === 1 ? 'original' : 'translation';
+    const searchLabel = index === 1 ? 'Tìm trong lời gốc' : 'Tìm trong bản dịch tiếng Việt';
+    search.placeholder = `${searchLabel}…`;
+    search.setAttribute('aria-label', searchLabel);
+    list.setAttribute('aria-label', index === 1 ? 'Lời gốc nhận diện từ video' : 'Bản dịch tiếng Việt có thể chỉnh sửa');
     filterTranscript();
     if (focus) tabs[index].focus();
   }
@@ -181,8 +185,7 @@ document.addEventListener('DOMContentLoaded', () => {
     if (event.key === 'Escape' && search.value) { event.preventDefault(); search.value = ''; filterTranscript(); }
   });
   new MutationObserver(filterTranscript).observe(list, {childList: true, subtree: true, characterData: true, attributes: true, attributeFilter: ['data-editing']});
-  filterTranscript();
-  transcript.dataset.mode = 'translation';
+  selectTab(0);
   const reveal = id => { const el = document.getElementById(id); el.scrollIntoView({block: 'nearest', behavior: 'auto'}); el.focus({preventScroll: true}); };
   document.getElementById('tool-captions').addEventListener('click', () => {
     selectTab(2, true);

@@ -653,6 +653,10 @@ input[type="range"],input[type="checkbox"] { accent-color: #ee3986 !important; }
 .transcript-original { font-size: 14px; color: #c9c4cc; }
 .transcript-translation { font-size: 15px; color: #f6f0f6; }
 .transcript-label { display: none; }
+.transcript-mode-help { margin: 10px 12px 0; color: #c7b9c5; font-size: 12px; line-height: 1.6; }
+#editor-transcript[data-mode="translation"] .original-mode-help,
+#editor-transcript[data-mode="original"] .translation-mode-help,
+#editor-transcript[data-mode="original"] #transcript-status { display: none; }
 #editor-transcript[data-mode="original"] .transcript-translation { display: none; }
 #editor-transcript[data-mode="translation"] .transcript-original { display: none; }
 #editor-transcript[data-mode="original"] :is(.transcript-editor,.transcript-review,.transcript-confirm-silence,.transcript-speaker,.transcript-state) { display: none; }
