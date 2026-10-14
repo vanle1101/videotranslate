@@ -131,6 +131,20 @@ def click_ready(page, element_id, timeout=30):
     assert click(page, element_id), f'Control became unavailable: {element_id}'
 
 
+def failure_snapshot(snapshot):
+    """Diagnose a failed QA run without dumping every dialogue and audit."""
+    progress = snapshot.get('progress', {})
+    fields = ('status', 'phase', 'stage', 'segment_states', 'ai_queue',
+              'source_prepared_seconds', 'processed_seconds', 'total_seconds',
+              'completed_chunks', 'total_chunks', 'retry_pending_count',
+              'retry_next_attempt_at', 'retry_error_codes')
+    return {'task_id':snapshot.get('task_id'),
+            'progress':{name:progress.get(name) for name in fields},
+            'unfinished_rows':[{name:row.get(name) for name in
+                ('id', 'status', 'failed_stage', 'revision', 'timing_issue')}
+                for row in snapshot.get('segments', []) if row.get('status') not in {'READY', 'PLAYED'}]}
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('source', type=Path)
@@ -255,7 +269,7 @@ def main():
                     'states':progress.get('segment_states')})
                 last=state
             if state[0] in {'FAILED','STOPPED','CANCELLED'}:
-                raise AssertionError({'progress':progress,'rows':snapshot.get('segments')})
+                raise AssertionError(failure_snapshot(snapshot))
             if progress.get('can_translate_full') and not promoted:
                 check_translated_preview(page, snapshot)
                 click_ready(page,'btn-translate-full')
@@ -266,7 +280,7 @@ def main():
                 break
             wait(500)
         else:
-            raise AssertionError({'timeout':args.timeout,'progress':progress})
+            raise AssertionError({'timeout':args.timeout, **failure_snapshot(snapshot)})
         rows=snapshot['segments']
         # Validate persisted source coverage independently of the UI's Completed
         # label: a full-length source picture can hide omitted translated chunks.
