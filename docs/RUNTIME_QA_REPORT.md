@@ -1,5 +1,25 @@
 # Runtime QA report
 
+## Full offline retest and real playback result — October 15, 2026, 04:36
+
+Offline regression rerun after the transfer/probe fixes: **3,722 passed,
+2 skipped, 127 subtests passed in 627.43s**. The same six historical standalone
+scripts were excluded; this is not an unfiltered-suite claim. Three deprecation
+warnings remain in the existing websockets/uvicorn compatibility stack.
+
+The previously pending `fdc6ca35` production UI retest finished successfully at
+04:24:05: validated MP4, full FFmpeg decode, actual result-player playback
+(readyState 4, time advancing to 0.444969s, duration 32.625s, no media error), and
+reload restoring all 12 rows. Five rows still require content review; output
+remains a draft. This playback process loaded the probe-timeout fix but predates
+the final disconnected-transfer fix; fresh player/seek acceptance is pending.
+
+Long-video recovery `76f5aa6b` is still running with real Muse and Edge-TTS.
+191/193 speech artifacts remain available. Focus-row wording proposals have
+been rejected for semantic mismatch, duplication, or measured timing overflow;
+neighbor recovery is still being evaluated. No long MP4 has been produced by
+this recovery attempt, and content/timing acceptance is not claimed.
+
 ## Export probe and disconnected file ownership — October 15, 2026, 04:24
 
 Full offline traversal: **3 failed, 3,709 passed, 2 skipped, 127 subtests passed**
