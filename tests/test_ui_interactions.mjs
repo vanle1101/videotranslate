@@ -119,6 +119,25 @@ test('AI admission counts remain visible without segment-state metadata', async 
   assert.equal(ui.el('task-progress-track').dataset.indeterminate,'true');
 });
 
+test('RAM waiters are not shown as running and resource-only polling refreshes their reason', async () => {
+  const ui=studio();await ui.start();const socket=ui.sockets.at(-1);
+  const task={task_id:'fixture',status:'RUNNING',phase:'visual',progress_pct:null};
+  const queue={selected_concurrency:20,active_requests:8,queued_requests:3,
+    resource_waiting_requests:5,admission_reason:'ram_headroom'};
+  socket.receive({type:'progress',...task,ai_queue:queue});
+  assert.match(ui.el('task-progress-detail').textContent,/Đã chọn 20: 3 đang chạy, 8 đang chờ/);
+  assert.match(ui.el('task-progress-detail').textContent,/Đang chờ đủ RAM/);
+  for (const [reason,expected] of [['memory_unknown',/Chưa đo được RAM/],['resource_fifo',/Đang chờ lượt mở Muse/]]) {
+    ui.replies.set('/api/tasks',{tasks:[{...task,ai_queue:{...queue,admission_reason:reason}}]});
+    await ui.el('btn-refresh-tasks').click();
+    assert.match(ui.el('task-progress-detail').textContent,expected);
+  }
+  ui.replies.set('/api/tasks',{tasks:[{...task,ai_queue:{...queue,resource_waiting_requests:0,admission_reason:'running'}}]});
+  await ui.el('btn-refresh-tasks').click();
+  assert.match(ui.el('task-progress-detail').textContent,/Đã chọn 20: 8 đang chạy, 3 đang chờ/);
+  assert.doesNotMatch(ui.el('task-progress-detail').textContent,/RAM|chờ lượt mở/);
+});
+
 test('retry countdown refreshes without new provider progress and never invents a missing deadline', async () => {
   let now=Date.now();
   class Clock extends Date { static now() { return now; } }

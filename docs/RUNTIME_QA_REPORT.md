@@ -1,5 +1,29 @@
 # Runtime QA report
 
+## CLI RAM admission — October 15, 2026, 06:11
+
+Observed long-run memory pressure is now handled at the real OpenCode process
+boundary. Admission measures available physical RAM, reserves startup growth for
+owned children and retains headroom of max(2GiB, 10% physical RAM). The initial
+896MiB child envelope grows when observed process-tree RSS exceeds it. This is
+resource backpressure, not a replacement for selected 20/30/40/50 AI concurrency.
+Unknown memory and FIFO waiting have distinct visible reasons. Waiters are
+subtracted from the UI's running count and included in its waiting count.
+
+Admission waits are cancellable and bounded to 30 seconds. Local pressure is
+classified as a recoverable queue timeout; it does not count as remote provider
+failure or cause immediate transport retry. Invalid configuration fails before
+waiting. Reservations survive an unreaped child until its exit is confirmed.
+The gate coordinates this backend's children only; it is not an OS-wide memory
+quota and cannot prevent unrelated applications from allocating RAM.
+
+Validation: **135 Python tests passed** for resources, adapter and execution
+contracts; **287 existing JavaScript tests passed**, plus one new polling/UI
+regression covering RAM, unknown measurement, FIFO and release. JavaScript syntax
+and whitespace checks passed. These are offline/contract results. The ongoing
+`5bea8fe5` run still uses its launch-time code; live resource-admission acceptance
+is pending. No existing source, checkpoint or user output was removed.
+
 ## Parallel publication and resource observations — October 15, 2026, 06:02
 
 The real long run reached 18 overlapping provider requests. At 05:58 the host

@@ -35,6 +35,9 @@ def test_shared_queue_diagnostics_never_resolve_filesystem_paths(monkeypatch, tm
 
 @pytest.fixture
 def isolated(monkeypatch, tmp_path):
+    from core.cli_resources import CLIResourceAdmission, MIB
+    monkeypatch.setattr(oc, "opencode_resources", CLIResourceAdmission(
+        memory=lambda: (32768 * MIB, 24000 * MIB), rss=lambda process: 0))
     layer = AIExecutionLayer(AIExecutionPolicy(retry_jitter=0), cache_root=tmp_path / "cache")
     monkeypatch.setattr(oc, "_shared_execution_layer", lambda: layer)
     monkeypatch.setattr(settings, "OPENCODE_API_KEY", "")

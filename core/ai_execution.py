@@ -424,9 +424,15 @@ class AIExecutionLayer:
                       "half_open_probe" if self._half_open else
                       "video_limit" if queued and active >= limit else
                       "duplicate_or_fair_queue" if queued else "idle" if not active else "running")
-            return {"active_requests": active, "queued_requests": queued,
+            snapshot = {"active_requests": active, "queued_requests": queued,
                     "concurrency": limit, "selected_concurrency": limit, "admission_reason": reason,
                     "requests": counters.get("requests", 0), "retry_requests": counters.get("retry_requests", 0),
                     "cache_hits": counters.get("cache_hits", 0), "consecutive_failures": self._failures,
                     "circuit_retry_after": max(0, self._open_until - time.monotonic()),
                     "half_open": self._half_open}
+            resources = getattr(self, "resource_snapshot", None)
+            if callable(resources):
+                snapshot.update(resources(run_id))
+                if snapshot.get("resource_wait_reason"):
+                    snapshot["admission_reason"] = snapshot["resource_wait_reason"]
+            return snapshot

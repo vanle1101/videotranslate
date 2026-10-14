@@ -1630,13 +1630,17 @@ document.addEventListener("DOMContentLoaded", () => {
     if (currentProgress.ai_queue && Number.isInteger(currentProgress.ai_queue.active_requests)) {
       const queue = currentProgress.ai_queue;
       const selected = Number.isInteger(queue.selected_concurrency) ? queue.selected_concurrency : null;
-      counters.push(`AI${selected === null ? "" : ` · Đã chọn ${selected}`}: ${queue.active_requests} đang chạy, ${queue.queued_requests || 0} đang chờ`);
+      const resourceWaiting = Math.max(0, Number(queue.resource_waiting_requests) || 0);
+      counters.push(`AI${selected === null ? "" : ` · Đã chọn ${selected}`}: ${Math.max(0, queue.active_requests - resourceWaiting)} đang chạy, ${(queue.queued_requests || 0) + resourceWaiting} đang chờ`);
       const reasons = {run_limit: "Đã đủ số yêu cầu AI đồng thời của video", concurrency_limit: "Đã đủ số yêu cầu AI đồng thời của video",
         rate_limit: "Dịch vụ đang giới hạn yêu cầu", provider_backoff: "Đang đợi dịch vụ cho phép thử lại",
         circuit_open: "Dịch vụ tạm lỗi; đang chờ thử lại", retry_backoff: "Đang chờ tới lượt thử lại",
         source_not_ready: "Đang chờ câu nguồn", paused: "Đã tạm dừng", fair_queue: "Đang chia lượt công bằng giữa các video",
         video_limit: "Đã đủ số yêu cầu AI đồng thời của video", half_open_probe: "Đang kiểm tra dịch vụ phục hồi",
-        duplicate_or_fair_queue: "Đang chờ lượt hoặc kết quả yêu cầu trùng"};
+        duplicate_or_fair_queue: "Đang chờ lượt hoặc kết quả yêu cầu trùng",
+        ram_headroom: "Đang chờ đủ RAM để mở thêm Muse",
+        resource_fifo: "Đang chờ lượt mở Muse",
+        memory_unknown: "Chưa đo được RAM khả dụng; đang chờ kiểm tra lại"};
       const waitReason = queue.wait_reason || queue.admission_reason;
       if (waitReason && !["idle", "running"].includes(waitReason)) counters.push(reasons[waitReason] || "Đang chờ bộ điều phối AI");
     }
