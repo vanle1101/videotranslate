@@ -5,6 +5,7 @@ The real production controls create a project and spend real provider requests.
 Existing projects are never edited. Outputs and checkpoints remain reviewable.
 """
 import argparse
+import hashlib
 import json
 import re
 from pathlib import Path
@@ -153,6 +154,12 @@ def main():
         assert re.fullmatch(r'[a-zA-Z0-9_-]{1,80}', args.resume), 'Invalid QA task ID'
         manifest = _read(args.resume)
         assert manifest and Path(manifest['session']['video_path']).resolve() == source, 'Resume source does not match QA input'
+        retained_rows = manifest['segments']
+        if isinstance(retained_rows, dict):
+            retained_rows = list(retained_rows.values())
+        retained_audio = {str(path): hashlib.sha256(path.read_bytes()).hexdigest()
+            for row in retained_rows if row.get('audio_path')
+            and (path := Path(row['audio_path'])).is_file()}
     probe = json.loads(run_media(['ffprobe','-v','error','-show_format','-show_streams','-of','json',str(source)], capture_output=True))
     assert 0 < float(probe['format']['duration']) <= args.max_source_seconds, 'Source exceeds the explicit acceptance duration budget'
     app = QApplication.instance() or QApplication([])
@@ -182,6 +189,23 @@ def main():
             until(page,'window.__attached===true')
             task_id = args.resume
             snapshot = backend(base,f'/api/streaming/{task_id}')
+            restored = {row['id']: row for row in snapshot['segments']}
+            assert snapshot.get('task_id') == task_id, 'Restore created a different task'
+            assert {row['id'] for row in retained_rows}.issubset(restored), 'Restore discarded saved source rows'
+            assert float(snapshot['progress'].get('source_prepared_seconds', 0)) >= float(
+                manifest['session'].get('_source_prepared_seconds', 0)) - .001, 'Restore lost ASR coverage'
+            for row in retained_rows:
+                saved = restored[row['id']]
+                assert (saved['start'], saved['end'], saved.get('asr_text')) == (
+                    row['start'], row['end'], row.get('asr_text')), 'Restore changed measured source ownership'
+                if (row.get('verification') or {}).get('status') == 'manual':
+                    for key in ('text_zh', 'final_vi', 'revision', 'voice_id'):
+                        assert saved.get(key) == row.get(key), ('Restore changed a manual edit', row['id'], key)
+            for filename, fingerprint in retained_audio.items():
+                assert hashlib.sha256(Path(filename).read_bytes()).hexdigest() == fingerprint, 'Restore rewrote saved audio'
+            event('RESTORED_CHECKPOINT_VALIDATED', {'task_id':task_id, 'retained_rows':len(retained_rows),
+                'retained_audio_files':len(retained_audio),
+                'source_prepared_seconds':snapshot['progress'].get('source_prepared_seconds')})
             if snapshot['progress'].get('can_retry'):
                 click_ready(page,'btn-retry-worker')
                 until(page,"['RUNNING','PREVIEW_READY','PREPARED','COMPLETED'].includes(document.getElementById('task-progress').dataset.status)")
