@@ -71,6 +71,16 @@ A new real production recovery began at02:34 with the latest pacing code. Its
 History screen/API correctly listed missing audio87,119,135,145,146 and disabled
 full Export. The run is pending and its final result will be recorded separately.
 
+Inspection of actual rejected language reviews found a scope conflict: the blind
+Vietnamese fluency request appended source/OCR-dependent role verification rules,
+although its payload intentionally excludes source evidence. Removed that policy
+from the blind request only; fidelity/address verification still receives it.
+Clarified that an explicit Vietnamese referent in before/after need not be repeated
+in the candidate. Context reconstruction for ID87 confirmed the preceding wall/
+brick sentence was present, so no context-loss fix or forced acceptance was made.
+Blind contract changed to v3; natural=false still rejects output. **119 focused
+tests passed in18.19s**. The02:34 runtime predates this final prompt correction.
+
 ## Review transport recovery and neighboring speech — October 15, 2026
 
 Acceptance remains **INCOMPLETE**. The ongoing real 320-second recovery still has

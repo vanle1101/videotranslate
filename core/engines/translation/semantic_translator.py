@@ -902,18 +902,25 @@ Trả duy nhất JSON: {{"literal_vi":"...","natural_vi":"...","final_vi":"...",
             "mảnh lời nói: before là lời ngay trước, after là lời ngay sau "
             "ứng viên. Đánh giá ứng viên ở đúng vị trí đó; một từ nối, lời gọi hay thán từ "
             "không phải từ khóa rời nếu lời Việt thực có tạo thành mạch nói tự nhiên. "
+            "Danh từ, đối tượng hoặc mốc không gian/thời gian đã được nêu rõ ở lời trước "
+            "có thể làm tham chiếu cho câu tiếp theo; không bắt buộc nhắc lại đầy đủ "
+            "trong riêng ứng viên. Chỉ coi là thiếu tham chiếu nếu đọc cả ngữ cảnh "
+            "vẫn không xác định được, hoặc còn nhiều cách hiểu khiến câu khó hiểu. "
             "Không tự tưởng tượng lời nối, người nói, hoặc phần ngữ cảnh chưa được cung cấp; "
             "unpositioned không chứng minh lời trước hay lời sau. Câu tỉnh lược đại từ vẫn có "
             "thể tự nhiên nếu tiếng Việt tự xác định được vai; từ khóa rời, cụm danh từ "
             "ghép sai, hoặc câu khiến người nghe phải đoán quan hệ ngữ pháp là không tự nhiên. "
+            "Chỉ nhận xét sự tự nhiên và rõ nghĩa của lời Việt trong ngữ cảnh đã cho. "
+            "Không xác nhận quan hệ nhân vật, độ trung thành với nguồn hay tính đúng "
+            "của bản dịch; các việc đó thuộc lượt kiểm định nguồn riêng. "
             "Không sửa câu và không chấm theo độ dài. Trả duy nhất JSON "
             '{"natural":true,"reason":"lý do cụ thể"}; natural=false nếu còn nghi ngờ.'
-        ) + "\n" + VIETNAMESE_ADDRESS_POLICY
+        )
         fluency_input = json.dumps({"candidate": candidate["final_vi"],
                                     "nearby_vietnamese_dialogue": nearby_vi}, ensure_ascii=False)
         fluency = self._validated_request(fluency_system, fluency_input,
             lambda raw: self._review_response(raw, _FLUENCY_SCHEMA),
-            schema_id="semantic-pacing-blind-fluency-v2", task_kind="fluency_review", max_tokens=1024)
+            schema_id="semantic-pacing-blind-fluency-v3", task_kind="fluency_review", max_tokens=1024)
         if (not isinstance(fluency, dict) or fluency.get("natural") is not True
                 or not self._nonempty_string(fluency.get("reason"))):
             raise PacingReviewRejected(

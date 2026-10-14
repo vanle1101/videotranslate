@@ -172,6 +172,13 @@ def test_semantic_unit_and_source_proof_reach_draft_fidelity_but_not_blind_fluen
     blind = json.loads(requests.call_args_list[2].args[1])
     assert set(blind) == {"candidate", "nearby_vietnamese_dialogue"}
     assert "speaker" not in json.dumps(blind) and "source" not in json.dumps(blind)
+    # The blind editor has no source/OCR evidence. Source role instructions
+    # belong only to the preceding fidelity check, otherwise the contracts
+    # contradict each other even with a correct Vietnamese context payload.
+    from core.translation_context import VIETNAMESE_ADDRESS_POLICY
+    assert VIETNAMESE_ADDRESS_POLICY in requests.call_args_list[1].args[0]
+    assert VIETNAMESE_ADDRESS_POLICY not in requests.call_args_list[2].args[0]
+    assert "không bắt buộc nhắc lại đầy đủ" in requests.call_args_list[2].args[0]
 
 
 def test_unknown_continuity_and_legacy_missing_metadata_do_not_create_fake_audio_evidence():
