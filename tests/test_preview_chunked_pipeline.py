@@ -162,6 +162,11 @@ def preview(tmp_path, monkeypatch):
             session.segments[sid].needs_review = False
         session.review_summary = {"status": "completed"}
 
+    async def detached_review(targets):
+        # This fixture substitutes the publication reviewer above. Keep its
+        # optional lookahead isolated too; real detachment has separate tests.
+        return None
+
     async def synthesize(item, **options):
         speech.append(item.id)
         path = session.segments_dir / f"seg_{item.id}.wav"
@@ -176,6 +181,7 @@ def preview(tmp_path, monkeypatch):
     monkeypatch.setattr("core.streaming.chunked_source.publish_background_prefix", background)
     monkeypatch.setattr(session.video_intelligence, "prepass", prepass)
     monkeypatch.setattr(session, "_review_translations", review)
+    monkeypatch.setattr(session, "_prefetch_visual_review", detached_review)
     monkeypatch.setattr(session, "_synthesize_segment", synthesize)
     session.event_callback = lambda event, payload: events.append((event, deepcopy(payload)))
     return session, prepared, analyzed, speech, events
@@ -1443,7 +1449,8 @@ def test_review_dispatch_freezes_context_before_worker_and_preserves_newer_edit(
     session.screen_texts = [{"id": "title-0", "kind": "title", "start": 0, "end": 3,
         "text_zh": "家", "text_vi": "Nhà", "bbox": [.1, .1, .5, .1]}]
     expected_targets = deepcopy([focus.to_dict()])
-    expected_context = deepcopy([focus.to_dict(), neighbor.to_dict()])
+    context_fields = ("id", "text_zh", "asr_text", "final_vi", "revision", "speaker_id", "speaker_evidence")
+    expected_context = [{key: deepcopy(getattr(row, key)) for key in context_fields} for row in (focus, neighbor)]
     expected_screens = deepcopy(session.screen_texts)
     original_blocking = session._run_blocking
     calls = []
@@ -1453,7 +1460,8 @@ def test_review_dispatch_freezes_context_before_worker_and_preserves_newer_edit(
         assert video_path == session.video_path
         assert [row.to_dict() for row in rows] == expected_targets
         context = options["context_segments"]
-        assert [row.to_dict() for row in context] == expected_context
+        assert [{key: row[key] for key in context_fields} for row in context] == expected_context
+        assert all("status" not in row and "audio_url" not in row for row in context)
         assert context[0] is not focus and context[1] is not neighbor
         assert screens == expected_screens
         return {"segments": {0: {**rows[0].to_dict(), "final_vi": "Bản rà đã cũ.",
@@ -1521,7 +1529,7 @@ def test_stale_address_resume_uses_current_context_and_keeps_unchanged_ready_aud
     def review(_reviewer, video_path, rows, screens, **options):
         calls.append(options)
         assert [item.id for item in rows] == [0]
-        assert [(item.id, item.text_zh) for item in options["context_segments"]] == [(0, "我回来了"), (1, "妈妈")]
+        assert [(item["id"], item["text_zh"]) for item in options["context_segments"]] == [(0, "我回来了"), (1, "妈妈")]
         assert options["force_review"] is True
         return {"segments": {0: {**row.to_dict(), "needs_review": False,
             "verification": {"status": "verified", "semantic_verified": True,

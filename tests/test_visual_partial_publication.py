@@ -128,7 +128,7 @@ def test_completed_prefix_publishes_before_next_timeout_and_retry_keeps_audio(pa
     assert requests == [0., 24.]
     assert speech == [0, 1], "Retry must keep the existing reviewed audio prefix"
     assert reviews[0][0] == [0]
-    assert [row.id for row in reviews[0][1]] == [0, 1], "Review subset retains later ASR source context"
+    assert [row["id"] for row in reviews[0][1]] == [0, 1], "Review subset retains later ASR source context"
     assert reviews[1][0] == [1]
     assert len([event for event, payload in events if event == "init"]) == 1
 

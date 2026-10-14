@@ -7,6 +7,7 @@ import sys
 import threading
 import time
 import urllib.request
+from types import SimpleNamespace
 
 import psutil
 import pytest
@@ -149,3 +150,121 @@ def test_interrupt_during_native_file_open_drains_and_closes_handle(tmp_path, mo
             await asyncio.gather(task, return_exceptions=True)
             for handle in handles: handle.close()
     asyncio.run(run())
+
+
+@pytest.mark.parametrize("blocked_socket", [False, True])
+def test_multiple_connected_slow_transfers_shutdown_drains_handles_despite_expected_cancel_logs(tmp_path, caplog, blocked_socket):
+    """Grace timeout cancels live requests; its traceback alone is not a leak."""
+    source = tmp_path / "multi-client.bin"
+    source.write_bytes(bytes(range(256)) * 32768)
+    clients, errors, drained = [], [], []
+    class SlowResponse(FileResponse):
+        chunk_size = 65536 if blocked_socket else 1024
+    async def app(scope, receive, send):
+        async def slow_send(message):
+            if not blocked_socket and message["type"] == "http.response.body":
+                await asyncio.sleep(.05)
+            await send(message)
+        try:
+            await SlowResponse(source)(scope, receive, slow_send)
+        finally:
+            drained.append(scope["client"])
+    with socket.socket() as reservation:
+        reservation.bind(("127.0.0.1", 0))
+        port = reservation.getsockname()[1]
+    server = uvicorn.Server(uvicorn.Config(app,host="127.0.0.1",port=port,loop="none",
+        lifespan="off",log_config=None,access_log=False,timeout_graceful_shutdown=.15))
+    def serve():
+        try:
+            run_backend_server(server)
+        except BaseException as error:
+            errors.append(error)
+    thread=threading.Thread(target=serve,name="multi-client-shutdown-qa")
+    thread.start()
+    try:
+        deadline=time.monotonic()+5
+        while not server.started and thread.is_alive() and time.monotonic()<deadline:
+            time.sleep(.01)
+        assert server.started,errors
+        for _ in range(3):
+            client=socket.socket()
+            client.setsockopt(socket.SOL_SOCKET,socket.SO_RCVBUF,1024)
+            client.settimeout(2)
+            client.connect(("127.0.0.1",port))
+            clients.append(client)
+            client.sendall(b"GET /media HTTP/1.1\r\nHost: localhost\r\nRange: bytes=0-\r\n\r\n")
+            assert client.recv(8192).startswith(b"HTTP/1.1 206")
+        assert len(server.server_state.tasks)==3
+        if blocked_socket:
+            deadline=time.monotonic()+3
+            while not all(connection.flow.write_paused for connection in server.server_state.connections) and time.monotonic()<deadline:
+                time.sleep(.01)
+            assert all(connection.flow.write_paused for connection in server.server_state.connections)
+        server.should_exit=True
+        thread.join(5)
+
+        assert not thread.is_alive() and not errors
+        assert len(drained)==3 and not server.server_state.tasks
+        assert not server.server_state.connections
+        assert not any(os.path.normcase(item.path)==os.path.normcase(str(source))
+                       for item in psutil.Process().open_files())
+        traces=[record for record in caplog.records if "Exception in ASGI application" in record.message]
+        assert traces and all(isinstance(record.exc_info[1],asyncio.CancelledError) for record in traces)
+        assert "Task was destroyed" not in caplog.text and "unhandled exception during" not in caplog.text.lower()
+        with socket.socket() as closed:
+            closed.settimeout(.5)
+            assert closed.connect_ex(("127.0.0.1",port))!=0
+    finally:
+        for client in clients:
+            client.close()
+        server.should_exit=True
+        thread.join(5)
+
+
+@pytest.mark.parametrize("legacy_runner", [False, True])
+def test_backend_shutdown_drains_cancelled_response_before_global_native_open_cancellation(tmp_path,monkeypatch,legacy_runner):
+    import anyio
+    import starlette.responses
+    if legacy_runner:
+        monkeypatch.delattr(asyncio,"Runner",raising=False)
+    source=tmp_path/"native-open.bin"
+    source.write_bytes(b"existing fixture")
+    entered,release=threading.Event(),threading.Event()
+    handles=[]
+    def native_open(path,mode):
+        handle=open(path,mode)
+        handles.append(handle)
+        entered.set()
+        assert release.wait(4)
+        return handle
+    async def open_file(path,mode="rb"):
+        return anyio.AsyncFile(await anyio.to_thread.run_sync(native_open,path,mode))
+    monkeypatch.setattr(starlette.responses.anyio,"open_file",open_file)
+    class Server:
+        server_state=SimpleNamespace(connections=set(),tasks=set())
+        async def serve(self):
+            async def receive():
+                await asyncio.Event().wait()
+            async def send(message):
+                pass
+            self.response=asyncio.create_task(FileResponse(source)(
+                {"type":"http","method":"GET","headers":[],"extensions":{}},receive,send))
+            self.server_state.tasks.add(self.response)
+            deadline=time.monotonic()+2
+            while not entered.is_set() and time.monotonic()<deadline:
+                await asyncio.sleep(.01)
+            assert entered.is_set()
+            self.response.cancel("simulated expired graceful shutdown")
+            self.release_timer=threading.Timer(.1,release.set)
+            self.release_timer.start()
+    server=Server()
+    try:
+        run_backend_server(server)
+        assert server.response.cancelled()
+        assert handles and all(handle.closed for handle in handles)
+    finally:
+        release.set()
+        if hasattr(server,"release_timer"):
+            server.release_timer.join(2)
+        for handle in handles:
+            handle.close()

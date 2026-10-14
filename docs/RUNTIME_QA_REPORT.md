@@ -1,5 +1,47 @@
 # Runtime QA report
 
+## Review recovery and bounded overlap — October 15, 2026, 06:44
+
+**Full-video acceptance remains BLOCKED.** The live old-code run `5bea8fe5`
+retains75 measured source rows,453.508934s source coverage,43 translated rows
+and26 audio rows. There is no full MP4. Rows33/34 received valid speech after a
+real Muse review timeout, but their incomplete review had no durable retry.
+
+Root cause: retry identity includes source context, target draft and screen
+metadata. Parallel source publication or subsequent review/screen publication
+changes this identity; the former scheduler rejected the timeout scope or
+pruned its retry. `core/review_retry.py` now distinguishes request ownership
+from future retry intent. Unchanged incomplete targets can schedule against new
+surrounding context; pending incomplete retries retain cooldown/rounds while
+rebasing to current inputs. In-flight results never acquire new ownership.
+Manual/resolved targets remain protected. Missing first-pass verdicts count as
+not-yet-reviewed, never verified. Regression cases reproduce both loss paths.
+
+`core/streaming/pipeline.py` now overlaps one detached next review group with
+current-group speech. Only the original owner publishes rows/audio/retries.
+Exact target/context/source/model/glossary identity rejects stale packets;
+manual edits win and cancellation drains native work. This is bounded within
+one chunk followup, not across all chunks. Actual throughput gain is unmeasured.
+
+Multi-client shutdown testing also exposed buffered HTTP transports surviving
+loop closure when clients stop reading. `core/services/backend_runtime.py`
+aborts only remaining server-owned transports after graceful service and drains
+response owners before closing their loop. Real three-client backpressure and
+delayed native-file-open regressions pass. Expected Uvicorn cancellation
+tracebacks remain visible; errors were not suppressed.
+
+Validation:176 focused pipeline/UI-publication Python regressions passed in
+23.34s;105 retry/lookahead/backend/file-response regressions passed in10.96s.
+The agent additionally reported625 related regressions. These sets overlap and
+are not additive. Git whitespace validation passed. Fresh production loading
+of these changes and full output verification are still pending.
+
+A separate uncached real Muse request translating one short Chinese safety
+sentence also timed out after61.062s with zero retries. Its owned CLI/waiters
+returned to zero. This demonstrates the current stall is not confined to a
+large review prompt; it does not identify the remote service's internal cause.
+No replacement provider, fake response or completed-media state was used.
+
 ## Partial UI and resumed-status correction — October 15, 2026, 06:32
 
 A fresh offscreen production page attached to backend53169/task5bea8fe5.

@@ -328,7 +328,7 @@ def test_explicit_review_targets_only_pending_confirmation_and_retains_full_cont
     untouched = {sid: deepcopy(vars(row)) for sid, row in session.segments.items() if sid not in {0, 4}}
     calls = []
     def review(_self, source, targets, screens, **kwargs):
-        calls.append(([row.id for row in targets], [row.id for row in kwargs["context_segments"]], kwargs["force_review"]))
+        calls.append(([row.id for row in targets], [row["id"] for row in kwargs["context_segments"]], kwargs["force_review"]))
         return reviewed_rows(targets)
     monkeypatch.setattr(AutomaticTranslationReviewer, "review", review)
     async def run():

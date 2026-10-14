@@ -1250,6 +1250,7 @@ class StreamingPipelineSession:
                 packet["result"] = await self._run_blocking(reviewer.review, snapshot["video"],
                     deepcopy(snapshot["targets"]), deepcopy(snapshot["screens"]), **options)
             packet["cache_usage"] = cache_usage
+            packet["finished"] = time.monotonic()
         except asyncio.CancelledError:
             raise
         except Exception as error:
@@ -1259,11 +1260,7 @@ class StreamingPipelineSession:
         return packet
 
     async def _review_translations(self, *, regenerate_audio=False, force_review=False, segment_ids=None,
-                                   defer_audio=False, _detached=False, _prefetched=None):
-        from core.translation_review import AutomaticTranslationReviewer
-        invocation = self._review_invocation_snapshot(segment_ids, force_review)
-        if _detached:
-            return await self._invoke_detached_review(invocation)
+                                   defer_audio=False, _prefetched=None):
         self._review_scope = "chunk" if segment_ids is not None else "all"
         self._reviewing_segment_ids = sorted(segment_ids) if segment_ids is not None else sorted(self.segments)
         await self.report_progress("review", "AI đang kiểm tra lại từng câu với nguồn…", None)
@@ -1280,6 +1277,7 @@ class StreamingPipelineSession:
         def progress(percent):
             if semantic_active and not self.is_stopped:
                 loop.call_soon_threadsafe(lambda: asyncio.create_task(publish_review_progress(percent)))
+        invocation = self._review_invocation_snapshot(segment_ids, force_review)
         targets = invocation["targets"]
         target_revisions = {segment.id: segment.revision for segment in targets}
         source_rows = invocation["source_rows"]
@@ -1288,9 +1286,21 @@ class StreamingPipelineSession:
         from core.streaming.progress_eta import record_processing_stage
         review_input_scopes = invocation["retry_scopes"]
         try:
+            # An in-flight editor may still be synthesizing while its public
+            # revision has not advanced. Wait before claiming a detached
+            # result, then compare the complete current review inputs again.
+            if _prefetched is not None:
+                await self._wait_for_edit_publication()
+                invocation = self._review_invocation_snapshot(segment_ids, force_review)
+                targets = invocation["targets"]
+                target_revisions = {segment.id: segment.revision for segment in targets}
+                source_rows, source_runtime_identity = invocation["source_rows"], invocation["runtime"]
+                review_input_scopes = invocation["retry_scopes"]
             if (_prefetched is not None and _prefetched["snapshot"]["identity"] == invocation["identity"]
                     and invocation["runtime"] is not None):
                 packet = _prefetched
+                logging.getLogger("pipeline").info("REVIEW_LOOKAHEAD_HIT run_id=%s segment_ids=%s",
+                    self.task_id, sorted(row.id for row in targets))
             else:
                 if _prefetched is not None:
                     logging.getLogger("pipeline").info("REVIEW_LOOKAHEAD_STALE run_id=%s segment_ids=%s",
@@ -1310,7 +1320,9 @@ class StreamingPipelineSession:
             successful_rows = sum((row.get("verification") or {}).get("status") in
                                   {"verified", "corrected", "unresolved", "manual"}
                                   for row in result.get("segments", {}).values())
-            record_processing_stage(self, "review", successful_rows, packet["started"], cache_usage=packet["cache_usage"])
+            started = packet["started"]
+            measured = (time.monotonic() - (packet["finished"] - started[0]), *started[1:])
+            record_processing_stage(self, "review", successful_rows, measured, cache_usage=packet["cache_usage"])
         except asyncio.CancelledError:
             raise
         except Exception as error:
@@ -2392,6 +2404,24 @@ class StreamingPipelineSession:
             return
         await self._finish_visual_chunk(pending, review_candidates, draft_identities)
 
+    async def _prefetch_visual_review(self, targets):
+        await self.pause_event.wait()
+        if self.is_stopped:
+            raise asyncio.CancelledError
+        try:
+            logging.getLogger("pipeline").info("REVIEW_LOOKAHEAD_START run_id=%s segment_ids=%s",
+                self.task_id, sorted(targets))
+            return await self._invoke_detached_review(self._review_invocation_snapshot(targets))
+        except asyncio.CancelledError:
+            raise
+        except Exception as error:
+            # Snapshot/constructor failure did not submit a provider request.
+            # Let the ordinary publication owner surface it per group, rather
+            # than turning optional lookahead into a fatal whole-video error.
+            logging.getLogger("errors").warning("REVIEW_LOOKAHEAD_UNAVAILABLE run_id=%s error_type=%s",
+                self.task_id, type(error).__name__)
+            return None
+
     async def _finish_visual_chunk(self, pending, review_candidates, draft_identities):
         """One review/TTS consumer; source preparation has bounded backpressure."""
         groups = []
@@ -2400,65 +2430,94 @@ class StreamingPipelineSession:
                     or (sid in review_candidates) != (groups[-1][0] in review_candidates)):
                 groups.append([])
             groups[-1].append(sid)
-        for group in groups:
-            await self.pause_event.wait()
-            if self.is_stopped:
-                raise asyncio.CancelledError
-            targets = review_candidates.intersection(group)
-            if targets and settings.LLM_PROVIDER == "opencode":
-                try:
-                    await self._review_translations(segment_ids=targets)
-                    for sid in targets:
-                        self._visual_reviewed_drafts[sid] = {"draft": draft_identities[sid],
-                            "state": self._visual_review_state(self.segments[sid]),
-                            "context": self._visual_source_context_identity()}
-                except asyncio.CancelledError:
-                    raise
-                except Exception as error:
-                    if getattr(self, "_persistence_capacity_failed", False):
-                        raise
-                    self.review_summary = {"status": "incomplete"}
-                    warning = "AI kiểm tra lại chưa hoàn tất; giữ bản nháp và cho phép thử lại."
-                    if warning not in self.warnings:
-                        self.warnings.append(warning)
-                    logging.getLogger("errors").error("[%s] REVIEW_FAILED error_type=%s", self.task_id, type(error).__name__)
-                    for sid in targets:
-                        item = self.segments[sid]
-                        item.needs_review = True
-                        item.review_reason = "AI kiểm tra nguồn chưa hoàn tất; đây là bản nháp cần kiểm tra."
-                        item.verification = {"status": "incomplete", "semantic_verified": False,
-                                             "reason": item.review_reason}
-            for sid in group:
-                await self.pause_event.wait()
-                if self.is_stopped:
-                    raise asyncio.CancelledError
-                segment = self.segments[sid]
-                try:
-                    await self._process_segment(segment)
-                except Exception as error:
-                    if getattr(self, "_persistence_capacity_failed", False):
-                        raise
-                    segment.failed_stage, segment.status = segment.status, "FAILED"
-                    segment.error = str(error)
-                    await self.emit("segment_update", segment.to_dict())
-                    # A single unfit sentence or transient speech request must
-                    # not hide all following chunks of a long video. Keep the
-                    # failed row actionable and carry on; final completion is
-                    # decided by the worker from all rows, never this callback.
-                    logging.getLogger("errors").error(
-                        "[%s] SEGMENT_FAILED_CONTINUING segment_id=%s stage=%s error_type=%s",
-                        self.task_id, sid, segment.failed_stage, type(error).__name__)
-                    warning = f"Câu {sid + 1} chưa tạo được giọng; giữ phần đã xong và tiếp tục các câu sau."
-                    if warning not in self.warnings:
-                        self.warnings.append(warning)
-                    continue
-                self._visual_published_ids.add(sid)
+        await self._finish_visual_review_groups(groups, review_candidates, draft_identities)
         await self.report_progress("visual", "Đang đối chiếu lời thoại, phụ đề và tiêu đề",
             round(100 * self._visual_completed_seconds / self.total_duration, 1) if self.total_duration else None,
             processed_seconds=self._visual_completed_seconds, total_seconds=self.total_duration,
             completed_segments=sum(s.status in ("READY", "PLAYED") for s in self.segments.values()),
             total_segments=len(self.segments))
         await self.pause_event.wait()
+
+    async def _finish_visual_review_groups(self, groups, review_candidates, draft_identities):
+        lookahead = None
+        try:
+            for index, group in enumerate(groups):
+                prefetched = await lookahead if lookahead is not None else None
+                lookahead = None
+                await self._finish_visual_review_group(group, review_candidates, draft_identities, prefetched)
+                # Start only after the current review has committed its source
+                # corrections. One detached next group overlaps one speech
+                # owner; it cannot publish text, retry state or audio itself.
+                if index + 1 < len(groups) and settings.LLM_PROVIDER == "opencode":
+                    targets = review_candidates.intersection(groups[index + 1])
+                    if targets and not self.is_stopped:
+                        lookahead = asyncio.create_task(self._prefetch_visual_review(targets))
+                await self._finish_visual_speech_group(group)
+        finally:
+            if lookahead is not None:
+                if not lookahead.done():
+                    lookahead.cancel()
+                # _run_blocking cancels and reaps native work before returning.
+                await asyncio.gather(lookahead, return_exceptions=True)
+
+    async def _finish_visual_review_group(self, group, review_candidates, draft_identities, prefetched):
+        await self.pause_event.wait()
+        if self.is_stopped:
+            raise asyncio.CancelledError
+        targets = review_candidates.intersection(group)
+        if targets and settings.LLM_PROVIDER == "opencode":
+            revisions = {sid: self.segments[sid].revision for sid in targets}
+            try:
+                await self._review_translations(segment_ids=targets, _prefetched=prefetched)
+                for sid in targets:
+                    self._visual_reviewed_drafts[sid] = {"draft": draft_identities[sid],
+                        "state": self._visual_review_state(self.segments[sid]),
+                        "context": self._visual_source_context_identity()}
+            except asyncio.CancelledError:
+                raise
+            except Exception as error:
+                if getattr(self, "_persistence_capacity_failed", False):
+                    raise
+                self.review_summary = {"status": "incomplete"}
+                warning = "AI kiểm tra lại chưa hoàn tất; giữ bản nháp và cho phép thử lại."
+                if warning not in self.warnings:
+                    self.warnings.append(warning)
+                logging.getLogger("errors").error("[%s] REVIEW_FAILED error_type=%s", self.task_id, type(error).__name__)
+                for sid in targets:
+                    item = self.segments[sid]
+                    if item.revision != revisions[sid] or (item.verification or {}).get("status") == "manual":
+                        continue
+                    item.needs_review = True
+                    item.review_reason = "AI kiểm tra nguồn chưa hoàn tất; đây là bản nháp cần kiểm tra."
+                    item.verification = {"status": "incomplete", "semantic_verified": False,
+                                         "reason": item.review_reason}
+
+    async def _finish_visual_speech_group(self, group):
+        for sid in group:
+            await self.pause_event.wait()
+            if self.is_stopped:
+                raise asyncio.CancelledError
+            segment = self.segments[sid]
+            try:
+                await self._process_segment(segment)
+            except Exception as error:
+                if getattr(self, "_persistence_capacity_failed", False):
+                    raise
+                segment.failed_stage, segment.status = segment.status, "FAILED"
+                segment.error = str(error)
+                await self.emit("segment_update", segment.to_dict())
+                # A single unfit sentence or transient speech request must
+                # not hide all following chunks of a long video. Keep the
+                # failed row actionable and carry on; final completion is
+                # decided by the worker from all rows, never this callback.
+                logging.getLogger("errors").error(
+                    "[%s] SEGMENT_FAILED_CONTINUING segment_id=%s stage=%s error_type=%s",
+                    self.task_id, sid, segment.failed_stage, type(error).__name__)
+                warning = f"Câu {sid + 1} chưa tạo được giọng; giữ phần đã xong và tiếp tục các câu sau."
+                if warning not in self.warnings:
+                    self.warnings.append(warning)
+                continue
+            self._visual_published_ids.add(sid)
 
     async def _consume_chunk_followups(self):
         while True:

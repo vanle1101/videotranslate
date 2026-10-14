@@ -13,6 +13,27 @@ def create_backend_loop():
     return asyncio.new_event_loop()
 
 
+async def _serve_and_drain(server):
+    try:
+        await server.serve()
+    finally:
+        # Graceful shutdown can expire with unread response bytes still queued.
+        # transport.close() waits to flush those bytes; a client that stopped
+        # reading can retain its socket after the event loop closes. At this
+        # point Uvicorn has ended graceful service, so abort only its remaining
+        # transports and let response owners close their file contexts before
+        # Runner cancels every child task (including native-open awaits).
+        state = getattr(server, "server_state", None)
+        if state is not None:
+            for connection in tuple(state.connections):
+                connection.transport.abort()
+            tasks = tuple(state.tasks)
+            if tasks:
+                await asyncio.gather(*tasks, return_exceptions=True)
+            # Deliver connection_lost callbacks before closing the local loop.
+            await asyncio.sleep(0)
+
+
 def run_backend_server(server):
     """Serve on a thread-owned loop and drain its async/native workers on exit.
 
@@ -24,12 +45,12 @@ def run_backend_server(server):
         # Keep the standard runner's task/generator/executor teardown bounds
         # on current Python; only supply this backend's local loop factory.
         with runner_type(loop_factory=create_backend_loop) as runner:
-            runner.run(server.serve())
+            runner.run(_serve_and_drain(server))
         return
     loop = create_backend_loop()
     asyncio.set_event_loop(loop)
     try:
-        loop.run_until_complete(server.serve())
+        loop.run_until_complete(_serve_and_drain(server))
     finally:
         try:
             pending = asyncio.all_tasks(loop)
