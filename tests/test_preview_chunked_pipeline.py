@@ -774,6 +774,37 @@ def test_interrupted_preview_does_not_prepare_translate_rest_before_full_click(p
     asyncio.run(run())
 
 
+def test_startup_resume_marks_owned_unfinished_rows_pending_before_first_source_result(preview, monkeypatch):
+    session, *_ = preview
+    session.initialized = session._chunked_source_started = True
+    session._startup_failed = True
+    session.error = "source work interrupted"
+    stages = ["WAITING", "ASR", "TRANSLATING", "TTS", "ALIGNING"]
+    for sid, stage in enumerate(stages):
+        row = SegmentItem(sid, sid * 2, sid * 2 + 1, 1)
+        row.status, row.failed_stage, row.error = "FAILED", stage, "interrupted"
+        row.final_vi = "Lời đã dịch." if stage in {"TTS", "ALIGNING"} else ""
+        session.segments[sid] = row
+    saved = SegmentItem(5, 10, 11, 1)
+    saved.status, saved.final_vi, saved.verification = "READY", "Lời thủ công.", {"status":"manual"}
+    session.segments[5] = saved
+    before = deepcopy(saved.to_dict())
+    async def blocked_source(*args):
+        assert all(session.segments[sid].status == "WAITING" for sid in range(5))
+        assert all(session.segments[sid].error is None for sid in range(5))
+    monkeypatch.setattr(session, "_start_guarded", blocked_source)
+    async def run():
+        progress = await session.retry_failed_synthesis()
+        assert progress["segment_states"]["FAILED"] == 0
+        assert progress["segment_states"]["PENDING"] == 5
+        assert progress["segment_states"]["RETRY_PENDING"] == 0
+        await session.start_task
+    asyncio.run(run())
+    assert [session.segments[sid].failed_stage for sid in range(5)] == stages
+    assert [session.segments[sid]._retry_synthesis for sid in range(5)] == [False,False,False,True,True]
+    assert saved.to_dict() == before
+
+
 def test_startup_resume_retries_earlier_known_speech_without_discarding_ready_prefix(preview):
     session, prepared, analyzed, speech, events = preview
     async def run():

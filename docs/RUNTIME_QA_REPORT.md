@@ -1,5 +1,24 @@
 # Runtime QA report
 
+## Partial UI and resumed-status correction — October 15, 2026, 06:32
+
+A fresh offscreen production page attached to backend53169/task5bea8fe5.
+All42 nonempty backend translations matched the exact visible transcript-button
+text across75 source rows. The33 empty rows/placeholders were explicitly excluded.
+**Retained partial-script display PASS**, not validation of semantic accuracy or
+early publication before every chunk finishes. The page closed without stopping
+the real long run.
+
+The same UI showed32 failures from the previous interrupted startup even though
+Resume had reserved unfinished source work. Root cause: the startup-retry branch
+reset only TTS/ALIGNING rows, unlike normal Retry, leaving source-stage rows FAILED
+until each result arrived. Explicit startup Resume now resets unfinished FAILED
+rows to WAITING, clears the old interruption message and preserves failed_stage
+for routing. Completed/manual output is untouched; no retry timer is invented.
+**106 preview/partial-publication regressions passed in15.06s**, including the
+pending counts before the first source result and retained manual output. The
+live backend predates this latest status patch; runtime retest remains pending.
+
 ## Real Stop / fresh-runtime Resume — October 15, 2026, 06:25
 
 The long run was intentionally stopped through the production UI while a real

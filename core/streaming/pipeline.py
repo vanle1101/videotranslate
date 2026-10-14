@@ -592,11 +592,16 @@ class StreamingPipelineSession:
             # earlier speech failed. Explicit Retry must also schedule those
             # known translations; otherwise the cursor skips them forever.
             for segment in self.segments.values():
-                if (segment.status == "FAILED" and segment.failed_stage in {"TTS", "ALIGNING"}
-                        and (segment.final_vi.strip() or segment.confirmed_silence)):
+                if segment.status == "FAILED":
                     segment.status = "WAITING"
                     segment.error = None
-                    segment._retry_synthesis = True
+                    segment._retry_synthesis = bool(segment.failed_stage in {"TTS", "ALIGNING"}
+                        and (segment.final_vi.strip() or segment.confirmed_silence))
+                    # Explicit Resume reserves unfinished source rows too.
+                    # Their persisted interruption is no longer a terminal
+                    # failure while source workers await their turn. Keep the
+                    # failed stage for recovery routing, without inventing a
+                    # retry timer or changing completed/manual output.
             self._restored_interrupted = False
             self.is_stopped = False
             self.is_running = True
@@ -1200,9 +1205,65 @@ class StreamingPipelineSession:
             self.screen_texts = updated
             await self.emit("screen_update", {"screen_texts": self.screen_texts})
 
-    async def _review_translations(self, *, regenerate_audio=False, force_review=False, segment_ids=None,
-                                   defer_audio=False):
+    def _review_invocation_snapshot(self, segment_ids, force_review=False):
+        """Capture detached review inputs; playback state is not dialogue evidence."""
         from core.translation_review import AutomaticTranslationReviewer
+        from core.review_checkpoint import digest
+        targets = deepcopy([row for row in self.segments.values()
+                            if segment_ids is None or row.id in segment_ids])
+        # Read-only neighbors are serialized directly into reviewer prompts.
+        # Do not feed transient TTS status, audio URLs or subtitle timing back
+        # into semantic review (or invalidate lookahead when speech advances).
+        fields = ("id", "start", "end", "duration", "text_zh", "asr_text", "emotion",
+                  "literal_vi", "natural_vi", "final_vi", "revision", "source_method",
+                  "translation_provider", "translation_model", "evidence_mode",
+                  "needs_review", "review_reason", "verification", "confirmed_silence",
+                  "speaker_review_pending", "voice_id", *SOURCE_METADATA_FIELDS)
+        context = [{name: deepcopy(getattr(row, name, None)) for name in fields}
+                   for row in sorted(self.segments.values(), key=lambda item: (item.start, item.id))]
+        snapshot = {"targets": targets, "context": context if segment_ids is not None else None,
+                    "screens": deepcopy(self.screen_texts), "glossary": glossary_snapshot(self),
+                    "runtime": self._source_scope_review_runtime(), "language": self.source_language,
+                    "video": self.video_path, "force_review": force_review,
+                    "source_rows": self._source_scope_review_rows(),
+                    "retry_scopes": review_input_hashes(self)}
+        snapshot["identity"] = digest({
+            "targets": [AutomaticTranslationReviewer._row(row) for row in targets],
+            **{key: snapshot[key] for key in ("context", "screens", "glossary", "runtime", "language", "force_review")}})
+        return snapshot
+
+    async def _invoke_detached_review(self, snapshot, progress_callback=None):
+        """Provider work only: never publish rows, retries or session progress."""
+        from core.translation_review import AutomaticTranslationReviewer
+        from core.streaming.progress_eta import stage_measurement_start
+        from core.runtime_context import observe_cache_usage
+        reviewer = AutomaticTranslationReviewer(source_language=snapshot["language"])
+        reviewer.glossary = deepcopy(snapshot["glossary"])
+        options = {"cancel_check": lambda: self.is_stopped,
+                   "progress_callback": progress_callback, "force_review": snapshot["force_review"]}
+        if snapshot["context"] is not None:
+            options["context_segments"] = deepcopy(snapshot["context"])
+        packet = {"snapshot": snapshot, "reviewer": reviewer,
+                  "started": stage_measurement_start(self)}
+        try:
+            with observe_cache_usage() as cache_usage:
+                packet["result"] = await self._run_blocking(reviewer.review, snapshot["video"],
+                    deepcopy(snapshot["targets"]), deepcopy(snapshot["screens"]), **options)
+            packet["cache_usage"] = cache_usage
+        except asyncio.CancelledError:
+            raise
+        except Exception as error:
+            # The single publication owner schedules this exact failure once.
+            # Lookahead must not retry a failed call behind the owner's back.
+            packet["error"] = error
+        return packet
+
+    async def _review_translations(self, *, regenerate_audio=False, force_review=False, segment_ids=None,
+                                   defer_audio=False, _detached=False, _prefetched=None):
+        from core.translation_review import AutomaticTranslationReviewer
+        invocation = self._review_invocation_snapshot(segment_ids, force_review)
+        if _detached:
+            return await self._invoke_detached_review(invocation)
         self._review_scope = "chunk" if segment_ids is not None else "all"
         self._reviewing_segment_ids = sorted(segment_ids) if segment_ids is not None else sorted(self.segments)
         await self.report_progress("review", "AI đang kiểm tra lại từng câu với nguồn…", None)
@@ -1219,26 +1280,26 @@ class StreamingPipelineSession:
         def progress(percent):
             if semantic_active and not self.is_stopped:
                 loop.call_soon_threadsafe(lambda: asyncio.create_task(publish_review_progress(percent)))
-        targets = [segment for segment in self.segments.values()
-                   if segment_ids is None or segment.id in segment_ids]
+        targets = invocation["targets"]
         target_revisions = {segment.id: segment.revision for segment in targets}
-        source_rows = self._source_scope_review_rows()
-        source_runtime_identity = self._source_scope_review_runtime()
+        source_rows = invocation["source_rows"]
+        source_runtime_identity = invocation["runtime"]
         published_revisions = {}
-        options = {"cancel_check": lambda: self.is_stopped, "progress_callback": progress,
-                   "force_review": force_review}
-        if segment_ids is not None:
-            options["context_segments"] = deepcopy(list(self.segments.values()))
-        from core.streaming.progress_eta import stage_measurement_start, record_processing_stage
-        from core.runtime_context import observe_cache_usage
-        eta_review_started = stage_measurement_start(self)
-        review_input_scopes = review_input_hashes(self)
+        from core.streaming.progress_eta import record_processing_stage
+        review_input_scopes = invocation["retry_scopes"]
         try:
-            with observe_cache_usage() as review_cache_usage:
-                reviewer = AutomaticTranslationReviewer(source_language=self.source_language)
-                reviewer.glossary = glossary_snapshot(self)
-                result = await self._run_blocking(
-                    reviewer.review, self.video_path, deepcopy(targets), deepcopy(self.screen_texts), **options)
+            if (_prefetched is not None and _prefetched["snapshot"]["identity"] == invocation["identity"]
+                    and invocation["runtime"] is not None):
+                packet = _prefetched
+            else:
+                if _prefetched is not None:
+                    logging.getLogger("pipeline").info("REVIEW_LOOKAHEAD_STALE run_id=%s segment_ids=%s",
+                        self.task_id, sorted(row.id for row in targets))
+                packet = await self._invoke_detached_review(invocation, progress)
+            reviewer = packet["reviewer"]
+            if "error" in packet:
+                raise packet["error"]
+            result = packet["result"]
             # Typed transport failures collected inside review stay independent
             # from semantic verdicts. Schedule them before any row publication,
             # while the captured source/context revision still owns the scope.
@@ -1249,7 +1310,7 @@ class StreamingPipelineSession:
             successful_rows = sum((row.get("verification") or {}).get("status") in
                                   {"verified", "corrected", "unresolved", "manual"}
                                   for row in result.get("segments", {}).values())
-            record_processing_stage(self, "review", successful_rows, eta_review_started, cache_usage=review_cache_usage)
+            record_processing_stage(self, "review", successful_rows, packet["started"], cache_usage=packet["cache_usage"])
         except asyncio.CancelledError:
             raise
         except Exception as error:
