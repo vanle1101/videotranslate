@@ -50,7 +50,7 @@ from core.source_language import SourceLanguage
 from core.history_thumbnail import (
     ThumbnailError, attach_history_thumbnails, history_thumbnail_cache, resolve_history_source,
 )
-from core.streaming.output_gate import final_output_metadata, missing_spoken_output_ids, missing_speech_message
+from core.streaming.output_gate import final_output_metadata, draft_review_metadata, missing_spoken_output_ids, missing_speech_message
 from core.runtime_errors import export_failure
 from core.media_preview import preview_manager, DEFAULT_COMPATIBILITY_SECONDS
 from core.voice_catalog import list_voices, resolve_voice
@@ -192,7 +192,7 @@ class ConfigRequest(BaseModel):
     @classmethod
     def validate_translation_chunk_workers(cls, value):
         if value is not None and value not in TRANSLATION_CHUNK_WORKER_OPTIONS:
-            raise ValueError("Số luồng dịch phải là 1, 3, 5, 10, 15 hoặc 20")
+            raise ValueError("Số luồng dịch phải là 1, 3, 5, 10, 15, 20, 30, 40 hoặc 50")
         return value
 
 
@@ -452,7 +452,10 @@ async def update_settings(req: ConfigRequest):
         # Session engines capture some settings while later stages read globals.
         # Reject mutations until all consumers finish rather than mixing models
         # or silently skipping the final review of an existing run.
-        changed = any(str(getattr(settings, name, "")) != str(value)
+        # AI concurrency is captured by each new session. Updating its default
+        # cannot retune active projects; other engine settings still require idle.
+        future_only = {"TRANSLATION_CHUNK_WORKERS", "OPENCODE_CONCURRENCY"}
+        changed = any(name not in future_only and str(getattr(settings, name, "")) != str(value)
                       for name, value in env_updates.items())
         if changed and (any(getattr(sess, "is_running", False) or getattr(sess, "is_editing", False)
                             for sess in active_streaming_sessions.values())
@@ -495,15 +498,17 @@ task_history: List[Dict[str, Any]] = []
 def review_result_details(session):
     """Keep unresolved findings visible even when the user receives a final file."""
     summary = dict(getattr(session, "review_summary", {}) or {})
+    editorial = draft_review_metadata(session.segments.values(), summary)
     findings = [{"segment_id": s.id, "start": s.start, "end": s.end,
                  "text_zh": s.text_zh, "final_vi": s.final_vi,
                  "reason": s.review_reason or "Nguồn chưa đủ rõ để xác minh chắc chắn.",
                  "verification": getattr(s, "verification", None)}
-                for s in session.segments.values() if getattr(s, "needs_review", False)]
+                for s in session.segments.values() if s.id in editorial["review_issue_ids"]]
     return {"review_summary": summary, "review_report": findings,
-            "review_warning": (f"AI đã kiểm tra toàn bộ; {len(findings)} câu còn thiếu bằng chứng rõ từ nguồn. "
-                               "Video giữ bản dịch tốt nhất hiện có; chi tiết nằm trong báo cáo kiểm tra.")
-            if findings and summary.get("status") == "completed" else ""}
+            **editorial,
+            "review_warning": ("Bản nháp — cần kiểm tra. "
+                               f"{len(findings)} câu có ghi chú; việc rà nội dung chưa xác minh đầy đủ. "
+                               "Chi tiết nằm trong báo cáo kiểm tra.") if editorial["output_is_draft"] else ""}
 
 
 def review_sidecar_payload(session):
@@ -527,7 +532,7 @@ def review_sidecar_payload(session):
 
 
 def session_output_details(session):
-    gate = final_output_metadata(session.segments.values())
+    gate = final_output_metadata(session.segments.values(), getattr(session, "review_summary", {}))
     return {"output_video_url": "" if gate["final_output_blocked"] else getattr(session, "output_video_url", ""),
             "output_filename": "" if gate["final_output_blocked"] else getattr(session, "output_filename", ""),
             "review_url": "" if gate["final_output_blocked"] else getattr(session, "output_review_url", ""),
@@ -630,7 +635,7 @@ def export_revision_signature(session):
 def schedule_reviewed_export(task_id):
     session = get_streaming_session(task_id)
     if (session is None or getattr(session, "auto_export_result", False) is not True
-            or getattr(session, "review_summary", {}).get("status") != "completed"
+            or getattr(session, "review_summary", {}).get("status") == "running"
             or session.is_running or session.error or getattr(session, "is_stopped", False)
             or getattr(session, "_stop_draining", False)
             or getattr(session, "is_editing", False) or not session.segments
@@ -1644,12 +1649,13 @@ async def export_hq(req: ExportHQRequest):
     if missing_speech:
         raise HTTPException(status_code=409, detail=missing_speech_message(missing_speech))
     review_status = getattr(session, "review_summary", {}).get("status")
-    if review_status in {"failed", "running", "incomplete"}:
-        raise HTTPException(status_code=409, detail="AI kiểm tra lại chưa hoàn tất. Bấm AI kiểm tra lại để tiếp tục trước khi xuất.")
-    uncertain = [s for s in session.segments.values() if getattr(s, "needs_review", False)]
-    if uncertain and not (review_status == "completed" and all(
-            (getattr(s, "verification", None) or {}).get("status") == "unresolved" for s in uncertain)):
-        raise HTTPException(status_code=409, detail="Bản dịch chưa được AI kiểm tra đầy đủ. Bấm AI kiểm tra lại trước khi xuất.")
+    if review_status == "running":
+        raise HTTPException(status_code=409, detail="AI đang sửa bản dịch. Hãy chờ lượt đang chạy kết thúc trước khi xuất bản nháp.")
+    if getattr(session, "_chunked_source_started", False):
+        from core.streaming.pipeline import preview_source_covered
+        if not getattr(session, "_visual_prepass_complete", False) or not preview_source_covered(completed_seconds=session.total_duration,
+                source_prepared_seconds=getattr(session, "_source_prepared_seconds", 0), chunked_source_started=True):
+            raise HTTPException(status_code=409, detail="Chưa xử lý đủ nguồn của toàn video; không thể xuất đầy đủ.")
     if session.is_running or session.error or any(
         s.status not in ("READY", "PLAYED") for s in session.segments.values()
     ):
@@ -1763,7 +1769,7 @@ async def export_hq(req: ExportHQRequest):
         metadata_warning = ""
         sidecar_warning = ("Video MP4 đã xuất và có thể tải, nhưng chưa lưu được báo cáo kiểm tra. "
                            "Kiểm tra dung lượng/quyền ghi thư mục kết quả rồi xuất lại để lưu báo cáo.")
-        if review_status == "completed":
+        if review_status == "completed" or review_result_details(session)["output_is_draft"]:
             sidecar_name = f"{Path(result['output_filename']).stem}.review.json"
             sidecar_path = settings.OUTPUT_DIR / sidecar_name
             sidecar_temp = sidecar_path.with_name(f".{sidecar_name}.{uuid.uuid4().hex}.tmp")

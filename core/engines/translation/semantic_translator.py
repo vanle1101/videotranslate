@@ -693,6 +693,7 @@ Quy tắc bắt buộc:
         rolling_context: Optional[List[Dict[str, str]]] = None,
         measured_duration: Optional[float] = None,
         feedback: Optional[Dict[str, Any]] = None,
+        *, source_language: Optional[str] = None, allow_review_draft: bool = False,
     ) -> Dict[str, str]:
         """Create a shorter spoken line without changing its meaning.
 
@@ -702,6 +703,19 @@ Quy tắc bắt buộc:
         can hide the end of a sentence at export time.
         """
         clean_zh, draft = str(text_zh or "").strip(), str(current_vi or "").strip()
+        if source_language is not None and (not isinstance(source_language, str)
+                or not re.fullmatch(r"[a-zA-Z][a-zA-Z0-9_-]{0,31}", source_language)):
+            raise ValueError("Mã ngôn ngữ nguồn không hợp lệ.")
+        language_hint = source_language or "auto"
+        language_policy = (
+            "Nguồn thoại có thể thuộc bất kỳ ngôn ngữ nào hoặc xen kẽ nhiều ngôn ngữ. "
+            "Tự nhận diện ngôn ngữ của nguyên văn từng câu; không mặc định tiếng Trung. "
+            "text_zh/zh chỉ là tên trường cũ. Đối chiếu trực tiếp nguyên văn nguồn đang xét, "
+            "không dịch vòng qua phụ đề Trung hay thay lời Hàn/Anh bằng chữ OCR. "
+            "Ngôn ngữ cấu hình là gợi ý, không phải bằng chứng phủ nhận nguồn thực. "
+            "Các ví dụ ngữ pháp Trung chỉ áp dụng khi câu nguồn thực sự là tiếng Trung. "
+            "Giữ tên, số, phủ định, hành động, quan hệ và sắc thái của chính ngôn ngữ nguồn."
+        )
         if not clean_zh or not draft or self.provider not in self.STRICT_PROVIDERS:
             raise RuntimeError("Cần nguồn thoại và nhà cung cấp AI để rút gọn lời đọc mà giữ đúng nghĩa.")
         measured_hint = (f"Bản nháp đã được đọc thử và dài {measured_duration:.2f} giây. "
@@ -751,10 +765,10 @@ Trả duy nhất JSON: {{"literal_vi":"...","natural_vi":"...","final_vi":"...",
 "needs_review":false,"review_reason":"..."}}"""
         target = focus_identity(rolling_context or [])
         semantics = _source_semantics(rolling_context, [target] if target else [])
-        system += "\n" + SEMANTIC_TRANSLATION_POLICY
+        system += "\n" + SEMANTIC_TRANSLATION_POLICY + "\n" + language_policy
         user = (f"Mốc câu cần rút gọn: {json.dumps(target, ensure_ascii=False)}\n"
                 f"Ngữ cảnh gần đây:\n{context}\nsemantic_context: {json.dumps(semantics, ensure_ascii=False)}\n\nNguyên văn nguồn: {clean_zh}\n"
-                f"Bản dịch hiện tại: {draft}\nViết lại cho nhịp đọc tự nhiên.")
+                f"source_language_hint: {language_hint}\nBản dịch hiện tại: {draft}\nViết lại cho nhịp đọc tự nhiên.")
         if feedback:
             user += ("\nDưới đây là số đo giọng thật và phản hồi các lần thử trước. "
                      "measured_candidates là lời đã đọc nhưng chưa vừa; raw_budget_seconds là giới hạn vật lý. "
@@ -773,7 +787,7 @@ Trả duy nhất JSON: {{"literal_vi":"...","natural_vi":"...","final_vi":"...",
                                       candidate=candidate["final_vi"],
                                       reason="Rút thời lượng không được tự thêm sắc thái thô trong xưng hô.",
                                       code="semantic_mismatch")
-        if candidate.get("needs_review"):
+        if candidate.get("needs_review") and not allow_review_draft:
             raise PacingReviewRejected("AI chưa tìm được lời đọc ngắn hơn mà chắc chắn giữ đủ nghĩa.",
                                       candidate=candidate["final_vi"], reason=candidate.get("review_reason", ""), code="uncertain")
         tried = [draft]
@@ -828,13 +842,15 @@ Trả duy nhất JSON: {{"literal_vi":"...","natural_vi":"...","final_vi":"...",
               'nhấn mạnh/đối lập, người thứ ba hoặc lời gọi. Chưa biết quan hệ xã hội không '
               'tự bác câu trung tính đủ nghĩa; address_preserved ở đây xác nhận không đổi '
               'chiều/sắc thái, không chứng nhận một quan hệ chưa biết.'
-            + '\n' + SEMANTIC_TRANSLATION_POLICY,
+            + '\n' + SEMANTIC_TRANSLATION_POLICY + '\n' + language_policy,
             json.dumps({"target": target, "source": clean_zh, "previous": draft, "candidate": candidate["final_vi"],
-                        "context": context, "semantic_context": semantics}, ensure_ascii=False),
+                        "context": context, "semantic_context": semantics,
+                        "source_language_hint": language_hint}, ensure_ascii=False),
             lambda raw: self._review_response(raw, _FIDELITY_SCHEMA),
             schema_id="semantic-pacing-fidelity-v2", task_kind="semantic_review")
         if (not isinstance(verdict, dict) or verdict.get("equivalent") is not True
                 or verdict.get("natural") is not True or not self._nonempty_string(verdict.get("reason"))
+                or verdict.get("address_preserved") is False
                 or (needs_address_audit([
                         {"text_zh": clean_zh, "final_vi": draft},
                         {"text_zh": clean_zh, "final_vi": candidate["final_vi"]},
@@ -885,6 +901,13 @@ Trả duy nhất JSON: {{"literal_vi":"...","natural_vi":"...","final_vi":"...",
             "text": candidate["final_vi"], "reason": verdict["reason"][:500],
             "address_preserved": verdict.get("address_preserved") is True,
             "fluency": {"natural": True, "reason": fluency["reason"][:500]}}
+        if candidate.get("needs_review"):
+            # Only the draft author's uncertainty remains: both independent
+            # fidelity and fluency gates passed. Never turn a false verdict,
+            # schema/transport error, or unknown exception into draft success.
+            candidate["pacing_verification"].update(
+                status="draft", semantic_verified=True,
+                review_required=True, review_reason=candidate.get("review_reason") or "Còn bất định từ bản dịch.")
         return candidate
 
     def _review_response(self, raw, schema):

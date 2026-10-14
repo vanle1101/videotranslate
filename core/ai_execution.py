@@ -171,7 +171,7 @@ class ValidatedResponseCache:
 
 
 class AIExecutionLayer:
-    """FIFO admission across clients; circuit and cache are provider scoped.
+    """Fair per-video admission; circuit and cache are provider scoped.
 
     A retry holds its admitted slot (including backoff), so callers cannot
     bypass the provider's backpressure by each starting their own retry loop.
@@ -185,6 +185,10 @@ class AIExecutionLayer:
         self._queue = deque()
         self._active = 0
         self._active_keys = set()
+        self._run_limits = {}
+        self._run_active = {}
+        self._run_counters = {}
+        self._last_admitted_run = None
         self._failures = 0
         self._open_until = 0.0
         self._half_open = False
@@ -209,23 +213,59 @@ class AIExecutionLayer:
         if cancel_check is not None and cancel_check():
             raise AIExecutionCancelledError("Đã hủy yêu cầu AI đang chờ.")
 
-    def _admit(self, cancel_check, key):
+    def set_run_concurrency(self, run_id: str, concurrency: int) -> None:
+        """A video's admission limit is independent of other videos and presets."""
+        if not isinstance(run_id, str) or not run_id:
+            raise ValueError("run_id must be nonempty")
+        if isinstance(concurrency, bool) or not isinstance(concurrency, int) or not 1 <= concurrency <= 50:
+            raise ValueError("run concurrency must be between 1 and 50")
+        with self._condition:
+            self._run_limits[run_id] = concurrency
+            self._condition.notify_all()
+
+    def _count(self, run_id, name):
+        counters = self._run_counters.setdefault(run_id, {})
+        counters[name] = counters.get(name, 0) + 1
+
+    def has_run_concurrency(self, run_id: str) -> bool:
+        with self._condition:
+            return run_id in self._run_limits
+
+    def _next_ticket(self):
+        # First runnable request per video, then round robin among videos.
+        # A duplicate cache key or a saturated video cannot block another.
+        candidates = {}
+        for ticket, run_id, key in self._queue:
+            if (run_id not in candidates and key not in self._active_keys
+                    and self._run_active.get(run_id, 0) < self._run_limits.get(run_id, self.policy.concurrency)):
+                candidates[run_id] = ticket
+        if not candidates:
+            return None
+        runs = list(candidates)
+        if self._last_admitted_run in runs and len(runs) > 1:
+            index = (runs.index(self._last_admitted_run) + 1) % len(runs)
+            return candidates[runs[index]]
+        return candidates[runs[0]]
+
+    def _admit(self, cancel_check, key, run_id="unscoped"):
         ticket = object()
+        entry = (ticket, run_id, key)
         deadline = time.monotonic() + self.policy.queue_timeout
         with self._condition:
             self._cancel(cancel_check)
             self._check_circuit()
-            if len(self._queue) >= self.policy.queue_limit:
+            if sum(item[1] == run_id for item in self._queue) >= max(self.policy.queue_limit, self._run_limits.get(run_id, self.policy.concurrency)):
                 raise AIQueueFullError("Hàng đợi Muse đã đầy; phần chưa xong sẽ được thử lại.")
-            self._queue.append(ticket)
+            self._queue.append(entry)
             try:
                 while True:
                     self._cancel(cancel_check)
                     self._check_circuit()
-                    if (self._queue[0] is ticket and self._active < self.policy.concurrency
-                            and not self._half_open and key not in self._active_keys):
-                        self._queue.popleft()
+                    if self._next_ticket() is ticket and not self._half_open:
+                        self._queue.remove(entry)
                         self._active += 1
+                        self._run_active[run_id] = self._run_active.get(run_id, 0) + 1
+                        self._last_admitted_run = run_id
                         self._active_keys.add(key)
                         if self._open_until:
                             self._half_open = True
@@ -236,8 +276,8 @@ class AIExecutionLayer:
                         raise AIQueueTimeoutError("Hết thời gian chờ lượt Muse; phần chưa xong sẽ được thử lại.")
                     self._condition.wait(min(0.1, remaining))
             finally:
-                if ticket in self._queue:
-                    self._queue.remove(ticket)
+                if entry in self._queue:
+                    self._queue.remove(entry)
                     self._condition.notify_all()
 
     def _check_circuit(self):
@@ -258,9 +298,10 @@ class AIExecutionLayer:
             self._half_open = False
             self._condition.notify_all()
 
-    def _release(self, key):
+    def _release(self, key, run_id):
         with self._condition:
             self._active -= 1
+            self._run_active[run_id] -= 1
             self._active_keys.discard(key)
             # Cancellation/configuration of a half-open probe does not prove
             # the service recovered. Preserve cooldown for the next probe.
@@ -271,10 +312,10 @@ class AIExecutionLayer:
 
     def retry_delay(self, retry_index: int) -> float:
         base = min(self.policy.retry_cap, self.policy.retry_base * 2 ** retry_index)
-        return max(0, base * (1 + self.policy.retry_jitter * (2 * random.random() - 1)))
+        return min(self.policy.retry_cap, max(0, base * (1 + self.policy.retry_jitter * (2 * random.random() - 1))))
 
     def execute(self, operation: Callable[[int], str], *, identity: Mapping[str, Any],
-                max_retries: int = 0, cancel_check=None,
+                max_retries: int = 0, cancel_check=None, run_id: str = "unscoped",
                 retryable: Callable[[Exception], bool] = lambda error: False,
                 wait_retry: Optional[Callable[[float], None]] = None,
                 on_retry: Optional[Callable[[int, Exception], None]] = None,
@@ -283,7 +324,7 @@ class AIExecutionLayer:
                 on_cache_hit: Optional[Callable[[], None]] = None,
                 cache_allowed: Optional[Callable[[str], bool]] = None) -> str:
         self._cancel(cancel_check)
-        max_retries = max(0, min(int(max_retries), 2))
+        max_retries = max(0, min(int(max_retries), 5))
         key = response_cache_key(identity)
         cache_enabled = use_cache and validate is not None
         if cache_enabled:
@@ -292,10 +333,14 @@ class AIExecutionLayer:
                 self._cancel(cancel_check)
                 with self._condition:
                     self._cache_hits += 1
+                    self._count(run_id, "cache_hits")
                 if on_cache_hit:
                     on_cache_hit()
                 return cached
-        self._admit(cancel_check, key)
+        if run_id == "unscoped":
+            self._admit(cancel_check, key)
+        else:
+            self._admit(cancel_check, key, run_id)
         try:
             # Same-key requests queued behind a successful request use its
             # validated result rather than starting another provider request.
@@ -305,6 +350,7 @@ class AIExecutionLayer:
                     self._cancel(cancel_check)
                     with self._condition:
                         self._cache_hits += 1
+                        self._count(run_id, "cache_hits")
                     if on_cache_hit:
                         on_cache_hit()
                     return cached
@@ -313,6 +359,7 @@ class AIExecutionLayer:
                 self._check_circuit()
                 with self._condition:
                     self._requests += 1
+                    self._count(run_id, "requests")
                 try:
                     result = operation(attempt + 1)
                     self._cancel(cancel_check)
@@ -323,7 +370,11 @@ class AIExecutionLayer:
                 except Exception as error:
                     if not retryable(error):
                         raise
-                    self._failure()
+                    # Registered video waves own up to six transport attempts.
+                    # Count an exhausted wave toward the circuit, rather than
+                    # opening it midway solely on this request's own retries.
+                    if run_id not in self._run_limits or attempt >= max_retries:
+                        self._failure()
                     if attempt >= max_retries:
                         raise
                     # A breaker opened on this failure: do not spin through
@@ -331,7 +382,11 @@ class AIExecutionLayer:
                     self._check_circuit()
                     with self._condition:
                         self._retries += 1
+                        self._count(run_id, "retry_requests")
                     delay = self.retry_delay(attempt)
+                    retry_after = getattr(error, "retry_after", None)
+                    if isinstance(retry_after, (int, float)) and math.isfinite(retry_after):
+                        delay = max(delay, max(0.0, retry_after))
                     if wait_retry is None:
                         self._wait(delay, cancel_check)
                     else:
@@ -346,7 +401,7 @@ class AIExecutionLayer:
                 self._cancel(cancel_check)
                 return result
         finally:
-            self._release(key)
+            self._release(key, run_id)
         raise AIExecutionError("AI execution exhausted without a response")
 
     def _wait(self, seconds, cancel_check):
@@ -358,11 +413,20 @@ class AIExecutionLayer:
                 return
             time.sleep(min(0.1, remaining))
 
-    def snapshot(self):
+    def snapshot(self, run_id=None):
         with self._condition:
-            return {"active_requests": self._active, "queued_requests": len(self._queue),
-                    "concurrency": self.policy.concurrency,
-                    "requests": self._requests, "retry_requests": self._retries,
-                    "cache_hits": self._cache_hits, "consecutive_failures": self._failures,
+            active = self._active if run_id is None else self._run_active.get(run_id, 0)
+            queued = len(self._queue) if run_id is None else sum(item[1] == run_id for item in self._queue)
+            limit = self.policy.concurrency if run_id is None else self._run_limits.get(run_id, self.policy.concurrency)
+            counters = ({"requests": self._requests, "retry_requests": self._retries, "cache_hits": self._cache_hits}
+                        if run_id is None else self._run_counters.get(run_id, {}))
+            reason = ("circuit_open" if self._open_until > time.monotonic() else
+                      "half_open_probe" if self._half_open else
+                      "video_limit" if queued and active >= limit else
+                      "duplicate_or_fair_queue" if queued else "idle" if not active else "running")
+            return {"active_requests": active, "queued_requests": queued,
+                    "concurrency": limit, "selected_concurrency": limit, "admission_reason": reason,
+                    "requests": counters.get("requests", 0), "retry_requests": counters.get("retry_requests", 0),
+                    "cache_hits": counters.get("cache_hits", 0), "consecutive_failures": self._failures,
                     "circuit_retry_after": max(0, self._open_until - time.monotonic()),
                     "half_open": self._half_open}

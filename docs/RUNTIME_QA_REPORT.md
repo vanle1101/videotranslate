@@ -1,5 +1,27 @@
 # Runtime QA report
 
+## Per-video admission, bounded schema recovery and draft policy — October 14, 2026, 23:38
+
+**Overall acceptance remains INCOMPLETE.** These changes implement part of the newly agreed long-video objective, not completion of all recovery/stress requirements.
+
+- Per-video AI admission now supports 1/3/5/10/15/20/30/40/50, defaults to20, and persists `ai_concurrency` in plain/compressed manifests. Scoped admission is additive between videos, fair among runnable owners, and no longer blocks unrelated requests behind duplicate cache keys. Production transient transport retries have one owner, at most six attempts per wave, exponential backoff/jitter and Retry-After. Unknown CLI failures are not automatically transient. Admitted counters include retry backoff; they are not a claim of live provider CPU work.
+- The parallel source path now uses a dedicated, drained per-wave AI executor, avoiding asyncio's CPU-dependent default thread limit. Existing ChunkScreenOCR independently admits at most two native OCR owners and releases ONNX before awaiting AI. ASR/TTS/render are not multiplied by the AI preset. Short clips/source dependencies may not create enough requests to saturate the selected limit.
+- Structured text responses receive up to two repairs, then recursive target splitting; successful exact subrequests and split markers survive retries. Stable IDs/times are revalidated; uncertainty survives repair. Explicit three-turn neighbors remain read-only alongside established wider address context. OpenCode retains four target rows; other text batches cap at eight.
+- Pacing has at most five proposals per fitting round, language-aware instructions, retained rejection history, and no speed-ceiling increase or speech truncation. Only explicit uncertainty with independent positive fidelity/fluency may become a labeled draft; proven semantic/address errors remain rejected. Rescue cannot reset the focus proposal budget.
+- Idle semantic review can process playable unresolved rows despite unrelated TTS/ALIGNING failures, checkpoints groups, preserves failed/manual rows, and continues after one group fails. Full completion still requires speech. Editorially incomplete output can be exported as “Bản nháp — cần kiểm tra” with sidecar findings, subject to source/media/timeline validation.
+
+Real tests this iteration:
+
+| Steps | Actual result | Result |
+| --- | --- | --- |
+| Fresh offscreen production Qt → History76f5aa6b → AI review, real Muse/OCR/Edge; normal Stop at1200s | Groups processed; group59/63/65/66 failed with VideoIntelligenceError at23:27:17, subsequent groups continued. At bounded stop:193 rows,187 valid WAVs,37PLAYED+150READY+6FAILED,37 review flags,15 manual rows. No full new MP4. Backend stopped. | INCOMPLETE; independent progress and Stop observed |
+| Fresh offscreen production Qt → History00b293c5 → play saved result → Export HQ → play new MP4 | New238136-byte MP4,24.008s,640×360,Qt readyState4/time advances/no media error; backend reports full decode validation and exits. Reuses saved real-provider speech; this run is not new AI generation. | PASS for restore/render/playback |
+| Controlled real-thread50 workers and two20-worker video owners; queue cancellation/context/drain | Six executor tests pass; admission tests cover separate30/40/50 limits and two20 budgets. | PASS, simulated provider workload only |
+
+Regression evidence (overlapping suites, do not sum):263 pipeline/config/schema/pacing tests PASS;119 chunk execution/executor tests PASS;257 draft/export/persistence tests PASS;259 review/pacing/admission/OpenCode tests PASS;276 JavaScript interaction tests PASS. One combined run's one-second child-process fixture timed out under load; isolated retest passed, followed by complete259-test related run passing. No timeout behavior was weakened to hide it.
+
+Outstanding: persistent retry rounds with >=5min delay and restart intent, async render submission rather than long-held POST, broader semantic/source-correction batch recovery and versioned glossary, real50-request Muse throughput, recovery of six timing rows, full320s MP4 and long/new-language acceptance. Named E: projects265796c3/2b5ef22b/aeb… were not found in this project's manifests; this host exposes C: and D:, no E: mount. No unavailable job is claimed recovered. Previous24s mixed synthetic fixture is not evidence for a five-minute or multi-hour video.
+
 ## Rejected rewrite loops and a numeric address false positive — October 14, 2026, 23:01
 
 Two additional root causes were reproduced from retained data:

@@ -866,11 +866,135 @@ class VideoIntelligence:
                     "Lượt trả lời trước chưa chắc chắn nội dung; cần kiểm tra lại.")
         return flags
 
+    @staticmethod
+    def _batch_readonly_context(source_dialogue, targets):
+        """Exactly three chronological source turns either side, never targets."""
+        rows = sorted((row for row in source_dialogue if isinstance(row, dict)),
+                      key=lambda row: (row.get("start", 0), row.get("id", 0)))
+        ids = {row["id"] for row in targets}
+        positions = [i for i, row in enumerate(rows) if row.get("id") in ids]
+        if not positions:
+            return []
+        lo, hi = min(positions), max(positions)
+        return [dict(row) for row in rows[max(0, lo - 3):lo] + rows[hi + 1:hi + 4]
+                if row.get("id") not in ids]
+
     def _request_text_result(self, client, prompt, payload, observed, start, end, cancel_check=None):
-        """One schema-only repair attempt per stage; transport errors never retry."""
+        """Checkpoint exact successful subrequests; split only invalid structure.
+
+        The original prompt remains part of every identity. A changed source,
+        correction, context, model or draft cannot reuse a sibling's old answer.
+        """
+        root_payload, root_observed = list(payload), list(observed)
+        model_identity = getattr(client, "model", None)
+        checkpointable = isinstance(model_identity, str) and bool(model_identity.strip())
+        root_identity = self._checkpoint_digest({"prompt": prompt, "payload": payload,
+            "observed": observed, "start": start, "end": end,
+            "provider": getattr(self, "provider", None), "model": model_identity if checkpointable else None})
+
+        def checkpoint(stage, value):
+            if checkpointable:
+                self._write_checkpoint(stage, value, cancel_check)
+
+        def serialized(result, screens):
+            output_screens = [dict(row) for row in result["screen_texts"]]
+            emitted = {row["id"] for row in output_screens}
+            # Normalization removes explicitly ignored OCR. Preserve that
+            # already validated classification in the wire/checkpoint contract.
+            output_screens.extend({"id": row["id"], "kind": "ignore", "text_vi": "",
+                                   "needs_review": bool(row.get("needs_review")),
+                                   "review_reason": row.get("review_reason") or ""}
+                                  for row in screens if row["id"] not in emitted)
+            return json.dumps({"segments": [{**row, "review_reason": row.get("review_reason") or ""}
+                                            for row in result["segments"].values()],
+                              "screen_texts": output_screens, "summary": result["summary"]}, ensure_ascii=False)
+
+        def checked_saved(raw, targets, screens):
+            checked = self._provider_result(raw, self._fallback_segments(targets), start, end, screens)
+            flags = self._failed_review_flags(raw, targets, screens)
+            for sid, reason in flags["screen_texts"].items():
+                row = next((row for row in checked["screen_texts"] if row["id"] == sid), None)
+                if row is None:
+                    row = {**next(row for row in screens if row["id"] == sid), "kind": "ignore", "text_vi": ""}
+                    checked["screen_texts"].append(row)
+                row.update(needs_review=True, review_reason=reason)
+            return checked
+
+        def request(targets, screens):
+            self._check_cancelled(cancel_check)
+            stage = {"kind": "structured_text_subbatch_v1", "request": root_identity,
+                     "speech_ids": [row["id"] for row in targets], "screen_ids": [row["id"] for row in screens]}
+            saved = self._read_checkpoint(stage) if checkpointable else None
+            if isinstance(saved, dict) and isinstance(saved.get("raw"), str):
+                try:
+                    checked = checked_saved(saved["raw"], targets, screens)
+                except VideoIntelligenceError:
+                    pass
+                else:
+                    return saved["raw"], checked
+            if targets == root_payload and screens == root_observed:
+                scoped = prompt
+            else:
+                # Replace the actual target sections rather than asking the
+                # model to obey contradictory parent/child ID instructions.
+                scoped = prompt
+                for marker, selected in (("Mốc câu cần xuất: ", targets),
+                                         ("ID OCR cần xuất, vị trí/thời gian cố định: ", screens)):
+                    for line in scoped.splitlines():
+                        if line.startswith(marker):
+                            original = json.loads(line[len(marker):])
+                            selected_ids = {row["id"] for row in selected}
+                            scoped = scoped.replace(line, marker + json.dumps(
+                                [row for row in original if row.get("id") in selected_ids], ensure_ascii=False), 1)
+                            break
+                scoped += ("\nPHẠM VI LÔ CON DUY NHẤT: chỉ xuất đúng các ID dưới đây. "
+                           "Các hàng khác trong ngữ cảnh hoặc bản nháp là chỉ đọc, không phải mục tiêu.\n"
+                           + json.dumps({"target_segments": targets, "target_screens": screens,
+                               "readonly_source_neighbors": self._batch_readonly_context(
+                                   getattr(self, "_source_dialogue", None) or root_payload, targets)}, ensure_ascii=False))
+            try:
+                if isinstance(saved, dict) and saved.get("split") is True:
+                    raise VideoIntelligenceError("Tiếp tục các lô con đã chia.")
+                raw, result = self._request_text_result_once(client, scoped, targets, screens, start, end, cancel_check)
+            except VideoIntelligenceError as failure:
+                count = len(targets) + len(screens)
+                if count <= 1:
+                    raise
+                inherited_flags = (saved.get("flags", {}) if isinstance(saved, dict) and saved.get("split")
+                                   else getattr(failure, "failed_review_flags", {}))
+                checkpoint(stage, {"split": True, "flags": inherited_flags})
+                items = [("speech", row) for row in targets] + [("screen", row) for row in screens]
+                middle = len(items) // 2
+                children = []
+                for part in (items[:middle], items[middle:]):
+                    children.append(request([row for kind, row in part if kind == "speech"],
+                                            [row for kind, row in part if kind == "screen"])[1])
+                merged = {"segments": {sid: row for child in children for sid, row in child["segments"].items()},
+                          "screen_texts": [row for child in children for row in child["screen_texts"]],
+                          "summary": "\n".join(child["summary"] for child in children if child["summary"])[:3000]}
+                raw = serialized(merged, screens)
+                result = checked_saved(raw, targets, screens)
+                for sid, reason in inherited_flags.get("segments", {}).items():
+                    if int(sid) in result["segments"]:
+                        result["segments"][int(sid)].update(needs_review=True, review_reason=reason)
+                for sid, reason in inherited_flags.get("screen_texts", {}).items():
+                    row = next((row for row in result["screen_texts"] if row["id"] == sid), None)
+                    if row is None:
+                        row = {**next(row for row in screens if row["id"] == sid), "kind": "ignore", "text_vi": ""}
+                        result["screen_texts"].append(row)
+                    row.update(needs_review=True, review_reason=reason)
+            # Serialize normalized flags, not the provider's pre-repair claims.
+            raw = serialized(result, screens)
+            checkpoint(stage, {"raw": raw})
+            return raw, result
+
+        return request(root_payload, root_observed)
+
+    def _request_text_result_once(self, client, prompt, payload, observed, start, end, cancel_check=None):
+        """Two schema repairs; transport failures remain the retry owner's job."""
         request_prompt = prompt
         failed_flags = {"segments": {}, "screen_texts": {}}
-        attempts = schema_attempts(1)
+        attempts = schema_attempts(2)
         for attempt in range(attempts):
             self._check_cancelled(cancel_check)
             # Four speech turns and eight screen regions do not need a 12k
@@ -884,12 +1008,15 @@ class VideoIntelligence:
                 self._check_cancelled(cancel_check)
             except VideoIntelligenceError as exc:
                 self._check_cancelled(cancel_check)
-                if attempt == attempts - 1:
-                    raise
                 raw = getattr(exc, "raw_response", None)
-                failed_flags = self._failed_review_flags(raw, payload, observed)
+                latest_flags = self._failed_review_flags(raw, payload, observed)
+                for kind in failed_flags:
+                    failed_flags[kind].update(latest_flags[kind])
+                if attempt == attempts - 1:
+                    exc.failed_review_flags = failed_flags
+                    raise
                 request_prompt = (prompt + "\nSỬA ĐỊNH DẠNG JSON: lần trả lời trước không đúng hợp đồng. "
-                                  "Chỉ có một lần sửa. Trả lại TOÀN BỘ JSON với đúng mọi ID/thời gian đã cấp; "
+                                  "Trả lại TOÀN BỘ JSON với đúng mọi ID/thời gian đã cấp; "
                                   "không bỏ hàng, không thay thời gian, không tự xóa cờ needs_review=true. "
                                   "Mỗi segment bắt buộc có id (số nguyên), start/end (số), text_zh, literal_vi, "
                                   "natural_vi, final_vi (đều là chuỗi, không null), needs_review (boolean), review_reason (chuỗi). "
@@ -1019,7 +1146,7 @@ class VideoIntelligence:
                     current_execution_context().run_id, len(observed), len(representatives))
             # Bound response size even when rapid subtitle changes produce many
             # local OCR IDs. Every requested ID belongs to exactly one batch.
-            speech_limit = self.OPENCODE_SPEECH_BATCH_SIZE if provider == "opencode" else 12
+            speech_limit = min(8, self.OPENCODE_SPEECH_BATCH_SIZE if provider == "opencode" else 8)
             screen_limit = self.OPENCODE_SCREEN_BATCH_SIZE if provider == "opencode" else 24
             batches = max(1, math.ceil(len(payload) / speech_limit), math.ceil(len(representatives) / screen_limit))
             source_dialogue = [dict(row) for row in (getattr(self, "_source_dialogue", []) or payload)
@@ -1034,6 +1161,7 @@ class VideoIntelligence:
                 context_payload = {"speech": [{"start": row["start"], "end": row["end"],
                                                 "asr_text": row.get("asr_text", "")} for row in payload],
                                    "wider_source_dialogue": dialogue_context(source_dialogue, payload),
+                                   "readonly_source_neighbors": self._batch_readonly_context(source_dialogue, batch_payload),
                                    "semantic_context": self._semantic_context(source_dialogue, batch_payload),
                                    "ocr": [{"start": row["start"], "end": row["end"],
                                              "text_zh": row["text_zh"]} for row in context_screens.values()],
@@ -1085,6 +1213,7 @@ class VideoIntelligence:
                 # and any prior corrected turns, while the cache key above
                 # remains tied to the pre-correction request inputs.
                 context_payload["wider_source_dialogue"] = dialogue_context(source_dialogue, payload)
+                context_payload["readonly_source_neighbors"] = self._batch_readonly_context(source_dialogue, batch_payload)
                 context_payload["semantic_context"] = self._semantic_context(source_dialogue, batch_payload)
                 context = json.dumps(context_payload, ensure_ascii=False)
                 corrected_payload = [{**row, "corrected_text_zh": corrections[row["id"]]["text_zh"],

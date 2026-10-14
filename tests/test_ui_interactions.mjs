@@ -1493,11 +1493,11 @@ test('parallel translation worker presets are visible outside the collapsed Open
   assert.ok(select, 'Settings must expose the worker selector');
   assert.match(template, /<label\b[^>]*for="settings-translation-workers"[^>]*>Luồng dịch song song<\/label>/);
   assert.match(select, /aria-describedby="settings-translation-workers-help"/);
-  assert.match(select, /\{% for workers in \[1, 3, 5, 10, 15, 20\] %\}/);
+  assert.match(select, /\{% for workers in \[1, 3, 5, 10, 15, 20, 30, 40, 50\] %\}/);
   const help = template.match(/<p\b[^>]*id="settings-translation-workers-help"[^>]*>([^<]+)<\/p>/)?.[1];
-  assert.match(help, /Dịch toàn bộ/);
-  assert.match(help, /tự giảm theo CPU\/RAM/);
-  assert.match(help, /Bản xem trước vẫn dịch đoạn ngắn/);
+  assert.match(help, /yêu cầu AI/);
+  assert.match(help, /ASR/);
+  assert.match(help, /GPU/);
   const collapsedSections = [...template.matchAll(/<details\b[^>]*>[\s\S]*?<\/details>/g)].map(match => match[0]);
   assert.ok(collapsedSections.some(section => /settings-opencode-model/.test(section)));
   assert.ok(collapsedSections.every(section => !/settings-translation-workers/.test(section)), 'Worker choice must remain visible when provider details are collapsed');
@@ -1512,7 +1512,7 @@ test('parallel translation worker presets are visible outside the collapsed Open
 });
 
 test('each parallel translation preset saves a numeric value and restores the acknowledged backend setting', async () => {
-  for (const workers of [1, 3, 5, 10, 15, 20]) {
+  for (const workers of [1, 3, 5, 10, 15, 20, 30, 40, 50]) {
     const ui = studio(); await ui.flush();
     const cfg = {...ui.replies.get('/api/settings')};
     const select = ui.el('settings-translation-workers');
@@ -1552,7 +1552,7 @@ test('invalid parallel translation worker values focus the selector and never su
     assert.equal(ui.document.activeElement, select, value);
     assert.equal(ui.requests.some(request => request.url === '/api/settings' && request.options.method === 'POST'), false, value);
     assert.equal(ui.el('btn-save-settings').disabled, false, value);
-    assert.match(ui.alerts.at(-1), /1, 3, 5, 10, 15 hoặc 20/, value);
+    assert.match(ui.alerts.at(-1), /1, 3, 5, 10, 15, 20, 30, 40 hoặc 50/, value);
     assert.doesNotMatch(ui.el('btn-save-settings').innerHTML, /Đã lưu thành công/, value);
   }
 });
@@ -1587,20 +1587,20 @@ test('translation worker progress shows effective and configured counts from soc
     progress_pct: 25, chunk_workers: 3, configured_chunk_workers: 10,
     translation_mode: 'full', segment_states: {COMPLETED: 1, REVIEW_REQUIRED: 0, FAILED: 0, RETRY_PENDING: 0}};
   ui.sockets.at(-1).receive({type: 'progress', ...initial});
-  assert.match(ui.el('task-progress-detail').textContent, /Giới hạn đoạn: 3\/10 luồng/);
+  assert.match(ui.el('task-progress-detail').textContent, /Xử lý nguồn: tối đa 3 đoạn/);
   ui.replies.set('/api/tasks', {tasks: [{task_id: 'fixture', ...initial, chunk_workers: 5, configured_chunk_workers: 20}]});
   await ui.el('btn-refresh-tasks').click();
-  assert.match(ui.el('task-progress-detail').textContent, /Giới hạn đoạn: 5\/20 luồng/);
-  assert.doesNotMatch(ui.el('task-progress-detail').textContent, /3\/10 luồng/);
+  assert.match(ui.el('task-progress-detail').textContent, /Xử lý nguồn: tối đa 5 đoạn/);
+  assert.doesNotMatch(ui.el('task-progress-detail').textContent, /Xử lý nguồn: tối đa 3 đoạn/);
   assert.equal(ui.el('task-progress-value').textContent, '25%');
   ui.replies.set('/api/tasks', {tasks: [{task_id: 'fixture', ...initial, chunk_workers: 5, configured_chunk_workers: 15}]});
   await ui.el('btn-refresh-tasks').click();
-  assert.match(ui.el('task-progress-detail').textContent, /Giới hạn đoạn: 5\/15 luồng/);
+  assert.match(ui.el('task-progress-detail').textContent, /Xử lý nguồn: tối đa 5 đoạn/);
   ui.replies.set('/api/tasks', {tasks: [{task_id: 'fixture', ...initial, chunk_workers: 3, configured_chunk_workers: 15}]});
   await ui.el('btn-refresh-tasks').click();
-  assert.match(ui.el('task-progress-detail').textContent, /Giới hạn đoạn: 3\/15 luồng/);
+  assert.match(ui.el('task-progress-detail').textContent, /Xử lý nguồn: tối đa 3 đoạn/);
   ui.sockets.at(-1).receive({type: 'progress', ...initial, translation_mode: 'preview'});
-  assert.doesNotMatch(ui.el('task-progress-detail').textContent, /Giới hạn đoạn:/, 'The configured full-run count must not claim the short preview runs in parallel');
+  assert.doesNotMatch(ui.el('task-progress-detail').textContent, /Xử lý nguồn:/, 'The configured full-run count must not claim the short preview runs in parallel');
 });
 
 test('library selection previews an existing local video and waits for an explicit start', async () => {
@@ -4046,7 +4046,8 @@ test('ready draft keeps review visible while playing its dub and captions, then 
   const row = ui.el('seg-row-0'), warning = row.querySelector('.transcript-review');
   assert.equal(row.dataset.needsReview, 'true');
   assert.equal(ui.el('seg-badge-0').textContent, 'Bản nháp · Cần kiểm tra');
-  assert.equal(ui.el('btn-export-hq').disabled, true, 'Draft preview must not silently accept an unresolved final export');
+  assert.equal(ui.el('btn-export-hq').disabled, false);
+  assert.match(ui.el('btn-export-hq').title, /Bản nháp/);
   assert.equal(warning.hidden, false);
   assert.match(warning.textContent, /AI kiểm tra lại/);
   assert.doesNotMatch(warning.textContent, /trước khi tạo giọng/);
@@ -4573,6 +4574,31 @@ test('failed attach restores idle source controls', async () => {
   assert.equal(ui.sockets.length,0);
 });
 
+for (const priorStatus of ['FAILED', 'STOPPED']) test(`partial review remains available for ${priorStatus} speech recovery without enabling export`, async () => {
+  const ui = studio(); await ui.start();
+  const socket = ui.sockets.at(-1);
+  socket.receive({type:'segment_update',id:1,start:10,end:12,duration:2,status:'FAILED',
+    final_vi:'Lời chưa vừa thời lượng.',failed_stage:'ALIGNING',audio_url:null,revision:0});
+  socket.receive({type:'progress',status:priorStatus,phase:'failed',can_review:true,can_retry:true,
+    review_count:1,stage:'Còn câu lỗi căn tiếng.'});
+  assert.equal(ui.el('btn-review-worker').classList.contains('hidden'),false);
+  assert.equal(ui.el('btn-review-worker').disabled,false);
+  assert.equal(ui.el('btn-export-hq').disabled,true);
+  let finish;
+  ui.replies.set('/api/streaming/fixture/review',()=>new Promise(resolve=>{finish=resolve;}));
+  const pending = ui.el('btn-review-worker').click();
+  await ui.el('btn-review-worker').click();
+  assert.equal(ui.requests.filter(item=>item.url.endsWith('/review')).length,1);
+  assert.equal(ui.el('seg-vi-0').disabled,true);
+  finish({ok:true,json:async()=>({task_id:'fixture',progress:{status:'RUNNING',phase:'review',
+    can_review:false,review_scope:'all',review_summary:{status:'running'}}})});
+  await pending;
+  ui.sockets.at(-1).receive({type:'progress',status:'FAILED',phase:'failed',can_review:true,can_retry:true,
+    review_summary:{status:'completed',checked:1,verified:1},stage:'Còn câu lỗi căn tiếng.'});
+  assert.equal(ui.el('btn-export-hq').disabled,true);
+  assert.equal(ui.el('btn-review-worker').classList.contains('hidden'),false);
+});
+
 test('AI review uses the existing task and preserves playback while locking source, transcript and export', async () => {
   const ui = studio(undefined, {catalog:voiceCatalog}); await ui.start();
   const video = ui.el('video-player'), socket = ui.sockets.at(-1);
@@ -4641,7 +4667,8 @@ test('AI review receives corrected audio revision at the current playhead and re
   assert.equal(ui.el('btn-export-hq').disabled,false, 'An explicitly audited unresolved source may export with its uncertainty retained');
   assert.equal(ui.el('seg-row-0').dataset.needsReview,'true');
   socket.receive({type:'segment_update',...corrected,revision:4,needs_review:true,verification:null});
-  assert.equal(ui.el('btn-export-hq').disabled,true, 'An unaudited uncertain row remains blocked');
+  assert.equal(ui.el('btn-export-hq').disabled,false, 'Uncertainty permits only a labeled draft');
+  assert.match(ui.el('btn-export-hq').title,/Bản nháp/);
 });
 
 test('review completion replaces stale failure warnings but retains current source warnings', async () => {
@@ -4728,7 +4755,8 @@ test('AI review reconnect retains preview and existing audio and reports failed 
   assert.ok(ui.audio.includes(audio));
   ui.sockets.at(-1).receive({type:'progress',status:'COMPLETED',phase:'complete',can_review:true,review_summary:{status:'failed',checked:0}});
   assert.match(ui.el('task-progress-detail').textContent,/AI chưa kiểm tra đủ nguồn/);
-  assert.equal(ui.el('btn-export-hq').disabled,true);
+  assert.equal(ui.el('btn-export-hq').disabled,false);
+  assert.match(ui.el('btn-export-hq').title,/Bản nháp/);
   assert.equal(ui.el('btn-review-worker').disabled,false);
   assertWorkerSourceBusy(ui,false);
 });
@@ -5212,8 +5240,9 @@ test('incomplete review survives finished telemetry and polling without stopping
   assert.equal(ui.el('btn-export-hq').disabled, true);
   assertWorkerSourceBusy(ui, false);
   socket.receive({type:'result_ready', output_video_url:'/api/outputs/stale.mp4', review_summary:summary});
-  assert.equal(ui.el('task-result').classList.contains('hidden'), true);
-  assert.equal(ui.el('task-progress').dataset.status, 'FAILED');
+  assert.equal(ui.el('task-result').classList.contains('hidden'), false);
+  assert.match(ui.el('task-result-status').textContent, /Bản nháp/);
+  assert.equal(ui.el('task-progress').dataset.status, 'COMPLETED');
   ui.replies.set('/api/streaming/fixture/review', {progress:{status:'RUNNING',phase:'review',review_summary:{status:'running'}}});
   await ui.el('btn-review-worker').click();
   assert.equal(ui.requests.filter(request => request.url === '/api/streaming/fixture/review').length, 1);

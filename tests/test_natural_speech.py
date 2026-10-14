@@ -426,7 +426,7 @@ def test_rewrites_are_bounded_and_never_replace_output_when_nothing_fits(tmp_pat
 
     with pytest.raises(SpeechBudgetError, match="quá dài"):
         synthesize_natural_speech(text="Tôi vẫn chưa làm việc đó.", source="我还没做。",
-            duration=1, output_path=output, engine=engine, aligner=aligner, translator=translator)
+            duration=1, output_path=output, engine=engine, aligner=aligner, translator=translator, max_pacing_proposals=2)
 
     assert len(engine.calls) == 3
     assert translator.rewrite_for_pacing.call_count == 2
@@ -443,7 +443,7 @@ def test_failure_keeps_shortest_measured_verified_candidate_for_rescue(tmp_path,
     with pytest.raises(SpeechBudgetError) as raised:
         synthesize_natural_speech(text=original, source="我还没做。", duration=1,
             output_path=tmp_path / "voice.wav", engine=engine, aligner=aligner,
-            translator=translator)
+            translator=translator, max_pacing_proposals=2)
 
     error = raised.value
     assert error.required_dub_duration == pytest.approx(1.3 / aligner.max_speed + .012)
@@ -462,7 +462,7 @@ def test_later_rejection_keeps_earlier_measured_verified_candidate(tmp_path, ali
     output.write_bytes(b"retained output")
     with pytest.raises(PacingReviewRejected) as raised:
         synthesize_natural_speech(text=original, source="我还没做。", duration=1,
-            output_path=output, engine=engine, aligner=aligner, translator=translator)
+            output_path=output, engine=engine, aligner=aligner, translator=translator, max_pacing_proposals=4)
 
     assert raised.value.required_dub_duration == pytest.approx(1.3 / aligner.max_speed + .012)
     assert raised.value.candidate_text == shorter
@@ -513,7 +513,7 @@ def test_duplicate_proposals_are_bounded_and_preserve_previous_output(tmp_path, 
     output.write_bytes(b"previous complete output")
     with pytest.raises(PacingReviewRejected) as rejected:
         synthesize_natural_speech(text=original, source="我还没做。", duration=1,
-            output_path=output, engine=engine, aligner=aligner, translator=translator)
+            output_path=output, engine=engine, aligner=aligner, translator=translator, max_pacing_proposals=3)
     assert rejected.value.code == "duplicate"
     assert translator.rewrite_for_pacing.call_count == 3
     assert engine.calls == [original]
@@ -568,7 +568,7 @@ def test_rejected_pacing_drafts_stop_after_three_attempts(tmp_path, aligner):
     output = tmp_path / "voice.wav"
     with pytest.raises(PacingReviewRejected):
         synthesize_natural_speech(text="Tôi vẫn chưa làm việc đó.", source="我还没做。", duration=1,
-            output_path=output, engine=engine, aligner=aligner, translator=translator)
+            output_path=output, engine=engine, aligner=aligner, translator=translator, max_pacing_proposals=3)
     assert translator.rewrite_for_pacing.call_count == 3
     assert len(engine.calls) == 1 and not output.exists()
 
@@ -927,7 +927,7 @@ def test_alternating_rejected_drafts_do_not_repeat_fidelity_or_fluency(tmp_path,
     output.write_bytes(b"retained output")
     with pytest.raises(PacingReviewRejected) as raised:
         synthesize_natural_speech(text=original, source="我还没做。", duration=1,
-            output_path=output, engine=engine, aligner=aligner, translator=translator)
+            output_path=output, engine=engine, aligner=aligner, translator=translator, max_pacing_proposals=3)
     assert raised.value.code == "duplicate"
     assert request.call_count == 5  # Three drafts, two fidelity checks, zero fluency checks.
     last_prompt = request.call_args.args[1]

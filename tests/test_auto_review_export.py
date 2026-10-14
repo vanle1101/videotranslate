@@ -100,8 +100,8 @@ def test_successful_reexport_stamps_current_caption_renderer_only_after_result(s
     item.persist.assert_called_once()
 
 
-@pytest.mark.parametrize("status", [None, "running", "failed", "completed"])
-def test_uncertain_rows_without_a_completed_audit_stay_blocked(session, status):
+@pytest.mark.parametrize("status", ["running"])
+def test_uncertain_rows_during_active_audit_stay_blocked(session, status):
     item, exporter = session
     item.review_summary = {"status": status}
     item.segments[0].verification = None
@@ -111,8 +111,8 @@ def test_uncertain_rows_without_a_completed_audit_stay_blocked(session, status):
     exporter.export.assert_not_called()
 
 
-@pytest.mark.parametrize("status", ["running", "failed"])
-def test_failed_or_running_review_blocks_even_previously_clear_rows(session, status):
+@pytest.mark.parametrize("status", ["running"])
+def test_running_review_blocks_even_previously_clear_rows(session, status):
     item, exporter = session
     item.review_summary = {"status": status}
     item.segments[0].needs_review = False
@@ -148,7 +148,7 @@ def test_finished_event_automatically_exports_once_per_revision_and_publishes(se
     assert ready[-1]["review_warning"]
 
 
-@pytest.mark.parametrize("change", ["legacy", "failed", "running", "stopped", "draining", "synthesis", "busy"])
+@pytest.mark.parametrize("change", ["legacy", "running", "stopped", "draining", "synthesis", "busy"])
 def test_automatic_export_does_not_launch_for_ineligible_session(session, change):
     item, exporter = session
     if change == "legacy":

@@ -13,6 +13,8 @@ from dataclasses import replace
 import logging
 import math
 import os
+import re
+from email.utils import parsedate_to_datetime
 from pathlib import Path
 import shutil
 import subprocess
@@ -50,11 +52,12 @@ def _shared_execution_layer():
     """One provider queue for independently constructed reviewer/translator clients."""
     from config import settings
     policy = AIExecutionPolicy(
-        concurrency=getattr(settings, "OPENCODE_CONCURRENCY", 5),
+        concurrency=getattr(settings, "OPENCODE_CONCURRENCY", 20),
         queue_limit=getattr(settings, "OPENCODE_QUEUE_LIMIT", 24),
         queue_timeout=getattr(settings, "OPENCODE_QUEUE_TIMEOUT", 30.0),
         circuit_failures=getattr(settings, "OPENCODE_CIRCUIT_FAILURES", 4),
         circuit_cooldown=getattr(settings, "OPENCODE_CIRCUIT_COOLDOWN", 30.0),
+        retry_base=2.0, retry_cap=60.0,
     )
     cache_root = Path(settings.WORKSPACE_DIR) / "cache" / "ai_responses"
     # Queue identity needs lexical normalization only. Resolving filesystem
@@ -268,23 +271,41 @@ def _safe_failure(text: str) -> str:
     return "OpenCode chưa trả được bản dịch; chưa xác định được nguyên nhân từ phản hồi CLI. Hãy thử lại."
 
 
+def _retry_after_seconds(text: str):
+    """Read only explicit Retry-After metadata exposed by the CLI, if any."""
+    match = re.search(r'(?i)["\']?retry[-_]after["\']?\s*[:=]\s*["\']?([^\r\n"\'}]+)', text)
+    if not match:
+        return None
+    value = match.group(1).strip().rstrip(",")
+    try:
+        seconds = float(value)
+    except ValueError:
+        try:
+            seconds = parsedate_to_datetime(value).timestamp() - time.time()
+        except (ValueError, TypeError, OverflowError):
+            return None
+    return max(0.0, seconds) if math.isfinite(seconds) else None
+
+
 def _provider_failure(text: str) -> OpenCodeRequestError:
     """Classify real CLI failures; never retry auth/model/tool refusals."""
     value = text.casefold()
-    code, retryable = "provider_failed", True
+    code, retryable = "provider_failed", False
     if "freetiererror" in value or "free tier can only be used from within opencode" in value:
         code, retryable = "provider_rejected", False
     elif "429" in value or "rate limit" in value or "too many requests" in value:
-        code = "provider_rate_limited"
+        code, retryable = "provider_rate_limited", True
     elif any(marker in value for marker in ("401", "403", "unauthorized", "invalid api key", "forbidden")):
         code, retryable = "provider_authentication", False
     elif "model not found" in value or "providermodelnotfound" in value:
         code, retryable = "provider_model", False
     elif any(marker in value for marker in ("500", "502", "503", "504")):
-        code = "provider_server"
+        code, retryable = "provider_server", True
     elif any(marker in value for marker in ("econnreset", "econnrefused", "connection", "network", "fetch failed")):
-        code = "provider_transport"
-    return OpenCodeRequestError(_safe_failure(text), retryable=retryable, code=code)
+        code, retryable = "provider_transport", True
+    error = OpenCodeRequestError(_safe_failure(text), retryable=retryable, code=code)
+    error.retry_after = _retry_after_seconds(text)
+    return error
 
 
 def _managed_configuration_present() -> bool:
@@ -403,7 +424,7 @@ class OpenCodeZenClient:
         self._api_key = resolve_api_key(api_key)
         self.model = canonical_model_id(model)
         self.timeout = float(timeout)
-        self.max_retries = max(0, min(int(max_retries), 2))
+        self.max_retries = max(0, min(int(max_retries), 5))
         try:
             from config import settings
             self._uses_shared_execution_layer = execution_layer is None
@@ -564,7 +585,8 @@ class OpenCodeZenClient:
                           "prompt": prompt, "max_tokens": max_tokens,
                           "temperature": temperature, "task_kind": task_kind,
                           "schema_id": schema_id, "adapter_version": _EXECUTION_VERSION},
-                max_retries=self.max_retries, cancel_check=context.cancel_check,
+                max_retries=5 if self.execution_layer.has_run_concurrency(context.run_id) else self.max_retries,
+                cancel_check=context.cancel_check, run_id=context.run_id,
                 retryable=lambda error: isinstance(error, OpenCodeTimeoutError)
                     or isinstance(error, OpenCodeRequestError) and error.retryable,
                 wait_retry=wait_retry,

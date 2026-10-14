@@ -3,6 +3,9 @@ import math
 import logging
 import tempfile
 import uuid
+import hashlib
+import json
+from dataclasses import replace
 from pathlib import Path
 
 from core.runtime_context import current_execution_context
@@ -23,7 +26,8 @@ from core.engines.alignment.speech_cache import (
 def synthesize_natural_speech(*, text, source, duration, output_path, engine, aligner,
                               translator=None, voice=None, ref_audio=None, context=None, on_stage=None,
                               max_duration=None, allow_bidirectional_reflow=False,
-                              max_duration_limit=None, pacing_verification=None):
+                              max_duration_limit=None, pacing_verification=None,
+                              source_language=None, max_pacing_proposals=5, allow_review_draft=False):
     """Never publish chopped or excessively accelerated speech.
 
     A rewrite is allowed only for automatic translation, with independent
@@ -32,6 +36,8 @@ def synthesize_natural_speech(*, text, source, duration, output_path, engine, al
     """
     if not math.isfinite(duration) or duration <= 0 or not str(text).strip():
         raise ValueError("Lời đọc hoặc thời lượng không hợp lệ.")
+    if type(max_pacing_proposals) is not int or not 1 <= max_pacing_proposals <= 5:
+        raise ValueError("Mỗi đợt căn lời chỉ được thử từ 1 đến 5 đề xuất.")
     if max_duration is None:
         max_duration = duration
     if max_duration_limit is not None:
@@ -53,7 +59,9 @@ def synthesize_natural_speech(*, text, source, duration, output_path, engine, al
     # previous, measured attempt. Carry that proof through fitting without
     # asking the semantic translator for a different sentence.
     verification = (pacing_verification if isinstance(pacing_verification, dict)
-                    and pacing_verification.get("status") == "verified"
+                    and (pacing_verification.get("status") == "verified" or allow_review_draft
+                         and pacing_verification.get("status") == "draft"
+                         and pacing_verification.get("semantic_verified") is True)
                     and pacing_verification.get("text") == current else None)
     logger = logging.getLogger("pipeline")
     speech_id = uuid.uuid4().hex[:8]
@@ -62,10 +70,13 @@ def synthesize_natural_speech(*, text, source, duration, output_path, engine, al
     try:
         # Adaptive timing depends on neighboring audio. Its final checkpoint is
         # persisted by the session; never reuse a fixed-slot speech cache hit.
-        if max_duration == duration:
+        if max_duration == duration and not allow_review_draft:
             cache_identity = synthesis_cache_identity(
                 source=source, text=current, duration=duration, voice=voice, engine=engine,
                 aligner=aligner, translator=translator, context=context, ref_audio=ref_audio)
+            if cache_identity is not None:
+                policy = json.dumps([cache_identity.key, source_language, max_pacing_proposals], ensure_ascii=True)
+                cache_identity = replace(cache_identity, key=hashlib.sha256(policy.encode()).hexdigest())
     except (OSError, ValueError, TypeError, KeyError):
         logger.warning("PACING_CACHE_UNAVAILABLE run_id=%s speech_id=%s", execution.run_id, speech_id)
     if cache_identity is not None:
@@ -81,10 +92,13 @@ def synthesize_natural_speech(*, text, source, duration, output_path, engine, al
     measured_candidates = []
     seen_candidates = set()
     rejection_feedback = {}
+    proposals_used = 0
     original_duration = duration
     with tempfile.TemporaryDirectory(prefix="speech-fit-", dir=output_path.parent) as temporary:
         raw, fitted = Path(temporary) / "raw.wav", Path(temporary) / "fitted.wav"
-        for attempt in range(3):
+        # One original waveform plus at most five proposed wordings per round.
+        # Duplicate responses consume a request slot but are never synthesized.
+        for attempt in range(max_pacing_proposals + 1):
             duration = original_duration
             raw_budget = duration * aligner.max_speed
             execution = current_execution_context()
@@ -185,7 +199,7 @@ def synthesize_natural_speech(*, text, source, duration, output_path, engine, al
                                     execution.run_id, speech_id, attempt + 1, before, measured,
                                     sum(right - left for left, right in cuts + edge_cuts), len(cuts) + len(edge_cuts))
             except SpeechBudgetError:
-                if translator is None or attempt == 2:
+                if translator is None or proposals_used >= max_pacing_proposals:
                     logger.warning("PACING_FAILED run_id=%s speech_id=%s attempt=%d reason=%s",
                                    execution.run_id, speech_id, attempt + 1, "rewrite_disabled" if translator is None else "budget_exhausted")
                     failure = SpeechBudgetError(
@@ -199,6 +213,8 @@ def synthesize_natural_speech(*, text, source, duration, output_path, engine, al
                     # Keep the complete candidate record available to callers
                     # that need to explain or retry this measured attempt.
                     failure.measured_candidate = dict(best)
+                    failure.pacing_proposals_used = proposals_used
+                    failure.pacing_rejection_feedback = rejection_feedback
                     raise failure from None
                 # Leave a little room for encoder/atempo block rounding.
                 if on_stage:
@@ -215,21 +231,29 @@ def synthesize_natural_speech(*, text, source, duration, output_path, engine, al
                     "measured_candidates": list(measurements),
                 }
                 review_feedback = {**rejection_feedback, **timing_feedback}
-                for review_attempt in range(3):
+                for review_attempt in range(max_pacing_proposals - proposals_used):
                     if execution.cancel_check and execution.cancel_check():
                         import asyncio
                         raise asyncio.CancelledError
                     try:
+                        proposals_used += 1
                         logger.info("PACING_REWRITE run_id=%s speech_id=%s attempt=%d proposal=%d request_budget_seconds=%.4f reduction_pct=%.1f",
                                     execution.run_id, speech_id, attempt + 1, review_attempt + 1,
                                     request_budget, timing_feedback["required_reduction_pct"])
+                        proposal_options = {}
+                        if source_language is not None:
+                            proposal_options["source_language"] = source_language
+                        if allow_review_draft:
+                            proposal_options["allow_review_draft"] = True
                         proposed = translator.rewrite_for_pacing(
                             source, current, request_budget, context,
-                            measured_duration=measured, feedback=review_feedback)
+                            measured_duration=measured, feedback=review_feedback, **proposal_options)
                         candidate = proposed.get("final_vi")
                         proof = proposed.get("pacing_verification")
                         if (not isinstance(candidate, str) or not candidate.strip()
-                                or not isinstance(proof, dict) or proof.get("status") != "verified"
+                                or not isinstance(proof, dict)
+                                or not (proof.get("status") == "verified" or allow_review_draft
+                                        and proof.get("status") == "draft" and proof.get("semantic_verified") is True)
                                 or proof.get("text") != candidate):
                             raise RuntimeError("Thiếu xác minh cho lời đọc đã rút gọn.")
                         if pacing_candidate_key(candidate) in seen_candidates:
@@ -244,12 +268,14 @@ def synthesize_natural_speech(*, text, source, duration, output_path, engine, al
                                        execution.run_id, speech_id, attempt + 1, review_attempt + 1, error.code)
                         seen_candidates.add(pacing_candidate_key(error.feedback["rejected_candidate"]))
                         rejection_feedback = accumulate_pacing_rejection(rejection_feedback, error)
-                        if review_attempt == 2:
+                        if proposals_used >= max_pacing_proposals:
                             best = min(measured_candidates, key=lambda item: item["measured_seconds"])
                             error.required_dub_duration = best["measured_seconds"] / aligner.max_speed + .012
                             error.candidate_text = best["text"]
                             error.pacing_verification = best["pacing_verification"]
                             error.measured_candidate = dict(best)
+                            error.pacing_proposals_used = proposals_used
+                            error.pacing_rejection_feedback = rejection_feedback
                             raise
                         review_feedback = {**rejection_feedback, **timing_feedback}
                 current, verification = candidate.strip(), proof
@@ -265,7 +291,10 @@ def synthesize_natural_speech(*, text, source, duration, output_path, engine, al
             logger.info("PACING_READY run_id=%s speech_id=%s attempt=%d speed=%.4f rewritten=%s",
                         execution.run_id, speech_id, attempt + 1, ratio, verification is not None)
             result = {"text": current, "tts_duration": measured, "speed_ratio": ratio,
-                      "boundaries": boundaries, "pacing_verification": verification}
+                      "boundaries": boundaries, "pacing_verification": verification,
+                      "pacing_proposals_used": proposals_used}
+            if verification is not None and verification.get("status") == "draft":
+                result.update(needs_review=True, review_reason=verification["review_reason"])
             if cache_identity is not None:
                 saved = store_speech_cache(cache_identity, output_path, result, cancel_check=execution.cancel_check)
                 logger.info("PACING_CACHE_STORED run_id=%s speech_id=%s saved=%s", execution.run_id, speech_id, saved)

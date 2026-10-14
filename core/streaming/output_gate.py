@@ -33,11 +33,25 @@ def missing_speech_message(ids):
             "Phần xem trước được giữ; kiểm tra và bổ sung lời, hoặc chỉ xác nhận im lặng nếu nguồn thực sự không có thoại, trước khi xuất đầy đủ.")
 
 
-def final_output_metadata(rows):
+def draft_review_metadata(rows, review_summary=None):
+    """Editorial uncertainty is a label, never permission to skip media gates."""
+    rows = list(rows)
+    summary = review_summary or {}
+    issues = [_value(row, "id") for row in rows if _value(row, "needs_review", False)
+              or (_value(row, "verification", {}) or {}).get("status") in
+              {"unresolved", "incomplete", "failed", "pending"}]
+    draft = bool(issues or summary.get("status") != "completed" or summary.get("unresolved", 0))
+    return {"output_is_draft": draft, "output_quality_label": "Bản nháp — cần kiểm tra" if draft else "Đã rà tự động",
+            "review_issue_ids": issues}
+
+
+def final_output_metadata(rows, review_summary=None):
     rows = list(rows)
     missing = missing_spoken_output_ids(rows)
-    pending_review = bool(missing or any(_value(row, "needs_review", False) for row in rows))
+    pending_review = bool(missing or any(_value(row, "needs_review", False) for row in rows)
+                          or review_summary and review_summary.get("status") != "completed")
     return {"missing_speech_ids": missing, "final_output_blocked": bool(missing),
+            **draft_review_metadata(rows, review_summary),
             # This is an editorial state, never a claim of certain semantic truth.
             "content_review_state": "REVIEW_REQUIRED" if pending_review else "NO_PENDING_REVIEW"}
 

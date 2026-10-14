@@ -167,7 +167,7 @@ document.addEventListener("DOMContentLoaded", () => {
   const settingsDuckingLevel = document.getElementById("settings-ducking-level");
   const settingsBufferTarget = document.getElementById("settings-buffer-target");
   const settingsTranslationWorkers = document.getElementById("settings-translation-workers");
-  const translationWorkerChoices = [1, 3, 5, 10, 15, 20];
+  const translationWorkerChoices = [1, 3, 5, 10, 15, 20, 30, 40, 50];
   const btnToggleGeminiKey = document.getElementById("btn-toggle-gemini-key");
   const btnTestGemini = document.getElementById("btn-test-gemini");
   const geminiTestResult = document.getElementById("gemini-test-result");
@@ -780,12 +780,13 @@ document.addEventListener("DOMContentLoaded", () => {
       (currentProgress?.translation_mode === "preview" && currentProgress?.status !== "COMPLETED") || isPreviewReady(currentProgress?.status) ||
       captionStyleDirty || !!captionStyleRequest ||
       reviewInProgress() || pendingTaskAction?.kind === "review" || automaticExportActive ||
-      ["failed", "incomplete"].includes(currentProgress?.review_summary?.status) || (currentProgress?.phase === "export" && ["RUNNING", "CANCELLING"].includes(currentProgress?.status)) ||
+      (currentProgress?.phase === "export" && ["RUNNING", "CANCELLING"].includes(currentProgress?.status)) ||
       transcriptDrafts.size > 0 || pendingTranscriptSaves > 0 ||
-      items.some(segment => (segment.needs_review && !(currentProgress?.review_summary?.status === "completed" && segment.verification?.status === "unresolved")) || !["READY", "PLAYED"].includes(segment.status)) ||
+      items.some(segment => !["READY", "PLAYED"].includes(segment.status)) ||
       (["FAILED", "STOPPED", "CANCELLED", "CANCELLING"].includes(currentProgress?.status)
         && currentProgress?.phase !== "export_error");
-    btnExportHQ.title = missingSpeech ? "Còn câu có lời gốc nhưng chưa có lời Việt; kiểm tra lời trước khi xuất đầy đủ." : "";
+    btnExportHQ.title = missingSpeech ? "Còn câu có lời gốc nhưng chưa có lời Việt; kiểm tra lời trước khi xuất đầy đủ." :
+      outputIsDraft(currentProgress) ? "Bản nháp — cần kiểm tra. Xuất khi đủ nguồn, lời và giọng; giữ các ghi chú chưa xác minh." : "";
     if (btnReviewWorker) btnReviewWorker.disabled = !!pendingTaskAction || reviewInProgress() || automaticExportActive ||
       !!exportingTaskId || captionStyleDirty || !!captionStyleRequest || transcriptDrafts.size > 0 || pendingTranscriptSaves > 0;
     updateFullTranslationAvailability();
@@ -1288,7 +1289,7 @@ document.addEventListener("DOMContentLoaded", () => {
   window.addEventListener("pagehide", () => closeResultPreview(false));
 
   function showPipelineWarnings(data) {
-    if (!Array.isArray(data.warnings) && !data.metadata_warning) return;
+    if (!Array.isArray(data.warnings) && !data.metadata_warning && !data.review_warning) return;
     const warning = document.getElementById("pipeline-warning");
     if (!warning) return;
     const reviewCompleted = (data.review_summary || data.progress?.review_summary || currentProgress?.review_summary)?.status === "completed";
@@ -1299,21 +1300,29 @@ document.addEventListener("DOMContentLoaded", () => {
     ]);
     const messages = (Array.isArray(data.warnings) ? data.warnings : []).filter(item => typeof item === "string" && item && !(reviewCompleted && resolvedReviewWarnings.has(item)));
     if (typeof data.metadata_warning === "string" && data.metadata_warning && !messages.includes(data.metadata_warning)) messages.push(data.metadata_warning);
+    if (typeof data.review_warning === "string" && data.review_warning && !messages.includes(data.review_warning)) messages.push(data.review_warning);
     warning.textContent = messages.join(" · ");
     warning.classList.toggle("hidden", !warning.textContent);
+  }
+
+  function outputIsDraft(data) {
+    const summary = data?.review_summary || currentProgress?.review_summary;
+    return data?.output_is_draft === true || (summary && summary.status !== "completed") ||
+      Number(summary?.unresolved) > 0 || Object.values(segments).some(segment => segment.needs_review ||
+        ["unresolved", "incomplete", "failed", "pending"].includes(segment.verification?.status));
   }
 
   function showTaskResult(data) {
     showPipelineWarnings(data);
     if (captionStyleDirty || captionStyleRequest || captionOutputOutdated) return;
-    if (["failed", "incomplete", "running"].includes((data.review_summary || currentProgress?.review_summary)?.status)) return;
+    if (data.final_output_blocked === true) return;
     if (!data.output_video_url || !taskResult) return;
     const origin = `${window.location.protocol}//${window.location.host}`;
     let url;
     try { url = new URL(data.output_video_url, origin); } catch (_) { return; }
     if (url.origin !== origin || !/^\/api\/outputs\/[^/]+$/.test(url.pathname)) return;
     lastExportedFileUrl = url.pathname;
-    taskResultStatus.textContent = `Video kết quả đã sẵn sàng: ${data.output_filename || url.pathname.split("/").pop()}`;
+    taskResultStatus.textContent = `${outputIsDraft(data) ? "Bản nháp — cần kiểm tra" : "Video kết quả đã sẵn sàng"}: ${data.output_filename || url.pathname.split("/").pop()}`;
     taskResultLink.href = url.href;
     taskResult.classList.remove("hidden");
     taskResultLink.classList.remove("hidden");
@@ -1494,11 +1503,6 @@ document.addEventListener("DOMContentLoaded", () => {
       void refreshCompatiblePreview();
     }
     const incompleteReview = ["failed", "incomplete"].includes(currentProgress.review_summary?.status);
-    if (incompleteReview && (currentProgress.status === "COMPLETED" || (currentProgress.status === "FAILED" && currentProgress.phase === "review"))) {
-      currentProgress = {...currentProgress, status: "FAILED", phase: "review",
-        stage: reviewSummaryText(), progress_pct: null};
-      resetTaskResult();
-    }
     refreshPreparedPlaybackMode();
     const status = currentProgress.status || "RUNNING";
     if (currentProgress.phase === "export") automaticExportActive = ["RUNNING", "CANCELLING"].includes(status);
@@ -1573,12 +1577,22 @@ document.addEventListener("DOMContentLoaded", () => {
         counters.push(`${currentProgress.completed_chunks}/${currentProgress.total_chunks} đoạn đã tiếp nhận`);
       }
       if (currentProgress.ai_queue && Number.isInteger(currentProgress.ai_queue.active_requests)) {
-        counters.push(`Muse: ${currentProgress.ai_queue.active_requests} đang chạy, ${currentProgress.ai_queue.queued_requests || 0} chờ`);
+        const queue = currentProgress.ai_queue;
+        const selected = Number.isInteger(queue.selected_concurrency) ? queue.selected_concurrency : null;
+        counters.push(`AI${selected === null ? "" : ` · Đã chọn ${selected}`}: ${queue.active_requests} đang chạy, ${queue.queued_requests || 0} đang chờ`);
+        const reasons = {run_limit: "Đã đủ số yêu cầu AI đồng thời của video", concurrency_limit: "Đã đủ số yêu cầu AI đồng thời của video",
+          rate_limit: "Dịch vụ đang giới hạn yêu cầu", provider_backoff: "Đang đợi dịch vụ cho phép thử lại",
+          circuit_open: "Dịch vụ tạm lỗi; đang chờ thử lại", retry_backoff: "Đang chờ tới lượt thử lại",
+          source_not_ready: "Đang chờ câu nguồn", paused: "Đã tạm dừng", fair_queue: "Đang chia lượt công bằng giữa các video",
+          video_limit: "Đã đủ số yêu cầu AI đồng thời của video", half_open_probe: "Đang kiểm tra dịch vụ phục hồi",
+          duplicate_or_fair_queue: "Đang chờ lượt hoặc kết quả yêu cầu trùng"};
+        const waitReason = queue.wait_reason || queue.admission_reason;
+        if (waitReason && !["idle", "running"].includes(waitReason)) counters.push(reasons[waitReason] || "Đang chờ bộ điều phối AI");
       }
       if (currentProgress.translation_mode === "full" && Number.isInteger(currentProgress.chunk_workers) &&
           currentProgress.chunk_workers > 0 && Number.isInteger(currentProgress.configured_chunk_workers) &&
           currentProgress.configured_chunk_workers >= currentProgress.chunk_workers) {
-        counters.push(`Giới hạn đoạn: ${currentProgress.chunk_workers}/${currentProgress.configured_chunk_workers} luồng`);
+        counters.push(`Xử lý nguồn: tối đa ${currentProgress.chunk_workers} đoạn; tách riêng số yêu cầu AI`);
       }
       taskProgressDetail.textContent += ` ${counters.join(" · ")}.`;
     }
@@ -3334,7 +3348,7 @@ document.addEventListener("DOMContentLoaded", () => {
         const missingPreview = !["STOPPED", "CANCELLED", "PREPARED"].includes(finishedStatus) &&
           (isPreviewReady(finishedStatus) || finishedProgress.translation_mode === "preview") &&
           !hasMeasuredPreview(finishedProgress);
-        const failed = finishedStatus === "FAILED" || currentProgress?.status === "FAILED" || reviewFailed || missingPreview;
+        const failed = finishedStatus === "FAILED" || currentProgress?.status === "FAILED" || missingPreview;
         const stopped = ["CANCELLED", "STOPPED"].includes(finishedStatus);
         const prepared = !failed && !stopped && (finishedStatus === "PREPARED" || currentProgress?.phase === "prepared");
         const previewReady = !failed && !stopped && (isPreviewReady(finishedStatus) ||
@@ -5352,7 +5366,7 @@ document.addEventListener("DOMContentLoaded", () => {
   btnSaveSettings?.addEventListener("click", async () => {
     const translationWorkers = Number(settingsTranslationWorkers?.value);
     if (settingsTranslationWorkers && !translationWorkerChoices.includes(translationWorkers)) {
-      alert("Hãy chọn 1, 3, 5, 10, 15 hoặc 20 luồng dịch.");
+      alert("Hãy chọn 1, 3, 5, 10, 15, 20, 30, 40 hoặc 50 yêu cầu AI đồng thời.");
       settingsTranslationWorkers.focus();
       return;
     }
@@ -5517,7 +5531,7 @@ document.addEventListener("DOMContentLoaded", () => {
       exportResultBox.classList.remove("hidden");
       lastExportedFileUrl = data.video_url;
       captionOutputOutdated = false;
-      showTaskResult({output_video_url: data.video_url, output_filename: data.output_filename});
+      showTaskResult({...data, output_video_url: data.video_url, output_filename: data.output_filename});
       updateTasksTable();
 
       // Native desktop notification if available

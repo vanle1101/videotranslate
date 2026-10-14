@@ -606,7 +606,7 @@ def test_poll_timeouts_preserve_one_total_deadline_and_safe_failure_log(isolated
 
 
 def test_retry_lifecycle_records_separate_attempts(isolated, monkeypatch, caplog):
-    processes = [make_process("private-output", "private-key", 1), make_process()]
+    processes = [make_process("private-output", "HTTP 503 private-key", 1), make_process()]
     monkeypatch.setattr(oc.subprocess, "Popen", Mock(side_effect=processes))
     monkeypatch.setattr(oc.time, "sleep", lambda duration: None)
     caplog.set_level(logging.INFO, logger="ai")
@@ -633,7 +633,7 @@ def test_provider_logs_correlate_request_without_prompt_key_or_output(isolated, 
 
 
 def test_retry_logs_each_attempt_with_same_request_id(isolated, monkeypatch, caplog):
-    failed, completed = make_process(returncode=1), make_process()
+    failed, completed = make_process(stderr="HTTP 503", returncode=1), make_process()
     monkeypatch.setattr(oc.subprocess, "Popen", Mock(side_effect=[failed, completed]))
     monkeypatch.setattr(oc.time, "sleep", lambda seconds: None)
     with caplog.at_level(logging.INFO, logger="ai"), execution_context("run-retry"):
@@ -925,7 +925,7 @@ def test_real_large_bidirectional_exchange_delivers_stdin_once_and_drains_both_o
 
 def test_cancellation_during_retry_backoff_prevents_next_process(isolated, monkeypatch):
     cancelled = threading.Event()
-    process = make_process(returncode=1)
+    process = make_process(stderr="HTTP 503", returncode=1)
     start = Mock(return_value=process)
     monkeypatch.setattr(oc.subprocess, "Popen", start)
     monkeypatch.setattr(oc.time, "sleep", lambda seconds: cancelled.set())
@@ -953,7 +953,7 @@ def test_pipeline_blocking_context_propagates_and_cancellation_reaches_adapter()
     from core.streaming.pipeline import StreamingPipelineSession
     marker = contextvars.ContextVar("pipeline-test-marker", default="missing")
     entered, exited = threading.Event(), threading.Event()
-    session = SimpleNamespace(task_id="pipeline-run", is_stopped=False)
+    session = SimpleNamespace(task_id="pipeline-run", is_stopped=False, ai_concurrency=20)
 
     def blocking():
         context = current_execution_context()

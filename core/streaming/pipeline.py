@@ -203,8 +203,15 @@ class StreamingPipelineSession:
         translation_mode: str = "full",
         _restoring: bool = False,
         source_language: str = "zh",
+        ai_concurrency: Optional[int] = None,
     ):
         self.task_id = task_id
+        selected = settings.TRANSLATION_CHUNK_WORKERS if ai_concurrency is None else ai_concurrency
+        if type(selected) is not int or not 1 <= selected <= 50:
+            raise ValueError("Số yêu cầu AI đồng thời phải từ 1 đến 50.")
+        # Capture the user's choice once. Later settings changes belong to new
+        # projects; a restored project keeps the cap recorded in its manifest.
+        self.ai_concurrency = selected
         # Directly constructed test/utility sessions are not silently persisted.
         # The session manager opts real application projects in explicitly.
         self._persistence_enabled = False
@@ -777,7 +784,8 @@ class StreamingPipelineSession:
                 if spoken_text != text:
                     proof = spoken.get("pacing_verification")
                     if (review_result is None or not isinstance(spoken_text, str) or not spoken_text.strip()
-                            or not isinstance(proof, dict) or proof.get("status") != "verified"
+                            or not isinstance(proof, dict) or not (proof.get("status") == "verified"
+                                or proof.get("status") == "draft" and proof.get("semantic_verified") is True)
                             or proof.get("text") != spoken_text):
                         raise RuntimeError("Thiếu xác minh cho lời đọc đã rút gọn.")
                     verification = {**(review_result.get("verification") or {}),
@@ -788,6 +796,9 @@ class StreamingPipelineSession:
                     text = spoken_text
                 if review_result is not None:
                     review_result["final_vi"] = text
+                    if spoken.get("needs_review"):
+                        review_result.update(needs_review=True, review_reason=spoken["review_reason"])
+                        review_result["verification"] = {**review_result.get("verification", {}), "status": "unresolved"}
                 tts_duration, ratio, boundaries = spoken["tts_duration"], spoken["speed_ratio"], spoken["boundaries"]
             if self._execution_cancelled(task):
                 raise asyncio.CancelledError
@@ -1582,14 +1593,54 @@ class StreamingPipelineSession:
                     if row.end <= self._visual_completed_seconds + .001]
         return list(self.segments.values())
 
+    def _automatic_review_plan(self):
+        """One admission contract for the button and the explicit review API.
+
+        A saved speech failure is not a dependency of reviewing a different
+        playable row. Only idle, fully prepared speech recovery is admitted;
+        interrupted ASR/source preparation still belongs to Resume.
+        """
+        owners = (self.start_task, self.worker_task, self.review_task, self._chunk_followup_task,
+                  getattr(self, "export_task", None), getattr(self, "auto_export_task", None))
+        scope = self._idle_review_targets()
+        if (not self.initialized or self.is_running or self.is_editing
+                or settings.LLM_PROVIDER != "opencode" or not scope
+                or getattr(self, "_stop_draining", False)
+                or getattr(self, "_persistence_capacity_failed", False)
+                or getattr(self, "_restored_source_missing", False)
+                or any(owner is not None and not owner.done() for owner in owners)):
+            return [], scope, False
+        failed = [row for row in scope if row.status == "FAILED"]
+        recovery = bool(failed)
+        if recovery:
+            if (getattr(self, "_startup_failed", False) or not self.video_path or not self.video_path.is_file()
+                    or any(row.status not in {"READY", "PLAYED", "FAILED"} for row in scope)
+                    or any(row.failed_stage not in {"TTS", "ALIGNING"} for row in failed)):
+                return [], scope, True
+            targets = [row for row in scope if row.status in {"READY", "PLAYED"}
+                       and (row.needs_review or row.speaker_review_pending
+                            or (row.verification or {}).get("status") in {"pending", "incomplete", "unresolved"})
+                       and (row.verification or {}).get("status") != "manual"]
+            return targets, scope, True
+        if self.is_stopped or self.error or any(row.status not in {"READY", "PLAYED"} for row in scope):
+            return [], scope, False
+        return scope, scope, False
+
     async def start_automatic_review(self):
-        targets = self._idle_review_targets()
+        targets, source_scope, recovery_review = self._automatic_review_plan()
         preview_scope = self.translation_mode == "preview" and self._chunked_source_started
-        if (not self.initialized or self.is_running or self.is_stopped or self.is_editing or self.error
-                or not targets or any(s.status not in ("READY", "PLAYED") for s in targets)):
+        if not targets:
             raise SegmentEditConflict("Hãy chờ xử lý xong trước khi AI kiểm tra lại.")
-        if settings.LLM_PROVIDER != "opencode":
-            raise SegmentEditConflict("Kiểm tra lại miễn phí hiện dùng OpenCode trong Cài đặt.")
+        previous_error = self.error
+        # An explicit Review starts a new cancellation scope. Row failures and
+        # their retained checkpoints are never reset or queued for synthesis.
+        if recovery_review:
+            self.is_stopped = False
+            self._restored_interrupted = False
+            self.is_paused = False
+            self.pause_event.set()
+            self.error = None
+        self._exclusive_review = True
         self._run_started_at = time.monotonic()
         self._run_ready_baseline = sum(row.status in ("READY", "PLAYED") for row in self.segments.values())
         from core.streaming.progress_eta import reset_eta
@@ -1598,6 +1649,7 @@ class StreamingPipelineSession:
         self.review_summary = {"status": "running"}
         self._invalidate_output()
         self.progress = {"phase": "review", "stage": "AI đang kiểm tra lại từng câu…", "progress_pct": 0, "status": "RUNNING"}
+        target_revisions = {row.id: row.revision for row in targets}
         async def run_review():
             try:
                 await self.emit("result_invalidated", {"reason": "review_started",
@@ -1606,8 +1658,39 @@ class StreamingPipelineSession:
                 # inside the initial pipeline may reuse exact verified batches.
                 pending_ids = {row.id for row in targets
                                if row.speaker_review_pending and (row.verification or {}).get("status") != "manual"}
-                await self._review_translations(regenerate_audio=True, force_review=True,
-                    segment_ids=pending_ids or ({row.id for row in targets} if preview_scope else None))
+                if recovery_review:
+                    # Publish each bounded group before asking Muse about the
+                    # next one. An unrelated provider failure must not discard
+                    # earlier verdicts or prevent later saved speech review.
+                    first_error = None
+                    ordered = sorted(targets, key=lambda row: (row.start, row.id))
+                    for offset in range(0, len(ordered), self.VISUAL_REVIEW_GROUP_SIZE):
+                        if self.is_stopped:
+                            raise asyncio.CancelledError
+                        group = {row.id for row in ordered[offset:offset + self.VISUAL_REVIEW_GROUP_SIZE]
+                                 if row.revision == target_revisions[row.id]
+                                 and (row.verification or {}).get("status") != "manual"}
+                        if not group:
+                            continue
+                        try:
+                            await self._review_translations(regenerate_audio=True, force_review=True,
+                                                            segment_ids=group)
+                        except asyncio.CancelledError:
+                            raise
+                        except Exception as error:
+                            if isinstance(error, ProjectEditSaveError) or getattr(self, "_persistence_capacity_failed", False):
+                                raise
+                            first_error = first_error or error
+                            self.review_summary = {**self.review_summary, "status": "incomplete"}
+                            logging.getLogger("errors").error(
+                                "[%s] PARTIAL_REVIEW_GROUP_FAILED segment_ids=%s error_type=%s",
+                                self.task_id, sorted(group), type(error).__name__)
+                        self._persist_if_enabled()
+                    if first_error is not None:
+                        raise first_error
+                else:
+                    await self._review_translations(regenerate_audio=True, force_review=True,
+                        segment_ids=pending_ids or ({row.id for row in targets} if preview_scope else None))
             except asyncio.CancelledError:
                 self.is_stopped = True
                 raise
@@ -1622,8 +1705,12 @@ class StreamingPipelineSession:
             finally:
                 self.is_running = False
                 self.review_task = None
+                self._exclusive_review = False
+                if recovery_review and self.is_stopped:
+                    self.error = previous_error
+                    self._persist_if_enabled()
                 if not self.is_stopped:
-                    failed_audio = [segment.id for segment in targets
+                    failed_audio = [segment.id for segment in source_scope
                                     if segment.status == "FAILED"
                                     or (segment.final_vi.strip() and segment.status in ("READY", "PLAYED")
                                         and not segment.audio_path)]
@@ -1764,7 +1851,7 @@ class StreamingPipelineSession:
 
     def get_progress(self) -> Dict[str, Any]:
         snapshot = dict(self.progress)
-        output_gate = final_output_metadata(self.segments.values())
+        output_gate = final_output_metadata(self.segments.values(), self.review_summary)
         snapshot.update(output_gate)
         snapshot.update(self._processing_progress_metadata())
         from core.streaming.recovery import segment_state
@@ -1778,13 +1865,15 @@ class StreamingPipelineSession:
                                        if self._run_started_at is not None else None)
         if settings.LLM_PROVIDER == "opencode":
             from core.engines.translation.opencode_client import _shared_execution_layer
-            snapshot["ai_queue"] = _shared_execution_layer().snapshot()
+            layer = _shared_execution_layer()
+            layer.set_run_concurrency(self.task_id, self.ai_concurrency)
+            snapshot["ai_queue"] = layer.snapshot(run_id=self.task_id)
         snapshot.update(self._review_metadata())
         snapshot["can_retry"] = self.can_retry
         snapshot["can_repair_failed"] = any(self._can_repair_failed_segment(row) for row in self.segments.values())
         snapshot.update(source_language=self.source_language, translation_mode=self.translation_mode, preview_seconds=self.preview_seconds,
                         chunk_workers=getattr(self, "_parallel_chunk_workers", 1),
-                        configured_chunk_workers=settings.TRANSLATION_CHUNK_WORKERS,
+                        configured_chunk_workers=self.ai_concurrency,
                         chunk_seconds=settings.TRANSLATION_CHUNK_SECONDS,
                         source_prepared_seconds=self._source_prepared_seconds,
                         processed_seconds=self._visual_completed_seconds,
@@ -1792,13 +1881,11 @@ class StreamingPipelineSession:
         preview_output = self._preview_output_metadata() if self.translation_mode == "preview" else None
         if preview_output is not None:
             snapshot.update(preview_output)
-        snapshot["review_summary"] = self.review_summary
-        snapshot["review_scope"] = self._review_scope
+        snapshot["review_summary"] = ({**self.review_summary, "status": "running"}
+            if getattr(self, "_exclusive_review", False) and self.is_running else self.review_summary)
+        snapshot["review_scope"] = "all" if getattr(self, "_exclusive_review", False) else self._review_scope
         snapshot["reviewing_segment_ids"] = list(self._reviewing_segment_ids)
-        review_targets = self._idle_review_targets()
-        snapshot["can_review"] = bool(self.initialized and not self.is_running and not self.is_stopped
-                                      and not self.is_editing and not self.error and settings.LLM_PROVIDER == "opencode"
-                                      and review_targets and all(s.status in ("READY", "PLAYED") for s in review_targets))
+        snapshot["can_review"] = bool(self._automatic_review_plan()[0])
         snapshot["can_pause"] = bool(self.initialized and self.is_running and not self.is_paused and not self.is_stopped and not self.error
                                     and not (self.review_task and not self.review_task.done()))
         if getattr(self, "_stop_draining", False):
@@ -2750,11 +2837,8 @@ class StreamingPipelineSession:
         await self._complete_chunked_source()
 
     def _parallel_chunk_capacity(self):
-        """OCR uses one CPU thread per owner; leave RAM for ASR and review."""
-        import psutil
-        memory_workers = max(1, int((psutil.virtual_memory().available - 2 * 1024**3) // 1024**3))
-        return min(settings.TRANSLATION_CHUNK_WORKERS, settings.OPENCODE_CONCURRENCY,
-                   max(1, (os.cpu_count() or 1) - 1), memory_workers)
+        """AI chunk owners wait on I/O; ChunkScreenOCR separately limits native work."""
+        return self.ai_concurrency
 
     def _new_chunk_intelligence(self):
         from core.video_intelligence import VideoIntelligence
@@ -2782,6 +2866,9 @@ class StreamingPipelineSession:
 
     async def _produce_parallel_visual(self, target, workers):
         from core.streaming.parallel_chunks import ChunkWork, OrderedChunkRunner
+        from core.ai_workers import VideoAIExecutor
+        from core.engines.translation.opencode_client import _shared_execution_layer
+        _shared_execution_layer().set_run_concurrency(self.task_id, self.ai_concurrency)
         from core.streaming.recovery import reserve, input_hash, transition, contiguous_coverage
         # Existing ranges are authoritative on Resume, even if the user changes
         # the requested chunk length. Completed owners are never submitted again.
@@ -2889,13 +2976,19 @@ class StreamingPipelineSession:
                         except Exception as error:
                             return batches, error
                     try:
-                        return await self._run_blocking(invoke)
+                        # asyncio's default executor is capped around CPU+4/
+                        # 32 threads. Give this bounded AI wave its own pool;
+                        # ASR/TTS/render retain their separate admission.
+                        owner = asyncio.current_task()
+                        return await ai_workers.run(invoke,
+                            cancel_check=lambda: self._execution_cancelled(owner))
                     finally:
                         engine.screen_ocr.close()
                 job = ChunkWork(start, end, tuple(row.id for row in source), execute)
                 jobs.append(job)
                 metadata[(start, end)] = (record, owners)
             self._persist_if_enabled()
+            ai_workers = VideoAIExecutor(self.task_id, workers)
             try:
                 async with OrderedChunkRunner(workers, admission_event=self.pause_event,
                                               is_current=current) as pool:
@@ -2951,6 +3044,9 @@ class StreamingPipelineSession:
                                 self._chunk_jobs, self._legacy_visual_prefix)
                             raise
             finally:
+                # OrderedChunkRunner has already cancelled/drained native
+                # workers; no persistent executor survives this wave.
+                await ai_workers.aclose()
                 for record, _ in metadata.values():
                     if record["state"] == "RUNNING":
                         transition(record, "RETRY_PENDING", "interrupted")
@@ -3219,6 +3315,9 @@ class StreamingPipelineSession:
         cancellation = threading.Event()
 
         def invoke():
+            if settings.LLM_PROVIDER == "opencode":
+                from core.engines.translation.opencode_client import _shared_execution_layer
+                _shared_execution_layer().set_run_concurrency(self.task_id, self.ai_concurrency)
             with execution_context(self.task_id, lambda: check() or cancellation.is_set()):
                 return function(*args, **kwargs)
 
@@ -3577,14 +3676,15 @@ class StreamingPipelineSession:
                 feedback = {"raw_budget_seconds": budget * self.aligner.max_speed,
                             "measured_candidates": [{"text": item.final_vi, "measured_seconds": item.tts_duration}]}
                 proposal = None
-                for rewrite_attempt in range(3):
+                for rewrite_attempt in range(5):
                     logging.getLogger("pipeline").info(
                         "PACING_NEIGHBOR_REWRITE run_id=%s focus_id=%s neighbor_id=%s attempt=%d",
                         self.task_id, focus.id, item.id, rewrite_attempt + 1)
                     try:
                         proposal = await self._run_blocking(self.translator.rewrite_for_pacing,
                             item.text_zh, item.final_vi, budget * self.aligner.max_speed * .98,
-                            context, measured_duration=item.tts_duration, feedback=feedback)
+                            context, measured_duration=item.tts_duration, feedback=feedback,
+                            source_language=self.source_language)
                         logging.getLogger("pipeline").info(
                             "PACING_NEIGHBOR_REWRITE_ACCEPTED run_id=%s focus_id=%s neighbor_id=%s attempt=%d",
                             self.task_id, focus.id, item.id, rewrite_attempt + 1)
@@ -3685,7 +3785,8 @@ class StreamingPipelineSession:
                     text=text, source=source, duration=duration, max_duration=capacity,
                     output_path=output_path, engine=self.tts_engine, aligner=self.aligner,
                     translator=translator, voice=self._segment_voice(seg), ref_audio=self.ref_audio,
-                    context=context, on_stage=on_stage,
+                    context=context, on_stage=on_stage, source_language=self.source_language,
+                    allow_review_draft=True,
                     allow_bidirectional_reflow=self._chunked_source_started,
                     **({"max_duration_limit": capacity} if tail_limit is not None else {}),
                     **({"pacing_verification": pacing_verification} if pacing_verification is not None else {}))
@@ -3709,9 +3810,13 @@ class StreamingPipelineSession:
                 proof = getattr(exc, "pacing_verification", None)
                 if (isinstance(candidate, str) and candidate.strip()
                         and isinstance(proof, dict)
-                        and proof.get("status") == "verified"
+                        and (proof.get("status") == "verified" or
+                             proof.get("status") == "draft" and proof.get("semantic_verified") is True)
                         and proof.get("text") == candidate):
                     retry_text, retry_proof, retry_translator = candidate.strip(), proof, None
+                # Rescue changes the available physical gap, not the sentence's
+                # proposal budget. Reuse the measured candidate/original only.
+                retry_translator = None
                 retry_kwargs = {}
                 if retry_proof is not None:
                     retry_kwargs["pacing_verification"] = retry_proof
@@ -3720,6 +3825,7 @@ class StreamingPipelineSession:
                     output_path=output_path, engine=self.tts_engine, aligner=self.aligner,
                     translator=retry_translator, voice=self._segment_voice(seg), ref_audio=self.ref_audio,
                     context=context, on_stage=on_stage, allow_bidirectional_reflow=True,
+                    source_language=self.source_language, allow_review_draft=True,
                     **({"max_duration_limit": capacity} if tail_limit is not None else {}),
                     **retry_kwargs)
             measured = self._dub_audio_duration(output_path)
@@ -4081,6 +4187,10 @@ class StreamingPipelineSession:
                             self.review_summary["corrected"] = self.review_summary.get("corrected", 0) + 1
                     seg.revision += 1
                 seg.tts_duration = tts_dur
+                if spoken.get("needs_review"):
+                    seg.needs_review = True
+                    seg.review_reason = spoken.get("review_reason") or "Lời rút gọn là bản nháp, cần kiểm tra."
+                    seg.verification = {**(seg.verification or {}), "status": "unresolved"}
                 seg.speed_ratio = round(ratio, 2)
                 seg.audio_path = str(final_path.resolve())
                 for key, value in timing.items():

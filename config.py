@@ -12,7 +12,7 @@ LOGS_DIR.mkdir(parents=True, exist_ok=True)
 
 # Presets exposed by Studio. Environment settings retain intermediate values
 # for existing installations; the settings API accepts only these presets.
-TRANSLATION_CHUNK_WORKER_OPTIONS = (1, 3, 5, 10, 15, 20)
+TRANSLATION_CHUNK_WORKER_OPTIONS = (1, 3, 5, 10, 15, 20, 30, 40, 50)
 
 class SafeStream:
     """Safe stream wrapper for Windows GUI / pythonw.exe where stdout/stderr is None."""
@@ -105,10 +105,11 @@ class Settings(BaseSettings):
     OPENCODE_TIMEOUT: float = 60.0
     # Let the source producer overlap the independent review/TTS consumer.
     # Stage deadlines shorten, never extend, each adapter's request timeout.
-    OPENCODE_CONCURRENCY: int = Field(default=5, ge=1, le=20)
-    # Independent time ranges for full translation; preview remains bounded.
+    OPENCODE_CONCURRENCY: int = Field(default=20, ge=1, le=50)
+    # Source chunk width is independent of per-video AI request capacity.
     TRANSLATION_CHUNK_SECONDS: float = Field(default=60.0, ge=15, le=90)
-    TRANSLATION_CHUNK_WORKERS: int = Field(default=5, ge=1, le=20)
+    # Historical field name retained for API/env compatibility; captured per job.
+    TRANSLATION_CHUNK_WORKERS: int = Field(default=20, ge=1, le=50)
     OPENCODE_QUEUE_LIMIT: int = Field(default=24, ge=1, le=256)
     # Queue admission is separate from a provider request deadline. It must
     # cover the longest bounded review request already ahead in the FIFO.
