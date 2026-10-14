@@ -21,6 +21,7 @@ from core.engines.alignment.speech_cache import (
     synthesis_cache_identity, load_speech_cache, store_speech_cache,
     raw_synthesis_cache_identity, load_raw_speech_cache, store_raw_speech_cache,
 )
+from core.engines.alignment import pacing_checkpoint
 
 
 def synthesize_natural_speech(*, text, source, duration, output_path, engine, aligner,
@@ -88,10 +89,35 @@ def synthesize_natural_speech(*, text, source, duration, output_path, engine, al
             return cached
     raw_budget = duration * aligner.max_speed
     request_budget = raw_budget * .98
-    measurements = []
+    history_key = None
+    try:
+        history_key = pacing_checkpoint.identity(source=source, text=current, duration=duration,
+            voice=voice, engine=engine, aligner=aligner, translator=translator, context=context,
+            ref_audio=ref_audio, max_duration=max_duration, max_duration_limit=max_duration_limit,
+            allow_bidirectional_reflow=allow_bidirectional_reflow, source_language=source_language,
+            max_pacing_proposals=max_pacing_proposals, allow_review_draft=allow_review_draft)
+    except (OSError, ValueError, TypeError, KeyError):
+        logger.warning("PACING_HISTORY_IDENTITY_UNAVAILABLE run_id=%s", execution.run_id)
+    history = pacing_checkpoint.load(history_key, cancel_check=execution.cancel_check)
+    # Historical proof is diagnostic only. No old candidate is synthesized or
+    # approved from this history; a new proposal must pass today's validators.
+    historical_measured = history["measured"]
+    measurements = [{"text": row["text"], "measured_seconds": row["measured_seconds"]}
+                    for row in historical_measured]
     measured_candidates = []
-    seen_candidates = set()
-    rejection_feedback = {}
+    seen_candidates = {pacing_candidate_key(row["text"]) for row in historical_measured}
+    rejection_feedback = history["feedback"]
+    seen_candidates.update(pacing_candidate_key(row["text"])
+                           for row in rejection_feedback.get("rejected_candidates", []))
+
+    def checkpoint_failure():
+        # The original is always measured again; deduplicate that observation
+        # while keeping newly measured alternatives and their evidence bounded.
+        merged = {}
+        for row in [*historical_measured, *measured_candidates]:
+            merged[pacing_candidate_key(row["text"])] = row
+        pacing_checkpoint.store(history_key, list(merged.values()), rejection_feedback,
+                                cancel_check=execution.cancel_check)
     proposals_used = 0
     original_duration = duration
     with tempfile.TemporaryDirectory(prefix="speech-fit-", dir=output_path.parent) as temporary:
@@ -199,6 +225,7 @@ def synthesize_natural_speech(*, text, source, duration, output_path, engine, al
                                     execution.run_id, speech_id, attempt + 1, before, measured,
                                     sum(right - left for left, right in cuts + edge_cuts), len(cuts) + len(edge_cuts))
             except SpeechBudgetError:
+                checkpoint_failure()
                 if translator is None or proposals_used >= max_pacing_proposals:
                     logger.warning("PACING_FAILED run_id=%s speech_id=%s attempt=%d reason=%s",
                                    execution.run_id, speech_id, attempt + 1, "rewrite_disabled" if translator is None else "budget_exhausted")
@@ -268,6 +295,7 @@ def synthesize_natural_speech(*, text, source, duration, output_path, engine, al
                                        execution.run_id, speech_id, attempt + 1, review_attempt + 1, error.code)
                         seen_candidates.add(pacing_candidate_key(error.feedback["rejected_candidate"]))
                         rejection_feedback = accumulate_pacing_rejection(rejection_feedback, error)
+                        checkpoint_failure()
                         if proposals_used >= max_pacing_proposals:
                             best = min(measured_candidates, key=lambda item: item["measured_seconds"])
                             error.required_dub_duration = best["measured_seconds"] / aligner.max_speed + .012

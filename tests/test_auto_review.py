@@ -149,6 +149,7 @@ def test_bad_citations_never_apply_changed_translation(review, refs):
     assert result["needs_review"] is True
     assert result["final_vi"] == segment()["final_vi"]
     assert "sai ID hoặc sai thời điểm" in result["review_reason"]
+    assert result["verification"]["semantic_verified"] is False
 
 
 @pytest.mark.parametrize("changes", [{"semantic_verified": False},
@@ -165,6 +166,7 @@ def test_changed_source_with_no_support_retains_source_and_translation_together(
     assert result["text_zh"] == segment()["text_zh"]
     assert result["final_vi"] == segment()["final_vi"]
     assert result["needs_review"] is True
+    assert result["verification"]["semantic_verified"] is False
 
 
 @pytest.mark.parametrize("changes", [{"start": 0}, {"id": 2}, {"semantic_verified": "yes"},

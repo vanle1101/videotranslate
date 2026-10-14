@@ -1,5 +1,26 @@
 # Runtime QA report
 
+## Durable pacing feedback and proof ownership — October 15, 2026, 04:08
+
+Restart previously discarded rejected/overlong wording history even though raw
+speech and successful AI requests remained cached. Added bounded atomic pacing
+history keyed by source, context, voice/model, code and timing policy. Rejected
+and measured alternatives inform the next proposal round; historical proof is
+diagnostic only and cannot approve or publish audio. Manual wording does not
+enter this automatic history. Cache identity now includes semantic grouping
+policy code. **193 focused pacing/cache/context tests passed in 12.79s**;
+the agent's earlier focused suite also passed 119 tests. Actual recovery of
+the two long-video timing conflicts has not yet been retested with this change.
+
+A real short export exposed an unaccented Vietnamese draft. Translation and
+review prompts now explicitly require Vietnamese diacritics; no guessed local
+accent replacement is applied. Source review also incorrectly copied semantic
+approval from a rejected proposed source/text pair onto the retained old pair.
+Approval now requires accepting that actual pair in both OCR and audio review.
+**125 review/source/checkpoint tests passed in 3.46s**, including rejected source
+changes and invalid evidence references. A newly loaded production UI review
+of `fdc6ca35` is running against real Muse; quality retest is pending.
+
 ## Real Chinese preview/full recovery and partial batch preservation — October 15, 2026, 04:05
 
 **Runtime output PASS; content quality remains REVIEW_REQUIRED; overall goal incomplete.**

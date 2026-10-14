@@ -830,7 +830,7 @@ class AutomaticTranslationReviewer:
                 target.update(needs_review=not verified, review_reason=None if verified else reason)
                 target["verification"] = {**source["verification"], **provenance,
                     "status": status, "source_supported": supported,
-                    "semantic_verified": bool(audit["semantic_verified"] and proposed["final_vi"].strip() and not address_uncertain),
+                    "semantic_verified": bool(supported and audit["semantic_verified"] and proposed["final_vi"].strip() and not address_uncertain),
                     "reason": reason, "translation_changed": target.get("final_vi") != source.get("final_vi"),
                     "audio_consensus": True}
                 if sid in address_reading:
@@ -1106,6 +1106,8 @@ class AutomaticTranslationReviewer:
             "semantic_verified=true CHỈ khi đã kiểm tra nghĩa của mọi mệnh đề; không bảo đảm nguồn nếu OCR thiếu. "
             "Giữ lời Việt ngắn, văn nói tự nhiên nhưng đầy đủ phủ định/ý chính, không có chữ Hán. "
             "Giữ dấu câu để tạo giọng, câu hỏi phải có dấu hỏi. Kiểm tra cả nghĩa và văn nói: "
+            "Viết đầy đủ dấu thanh và dấu chữ tiếng Việt; sửa bản nháp bị mất dấu theo nguồn và ngữ cảnh, "
+            "không xuất lời Việt dạng ASCII không dấu và không tự đổi tên riêng. "
             "phải giữ quan hệ chủ thể/hành động/đối tượng, nghĩa đầy đủ của thuật ngữ, số và đơn vị. "
             "Không chấp nhận chuỗi từ khóa hoặc cụm bị rút sai nghĩa dù ngắn và vừa thời lượng. "
             "Không dùng hạn mức số từ; thời lượng không phải lý do để xác nhận câu thiếu ý. "
@@ -1407,7 +1409,7 @@ class AutomaticTranslationReviewer:
                     "status": status, **provenance, "source_supported": bool(supported),
                     "source_accepted": bool(accepted),
                     "source_scope_conflict": scope_conflict,
-                    "semantic_verified": bool(second_pass_complete and audit["semantic_verified"] and proposed["final_vi"].strip() and not address_uncertain and not scope_conflict),
+                    "semantic_verified": bool(accepted and audit["semantic_verified"] and proposed["final_vi"].strip() and not address_uncertain and not scope_conflict),
                     "second_pass_status": "completed" if second_pass_complete else "failed",
                     "evidence_ids": [item["id"] for item in usable],
                     "evidence": [{key: item[key] for key in ("id", "start", "end", "text_zh", "confidence", "bbox",

@@ -23,6 +23,8 @@ _CLOSING = "\"'”’」』】）)]"
 
 SEMANTIC_TRANSLATION_POLICY = """
 Các semantic_units là đơn vị đọc nghĩa, KHÔNG phải mốc phụ đề mới.
+- Lời Việt phải có đầy đủ dấu thanh và dấu chữ, không phiên sang ASCII không dấu.
+  Giữ tên riêng; nếu việc thêm dấu còn nhập nhằng về nghĩa, báo needs_review.
 - Đọc toàn bộ source_parts của một unit và ngữ cảnh trước/sau trước khi dịch;
   không diễn giải mỗi mảnh ASR như một câu độc lập. Một mệnh đề có thể nằm
   trên nhiều ID, ví dụ cấu trúc phủ định/mục đích còn tiếp ở ID kế tiếp.

@@ -158,6 +158,8 @@ Mỗi hàng có asr_text nhận dạng âm thanh tại máy; hãy sửa lỗi t�
 nghe video và chữ OCR. Không chuyển lời của ID này sang ID khác. Chỉ dịch lời
 trong ID đó. Câu ngắn hãy dịch ngắn, dùng khẩu ngữ rõ nghĩa, phù hợp thời lượng;
 final_vi là lời để đọc thành tiếng, đúng ngữ pháp và có dấu câu tự nhiên.
+Viết đầy đủ dấu thanh và dấu chữ tiếng Việt, không chuyển lời Việt thành ASCII
+không dấu. Dấu chữ ảnh hưởng nghĩa và cách TTS phát âm; không tự đổi tên riêng.
 Giữ quan hệ chủ thể/hành động/đối tượng, nghĩa đầy đủ của thuật ngữ, số và đơn vị.
 Không áp dụng hạn mức số từ, không biến câu thành từ khóa rời hoặc viết tắt khó đọc.
 Phần mềm sẽ đo giọng thật sau khi dịch; không cắt mất nghĩa để ép thời lượng.
