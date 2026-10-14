@@ -1,5 +1,34 @@
 # Runtime QA report
 
+## New long-source run and lexical fidelity check — October 15, 2026, 05:31
+
+The production resumable downloader completed the new natural Douyin source
+`7693853424030699451`: 65,034,877 bytes, 453.508934 seconds, valid media.
+The offscreen production UI created task `5bea8fe5` and is processing its
+first 32-second source chunk with real Muse. Full translation/export is pending.
+An initial UI harness process stalled before creating a task and was interrupted;
+the harness now records native alert text instead of allowing an unattended
+modal to hide the error indefinitely. Source selection is asserted explicitly.
+
+Independent inspection of retained `38680e43` pacing evidence found an overly
+literal fidelity rationale: it required separate Vietnamese words for synonymous
+components of a source compound. Rewriting and fidelity instructions now compare
+lexical units in context and require an actual semantic distinction for a missing-
+meaning claim. Negation, aspect, quantity, emphasis, politeness and independent
+fluency checks remain mandatory. No candidate is whitelisted or auto-approved.
+Focused regression: **89 passed in 13.50s**.
+
+Real Muse retest of the historical candidate for ID5 passed fresh fidelity but
+was rejected by independent Vietnamese fluency for its disconnected reply in the
+age-question context. **Recovery still FAIL; no new speech or MP4 published for
+this task.** This check does not count as UI acceptance or listening validation.
+
+Harness audit also found that the earlier mixed-source script promoted preview
+without exercising its detached speech player. Its existing passes prove real
+provider execution/basic final playback only, not translated-preview playback.
+Stronger preview/coverage/seek assertions are being added; earlier verdicts are
+not expanded beyond their observed evidence.
+
 ## Additional retained recovery and long-source selection — October 15, 2026, 05:20
 
 **Retained natural Douyin 15-second project `38680e43`: FAIL full recovery.**
