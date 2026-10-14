@@ -1,5 +1,29 @@
 # Runtime QA report
 
+## Parallel publication and resource observations — October 15, 2026, 06:02
+
+The real long run reached 18 overlapping provider requests. At 05:58 the host
+had 993,320KiB available out of 16,473,976KiB physical memory; observed OpenCode
+children individually occupied roughly 0.4–0.75GB working sets. More concurrency
+therefore cannot be claimed faster from this run. Nineteen distinct requests
+timed out; all eventually returned on retry by 06:00:30. Affected requests did
+not discard the saved preview or restart ASR. Full output remains pending.
+
+At 06:01 the manifest contained 75 source rows, 20 translations, eight usable
+WAV rows and 84.26s committed coverage. Inspection found validated partial speech
+batches accumulated in worker-local lists until an entire ordered worker
+finished. This delayed script visibility even though provider checkpoints existed.
+The parallel callback now publishes validated draft rows immediately through a
+bounded acknowledged event-loop bridge. Exact own-write fingerprints allow later
+full refinement; manual/newer review/glossary ownership wins. Partial rows never
+advance coverage, mark a chunk completed, publish screen metadata or invoke TTS.
+Independent review/TTS still follows ordered complete publication.
+
+**112 focused tests passed**, including late-chunk publication before earlier
+completion, own-refinement, duplicate-speech prevention, edits, persistence failure
+and cancellation while acknowledgments are queued. The running process predates
+this patch; live partial-publication acceptance remains pending.
+
 ## Retained translated-preview playback — October 15, 2026, 05:54
 
 The strengthened preview helper initially failed because it selected source text

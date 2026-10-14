@@ -2299,6 +2299,10 @@ class StreamingPipelineSession:
         for source in result.get("translation_sources", []):
             if source not in self.translation_sources:
                 self.translation_sources.append(dict(source))
+        # Capture only this publication's writes before any await permits a
+        # newer editor/review to take ownership. Partial callback acknowledgments
+        # must never adopt whatever state happens to exist when emit returns.
+        partial_states = {sid: self._visual_review_state(self.segments[sid]) for sid in pending} if partial_only else None
         await self._invalidate_changed_address_verifications()
         source_context = self._visual_source_context_identity()
         for sid in pending - review_candidates:
@@ -2321,7 +2325,7 @@ class StreamingPipelineSession:
             # A successful speech batch can survive an unrelated OCR failure.
             # It is an editable draft, not complete interval/source coverage.
             # The normal follow-up/recovery owner performs review and TTS.
-            return
+            return partial_states
         if self._chunk_followups is not None:
             await self._enqueue_chunk_followup((pending, review_candidates, draft_identities))
             return
@@ -3039,6 +3043,8 @@ class StreamingPipelineSession:
         cursor = max(self._visual_scanned_seconds, self._legacy_visual_prefix,
                      max((row["end"] for row in self._chunk_jobs), default=0.))
         attempts = {}
+        event_loop = asyncio.get_running_loop()
+        partial_publication_lock = asyncio.Lock()
         self._parallel_chunk_planning = True
         self._parallel_chunk_workers = workers
         def current():
@@ -3103,14 +3109,17 @@ class StreamingPipelineSession:
                     continue
                 owners = {row.id: self._visual_review_state(self.segments[row.id]) for row in source}
                 owners["glossary_version"] = glossary_snapshot(self)["version"]
-                async def execute(record=record, source=source, context=context):
+                async def execute(record=record, source=source, context=context, owners=owners):
                     if not current():
                         raise asyncio.CancelledError
                     transition(record, "RUNNING")
                     self._persist_if_enabled()
                     engine = self._new_chunk_intelligence()
                     batches = []
-                    partial_batches = []
+                    partial_active = threading.Event()
+                    partial_active.set()
+                    partial_callback_lock = threading.Lock()
+                    partial_ids = set()
                     batch_cursor, published_ids = record["start"], set()
                     def collect_partial(result, lo, hi):
                         check = current_execution_context().cancel_check
@@ -3123,7 +3132,62 @@ class StreamingPipelineSession:
                         from core.video_intelligence import VideoIntelligence
                         expected = [row for row in source if row.id in result["segments"]]
                         result = VideoIntelligence._checked_checkpoint_result(result, expected, lo, hi)
-                        partial_batches.append((deepcopy(result), lo, hi))
+                        # One acknowledged callback per chunk owner, hence at
+                        # most `workers` pending publications. No unbounded
+                        # call_soon/create_task queue of detached drafts.
+                        while not partial_callback_lock.acquire(timeout=.1):
+                            if not partial_active.is_set() or self.is_stopped or (check and check()):
+                                raise asyncio.CancelledError
+                        try:
+                            if partial_ids.intersection(result["segments"]):
+                                raise ValueError("Lô dịch từng phần bị trùng ID câu nguồn.")
+                            entered, finished = threading.Event(), threading.Event()
+                            async def publish_partial():
+                                entered.set()
+                                try:
+                                    async with partial_publication_lock:
+                                        await self._wait_for_edit_publication()
+                                        if (not partial_active.is_set() or not current()
+                                                or (check and check())):
+                                            raise asyncio.CancelledError
+                                        if owners["glossary_version"] != glossary_snapshot(self)["version"]:
+                                            raise SegmentEditConflict("Bảng thuật ngữ đã đổi; bỏ kết quả dịch cũ.")
+                                        accepted = {sid: data for sid, data in result["segments"].items()
+                                            if sid in self.segments
+                                            and self._visual_review_state(self.segments[sid]) == owners[sid]
+                                            and (self.segments[sid].verification or {}).get("status") != "manual"}
+                                        if not accepted:
+                                            return
+                                        states = await self._publish_visual_chunk(
+                                            {**deepcopy(result), "segments": accepted}, lo, hi, partial_only=True)
+                                        # Only the exact states written by this
+                                        # callback can authorize its later full
+                                        # outcome. A concurrent user edit wins.
+                                        for sid, state in (states or {}).items():
+                                            if (sid in accepted and sid in self.segments
+                                                    and self._visual_review_state(self.segments[sid]) == state
+                                                    and (self.segments[sid].verification or {}).get("status") != "manual"):
+                                                owners[sid] = state
+                                finally:
+                                    finished.set()
+                            future = asyncio.run_coroutine_threadsafe(publish_partial(), event_loop)
+                            while True:
+                                if not partial_active.is_set() or self.is_stopped or (check and check()):
+                                    if not entered.wait(.1):
+                                        continue
+                                    future.cancel()
+                                    while not finished.wait(.1):
+                                        pass
+                                    raise asyncio.CancelledError
+                                try:
+                                    future.result(timeout=.1)
+                                    partial_ids.update(result["segments"])
+                                    break
+                                except FutureTimeoutError:
+                                    if future.done():
+                                        raise
+                        finally:
+                            partial_callback_lock.release()
                     def collect(result, lo, hi):
                         nonlocal batch_cursor
                         check = current_execution_context().cancel_check
@@ -3156,14 +3220,8 @@ class StreamingPipelineSession:
                                 raise ValueError("Đoạn dịch song song chưa xuất bản đủ kết quả đã kiểm định.")
                             return batches, None
                         except Exception as error:
-                            # Preserve validated speech even when a sibling OCR
-                            # batch fails. These drafts never advance coverage.
-                            for partial, lo, hi in partial_batches:
-                                partial["segments"] = {sid: row for sid, row in partial["segments"].items()
-                                    if sid not in published_ids}
-                                if partial["segments"]:
-                                    partial["partial_only"] = True
-                                    batches.append((partial, lo, hi))
+                            # Successful partial callbacks are already durable;
+                            # replaying them here could overwrite a newer edit.
                             return batches, error
                     try:
                         # asyncio's default executor is capped around CPU+4/
@@ -3173,6 +3231,7 @@ class StreamingPipelineSession:
                         return await ai_workers.run(invoke,
                             cancel_check=lambda: self._execution_cancelled(owner))
                     finally:
+                        partial_active.clear()
                         engine.screen_ocr.close()
                 job = ChunkWork(start, end, tuple(row.id for row in source), execute)
                 jobs.append(job)
