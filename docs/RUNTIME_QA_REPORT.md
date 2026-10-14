@@ -5,6 +5,14 @@
 Acceptance remains **INCOMPLETE**. The ongoing real 320-second recovery still has
 missing fitted speech; it must not be called a successful full export.
 
+The observation started at approximately 01:08 terminated normally at 01:42 with
+**FAILED**, six timing conflicts (87,119,135,143,145,146), 187 valid WAVs/193 rows,
+and 36 review-required rows. It did not hit its two-hour harness deadline. The
+backend exited; the finally-path assertion confirmed all source IDs and all 15
+manual rows' text, revision, timeline and audio SHA256 were unchanged. No full
+MP4 was rendered. A new production-UI recovery on the updated runtime was
+started afterward; its result is pending.
+
 - Complete offline regression on the preceding revision: **3,603 passed, 2 skipped,
   127 subtests passed**, 674.06 seconds. The two skips are not production passes.
 - Some caught second-pass/audio review transport failures were only recorded as
