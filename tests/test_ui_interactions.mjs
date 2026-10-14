@@ -2236,6 +2236,7 @@ test('worker errors do not pretend pause succeeded; success updates Studio from 
 
 test('reopening export cannot create a duplicate export', async () => {
   const ui = studio(); await ui.start();
+  ui.sockets.at(-1).receive({type:'progress',status:'PREPARED',phase:'prepared',translation_mode:'full'});
   const exporting = ui.el('btn-confirm-export').click();
   await ui.flush();
   await ui.el('btn-export-hq').click();
@@ -3006,6 +3007,8 @@ test('transcript draft survives worker updates and same-session init, then cance
   assert.equal(ui.el('seg-row-0').querySelector('.transcript-editor').hidden, false);
   await ui.el('seg-row-0').querySelector('.transcript-editor-actions').children[1].click();
   assert.equal(ui.el('seg-vi-0').textContent, '<b>Xin chào</b>');
+  assert.equal(ui.el('btn-export-hq').disabled, true, 'Ready speech cannot release a running worker');
+  ui.sockets.at(-1).receive({type:'progress',status:'PREPARED',phase:'prepared',translation_mode:'full'});
   assert.equal(ui.el('btn-export-hq').disabled, false);
 });
 
@@ -3032,6 +3035,8 @@ test('saving transcript commits server text and a new audio revision, blocks dup
   assert.equal(oldDub.paused, true);
   assert.ok(ui.audio.find(a => a.src === '/dub.wav?rev=1'));
   assert.equal(ui.el('seg-row-0').querySelector('.transcript-editor').hidden, true);
+  assert.equal(ui.el('btn-export-hq').disabled, true, 'Ready speech cannot release a running worker');
+  ui.sockets.at(-1).receive({type:'progress',status:'PREPARED',phase:'prepared',translation_mode:'full'});
   assert.equal(ui.el('btn-export-hq').disabled, false);
   ui.sockets.at(-1).receive({ type: 'segment_update', ...segment, revision: 0, final_vi: 'stale', audio_url: '/dub.wav' });
   assert.equal(ui.el('seg-vi-0').textContent, 'Bản dịch đã chỉnh.');
@@ -4102,11 +4107,14 @@ test('uncertain transcript remains editable, shows review reason and can confirm
   assert.equal(warning.hidden, true);
   assert.equal(row.dataset.needsReview, 'false');
   assert.equal(ui.el('subtitle-text').textContent, segment.final_vi);
+  assert.equal(ui.el('btn-export-hq').disabled, true, 'Ready speech cannot release a running worker');
+  ui.sockets.at(-1).receive({type:'progress',status:'PREPARED',phase:'prepared',translation_mode:'full'});
   assert.equal(ui.el('btn-export-hq').disabled, false);
 });
 
 test('ready draft keeps review visible while playing its dub and captions, then regenerates an edited sentence', async () => {
   const ui = studio(); await ui.start();
+  ui.sockets.at(-1).receive({type:'progress',status:'PREPARED',phase:'prepared',translation_mode:'full'});
   const video = ui.el('video-player');
   const segment = captionFixture(ui, { needs_review: true, revision: 0,
     review_reason: 'Lời nhận dạng chưa rõ; nghe lại trước khi tạo giọng.' });
@@ -4272,6 +4280,8 @@ test('review silence requires its explicit action and becomes a ready silent int
   assert.equal(row.querySelector('.transcript-review').hidden, true);
   assert.equal(ui.el('seg-vi-0').textContent, 'Đã xác nhận không có lời thoại');
   assert.equal(ui.el('subtitle-text').textContent, '');
+  assert.equal(ui.el('btn-export-hq').disabled, true, 'Ready speech cannot release a running worker');
+  ui.sockets.at(-1).receive({type:'progress',status:'PREPARED',phase:'prepared',translation_mode:'full'});
   assert.equal(ui.el('btn-export-hq').disabled, false);
   await ui.el('video-player').play();
   assert.equal(ui.el('video-player').paused, false);
@@ -4357,6 +4367,7 @@ test('transcript reports selected text provider and keeps review status prominen
 test('caption export sends the position mode while the source mask stays false', async () => {
   for (const positioned of [true, false]) {
     const ui = studio(); await ui.start();
+    ui.sockets.at(-1).receive({type:'progress',status:'PREPARED',phase:'prepared',translation_mode:'full'});
     ui.el('toggle-screen-text').checked = positioned; await ui.el('toggle-screen-text').emit('change');
     await ui.el('btn-export-hq').click();
     const summary = ui.el('export-screen-text-summary').textContent;
@@ -5265,6 +5276,7 @@ test('manual export polling is serial and stops after its terminal result', asyn
 test('accepted export reports terminal failure and cancellation without showing a result', async () => {
   for (const status of ['FAILED','CANCELLED']) {
     const ui=studio();await ui.start();
+    ui.sockets.at(-1).receive({type:'progress',status:'PREPARED',phase:'prepared',translation_mode:'full'});
     ui.replies.set('/api/streaming/export-hq/status/fixture',{status,stage:'Render không hoàn tất'});
     const pending=ui.el('btn-confirm-export').click();await ui.flush();await ui.tickIntervals(1000);await pending;
     assert.match(ui.el('export-status-text').textContent,/Render không hoàn tất/);
@@ -5275,6 +5287,7 @@ test('accepted export reports terminal failure and cancellation without showing 
 
 test('pagehide detaches accepted export polling without cancelling the backend render', async () => {
   const ui=studio();await ui.start();
+  ui.sockets.at(-1).receive({type:'progress',status:'PREPARED',phase:'prepared',translation_mode:'full'});
   const pending=ui.el('btn-confirm-export').click();await ui.flush();
   await ui.window.emit('pagehide');await pending;await ui.tickIntervals(1000);
   assert.equal(ui.requests.some(item=>item.url.includes('/export-hq/cancel/')),false);
@@ -5283,6 +5296,7 @@ test('pagehide detaches accepted export polling without cancelling the backend r
 
 test('accepted export retains polling after a transient status network failure', async () => {
   const ui=studio();await ui.start();
+  ui.sockets.at(-1).receive({type:'progress',status:'PREPARED',phase:'prepared',translation_mode:'full'});
   ui.replies.set('/api/streaming/export-hq/status/fixture',()=>Promise.reject(Error('network')));
   const pending=ui.el('btn-confirm-export').click();await ui.flush();await ui.tickIntervals(1000);
   assert.match(ui.el('export-status-text').textContent,/Tạm mất kết nối/);
@@ -5322,6 +5336,25 @@ test('incomplete review permits an explicitly gated spoken draft while runtime f
   assert.equal(ui.el('btn-export-hq').disabled, true);
   assertWorkerSourceBusy(ui, false);
   assert.equal(ui.el('video-player').paused, true);
+});
+
+test('durable review recovery remains visible and blocks draft export until workers release the session', async () => {
+  const ui=studio();await ui.start();const socket=ui.sockets.at(-1);
+  socket.receive({type:'progress',status:'RUNNING',phase:'retry',translation_mode:'full',
+    final_output_blocked:false,output_is_draft:true,review_summary:{status:'incomplete',incomplete:1},
+    retry_pending_count:1,retry_next_attempt_at:Date.now()/1000+300,retry_error_codes:['provider_timeout']});
+  assert.match(ui.el('task-retry-notice').textContent,/1 phần chờ thử lại/);
+  assert.match(ui.el('task-error-summary').textContent,/provider_timeout/);
+  assert.equal(ui.el('btn-export-hq').disabled,true,'A cooling review worker still owns the session');
+  await ui.el('btn-confirm-export').click();
+  assert.equal(ui.requests.filter(request=>request.url==='/api/streaming/export-hq/start').length,0);
+  for(const status of ['PAUSED','CANCELLING']) {
+    socket.receive({type:'progress',status});
+    assert.equal(ui.el('btn-export-hq').disabled,true,status);
+  }
+  socket.receive({type:'progress',status:'FAILED',phase:'review',can_stop:false,retry_pending_count:0,
+    retry_next_attempt_at:null,retry_error_codes:[]});
+  assert.equal(ui.el('btn-export-hq').disabled,false,'An idle complete spoken draft retains its existing export option');
 });
 
 test('incomplete review survives finished telemetry and polling without stopping explicitly played draft, then retries the same task', async () => {

@@ -783,6 +783,7 @@ document.addEventListener("DOMContentLoaded", () => {
       ["incomplete", "failed"].includes(currentProgress?.review_summary?.status);
     btnExportHQ.disabled = !currentTaskId || !items.length ||
       missingSpeech ||
+      ["RUNNING", "PAUSED", "CANCELLING"].includes(currentProgress?.status) ||
       (currentProgress?.translation_mode === "preview" && currentProgress?.status !== "COMPLETED") || isPreviewReady(currentProgress?.status) ||
       captionStyleDirty || !!captionStyleRequest ||
       reviewInProgress() || pendingTaskAction?.kind === "review" || automaticExportActive ||

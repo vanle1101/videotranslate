@@ -59,6 +59,13 @@ The next full offline traversal completed with **3,624 passed, 2 skipped,
 127 subtests passed** in544.19s. It preceded the final staged-neighbor change;
 the75 focused checks above cover that change. Counts overlap.
 
+Frontend review found another reproduced contract mismatch: Export could be
+enabled with all speech READY while a review retry still owned the RUNNING
+session; backend correctly rejected it. Export now stays disabled during
+RUNNING/PAUSED/CANCELLING, while an idle complete draft with unresolved review
+remains exportable. **284 JavaScript interaction tests passed**, including the
+visible retry error/deadline and absence of an export POST during active work.
+
 ## Recovery retest and cross-process ownership — October 15, 2026
 
 **Acceptance remains INCOMPLETE.** The real 320.040635-second project `76f5aa6b` has 187 valid speech files out of 193; IDs 87,119,135,143,145,146 still lack a usable fitted voice. No new complete MP4 is claimed for this run.
