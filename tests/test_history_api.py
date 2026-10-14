@@ -335,6 +335,20 @@ def test_live_output_probe_is_off_loop_and_cannot_invalidate_newer_render(saved_
     asyncio.run(run())
 
 
+def test_inconclusive_live_probe_preserves_publication_and_completed_export(saved_project, monkeypatch):
+    import core.streaming.session_store as store
+    session = saved_project
+    session.output_filename, session.output_video_url = "result.mp4", "/api/outputs/result.mp4"
+    (settings.OUTPUT_DIR / "result.mp4").write_bytes(b"fixture identity")
+    monkeypatch.setattr(store, "_valid_output", lambda *args: None)
+    job = {"status": "COMPLETED", "video_url": session.output_video_url}
+    monkeypatch.setitem(main.active_export_tasks, f"export_{session.task_id}", job)
+    asyncio.run(main.validate_live_output(session))
+    assert session.output_filename == "result.mp4"
+    assert session.output_video_url == "/api/outputs/result.mp4"
+    assert job["status"] == "COMPLETED" and not session.warnings
+
+
 def test_stale_probe_cannot_clear_replacement_at_same_output_name(saved_project, monkeypatch):
     import core.streaming.session_store as store
     entered, release = threading.Event(), threading.Event()

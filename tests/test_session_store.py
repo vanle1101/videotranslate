@@ -1607,6 +1607,7 @@ def test_output_validation_timeout_is_cached_briefly_and_recovers_without_losing
     monkeypatch.setattr(store, "_probe_saved_output", probe)
     for _ in range(3):
         assert list_saved_sessions()[0]["output_video_url"] == ""
+    assert store._valid_output(saved_mp4, 2) is None, "Timeout is inconclusive, not corrupt media"
     assert probe.call_count == 1
     monkeypatch.setattr(store, "_probe_saved_output", real_probe)
     clock[0] = 31

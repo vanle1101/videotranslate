@@ -693,6 +693,10 @@ async def validate_live_output(session):
     prior_file = file_revision()
     from core.streaming.session_store import _valid_output
     valid = path is not None and await asyncio.to_thread(_valid_output, path, session.total_duration)
+    if valid is None:
+        # The exporter already validated this publication. A bounded history
+        # probe timing out must not erase it or mark its export FAILED.
+        return
     current_file = file_revision()
     if valid or signature != (getattr(session, "output_filename", ""),
                              getattr(session, "output_video_url", ""),

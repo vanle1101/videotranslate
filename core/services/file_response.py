@@ -4,6 +4,10 @@ import asyncio
 from starlette.responses import FileResponse as StarletteFileResponse
 
 
+class _TransferDisconnected(Exception):
+    pass
+
+
 class FileResponse(StarletteFileResponse):
     async def __call__(self, scope, receive, send):
         if scope.get("type") != "http":
@@ -14,26 +18,40 @@ class FileResponse(StarletteFileResponse):
                 if (await receive())["type"] == "http.disconnect":
                     return
 
-        # Starlette FileResponse does not observe receive while sending ranges.
-        # Uvicorn can stop writing after a disconnect while that response keeps
-        # reading the whole source. Own its task separately so one cancellation
-        # unwinds the real file context before the HTTP owner is released.
-        transfer = asyncio.create_task(super().__call__(scope, receive, send))
+        interrupted = False
+        async def guarded_send(message):
+            if interrupted:
+                raise _TransferDisconnected
+            await send(message)
+
+        async def transmit():
+            try:
+                await super(FileResponse, self).__call__(scope, receive, guarded_send)
+            except _TransferDisconnected:
+                return
+
+        # Do not cancel the file-open/read thread's await: a native open may
+        # return a live handle after its asyncio future has been discarded.
+        # Stop at the next send boundary, letting Starlette close its context.
+        transfer = asyncio.create_task(transmit())
         disconnect = asyncio.create_task(disconnected())
         try:
             done, _ = await asyncio.wait((transfer, disconnect), return_when=asyncio.FIRST_COMPLETED)
             if transfer in done:
-                return await transfer
+                return await asyncio.shield(transfer)
             await disconnect  # Do not turn an unexpected receive failure into success.
-            if not transfer.done():
-                transfer.cancel()
-                try:
-                    await transfer
-                except asyncio.CancelledError:
-                    return
-            return await transfer
+            interrupted = True
+            return await asyncio.shield(transfer)
         finally:
-            for task in (transfer, disconnect):
-                if not task.done():
-                    task.cancel()
-            await asyncio.gather(transfer, disconnect, return_exceptions=True)
+            interrupted = True
+            if not disconnect.done():
+                disconnect.cancel()
+            cleanup = asyncio.gather(transfer, disconnect, return_exceptions=True)
+            cancelled = False
+            while not cleanup.done():
+                try:
+                    await asyncio.shield(cleanup)
+                except asyncio.CancelledError:
+                    cancelled = True
+            if cancelled:
+                raise asyncio.CancelledError

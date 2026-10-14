@@ -100,3 +100,52 @@ def test_file_transfer_errors_are_not_converted_into_success(tmp_path, fault):
             await FileResponse(source)(scope, receive, send)
         assert not [task for task in asyncio.all_tasks() if task is not asyncio.current_task()]
     asyncio.run(run())
+
+
+@pytest.mark.parametrize("interrupt", ["disconnect", "cancel"])
+def test_interrupt_during_native_file_open_drains_and_closes_handle(tmp_path, monkeypatch, interrupt):
+    import anyio
+    import starlette.responses
+    path = tmp_path / "slow-open.bin"
+    path.write_bytes(b"content" * 100)
+    entered, release, finished = threading.Event(), threading.Event(), threading.Event()
+    handles = []
+    def slow_open(*args, **kwargs):
+        handle = open(*args, **kwargs)
+        handles.append(handle)
+        entered.set()
+        release.wait(3)
+        finished.set()
+        return handle
+    # mode is a keyword at the Starlette boundary, not run_sync's arguments.
+    async def wrapped_open(file, mode="rb"):
+        return anyio.AsyncFile(await anyio.to_thread.run_sync(slow_open, file, mode))
+    monkeypatch.setattr(starlette.responses.anyio, "open_file", wrapped_open)
+    async def run():
+        disconnected = asyncio.Event()
+        async def receive():
+            await disconnected.wait()
+            return {"type": "http.disconnect"}
+        async def send(message):
+            pass
+        task = asyncio.create_task(FileResponse(path)(
+            {"type":"http", "method":"GET", "headers":[], "extensions":{}}, receive, send))
+        try:
+            for _ in range(300):
+                if entered.is_set(): break
+                await asyncio.sleep(.01)
+            assert entered.is_set()
+            if interrupt == "cancel": task.cancel()
+            else: disconnected.set()
+            await asyncio.sleep(.05)
+            assert not task.done(), "Native open must drain before the response owner exits"
+            release.set()
+            if interrupt == "cancel":
+                with pytest.raises(asyncio.CancelledError): await task
+            else: await task
+            assert finished.is_set() and all(h.closed for h in handles)
+        finally:
+            release.set()
+            await asyncio.gather(task, return_exceptions=True)
+            for handle in handles: handle.close()
+    asyncio.run(run())

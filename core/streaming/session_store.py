@@ -981,6 +981,13 @@ def _valid_output(path, expected_duration):
         # large history entry must not serialize every other history row.
         try:
             valid = _probe_saved_output(path, expected_duration)
+        except subprocess.TimeoutExpired:
+            # Inconclusive under load is not evidence that validated media
+            # disappeared or became corrupt. History hides unverified links;
+            # live callers retain the previous publication and retry later.
+            valid = None
+            import logging
+            logging.getLogger("pipeline").warning("OUTPUT_PROBE_DEFERRED reason=timeout")
         except (OSError, ValueError, TypeError, KeyError, subprocess.SubprocessError):
             valid = False
         if identity != _output_identity(path, expected_duration):

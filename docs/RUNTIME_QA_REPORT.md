@@ -1,5 +1,37 @@
 # Runtime QA report
 
+## Export probe and disconnected file ownership — October 15, 2026, 04:24
+
+Full offline traversal: **3 failed, 3,709 passed, 2 skipped, 127 subtests passed**
+in 579.54s, with six historical standalone scripts excluded. Two reconnect
+failures were stale SimpleNamespace test fixtures missing the new chunk/retry
+ledger fields; fixtures now model the production session. Focused retest:
+28 passed, 1 skipped, 15 subtests. The third failure exposed a real file-owner
+race: asyncio cancellation during native `open()` discarded its eventual handle.
+Deterministic disconnect/cancel-during-open tests both failed before the fix.
+Transfers now stop at the next send boundary and drain file cleanup before the
+HTTP owner exits. Retest: **18 file/socket/backend tests passed in 8.25s**.
+
+Real UI review finished but its subsequent export was incorrectly invalidated
+by a short live media probe at 04:18. Export itself had fully validated the MP4;
+the same unchanged file subsequently passed direct probing in 3.625s. Code
+conflated a bounded probe timeout with missing/corrupt bytes. Timeout is now
+inconclusive: history still withholds unverified results, while live validation
+does not erase a previously validated publication or flip its export to FAILED.
+Missing/corrupt files still invalidate normally. **232 history/storage tests
+passed**, plus the explicit timeout regression. Newly loaded production UI has
+exported the retained speech again at 04:23:35; playback/reload retest pending.
+
+Quality remains unresolved: fresh real Muse review and a separate bounded
+row-9 diagnostic both retained the unaccented draft because proposed source
+corrections lacked corroboration. Prompt guidance alone did not recover this
+row. Five short-video rows remain REVIEW_REQUIRED, correctly without semantic
+approval for rejected source/text pairs. The two long-video timing conflicts
+remain unresolved. No universal success claim is made.
+
+JavaScript suites: **342 passed**. Full offline rerun after the file-owner fix
+and final real playback retest are still required.
+
 ## Durable pacing feedback and proof ownership — October 15, 2026, 04:08
 
 Restart previously discarded rejected/overlong wording history even though raw
