@@ -56,6 +56,23 @@ def review_response():
     }, "summary": {"checked": 2, "verified": 1, "corrected": 1, "unresolved": 0, "manual": 0}}
 
 
+@pytest.mark.parametrize("semantic_verified", [True, False])
+def test_measured_draft_recovery_requires_fidelity_and_retains_uncertainty(reviewed_session, semantic_verified):
+    from core.engines.alignment.timing_aligner import SpeechBudgetError
+    owner = reviewed_session
+    row = owner.segments[112]
+    error = SpeechBudgetError("Offline duration conflict")
+    error.required_dub_duration = 1.2
+    error.candidate_text = "Lời ngắn."
+    error.pacing_verification = {"status": "draft", "semantic_verified": semantic_verified,
+        "text": error.candidate_text, "review_reason": "Cần kiểm tra."}
+    owner._remember_pacing_failure(row, error, owner._dialogue_context_before(row))
+    assert (row.id in owner._pacing_failures) is semantic_verified
+    if semantic_verified:
+        assert owner._pacing_failures[row.id]["proof"]["status"] == "draft"
+    assert row.final_vi == "Lời cũ."
+
+
 def source_scope_recovery_row(session):
     session.visual_translation = True
     session._visual_completed_seconds = session.total_duration

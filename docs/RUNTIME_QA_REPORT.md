@@ -26,6 +26,10 @@ missing fitted speech; it must not be called a successful full export.
   retry rounds. Injected failures and synthetic PCM are offline tests, not real
   provider acceptance. The live recovery process predates these latest edits;
   loading and retesting the new runtime remains required.
+- The later measured-candidate recovery ledger had the same verified-only
+  inconsistency. It now retains a draft candidate only when its independent
+  semantic gate passed, without promoting its review status. Timing/recovery
+  regression: **71 passed**, including rejected unverified candidates.
 
 Files: `core/review_retry.py`, `core/translation_review.py`,
 `core/streaming/pipeline.py`, `tests/conftest.py`,

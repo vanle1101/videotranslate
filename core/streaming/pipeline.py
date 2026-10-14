@@ -4071,7 +4071,9 @@ class StreamingPipelineSession:
                 or not math.isfinite(required) or required <= 0
                 or not isinstance(candidate, str) or not candidate.strip()
                 or candidate != seg.final_vi and (not isinstance(proof, dict)
-                    or proof.get("status") != "verified" or proof.get("text") != candidate)):
+                    or not (proof.get("status") == "verified" or
+                        proof.get("status") == "draft" and proof.get("semantic_verified") is True)
+                    or proof.get("text") != candidate)):
             return
         rows, _, capacity, _, _ = self._dub_fit_window(seg, self._dub_rows())
         self._pacing_failures[seg.id] = {
