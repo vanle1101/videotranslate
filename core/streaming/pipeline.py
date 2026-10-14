@@ -65,6 +65,18 @@ SOURCE_METADATA_FIELDS = ("speaker_id", "speaker_evidence", "speaker_diagnostics
                           "source_piece_index", "source_piece_count")
 
 
+def unfinished_rows_message(rows):
+    """Report the failed stage, not speech failure for untranslated sources."""
+    counts = {}
+    labels = {"ASR": "chưa nhận diện được lời nguồn", "TRANSLATING": "chưa dịch được",
+              "TTS": "chưa tạo được giọng", "ALIGNING": "chưa căn được thời lượng giọng"}
+    for row in rows:
+        label = labels.get(row.failed_stage, "chưa xử lý xong")
+        counts[label] = counts.get(label, 0) + 1
+    details = "; ".join(f"{count} câu {label}" for label, count in counts.items())
+    return details + ". Phần đã xong được giữ; bấm Tiếp tục để thử lại."
+
+
 def preview_source_covered(*, completed_seconds, source_prepared_seconds, chunked_source_started):
     """An empty row list proves silence only inside an actually prepared prefix."""
     if (isinstance(completed_seconds, bool) or not isinstance(completed_seconds, (int, float))
@@ -4673,7 +4685,7 @@ class StreamingPipelineSession:
             if failed:
                 self.progress["progress_pct"] = round(100 * ready / len(owned), 1)
             if failed and not self.is_stopped and not self.error:
-                self.error = f"{len(failed)} câu chưa tạo được giọng. Phần đã xong được giữ; bấm Tiếp tục để thử lại."
+                self.error = unfinished_rows_message(failed)
                 await self.emit("error", {"message": self.error, "segment_ids": [s.id for s in failed]})
             if (not self.is_stopped and not self.error and self.translation_mode == "preview"
                     and self._chunked_source_started):

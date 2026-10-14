@@ -1,5 +1,20 @@
 # Runtime QA report
 
+## Preview retry and accurate failure labels — October 15, 2026, 03:46
+
+Reopened saved task `fdc6ca35` through the production Qt UI and clicked Retry.
+The same task ID and 11 source IDs were retained; existing text checkpoints were
+reused. Seven Vietnamese rows appeared before review/TTS. This is real progress,
+not preview acceptance: no valid final output has been observed yet.
+
+The failed preview exposed an incorrect final banner: all eight failures were
+`TRANSLATING`, while the UI received “8 câu chưa tạo được giọng”. The queue's
+final error now groups actual failed stages (ASR, translation, TTS, alignment),
+retains recovery instructions, and does not change failure or completion gates.
+Regression: **133 preview/progress Python tests passed in 60.48 seconds**,
+including production worker finalization for each failed stage. The currently
+running QA process predates this label correction.
+
 ## Inference recovery and provider cooldown audit — October 15, 2026
 
 **Overall acceptance remains incomplete.** Real Chinese-source UI task `fdc6ca35`

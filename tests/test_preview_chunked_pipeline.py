@@ -19,6 +19,25 @@ from core.streaming.chunked_source import owned_boundary, prepare_interval, publ
 from core.streaming.pipeline import SegmentEditConflict, SegmentItem, StreamingPipelineSession
 
 
+@pytest.mark.parametrize("stage,label", [
+    ("ASR", "chưa nhận diện được lời nguồn"), ("TRANSLATING", "chưa dịch được"),
+    ("TTS", "chưa tạo được giọng"), ("ALIGNING", "chưa căn được thời lượng giọng"),
+])
+def test_worker_final_error_preserves_failed_stage(preview, stage, label):
+    session, *_ = preview
+    row = SegmentItem(0, 0, 1, 1)
+    row.status, row.failed_stage = "FAILED", stage
+    session.segments = {0: row}
+    session._chunked_source_started = True
+    session._visual_scanned_seconds = session._source_prepared_seconds = 1.
+    session.is_running, session.is_stopped, session.error = True, False, None
+    asyncio.run(session._worker_loop(recover_pacing=False))
+    assert f"1 câu {label}" in session.error
+    assert "Tiếp tục" in session.error
+    if stage != "TTS":
+        assert "chưa tạo được giọng" not in session.error
+
+
 def advance_retry_clock(session, monkeypatch, before_due=None):
     """Advance only retry wall clocks, retaining the real 300s schedule check."""
     from core.streaming import pipeline, retry_schedule
