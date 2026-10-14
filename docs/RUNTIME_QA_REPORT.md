@@ -54,6 +54,14 @@ phase before any provider result. **41 parallel/progress tests passed in
 of this fix is pending. At 05:37:58, malformed JSON in a real review response
 was repaired by the existing bounded path; it did not abort or restart the job.
 
+At 05:48 a separate offscreen page attached to the existing backend and reopened
+the retained Korean fixture `34e42f42` without starting another server or review.
+The new result-seek helper passed early → late → middle at 0.37 → 16.37 → 8.37s;
+native playback advanced to 0.527199 / 16.520712 / 8.506893s with no media error.
+The owned page exited, leaving the long run intact. This tests existing-output
+seeking, not natural Korean content acceptance. Long-run requests encountered
+real provider timeouts and entered bounded retry; no final output is claimed.
+
 ## Additional retained recovery and long-source selection — October 15, 2026, 05:20
 
 **Retained natural Douyin 15-second project `38680e43`: FAIL full recovery.**
