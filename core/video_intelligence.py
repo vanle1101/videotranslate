@@ -1347,6 +1347,42 @@ class VideoIntelligence:
             source_dialogue = [dict(row) for row in (getattr(self, "_source_dialogue", []) or payload)
                                if isinstance(row, dict)]
             glossary = deepcopy(getattr(self, "glossary", None))
+            partial_callback = getattr(self, "_partial_callback", None)
+            publication_lock = threading.Lock()
+            published_ids = set()
+            publication_failed = threading.Event()
+
+            def publish_speech(result, corrections, batch_payload):
+                if partial_callback is None or not batch_payload:
+                    return
+                # Work on detached rows: conservative partial evidence must not
+                # alter the cached batch or the complete chunk's later review.
+                partial = self._checked_checkpoint_result(deepcopy(result),
+                    self._fallback_segments(batch_payload), start, end)
+                partial = self._review_primary_text(partial, batch_payload, observed, corrections)
+                if quota_fallback:
+                    for row in partial["segments"].values():
+                        row["needs_review"] = True
+                        row["review_reason"] = row.get("review_reason") or "Bản nháp từ nguồn văn bản dự phòng; cần đối chiếu."
+                model = getattr(client, "model", None)
+                partial = self._with_provenance(partial, provider,
+                    model if isinstance(model, str) else model_setting)
+                # Only speech is independently publishable here. OCR geometry
+                # and source coverage still belong to the complete chunk.
+                partial["screen_texts"] = []
+                with publication_lock:
+                    self._check_cancelled(cancel_check)
+                    if publication_failed.is_set():
+                        return
+                    owned = set(partial["segments"])
+                    if owned & published_ids:
+                        raise VideoIntelligenceError("Lô dịch từng phần bị trùng ID câu nguồn.")
+                    try:
+                        partial_callback(deepcopy(partial), start, end)
+                    except BaseException:
+                        publication_failed.set()
+                        raise
+                    published_ids.update(owned)
 
             def translate_batch(index, source_dialogue, summary):
                 self._check_cancelled(cancel_check)
@@ -1394,7 +1430,9 @@ class VideoIntelligence:
                     except (VideoIntelligenceError, KeyError, TypeError, ValueError):
                         pass
                     else:
-                        return saved_result, {int(key): value for key, value in saved_corrections.items()}
+                        corrections = {int(key): value for key, value in saved_corrections.items()}
+                        publish_speech(saved_result, corrections, batch_payload)
+                        return saved_result, corrections
                 self._report_stage("source", start, end, batch_index=index + 1, batch_total=batches)
                 corrections = self._correct_source(client, batch_payload, source_evidence, context, cancel_check)
                 for sid in truncated_evidence:
@@ -1480,6 +1518,9 @@ class VideoIntelligence:
                 result = self._expand_repeated_screens(verified, occurrences)
                 self._write_checkpoint(batch_stage, {"result": result,
                     "corrections": {str(key): value for key, value in corrections.items()}}, cancel_check)
+                # Dispatch from the finishing worker, rather than waiting for
+                # the first submitted future or unrelated OCR-only siblings.
+                publish_speech(result, corrections, batch_payload)
                 return result, corrections
 
             from core.runtime_context import current_execution_context
@@ -1710,18 +1751,24 @@ class VideoIntelligence:
 
     def prepass(self, video_path: Path, segments: List[Any], total_duration: Optional[float] = None,
                 cancel_check=None, progress_callback=None, chunk_callback=None, detail_callback=None,
-                start_time=0.0, end_time=None, context_segments=None, previous_summary="") -> Dict[str, Any]:
+                start_time=0.0, end_time=None, context_segments=None, previous_summary="",
+                partial_callback=None) -> Dict[str, Any]:
         """Publish detached, validated chunks with bounded caller backpressure.
 
         Validated results are checkpointed before publication. Restored chunks
         use the same callback, allowing a later request failure to retain the
         translated prefix instead of hiding every successful chunk.
+        partial_callback receives independently validated speech batches with
+        enclosing source bounds; it never certifies completed source coverage.
+        Calls are serialized, may run on text workers, and apply backpressure.
         """
         self._check_cancelled(cancel_check)
         segments = sorted(segments, key=lambda seg: self._get(seg, "start"))
         previous_context = self._checkpoint_context
         previous_stage_callback = getattr(self, "_stage_callback", None)
+        previous_partial_callback = getattr(self, "_partial_callback", None)
         self._stage_callback = detail_callback
+        self._partial_callback = partial_callback
         previous_dialogue = getattr(self, "_source_dialogue", [])
         self._source_dialogue = [self._source_context_row(seg)
                                  for seg in (segments if context_segments is None else context_segments)]
@@ -1739,6 +1786,7 @@ class VideoIntelligence:
             # namespace merely because the same instance is reused.
             self._checkpoint_context = previous_context
             self._stage_callback = previous_stage_callback
+            self._partial_callback = previous_partial_callback
             self._source_dialogue = previous_dialogue
 
     def _prepass(self, video_path: Path, segments: List[Any], total_duration: Optional[float] = None,

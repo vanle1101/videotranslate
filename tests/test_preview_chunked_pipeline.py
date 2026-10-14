@@ -38,6 +38,46 @@ def test_worker_final_error_preserves_failed_stage(preview, stage, label):
         assert "chưa tạo được giọng" not in session.error
 
 
+def test_successful_speech_batch_survives_unrelated_ocr_failure_without_coverage(preview, monkeypatch):
+    from core.engines.translation.opencode_client import OpenCodeRequestError
+    session, _, _, speech, events = preview
+    def partial_then_fail(path, rows, **options):
+        row = rows[0]
+        result = {"segments": {row.id: {"id": row.id, "start": row.start, "end": row.end,
+            "text_zh": row.text_zh, "literal_vi": "Lời đã dịch.", "natural_vi": "Lời đã dịch.",
+            "final_vi": "Lời đã dịch.", "needs_review": True, "review_reason": "Cần đối chiếu.",
+            "translation_provider": "opencode", "translation_model": "isolated-provider"}},
+            "screen_texts": [], "translation_sources": [], "summary": ""}
+        options["partial_callback"](result, options["start_time"], options["end_time"])
+        assert session.segments[row.id].final_vi == "Lời đã dịch."
+        assert session._visual_completed_seconds == 0
+        raise OpenCodeRequestError("OCR sibling failed", code="provider_failed")
+    monkeypatch.setattr(session.video_intelligence, "prepass", partial_then_fail)
+    async def run():
+        await session.start()
+        await session.worker_task
+    asyncio.run(run())
+    assert session.segments[0].final_vi == "Lời đã dịch."
+    assert session.segments[0].status == "READY" and speech == [0]
+    assert session._visual_completed_seconds == 0 and not session._preview_ready
+    assert session._chunk_jobs[0]["state"] == "FAILED"
+    assert any(e == "segment_update" and p.get("final_vi") == "Lời đã dịch." for e, p in events)
+
+
+def test_partial_batch_never_replaces_manual_text_or_claims_screen_coverage(preview):
+    session, *_ = preview
+    session.initialized = True
+    row = SegmentItem(0, 0, 1, 1)
+    row.final_vi, row.verification = "Lời của người dùng.", {"status": "manual"}
+    session.segments = {0: row}
+    session.screen_texts = [{"id": "keep", "start": 0, "end": 1}]
+    result = {"segments": {0: {"final_vi": "Lời mới."}}, "screen_texts": [], "summary": "new"}
+    asyncio.run(session._publish_visual_chunk(result, 0, 1, partial_only=True))
+    assert row.final_vi == "Lời của người dùng."
+    assert session.screen_texts == [{"id": "keep", "start": 0, "end": 1}]
+    assert session._visual_completed_seconds == 0
+
+
 def advance_retry_clock(session, monkeypatch, before_due=None):
     """Advance only retry wall clocks, retaining the real 300s schedule check."""
     from core.streaming import pipeline, retry_schedule

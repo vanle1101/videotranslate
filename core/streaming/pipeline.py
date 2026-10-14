@@ -2195,7 +2195,7 @@ class StreamingPipelineSession:
                 if (value := getattr(item, name, None)) is not None}}
             for item in sorted(self.segments.values(), key=lambda value: (value.start, value.id))])
 
-    async def _publish_visual_chunk(self, result, start, end, *, preserve_screen_intervals=()):
+    async def _publish_visual_chunk(self, result, start, end, *, preserve_screen_intervals=(), partial_only=False):
         """Commit and synthesize one measured chunk before translating another."""
         from core.video_intelligence import VideoIntelligence
         if self.is_stopped:
@@ -2205,12 +2205,12 @@ class StreamingPipelineSession:
         # Checkpoint drafts must never replace that committed screen metadata.
         published_until = self._visual_completed_seconds
         self._visual_incremental_started = True
-        if self._chunk_followups is None:
+        if not partial_only and self._chunk_followups is None:
             self._visual_completed_seconds = max(self._visual_completed_seconds, end)
         summary = result.get("summary")
-        if isinstance(summary, str) and summary.strip():
+        if not partial_only and isinstance(summary, str) and summary.strip():
             self._visual_context_summary = summary[:4000]
-        if end > published_until:
+        if not partial_only and end > published_until:
             screen_start = max(start, published_until)
             def protected(screen):
                 return any(screen["start"] < hi and screen["end"] > lo
@@ -2227,6 +2227,8 @@ class StreamingPipelineSession:
             item = self.segments.get(sid)
             if item is None or not start <= item.start < item.end <= end:
                 raise ValueError("Đoạn dịch không khớp mốc câu thoại nguồn.")
+            if (item.verification or {}).get("status") == "manual":
+                continue
             # A restored chunk must never replace an already committed review
             # or user edit with its earlier prepass draft.
             if item.status in ("READY", "PLAYED"):
@@ -2292,6 +2294,11 @@ class StreamingPipelineSession:
         await self._update_ready()
         for sid in pending:
             await self.emit("segment_update", {**self.segments[sid].to_dict(), "screen_texts": self.screen_texts})
+        if partial_only:
+            # A successful speech batch can survive an unrelated OCR failure.
+            # It is an editable draft, not complete interval/source coverage.
+            # The normal follow-up/recovery owner performs review and TTS.
+            return
         if self._chunk_followups is not None:
             await self._enqueue_chunk_followup((pending, review_candidates, draft_identities))
             return
@@ -2885,14 +2892,14 @@ class StreamingPipelineSession:
                             await self.report_progress("visual", stage,
                                 round(100 * self._visual_completed_seconds / self.total_duration, 1), **value)
                     event_loop.call_soon_threadsafe(lambda: asyncio.create_task(publish_detail()))
-            def chunk_callback(result, start, stop):
+            def chunk_callback(result, start, stop, *, partial_only=False):
                 entered, finished = threading.Event(), threading.Event()
                 async def publish():
                     entered.set()
                     try:
                         if glossary_snapshot(self)["version"] != configuration["glossary_version"]:
                             raise SegmentEditConflict("Bảng thuật ngữ đã đổi; bỏ kết quả dịch cũ.")
-                        await self._publish_visual_chunk(result, start, stop)
+                        await self._publish_visual_chunk(result, start, stop, partial_only=partial_only)
                     finally:
                         finished.set()
                 future = asyncio.run_coroutine_threadsafe(publish(), event_loop)
@@ -2924,7 +2931,8 @@ class StreamingPipelineSession:
                     total_duration=self.total_duration, start_time=cursor, end_time=end,
                     context_segments=context, previous_summary=getattr(self, "_visual_context_summary", ""),
                     cancel_check=lambda: self.is_stopped,
-                    chunk_callback=chunk_callback, detail_callback=detail_callback)
+                    chunk_callback=chunk_callback, detail_callback=detail_callback,
+                    partial_callback=lambda result, lo, hi: chunk_callback(result, lo, hi, partial_only=True))
                 if set(result.get("segments", {})) != {row.id for row in source_rows}:
                     raise ValueError("Đoạn dịch chưa trả đủ các ID nguồn.")
                 if any(not (self.segments[row.id].source_method in {"text-ai", "video-ai"}
@@ -3079,7 +3087,20 @@ class StreamingPipelineSession:
                     self._persist_if_enabled()
                     engine = self._new_chunk_intelligence()
                     batches = []
+                    partial_batches = []
                     batch_cursor, published_ids = record["start"], set()
+                    def collect_partial(result, lo, hi):
+                        check = current_execution_context().cancel_check
+                        if self.is_stopped or (check and check()):
+                            raise asyncio.CancelledError
+                        if (any(type(value) not in (int, float) or not math.isfinite(value) for value in (lo, hi))
+                                or not record["start"] <= lo < hi <= record["end"] + .001
+                                or not set(result.get("segments", {})).issubset({row.id for row in source})):
+                            raise ValueError("Bản dịch từng lô nằm ngoài phạm vi đoạn nguồn.")
+                        from core.video_intelligence import VideoIntelligence
+                        expected = [row for row in source if row.id in result["segments"]]
+                        result = VideoIntelligence._checked_checkpoint_result(result, expected, lo, hi)
+                        partial_batches.append((deepcopy(result), lo, hi))
                     def collect(result, lo, hi):
                         nonlocal batch_cursor
                         check = current_execution_context().cancel_check
@@ -3103,7 +3124,8 @@ class StreamingPipelineSession:
                             result = engine.prepass(self.video_path, source,
                                 total_duration=self.total_duration, start_time=record["start"],
                                 end_time=record["end"], context_segments=context, previous_summary="",
-                                cancel_check=current_execution_context().cancel_check, chunk_callback=collect)
+                                cancel_check=current_execution_context().cancel_check, chunk_callback=collect,
+                                partial_callback=collect_partial)
                             if set(result.get("segments", {})) != {row.id for row in source}:
                                 raise ValueError("Đoạn dịch song song chưa trả đủ ID câu thoại.")
                             if (abs(batch_cursor - record["end"]) > .001
@@ -3111,6 +3133,14 @@ class StreamingPipelineSession:
                                 raise ValueError("Đoạn dịch song song chưa xuất bản đủ kết quả đã kiểm định.")
                             return batches, None
                         except Exception as error:
+                            # Preserve validated speech even when a sibling OCR
+                            # batch fails. These drafts never advance coverage.
+                            for partial, lo, hi in partial_batches:
+                                partial["segments"] = {sid: row for sid, row in partial["segments"].items()
+                                    if sid not in published_ids}
+                                if partial["segments"]:
+                                    partial["partial_only"] = True
+                                    batches.append((partial, lo, hi))
                             return batches, error
                     try:
                         # asyncio's default executor is capped around CPU+4/
@@ -3146,7 +3176,8 @@ class StreamingPipelineSession:
                                 if self._visual_review_state(self.segments[sid]) == owners[sid]
                                 and (self.segments[sid].verification or {}).get("status") != "manual"}
                             await self._publish_visual_chunk(result, lo, hi,
-                                preserve_screen_intervals=[(row.start, row.end) for row in stale])
+                                preserve_screen_intervals=[(row.start, row.end) for row in stale],
+                                partial_only=result.get("partial_only") is True)
                             published.update(result["segments"])
                             published.update(row.id for row in stale if row.final_vi.strip() or row.confirmed_silence)
                         if error is None and not batches:

@@ -1,5 +1,38 @@
 # Runtime QA report
 
+## Real Chinese preview/full recovery and partial batch preservation — October 15, 2026, 04:05
+
+**Runtime output PASS; content quality remains REVIEW_REQUIRED; overall goal incomplete.**
+Production Qt UI resumed `fdc6ca35`, preserving its eight existing WAVs and
+recovering the four remaining rows through real Muse and Edge-TTS. At 04:02:24
+all 12 speech rows were available. The UI export produced
+`workspace/outputs/douyin_translated_fdc6ca35_hq.mp4` (82,512,884 bytes,
+32.633333s versus source 32.601667s). FFprobe, full FFmpeg decode, actual result
+player playback (advancing time, no media error), and page reload restoring all
+12 rows passed. The owned QA backend shut down cleanly at 04:04:52.
+Seven rows are completed and five require content review. This export is labeled
+draft; it is not proof of verified translation. Inspection also found an unaccented
+Vietnamese draft in row 9, retained as unresolved; orthography remains to address.
+This short acceptance does not prove long-video completion or 20-way speedup.
+
+Root cause fixed separately: a successful speech batch was checkpointed but
+withheld from the session when an unrelated OCR batch failed. Validated speech
+batches now publish detached editable drafts without claiming interval coverage,
+replacing OCR metadata, bypassing review, or overwriting newer/manual edits.
+Both sequential and parallel schedulers retain these drafts. Unknown terminal
+provider failures still fail their source interval and expose explicit Retry.
+
+Regression retest: **138 passed, 1 skipped in 43.45s** across preview, partial
+speech, checkpoint, parallel ownership/edit and retry telemetry suites. Fault
+injection includes OCR failure after speech success, healthy parallel siblings,
+cached publication, cancellation, and newer edits. These are isolated provider
+tests. The real run above started before this partial-publication change and
+does not certify it; a newly loaded real-provider retest is still required.
+
+Files changed: `core/video_intelligence.py`, `core/streaming/pipeline.py`,
+`tests/test_visual_partial_speech.py`, `tests/test_parallel_partial_publication.py`,
+`tests/test_preview_chunked_pipeline.py`, and this report.
+
 ## Preview retry and accurate failure labels — October 15, 2026, 03:46
 
 Reopened saved task `fdc6ca35` through the production Qt UI and clicked Retry.
