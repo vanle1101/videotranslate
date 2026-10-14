@@ -75,6 +75,24 @@ def review_response():
     }, "summary": {"checked": 2, "verified": 1, "corrected": 1, "unresolved": 0, "manual": 0}}
 
 
+def test_runtime_rewrite_callback_reports_alignment_in_progress_and_segment_state(reviewed_session, monkeypatch):
+    session = reviewed_session
+    focus = session.segments[112]
+    events = []
+    async def progress(phase, label):
+        events.append((phase, label, focus.status))
+    async def fit(row, *, on_stage, **kwargs):
+        await asyncio.to_thread(on_stage, "REWRITING")
+        raise pipeline.SpeechBudgetError("Still cannot fit")
+    monkeypatch.setattr(session, "_segment_progress", progress)
+    monkeypatch.setattr(session, "_fit_dub", fit)
+    with pytest.raises(pipeline.SpeechBudgetError):
+        asyncio.run(session._synthesize_segment(focus))
+    assert events[-1][0] == "align"
+    assert events[-1][2] == "ALIGNING"
+    assert "rút gọn" in events[-1][1]
+
+
 @pytest.mark.parametrize("semantic_verified", [True, False])
 def test_measured_draft_recovery_requires_fidelity_and_retains_uncertainty(reviewed_session, semantic_verified):
     from core.engines.alignment.timing_aligner import SpeechBudgetError

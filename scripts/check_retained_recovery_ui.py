@@ -2,6 +2,7 @@
 import argparse
 import hashlib
 import json
+import re
 from pathlib import Path
 import sys
 import time
@@ -23,11 +24,15 @@ def fingerprint(row):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--task', default='76f5aa6b', help='Explicit existing project ID to recover in place')
     parser.add_argument('--timeout', type=int, default=1800)
     args = parser.parse_args()
     assert 30 <= args.timeout <= 7200
-    task = '76f5aa6b'
+    task = args.task
+    assert re.fullmatch(r'[a-zA-Z0-9_-]{1,80}', task), 'Invalid retained project ID'
     original = _read(task)
+    assert original and original.get('segments'), 'Retained project must contain source rows'
+    assert Path(original['session']['video_path']).is_file(), 'Retained source video is missing'
     manual = {r['id']:fingerprint(r) for r in original['segments']
               if (r.get('verification') or {}).get('status') == 'manual'}
     ids = [r['id'] for r in original['segments']]

@@ -36,6 +36,8 @@ def main():
     parser.add_argument('--resume', help='Resume only a QA project for this exact source')
     parser.add_argument('--review', action='store_true', help='Run real review of the restored QA project through its UI')
     parser.add_argument('--timeout', type=int, default=1200)
+    parser.add_argument('--max-source-seconds', type=int, default=90,
+        help='Explicit maximum source duration for this real-provider acceptance run (up to 7200).')
     args = parser.parse_args()
     if args.review and not args.resume:
         parser.error('--review requires --resume')
@@ -43,13 +45,14 @@ def main():
     assert any(source.is_relative_to((ROOT / name).resolve())
         for name in ('cleanup/qa', 'workspace/inputs')), 'Use an explicit retained or QA input'
     assert args.timeout > 0, 'Timeout must be positive'
+    assert 0 < args.max_source_seconds <= 7200, 'Invalid source-duration budget'
     if args.resume:
         from core.streaming.session_store import _read
         assert re.fullmatch(r'[a-zA-Z0-9_-]{1,80}', args.resume), 'Invalid QA task ID'
         manifest = _read(args.resume)
         assert manifest and Path(manifest['session']['video_path']).resolve() == source, 'Resume source does not match QA input'
     probe = json.loads(run_media(['ffprobe','-v','error','-show_format','-show_streams','-of','json',str(source)], capture_output=True))
-    assert 0 < float(probe['format']['duration']) <= 90, 'Keep this acceptance clip short'
+    assert 0 < float(probe['format']['duration']) <= args.max_source_seconds, 'Source exceeds the explicit acceptance duration budget'
     app = QApplication.instance() or QApplication([])
     app.setQuitOnLastWindowClosed(False)
     window = None

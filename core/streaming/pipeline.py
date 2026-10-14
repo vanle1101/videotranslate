@@ -4388,7 +4388,7 @@ class StreamingPipelineSession:
                 seg.status = "ALIGNING" if stage in {"ALIGNING", "REWRITING"} else "TTS"
                 label = {"TTS": "Đang tạo giọng đọc", "ALIGNING": "Đang căn nhịp đọc",
                          "REWRITING": "AI đang rút gọn và kiểm tra nghĩa lời đọc"}[stage]
-                await self._segment_progress("align" if stage == "ALIGNING" else "tts", f"{label} câu {seg.id + 1}")
+                await self._segment_progress("align" if stage in {"ALIGNING", "REWRITING"} else "tts", f"{label} câu {seg.id + 1}")
                 # The initial TTS ownership is already durable. These cosmetic
                 # stage changes contain no new text/audio/checkpoint result;
                 # rewriting the complete project at every callback blocks the

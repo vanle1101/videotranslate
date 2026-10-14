@@ -1,5 +1,40 @@
 # Runtime QA report
 
+## Additional retained recovery and long-source selection — October 15, 2026, 05:20
+
+**Retained natural Douyin 15-second project `38680e43`: FAIL full recovery.**
+Fresh offscreen History → Retry selected only missing WAV ID 5; Export was
+disabled with the correct one-row missing-audio reason. Real Edge-TTS returned
+audio in 672ms. Muse tried five bounded rewrites; source/fluency/duplicate
+checks rejected them. The measured compacted original needs 1.061275s at the
+unchanged speed ceiling, but only 0.950000s is available. The run ended FAILED
+at 05:19 with 13/14 valid WAVs, 3 content-review flags; its one manual row,
+all IDs and existing speech remained intact. No new MP4 was published. Owned
+backend stopped. The earlier MP4 on disk is not a passed output for this run.
+
+Runtime observation exposed a phase mismatch: REWRITING set the row to
+ALIGNING while progress still reported `tts`. Both now report alignment;
+63 pacing/recovery tests passed in 24.02s, including the actual asynchronous
+stage callback regression. This observation predates that phase-only fix.
+
+Independent read-only PCM/planner audit reconfirmed the long `76f5aa6b`
+conflicts: ID87 has 1.139042s vs 1.566420s needed; ID119 has 0.850333s vs
+1.257725s needed. Logged acoustic neighbor rescue reaches only 1.141083s /
+0.908833s. No capacity/planner mismatch or reclaimable internal digital silence
+was found. Repeated rounds in prior logs were explicit QA Retry invocations,
+not an automatic timing-retry loop: scheduler excludes both typed pacing
+failures and halted/stopped jobs. No exhaustion-suppression change was made.
+
+The recovery harness now accepts an explicit existing `--task`, preserving
+source/ID/manual checks. The general real-provider UI harness accepts an
+explicit maximum source duration (default 90s, cap 7200s) for longer acceptance.
+Public Douyin feed yielded a new 453.509-second source, ID
+`7693853424030699451`, describing an electric scooter. Selected QA rendition:
+H264 576×1024, 65,034,877 bytes. A simple download ended prematurely after
+6,291,456 bytes; no complete source was claimed. The production resumable
+download worker is now fetching that selected rendition. Translation/export
+acceptance remains pending; discovery/download is not a passed video test.
+
 ## Korean-source recovery retest — October 15, 2026, 05:11
 
 **Runtime recovery/export: PASS, one content review remains.** A fresh
