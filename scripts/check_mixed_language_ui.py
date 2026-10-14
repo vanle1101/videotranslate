@@ -20,6 +20,102 @@ from scripts.check_production_ui import (
 from core.media_process import run_media
 
 
+# Observe the actual native media method; never replace playback, its promise,
+# media bytes, or error handling. Detached dubbing Audio objects aren't in DOM.
+MEDIA_OBSERVER = r"""(() => {
+    if (window.__qaMedia) return true;
+    const media = window.__qaMedia = {entries:[], errors:[]};
+    const original = HTMLMediaElement.prototype.play;
+    HTMLMediaElement.prototype.play = function(...args) {
+        if (!media.entries.some(entry => entry.element === this)) {
+            const entry = {element:this, playing:0};
+            media.entries.push(entry);
+            this.addEventListener('playing', () => entry.playing++);
+            this.addEventListener('error', () => media.errors.push({source:this.currentSrc,
+                code:this.error?.code, message:this.error?.message}));
+        }
+        return original.apply(this,args);
+    };
+    return true;
+})()"""
+
+
+def check_translated_preview(page, snapshot):
+    """Exercise the Studio player and its actual translated WAV before Full."""
+    progress = snapshot['progress']
+    assert progress.get('translation_mode') == 'preview' and progress.get('preview_output_ready') is True, progress
+    assert not progress.get('preview_untranslated_ids') and not progress.get('preview_missing_audio_ids'), progress
+    boundary = float(progress['processed_seconds'])
+    rows = [row for row in snapshot['segments'] if row.get('final_vi', '').strip()
+        and row.get('audio_url') and row.get('status') in {'READY', 'PLAYED'}
+        and not row.get('confirmed_silence') and row['end'] <= boundary + .001]
+    assert rows, 'No translated speech available to audition before Full'
+    row = max(rows, key=lambda value: float(value.get('tts_duration') or value['end'] - value['start']))
+    assert evaluate(page, MEDIA_OBSERVER)
+    if evaluate(page, "!document.getElementById('video-player').paused"):
+        click_ready(page, 'player-play-toggle')
+    click_ready(page, f"seg-zh-{row['id']}")
+    until(page, "(() => {const v=document.getElementById('video-player');return v.readyState>=2 && !v.seeking;})()", timeout=120)
+    # Match the precise revisioned WAV, not BGM, voice samples or source audio.
+    expected = json.dumps(row['audio_url'])
+    state_js = """(() => {
+        const expected = new URL(""" + expected + """,location.href).href;
+        const entries = window.__qaMedia.entries.filter(e => e.element.tagName==='AUDIO' && e.element.currentSrc===expected);
+        const entry = entries[entries.length-1], a=entry?.element, v=document.getElementById('video-player');
+        return {audio:a?{source:a.currentSrc,time:a.currentTime,ready:a.readyState,
+            paused:a.paused,muted:a.muted,volume:a.volume,error:a.error?.code||null,playing:entry.playing}:null,
+            video:{time:v.currentTime,ready:v.readyState,paused:v.paused,seeking:v.seeking,error:v.error?.code||null},
+            alerts:window.__qaAlerts||[]};
+    })()"""
+    click_ready(page, 'player-play-toggle')
+    deadline, first, last = time.monotonic() + 120, None, None
+    while time.monotonic() < deadline:
+        last = evaluate(page, state_js)
+        a, v = last['audio'], last['video']
+        assert not last['alerts'] and not v['error'] and not (a and a['error']), last
+        if a and a['playing'] and a['ready'] >= 2 and not a['paused'] and not a['muted'] and a['volume'] > 0 and not v['paused'] and not v['seeking']:
+            if first is None:
+                first = (a['time'], v['time'], time.monotonic())
+            if (a['time'] - first[0] >= .10 and v['time'] - first[1] >= .10
+                    and time.monotonic() - first[2] >= .10):
+                break
+        wait(40)
+    else:
+        raise AssertionError({'preview_audio_never_advanced_with_video': last, 'segment_id':row['id']})
+    if evaluate(page, "!document.getElementById('video-player').paused"):
+        click_ready(page, 'player-play-toggle')
+    event('TRANSLATED_PREVIEW_PLAYBACK', {'task_id':snapshot['task_id'], 'segment_id':row['id'],
+        'state':last, 'scope':'Actual translated WAV and video clocks advanced; page output muted; naturalness not judged'})
+
+
+def check_result_seeks(page, rows):
+    """Verify native result-media seeks forward and backward at speech times."""
+    spoken = sorted((row for row in rows if row.get('final_vi', '').strip()
+                     and not row.get('confirmed_silence')), key=lambda row: row['start'])
+    assert spoken, 'No spoken output to test'
+    click_ready(page, 'task-result-link')
+    until(page, "!document.getElementById('result-preview-modal').classList.contains('hidden')")
+    until(page, "document.getElementById('result-preview-video').readyState>=2", timeout=120)
+    duration = evaluate(page, "document.getElementById('result-preview-video').duration")
+    assert isinstance(duration, (int, float)) and duration > .25, duration
+    # Start, late, then middle explicitly exercises both seek directions.
+    tested = []
+    for row in (spoken[0], spoken[-1], spoken[len(spoken)//2]):
+        target = min(float(row.get('dub_start') if row.get('dub_start') is not None else row['start']), duration - .25)
+        evaluate(page, "(() => {const v=document.getElementById('result-preview-video');v.pause();"
+            "window.__qaSeekError=null;v.currentTime=" + json.dumps(target) + ";return true;})()")
+        until(page, "(() => {const v=document.getElementById('result-preview-video');return !v.seeking && v.readyState>=2 && Math.abs(v.currentTime-"
+            + json.dumps(target) + ")<.15;})()", timeout=120)
+        evaluate(page, "(() => {document.getElementById('result-preview-video').play().catch(e=>window.__qaSeekError=String(e));return true;})()")
+        until(page, "(() => {const v=document.getElementById('result-preview-video');return !v.paused && !v.seeking && !v.error && v.currentTime>="
+            + json.dumps(target + .10) + ";})()", timeout=60)
+        state = evaluate(page, "(() => {const v=document.getElementById('result-preview-video');return {time:v.currentTime,source:v.currentSrc,error:v.error?.code||window.__qaSeekError};})()")
+        assert not state['error'], state
+        tested.append({'target':target, **state})
+    click_ready(page, 'btn-close-result-preview')
+    event('RESULT_FORWARD_BACKWARD_SEEKS', tested)
+
+
 def click_ready(page, element_id, timeout=30):
     """Backend snapshots can arrive before the WebSocket updates its button."""
     until(page, "(() => {const e=document.getElementById(" + json.dumps(element_id) +
@@ -70,6 +166,10 @@ def main():
         page.setAudioMuted(True)
         window.show()
         until(page,"document.readyState==='complete' && !!window.loadDroppedLocalVideo")
+        event('UI_READY', {})
+        # Native JS alert dialogs block an unattended Qt event loop indefinitely.
+        # Record the actual error instead; never accept a confirmation for the user.
+        evaluate(page,"(() => {window.__qaAlerts=[];window.alert=m=>{window.__qaAlerts.push(String(m));console.error('QA_ALERT',m);};return true;})()")
         wait(5000)
         if args.resume:
             evaluate(page,"(() => {window.__attached=null;window.studioAttachTask("+json.dumps(args.resume)+").then(v=>window.__attached=v);return true;})()")
@@ -86,6 +186,8 @@ def main():
                 event('RESUME_REQUESTED', {'task_id':task_id, 'action':'resume'})
         else:
             evaluate(page,"(() => {window.loadDroppedLocalVideo("+json.dumps(str(source))+");document.getElementById('source-language').value='auto';document.getElementById('visual-translation').checked=true;return true;})()")
+            assert not evaluate(page, 'window.__qaAlerts'), evaluate(page, 'window.__qaAlerts')
+            event('SOURCE_SELECTED', {'source':str(source)})
             until(page,"!document.getElementById('btn-start').disabled")
             assert click(page,'btn-start')
             until(page,"document.getElementById('task-progress').dataset.status==='RUNNING'")
@@ -123,6 +225,7 @@ def main():
             if state[0] in {'FAILED','STOPPED','CANCELLED'}:
                 raise AssertionError({'progress':progress,'rows':snapshot.get('segments')})
             if progress.get('can_translate_full') and not promoted:
+                check_translated_preview(page, snapshot)
                 click_ready(page,'btn-translate-full')
                 promoted=True
                 until(page,"document.getElementById('btn-translate-full').disabled || document.getElementById('btn-translate-full').classList.contains('hidden')")
@@ -133,6 +236,26 @@ def main():
         else:
             raise AssertionError({'timeout':args.timeout,'progress':progress})
         rows=snapshot['segments']
+        # Validate persisted source coverage independently of the UI's Completed
+        # label: a full-length source picture can hide omitted translated chunks.
+        from core.streaming.session_store import _read
+        saved = _read(task_id)
+        fields = saved['session']
+        source_duration = float(probe['format']['duration'])
+        assert len({row['id'] for row in rows}) == len(rows), 'Duplicate segment ownership'
+        if fields.get('_chunked_source_started'):
+            assert fields.get('_visual_prepass_complete') is True, 'Source processing incomplete'
+            assert float(fields.get('_source_prepared_seconds', 0)) >= source_duration - .1, 'ASR coverage missing at EOF'
+            cursor = float(fields.get('_legacy_visual_prefix', 0))
+            chunks = sorted(fields.get('_chunk_jobs', []), key=lambda value:value['start'])
+            assert len({chunk['id'] for chunk in chunks}) == len(chunks), 'Duplicate chunk ownership'
+            for chunk in chunks:
+                assert chunk['state'] == 'COMPLETED', chunk
+                assert abs(float(chunk['start']) - cursor) <= .01, {'gap_or_overlap_after':cursor, 'chunk':chunk}
+                assert float(chunk['end']) > cursor, chunk
+                cursor = float(chunk['end'])
+            assert abs(cursor - source_duration) <= .1, {'coverage_end':cursor, 'source_duration':source_duration}
+            event('SOURCE_COVERAGE_VALIDATED', {'task_id':task_id, 'chunks':len(chunks), 'seconds':cursor})
         if args.review:
             assert progress.get('review_summary', {}).get('status') == 'completed', progress
         assert rows and all(row.get('final_vi','').strip() or row.get('confirmed_silence') for row in rows)
@@ -160,7 +283,9 @@ def main():
         result=json.loads(run_media(['ffprobe','-v','error','-show_format','-show_streams','-of','json',str(output)],capture_output=True))
         assert {s['codec_type'] for s in result['streams']} >= {'audio','video'}
         assert abs(float(result['format']['duration'])-float(probe['format']['duration']))<.5
-        run_media(['ffmpeg','-v','error','-i',str(output),'-f','null','-'],capture_output=True,timeout=120)
+        run_media(['ffmpeg','-v','error','-xerror','-err_detect','explode','-i',str(output),'-f','null','-'],
+            capture_output=True,timeout=max(120, min(7200, int(float(probe['format']['duration']) * 2))))
+        check_result_seeks(page, rows)
         reload_page(page)
         until(page,"localStorage.getItem('studio.last-task-id')==="+json.dumps(task_id))
         until(page,"document.querySelectorAll('.transcript-row').length==="+str(len(rows)))
@@ -168,6 +293,7 @@ def main():
         event('RUNTIME_PASS_REVIEW_REQUIRED' if review_required else 'RUNTIME_PASS',{
             'task_id':task_id,'mp4':str(output),'bytes':output.stat().st_size,
             'duration':result['format']['duration'],'review_required':review_required,
+            'translated_preview_playback':'verified' if promoted else 'not tested: restored full task',
             'scope':'real provider execution, MP4 decode/playback and page reload; semantic approval not implied'})
     finally:
         try:
