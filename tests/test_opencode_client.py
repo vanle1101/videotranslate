@@ -58,6 +58,168 @@ def make_process(stdout=None, stderr="", returncode=0):
     return process
 
 
+def cli_rate_line(*, model="big-pickle", error="APIError: Rate limit exceeded. Please try again later.", extra=""):
+    return ('timestamp=2026-10-16T00:00:00.000Z level=ERROR run=isolated '
+            f'message="stream error" providerID=opencode modelID={model} '
+            f'session.id=isolated small=false agent=plan mode=primary error.error={json.dumps(error)}{extra}\n')
+
+
+def write_owned_log(root, content):
+    path = root / "data" / "opencode" / "log" / "opencode.log"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(content, encoding="utf-8")
+    return path
+
+
+@pytest.mark.parametrize("retry_after,expected", [(None, None), ("125", 125), ("invalid", None), ("1e309", None)])
+def test_owned_cli_log_reports_typed_rate_limit_without_leaking_values(tmp_path, retry_after, expected):
+    extra = '' if retry_after is None else f' error.responseHeaders.retry-after={json.dumps(retry_after)}'
+    write_owned_log(tmp_path, cli_rate_line(extra=extra + ' private="private-secret"'))
+    monitor = oc._OwnedCLILogMonitor(tmp_path, "big-pickle")
+    with pytest.raises(oc.OpenCodeRequestError) as caught:
+        monitor.check()
+    error = caught.value
+    assert error.code == "provider_rate_limited" and error.retryable
+    assert error.failure_kind == "cli_rate_limit" and error.defer_retry
+    assert error.retry_after == expected
+    assert "private" not in str(error)
+
+
+@pytest.mark.parametrize("line", [
+    cli_rate_line(model="other-model"),
+    cli_rate_line().replace('providerID=opencode', 'providerID=other'),
+    cli_rate_line().replace('level=ERROR', 'level=INFO'),
+    cli_rate_line().replace('message="stream error"', 'message="prompt"'),
+    cli_rate_line(error="Quoted dialogue says Rate limit exceeded. Please try again later."),
+    cli_rate_line().replace('error.error=', 'input='),
+    'timestamp=isolated level=INFO message=' + json.dumps(cli_rate_line()) + '\n',
+    cli_rate_line()[:-1] + ' level=INFO\n',
+    cli_rate_line()[:-1] + ' trailing-unstructured-text\n',
+])
+def test_owned_cli_log_never_classifies_prompt_or_other_provider_as_rejection(tmp_path, line):
+    write_owned_log(tmp_path, line)
+    oc._OwnedCLILogMonitor(tmp_path, "big-pickle").check()
+
+
+def test_owned_cli_log_incremental_reads_handle_partial_lines_and_oversized_records(tmp_path):
+    line = cli_rate_line()
+    path = write_owned_log(tmp_path, "x" * (oc._OwnedCLILogMonitor.MAX_LINE_BYTES + 3))
+    monitor = oc._OwnedCLILogMonitor(tmp_path, "big-pickle")
+    monitor.check()
+    with path.open("a", encoding="utf-8") as stream:
+        stream.write(line + line[:100])
+    monitor.next_poll = 0
+    monitor.check()  # First line is still part of the oversized record.
+    with path.open("a", encoding="utf-8") as stream:
+        stream.write(line[100:])
+    monitor.next_poll = 0
+    with pytest.raises(oc.OpenCodeRequestError) as caught:
+        monitor.check()
+    assert caught.value.code == "provider_rate_limited"
+
+
+@pytest.mark.parametrize("windows", [True, False])
+def test_hanging_cli_rate_limit_is_reaped_before_deadline_without_waiting_for_stdin(tmp_path, monkeypatch, windows):
+    """Real child hangs after provider error; no network, provider or transcript mock."""
+    monkeypatch.setattr(oc, "_IS_WINDOWS", windows)
+    path = tmp_path / "data" / "opencode" / "log" / "opencode.log"
+    path.parent.mkdir(parents=True)
+    script = ('import sys,time; from pathlib import Path; '
+              'Path(sys.argv[1]).write_text(sys.argv[2],encoding="utf-8"); time.sleep(30)')
+    process = subprocess.Popen([sys.executable, "-c", script, str(path), cli_rate_line()],
+        stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        text=True, encoding="utf-8", creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+    started = time.monotonic()
+    try:
+        with pytest.raises(oc.OpenCodeRequestError) as caught:
+            oc._communicate(process, "large-private-prompt" * 100_000, 20, ExecutionContext(),
+                            oc._OwnedCLILogMonitor(tmp_path, "big-pickle"))
+        assert caught.value.code == "provider_rate_limited"
+        assert time.monotonic() - started < 8
+        assert process.poll() is not None
+        assert not hasattr(process, "_opencode_communication_thread")
+        assert not any(t.name == f"opencode-io-{process.pid}" for t in threading.enumerate())
+    finally:
+        if process.poll() is None:
+            process.kill()
+            process.communicate(timeout=5)
+
+
+def test_log_monitor_failure_preserves_cancellation_precedence(tmp_path, monkeypatch):
+    process = make_process()
+    terminate = Mock()
+    monitor = Mock()
+    monkeypatch.setattr(oc, "_terminate_process_tree", terminate)
+    with pytest.raises(oc.OpenCodeCancelledError):
+        oc._communicate(process, "private-input", 10, ExecutionContext("run", lambda: True), monitor)
+    monitor.check.assert_not_called()
+    terminate.assert_called_once_with(process)
+
+
+def test_owned_cli_status_429_and_http_date_retry_after(tmp_path, monkeypatch):
+    monkeypatch.setattr(oc.time, "time", lambda: 0)
+    write_owned_log(tmp_path, cli_rate_line(error="opaque provider error", extra=
+        ' error.statusCode=429 error.headers.retry-after="Thu, 01 Jan 1970 00:02:00 GMT"'))
+    with pytest.raises(oc.OpenCodeRequestError) as caught:
+        oc._OwnedCLILogMonitor(tmp_path, "big-pickle").check()
+    assert caught.value.retry_after == 120
+
+
+def test_owned_cli_log_truncation_and_read_budget(tmp_path):
+    path = write_owned_log(tmp_path, 'timestamp=x level=INFO message="unrelated"\n' * 10000)
+    monitor = oc._OwnedCLILogMonitor(tmp_path, "big-pickle")
+    monitor.check()
+    assert monitor.files[path][0] <= monitor.MAX_READ_BYTES
+    path.write_text(cli_rate_line(), encoding="utf-8")
+    monitor.next_poll = 0
+    with pytest.raises(oc.OpenCodeRequestError):
+        monitor.check()
+
+
+def test_owned_cli_log_ignores_symlink_escape(tmp_path):
+    root, outside = tmp_path / "request", tmp_path / "unrelated"
+    path = write_owned_log(outside, cli_rate_line())
+    link = root / "data"
+    root.mkdir()
+    try:
+        link.symlink_to(outside / "data", target_is_directory=True)
+    except OSError:
+        pytest.skip("Host does not allow unprivileged symlinks")
+    oc._OwnedCLILogMonitor(root, "big-pickle").check()
+    assert path.is_file()
+
+
+def test_owned_rate_limit_defers_registered_six_attempt_wave_and_cleans_process(isolated, monkeypatch, caplog):
+    real_popen = subprocess.Popen
+    processes, roots = [], []
+
+    def start(argv, **options):
+        root = Path(options["env"]["OPENCODE_TEST_HOME"])
+        roots.append(root)
+        path = root / "data" / "opencode" / "log" / "opencode.log"
+        path.parent.mkdir(parents=True)
+        script = ('import sys,time; from pathlib import Path; '
+                  'Path(sys.argv[1]).write_text(sys.argv[2],encoding="utf-8"); time.sleep(30)')
+        process = real_popen([sys.executable, "-c", script, str(path), cli_rate_line(
+            extra=' error.responseHeaders.retry-after=125')], **options)
+        processes.append(process)
+        return process
+
+    monkeypatch.setattr(oc.subprocess, "Popen", start)
+    client = oc.OpenCodeZenClient(api_key="private-key", model="big-pickle", timeout=20)
+    client.execution_layer.set_run_concurrency("rate-log-fixture", 20)
+    started = time.monotonic()
+    with caplog.at_level(logging.INFO, logger="ai"), execution_context("rate-log-fixture", lambda: False):
+        with pytest.raises(oc.OpenCodeRequestError) as caught:
+            client.translate("private-prompt", use_cache=False)
+    assert caught.value.code == "provider_rate_limited" and caught.value.retry_after >= 125
+    assert len(processes) == 1
+    assert time.monotonic() - started < 8
+    assert all(process.poll() is not None for process in processes)
+    assert not any(root.exists() for root in roots)
+    assert "private-key" not in caplog.text and "private-prompt" not in caplog.text
+
+
 def test_credential_precedence_and_existing_auth_file(isolated, monkeypatch):
     auth = isolated / "existing-data" / "opencode" / "auth.json"
     auth.parent.mkdir(parents=True)

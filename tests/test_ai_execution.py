@@ -25,6 +25,46 @@ IDENTITY = {"provider": "opencode", "model": "test-model", "prompt": "real sourc
             "system": "translate", "schema": "translation-v1", "config": {"max_tokens": 100}}
 
 
+def test_cli_rate_limit_defers_one_attempt_and_preserves_typed_failure(monkeypatch):
+    from core.engines.translation.opencode_client import OpenCodeRequestError
+    clock = [100.]
+    monkeypatch.setattr("core.ai_execution.time.monotonic", lambda: clock[0])
+    layer = AIExecutionLayer()
+    layer.set_run_concurrency("video", 20)
+    error = OpenCodeRequestError("rate limit", retryable=True, code="provider_rate_limited")
+    error.defer_retry = True
+    error.retry_after = 900
+    calls = []
+    def fail(attempt):
+        calls.append(attempt)
+        raise error
+    with pytest.raises(OpenCodeRequestError) as caught:
+        layer.execute(fail, identity=IDENTITY, run_id="video", max_retries=5,
+                      retryable=lambda e: e.retryable)
+    assert caught.value is error and calls == [1]
+    assert layer.snapshot()["active_requests"] == 0
+    assert layer.snapshot()["retry_requests"] == 0
+    assert layer.snapshot()["circuit_retry_after"] == 900
+    layer._success()  # A previously admitted sibling finishes after the limit.
+    with pytest.raises(AICircuitOpenError) as blocked:
+        layer.execute(lambda _: pytest.fail("must not submit"), identity={"other": 1})
+    assert blocked.value.code == "provider_rate_limited"
+    assert blocked.value.retry_after == 900
+    clock[0] = 1001
+    assert layer.execute(lambda _: "actual response", identity=IDENTITY) == "actual response"
+    assert layer.snapshot()["circuit_retry_after"] == 0
+
+
+def test_cli_rate_limit_local_cooldown_is_not_invented_provider_metadata():
+    from core.engines.translation.opencode_client import OpenCodeRequestError
+    layer = AIExecutionLayer()
+    error = OpenCodeRequestError("rate limit", retryable=True, code="provider_rate_limited")
+    error.defer_retry = True
+    layer._defer_rate_limit(error)
+    assert 299 <= layer.snapshot()["circuit_retry_after"] <= 300
+    assert getattr(error, "retry_after", None) is None
+
+
 def test_cache_key_exact_and_order_independent():
     assert response_cache_key(IDENTITY) == response_cache_key(dict(reversed(list(IDENTITY.items()))))
     for field in ("provider", "model", "prompt", "system", "schema", "config"):

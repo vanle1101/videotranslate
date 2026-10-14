@@ -191,6 +191,7 @@ class AIExecutionLayer:
         self._last_admitted_run = None
         self._failures = 0
         self._open_until = 0.0
+        self._rate_limit_until = 0.0
         self._half_open = False
         self._requests = self._retries = self._cache_hits = 0
 
@@ -267,7 +268,7 @@ class AIExecutionLayer:
                         self._run_active[run_id] = self._run_active.get(run_id, 0) + 1
                         self._last_admitted_run = run_id
                         self._active_keys.add(key)
-                        if self._open_until:
+                        if self._open_until or self._rate_limit_until:
                             self._half_open = True
                         self._condition.notify_all()
                         return
@@ -281,13 +282,34 @@ class AIExecutionLayer:
                     self._condition.notify_all()
 
     def _check_circuit(self):
+        if self._rate_limit_until > time.monotonic():
+            error = AICircuitOpenError(self._rate_limit_until - time.monotonic())
+            error.code = "provider_rate_limited"
+            error.args = ("Muse đang giới hạn lượt gọi; giữ tiến độ và chờ đợt thử lại.",)
+            raise error
         if self._open_until and time.monotonic() < self._open_until:
             raise AICircuitOpenError(self._open_until - time.monotonic())
+
+    def _defer_rate_limit(self, error):
+        # A typed CLI stream rejection must not launch six fresh CLI sessions.
+        # This local policy matches the durable retry wave's minimum cooldown;
+        # it is not presented as a Retry-After supplied by the provider.
+        retry_after = getattr(error, "retry_after", None)
+        delay = max(300.0, self.policy.circuit_cooldown,
+                    retry_after if type(retry_after) in (int, float)
+                    and math.isfinite(retry_after) and retry_after >= 0 else 0)
+        with self._condition:
+            self._rate_limit_until = max(self._rate_limit_until, time.monotonic() + delay)
+            self._half_open = False
+            self._condition.notify_all()
 
     def _success(self):
         with self._condition:
             self._failures = 0
             self._open_until = 0.0
+            # An older concurrent success cannot revoke a newer rate limit.
+            if self._rate_limit_until <= time.monotonic():
+                self._rate_limit_until = 0.0
             self._half_open = False
 
     def _failure(self):
@@ -370,6 +392,10 @@ class AIExecutionLayer:
                 except Exception as error:
                     if not retryable(error):
                         raise
+                    if (getattr(error, "defer_retry", False) is True
+                            and getattr(error, "code", None) == "provider_rate_limited"):
+                        self._defer_rate_limit(error)
+                        raise
                     # Registered video waves own up to six transport attempts.
                     # Count an exhausted wave toward the circuit, rather than
                     # opening it midway solely on this request's own retries.
@@ -420,7 +446,7 @@ class AIExecutionLayer:
             limit = self.policy.concurrency if run_id is None else self._run_limits.get(run_id, self.policy.concurrency)
             counters = ({"requests": self._requests, "retry_requests": self._retries, "cache_hits": self._cache_hits}
                         if run_id is None else self._run_counters.get(run_id, {}))
-            reason = ("circuit_open" if self._open_until > time.monotonic() else
+            reason = ("circuit_open" if max(self._open_until, self._rate_limit_until) > time.monotonic() else
                       "half_open_probe" if self._half_open else
                       "video_limit" if queued and active >= limit else
                       "duplicate_or_fair_queue" if queued else "idle" if not active else "running")
@@ -428,7 +454,7 @@ class AIExecutionLayer:
                     "concurrency": limit, "selected_concurrency": limit, "admission_reason": reason,
                     "requests": counters.get("requests", 0), "retry_requests": counters.get("retry_requests", 0),
                     "cache_hits": counters.get("cache_hits", 0), "consecutive_failures": self._failures,
-                    "circuit_retry_after": max(0, self._open_until - time.monotonic()),
+                    "circuit_retry_after": max(0, max(self._open_until, self._rate_limit_until) - time.monotonic()),
                     "half_open": self._half_open}
             resources = getattr(self, "resource_snapshot", None)
             if callable(resources):

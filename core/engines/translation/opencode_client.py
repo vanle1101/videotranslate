@@ -137,13 +137,13 @@ def _poll_communication(process, request, timeout, context, deadline):
                 raise
 
 
-def _communicate(process, request, timeout, context):
+def _communicate(process, request, timeout, context, log_monitor=None):
     """Bound the entire owned exchange, including a blocked Windows stdin write."""
     worker = None
     try:
         _check_cancelled(context)
         deadline = time.monotonic() + timeout
-        if not _IS_WINDOWS:
+        if not _IS_WINDOWS and log_monitor is None:
             return _poll_communication(process, request, timeout, context, deadline)
         # Windows Popen.communicate writes stdin synchronously before checking
         # its timeout. A CLI that never reads a large prompt can therefore block
@@ -165,6 +165,8 @@ def _communicate(process, request, timeout, context):
         worker.start()
         while True:
             _check_cancelled(context)
+            if log_monitor is not None:
+                log_monitor.check()
             remaining = deadline - time.monotonic()
             if remaining <= 0:
                 raise subprocess.TimeoutExpired("opencode", timeout)
@@ -308,6 +310,131 @@ def _provider_failure(text: str) -> OpenCodeRequestError:
     error = OpenCodeRequestError(_safe_failure(text), retryable=retryable, code=code)
     error.retry_after = _retry_after_seconds(text)
     return error
+
+
+class _OwnedCLILogMonitor:
+    """Read bounded structured status from this request's isolated CLI log.
+
+    Neither stdout model text nor prompt/transcript fields are searched for
+    error keywords. OpenCode can log a provider rejection while keeping its
+    process alive for internal retries; that rejection belongs to our queue.
+    """
+    MAX_LINE_BYTES = 64 * 1024
+    MAX_READ_BYTES = 256 * 1024
+    MAX_FILES = 8
+    _FIELD = re.compile(r'([A-Za-z_][\w.-]*)=("(?:[^"\\]|\\.)*"|[^\s"]+)')
+    _RATE_ERROR = re.compile(
+        r'(?:[A-Za-z_][\w.]*:\s*)?(?:Rate limit exceeded\.? Please try again later\.?|'
+        r'Rate limit exceeded\.?|Too many requests\.?)', re.IGNORECASE)
+
+    def __init__(self, root, model):
+        self.root = Path(root)
+        self.folder = Path(root) / "data" / "opencode" / "log"
+        self.model = model
+        self.files = {}
+        self.next_poll = 0.0
+
+    @classmethod
+    def _fields(cls, line):
+        """Strict logfmt, including quoted spaces and duplicate-key rejection."""
+        fields, position = {}, 0
+        while position < len(line):
+            match = cls._FIELD.match(line, position)
+            if match is None:
+                return None
+            key, value = match.groups()
+            if key in fields:
+                return None
+            if value.startswith('"'):
+                try:
+                    value = json.loads(value)
+                except ValueError:
+                    return None
+            fields[key] = value
+            position = match.end()
+            if position == len(line):
+                break
+            if not line[position].isspace():
+                return None
+            while position < len(line) and line[position].isspace():
+                position += 1
+        return fields
+
+    def _failure(self, line):
+        fields = self._fields(line)
+        if (not fields or fields.get("level") != "ERROR"
+                or fields.get("providerID") != "opencode"
+                or fields.get("modelID") != self.model
+                or fields.get("message") not in {"stream error", "provider error"}):
+            return None
+        # This is the actual CLI error field, not an arbitrary embedded
+        # request, candidate translation, or quoted event inside a string.
+        message = fields.get("error.error", "")
+        status = fields.get("error.statusCode", fields.get("error.status"))
+        if status != "429" and not self._RATE_ERROR.fullmatch(message):
+            return None
+        error = OpenCodeRequestError("OpenCode đang giới hạn lượt miễn phí. Hãy đợi rồi thử lại.",
+                                     retryable=True, code="provider_rate_limited")
+        error.failure_kind = "cli_rate_limit"
+        # The provider queue must defer the row and share its cooldown, not
+        # multiply the CLI's internal retries by another immediate six waves.
+        error.defer_retry = True
+        error.retry_after = None
+        for key in ("error.retryAfter", "error.retry_after", "error.retry-after",
+                    "error.responseHeaders.retry-after", "error.headers.retry-after"):
+            if key in fields:
+                error.retry_after = _retry_after_seconds("Retry-After: " + fields[key])
+                break
+        return error
+
+    def check(self):
+        now = time.monotonic()
+        if now < self.next_poll:
+            return
+        self.next_poll = now + .1
+        try:
+            # No recursive scans and no reads outside this owned request.
+            if (self.folder.is_symlink()
+                    or not self.folder.resolve().is_relative_to(self.root.resolve())):
+                return
+            paths = self.folder.glob("*.log")
+            budget = self.MAX_READ_BYTES
+            for path in paths:
+                if path not in self.files:
+                    if len(self.files) >= self.MAX_FILES:
+                        break
+                    self.files[path] = [0, b"", False]
+                if path.is_symlink() or budget <= 0:
+                    continue
+                offset, pending, skipping = self.files[path]
+                try:
+                    with path.open("rb") as stream:
+                        if stream.seek(0, 2) < offset:
+                            offset, pending, skipping = 0, b"", False
+                        stream.seek(offset)
+                        chunk = stream.read(budget)
+                        offset += len(chunk)
+                except OSError:
+                    continue
+                budget -= len(chunk)
+                lines = (pending + chunk).split(b"\n")
+                pending = lines.pop()
+                for raw in lines:
+                    if skipping:
+                        skipping = False
+                        continue
+                    if len(raw) > self.MAX_LINE_BYTES:
+                        continue
+                    error = self._failure(raw.decode("utf-8", errors="replace").rstrip("\r"))
+                    if error is not None:
+                        raise error
+                if len(pending) > self.MAX_LINE_BYTES:
+                    pending, skipping = b"", True
+                self.files[path] = [offset, pending, skipping]
+        except OSError:
+            # Log availability is diagnostic only. The existing bounded
+            # communication deadline and final CLI response remain active.
+            return
 
 
 def _managed_configuration_present() -> bool:
@@ -696,7 +823,8 @@ class OpenCodeZenClient:
                         creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
                     )
                     lease.attach(process)
-                    stdout, stderr = _communicate(process, request, timeout, context)
+                    stdout, stderr = _communicate(process, request, timeout, context,
+                                                  _OwnedCLILogMonitor(root, selected))
                 except OSError:
                     raise OpenCodeConfigurationError("Không khởi chạy được OpenCode CLI.") from None
                 events = []

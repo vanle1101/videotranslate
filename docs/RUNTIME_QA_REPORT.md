@@ -1,6 +1,42 @@
 # Runtime QA report
 
+## Rate-limit diagnosis and execution fix — October 15, 2026, 06:52
+
+The request-owned log parser recognizes actual OpenCode stream-error records,
+requiring matching provider/model and a structured error field. It does not
+classify prompt text, unrelated providers or model-authored log-shaped strings.
+Confirmed rate limiting now reaps the CLI and communication thread immediately,
+preserves `provider_rate_limited`, and skips immediate adapter retries. The
+shared provider queue holds new submissions for at least300s, or a longer
+explicit Retry-After. This minimum is local policy, not fabricated server
+metadata. A concurrent older success cannot clear this hold. Segment retry
+intent remains in the existing durable ledger.
+
+**216 tests passed,1 skipped in16.19s** across real child-process cancellation,
+blocked stdin, structured log parsing, single-attempt deferral, shared cooldown,
+resource admission, retry ownership and durable schedules. The skipped test
+requires Windows symlink privileges. Actual current request logs also matched
+the new parser. The production run was stopped through the UI in4.0s before
+loading this fix: all75 IDs and SHA256 of26 retained WAVs stayed intact. The
+real long MP4 is still missing; fresh rate-limit UI acceptance follows.
+
 ## Review recovery and bounded overlap — October 15, 2026, 06:44
+
+Fresh production retest at06:44: old backend was stopped through its actual UI
+button in3.781s and exited. New backend51930/PID27740 loaded commit `e169fac`.
+Its UI reopened the same task and validated75 retained source rows, all26 saved
+WAV hashes and453.508934s source coverage before clicking Continue. Unfinished
+rows now show49 PENDING and0 FAILED during startup, preserving13 COMPLETED and
+13 REVIEW_REQUIRED. Five source owners resumed saved checkpoints; no ASR reset
+to zero. **New-code restore/status regression PASS**; full rendering pending.
+
+Further transport diagnosis at06:45 read only the request-owned temporary
+OpenCode logs. Two active isolated attempts contained provider/model-matched
+ERROR records: `Rate limit exceeded. Please try again later.` The CLI remained
+alive, so its outer adapter reported timeout instead. This is direct evidence
+of rate limiting for those attempts, not proof that every past timeout had the
+same cause. Early typed detection and owned-process cancellation are being
+implemented; no raw logs, credentials or prompts are copied into this report.
 
 **Full-video acceptance remains BLOCKED.** The live old-code run `5bea8fe5`
 retains75 measured source rows,453.508934s source coverage,43 translated rows
