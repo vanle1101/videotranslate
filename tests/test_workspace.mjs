@@ -8,7 +8,8 @@ const key = 'studio.column-widths.v1';
 
 function editor({ saved, blockedStorage = false } = {}) {
   const elements = new Map(), storage = new Map(saved === undefined ? [] : [[key, saved]]);
-  const observers = [];
+  const observers = [], resizeObservers = [], writes = [], reads = [], storageWrites = [];
+  const frames = new Map(); let frameId = 0;
   let desktop = true;
   function el(id) {
     if (elements.has(id)) return elements.get(id);
@@ -16,7 +17,7 @@ function editor({ saved, blockedStorage = false } = {}) {
     const item = {
       id, hidden: false, disabled: false, value: '', title: '', dataset: {}, textContent: '', children: [], clientWidth: 1400,
       classList: { add: x => classes.add(x), remove: x => classes.delete(x), contains: x => classes.has(x) },
-      style: { setProperty: (name, value) => css.set(name, value), getPropertyValue: name => css.get(name) },
+      style: { setProperty: (name, value) => { writes.push({id, name, value}); css.set(name, value); }, getPropertyValue: name => css.get(name), removeProperty: name => css.delete(name) },
       setAttribute: (name, value) => attrs.set(name, value), getAttribute: name => attrs.get(name),
       addEventListener: (name, fn) => listeners.set(name, [...(listeners.get(name) || []), fn]),
       emit(name, event = {}) { const e = { preventDefault() { this.prevented = true; }, ...event }; for (const fn of listeners.get(name) || []) fn(e); return e; },
@@ -24,39 +25,55 @@ function editor({ saved, blockedStorage = false } = {}) {
       focus() { this.focused = true; }, scrollIntoView() { this.scrolled = true; },
       setPointerCapture: id => captures.add(id), hasPointerCapture: id => captures.has(id), releasePointerCapture: id => captures.delete(id),
       getBoundingClientRect() {
+        reads.push(id);
         const index = ['studio-controls', 'studio-preview', 'studio-sidebar'].indexOf(id);
         return { width: index < 0 ? 1400 : parseFloat(el('studio-workspace').style.getPropertyValue(`--column-${index}`)) };
       },
-      querySelectorAll() { return this.children; },
+      querySelectorAll(selector) { return this.children.filter(child => child.classList?.contains(selector.slice(1))); },
     };
     elements.set(id, item);
     return item;
   }
   const document = { getElementById: el, addEventListener: (_, fn) => fn() };
   const window = el('window'); window.matchMedia = () => ({matches: desktop});
+  const requestAnimationFrame = fn => { const id = ++frameId; frames.set(id, fn); return id; };
+  const cancelAnimationFrame = id => frames.delete(id);
+  Object.assign(window, {requestAnimationFrame, cancelAnimationFrame});
   vm.runInNewContext(source, {
-    document, window, getComputedStyle: () => ({paddingLeft: '16px', paddingRight: '16px'}),
+    document, window, requestAnimationFrame, cancelAnimationFrame,
+    getComputedStyle: () => ({paddingLeft: '16px', paddingRight: '16px'}),
     localStorage: {
       getItem: name => { if (blockedStorage) throw new Error('disabled'); return storage.get(name) ?? null; },
-      setItem: (name, value) => { if (blockedStorage) throw new Error('disabled'); storage.set(name, value); },
+      setItem: (name, value) => { if (blockedStorage) throw new Error('disabled'); storageWrites.push({name, value}); storage.set(name, value); },
       removeItem: name => { if (blockedStorage) throw new Error('disabled'); storage.delete(name); },
     },
-    ResizeObserver: class { constructor(fn) { this.fn = fn; } observe() {} },
+    ResizeObserver: class { constructor(fn) { resizeObservers.push(fn); } observe() {} },
     MutationObserver: class { constructor(fn) { this.fn = fn; } observe(target, options) { observers.push({target, options, fn: this.fn}); } },
   });
   return {
-    el, storage, window, observers,
+    el, storage, window, observers, writes, reads, storageWrites,
+    pendingFrames: () => frames.size,
+    flushFrame: () => { const batch = [...frames.values()]; frames.clear(); batch.forEach(fn => fn(16)); },
+    resizeObserved: () => resizeObservers.forEach(fn => fn()),
     widths: () => [0, 1, 2].map(i => parseFloat(el('studio-workspace').style.getPropertyValue(`--column-${i}`))),
     desktop: value => { desktop = value; window.emit('resize'); },
     mutate: id => observers.filter(o => o.target.id === id).forEach(o => o.fn()),
   };
 }
 const close = (actual, expected) => assert.ok(Math.abs(actual - expected) < .001, `${actual} != ${expected}`);
+function row(ui, id, original, translation) {
+  const element = ui.el(id); element.classList.add('transcript-row');
+  const source = ui.el(`${id}-source`); source.classList.add('transcript-original'); source.textContent = original;
+  const translated = ui.el(`${id}-translated`); translated.classList.add('transcript-translation'); translated.textContent = translation;
+  element.children = [source, translated];
+  return element;
+}
 
 test('both separators resize only adjacent columns, respect minimums and persist across reload', () => {
   const ui = editor(), initial = ui.widths(), left = ui.el('resize-left');
   left.emit('pointerdown', {button: 0, pointerId: 1, clientX: 0});
   left.emit('pointermove', {pointerId: 1, clientX: 50});
+  assert.deepEqual(ui.widths(), initial, 'drag moves a composited guide without reflowing media/transcript');
   left.emit('pointerup', {pointerId: 1});
   const widths = ui.widths();
   close(widths[0], initial[0] + 50); close(widths[1], initial[1] - 50); close(widths[2], initial[2]);
@@ -133,16 +150,17 @@ test('tab navigation updates selection, panel visibility, focus and transcript m
   assert.equal(ui.el('editor-transcript').hidden, false); assert.equal(ui.el('editor-advanced').hidden, true);
 });
 
-test('search matches Vietnamese accents and source text; editing rows stay visible until editing ends', () => {
+test('search matches active language and Vietnamese accents; editing rows stay visible until editing ends', () => {
   const ui = editor(), search = ui.el('transcript-search');
-  const first = ui.el('row1'), second = ui.el('row2');
-  first.children = [{textContent: '原文'}, {textContent: 'Đừng lo, mẹ đây.'}];
-  second.children = [{textContent: '另一句'}, {textContent: 'Xin chào.'}];
+  const first = row(ui, 'row1', '原文', 'Đừng lo, mẹ đây.'), second = row(ui, 'row2', '另一句', 'Xin chào.');
   ui.el('segments-list').children = [first, second];
   search.value = 'dung lo'; search.emit('input'); assert.equal(first.hidden, false); assert.equal(second.hidden, true);
   second.dataset.editing = 'true'; ui.mutate('segments-list'); assert.equal(second.hidden, false);
   second.dataset.editing = 'false'; ui.mutate('segments-list'); assert.equal(second.hidden, true);
-  search.value = '另一句'; search.emit('input'); assert.equal(first.hidden, true); assert.equal(second.hidden, false);
+  search.value = '另一句'; search.emit('input'); assert.equal(first.hidden, true); assert.equal(second.hidden, true);
+  ui.el('editor-tab-original').click(); assert.equal(first.hidden, true); assert.equal(second.hidden, false);
+  search.value = 'xin chao'; search.emit('input'); assert.equal(second.hidden, true);
+  ui.el('editor-tab-translation').click(); assert.equal(second.hidden, false);
   search.value = 'not found'; search.emit('input'); assert.equal(ui.el('transcript-search-empty').hidden, false);
   search.emit('keydown', {key: 'Escape'}); assert.equal(search.value, ''); assert.equal(first.hidden, false); assert.equal(second.hidden, false);
 });
@@ -180,5 +198,85 @@ test('late native preference cannot overwrite user changes or an active drag', (
   const ui = editor(); ui.el('resize-left').emit('keydown', {key: 'ArrowRight'});
   let saved; ui.window.restoreStudioLayout({getColumnWidths: () => { throw Error('must not load'); }, setColumnWidths: raw => { saved = raw; }});
   assert.equal(saved, ui.storage.get(key));
+});
+
+test('high-frequency drag coalesces guide paint per frame and performs no column reflow before release', () => {
+  const ui = editor(), handle = ui.el('resize-left'), initial = ui.widths();
+  handle.emit('pointerdown', {button: 0, pointerId: 8, clientX: 400});
+  ui.writes.length = 0; ui.reads.length = 0;
+  for (let delta = 1; delta <= 90; delta++) handle.emit('pointermove', {pointerId: 8, clientX: 400 + delta});
+  assert.deepEqual(ui.widths(), initial);
+  assert.equal(ui.reads.length, 0, 'pointermove must not remeasure column geometry');
+  assert.equal(ui.writes.length, 0, 'guide paints are deferred to one animation frame');
+  assert.equal(ui.pendingFrames(), 1);
+  ui.resizeObserved();
+  assert.equal(ui.writes.length, 0, 'ResizeObserver must not rewrite layout mid-drag');
+  ui.flushFrame();
+  assert.equal(ui.writes.length, 1);
+  assert.equal(handle.style.getPropertyValue('transform'), 'translateX(90px)');
+  assert.equal(ui.storageWrites.length, 0);
+  handle.emit('pointerup', {pointerId: 8});
+  close(ui.widths()[0], initial[0] + 90);
+  close(ui.widths()[1], initial[1] - 90);
+  assert.equal(ui.storageWrites.length, 1);
+  assert.equal(handle.style.getPropertyValue('transform'), undefined);
+  assert.equal(ui.pendingFrames(), 0);
+});
+
+test('release before guide frame paints commits final movement once without a stale guide', () => {
+  const ui = editor(), handle = ui.el('resize-right'), before = ui.widths();
+  handle.emit('pointerdown', {button: 0, pointerId: 4, clientX: 700});
+  handle.emit('pointermove', {pointerId: 4, clientX: 740});
+  handle.emit('pointerup', {pointerId: 4});
+  close(ui.widths()[1], before[1] + 40); close(ui.widths()[2], before[2] - 40);
+  assert.equal(ui.storageWrites.length, 1);
+  ui.flushFrame();
+  assert.equal(handle.style.getPropertyValue('transform'), undefined);
+  handle.emit('lostpointercapture', {pointerId: 4});
+  assert.equal(ui.storageWrites.length, 1, 'capture release must not store a second result');
+});
+
+test('cancel before guide frame cannot paint stale movement or overwrite persisted widths', () => {
+  for (const cancelledBy of ['pointercancel', 'Escape', 'viewport']) {
+    const ui = editor(), handle = ui.el('resize-left');
+    handle.emit('keydown', {key: 'ArrowRight'});
+    const saved = ui.storage.get(key), before = ui.widths(), count = ui.storageWrites.length;
+    handle.emit('pointerdown', {button: 0, pointerId: 2, clientX: 500});
+    handle.emit('pointermove', {pointerId: 2, clientX: 555});
+    if (cancelledBy === 'Escape') handle.emit('keydown', {key: 'Escape'});
+    else if (cancelledBy === 'viewport') ui.desktop(false);
+    else handle.emit('pointercancel', {pointerId: 2});
+    ui.flushFrame();
+    assert.equal(handle.style.getPropertyValue('transform'), undefined);
+    assert.equal(ui.storage.get(key), saved);
+    assert.equal(ui.storageWrites.length, count);
+    assert.deepEqual(ui.widths(), before);
+    assert.equal(handle.hasPointerCapture(2), false);
+    assert.equal(ui.el('studio-workspace').classList.contains('is-resizing'), false);
+  }
+});
+
+test('switching transcript language refilters existing query and keeps tab semantics consistent', () => {
+  const ui = editor(), sourceTab = ui.el('editor-tab-original'), translatedTab = ui.el('editor-tab-translation');
+  const first = row(ui, 'first', '妈妈', 'Mẹ ở đây'), second = row(ui, 'second', '爸爸', 'Bố đang về');
+  ui.el('segments-list').children = [first, second];
+  const search = ui.el('transcript-search');
+  search.value = '妈妈'; search.emit('input');
+  assert.equal(first.hidden, true); assert.equal(ui.el('transcript-search-empty').hidden, false);
+  sourceTab.click();
+  assert.equal(first.hidden, false); assert.equal(second.hidden, true);
+  assert.equal(ui.el('transcript-search-empty').hidden, true);
+  assert.equal(sourceTab.getAttribute('aria-selected'), 'true'); assert.equal(sourceTab.tabIndex, 0);
+  assert.equal(translatedTab.getAttribute('aria-selected'), 'false'); assert.equal(translatedTab.tabIndex, -1);
+  assert.equal(ui.el('editor-transcript').getAttribute('aria-labelledby'), 'editor-tab-original');
+  translatedTab.click();
+  assert.equal(first.hidden, true);
+  assert.equal(ui.el('editor-transcript').getAttribute('aria-labelledby'), 'editor-tab-translation');
+  search.value = 've'; search.emit('input'); assert.equal(second.hidden, false);
+  ui.el('second-translated').textContent = 'Bố ở nhà'; ui.mutate('segments-list');
+  assert.equal(second.hidden, true, 'new translation must obey the current-language filter');
+  first.dataset.editing = 'true'; ui.mutate('segments-list');
+  assert.equal(first.hidden, false, 'a live edit cannot be hidden by worker updates');
+  first.dataset.editing = 'false'; ui.mutate('segments-list'); assert.equal(first.hidden, true);
 });
 

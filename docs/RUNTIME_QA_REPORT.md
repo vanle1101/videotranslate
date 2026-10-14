@@ -1,5 +1,38 @@
 # Runtime QA report
 
+## Column drag, seeking, language selection and readable logs — October 14, 2026
+
+**Accepted for the UI interactions below; this is not full translation/export acceptance.** Testing used the actual FastAPI backend and production Qt window offscreen, with real local media and HTTP requests. No desktop mouse/keyboard input or new translation job was required for the UI checks. Existing user media and checkpoints were retained.
+
+Root causes and fixes:
+
+- Column dragging reflowed the video and every transcript row on each pointer movement. `static/workspace.js` now paints a separator guide once per animation frame and applies/persists widths on release. Escape/cancel restores the prior widths and cancels queued painting.
+- Qt cannot decode this source MP4 directly. Each arbitrary seek previously requested a differently positioned compatibility conversion; adjacent positions could repeatedly transcode. `static/app.js` uses fixed 24-second slots, latest-target ownership and a single request on timeline-drag release. `core/media_preview.py` reuses covering windows, validates cached files, and creates indexed WebM with one-second keyframes.
+- **Found during real UI retest:** restoring/reopening a STOPPED task and receiving its repeated status cancelled source-preview conversion. A worker's repeated stopped snapshot now leaves media preparation intact; an actual running-to-stopped transition still pauses/cancels deferred playback. Added a regression for replay and reopen during conversion.
+- Source language was hardcoded to Chinese across recognition, review and prompts. New requests accept auto/Chinese/English/Japanese/Korean, persist this choice, and include it in recovery matching. Legacy projects remain Chinese. Auto recognition uses short multilingual decode windows; the target remains Vietnamese.
+- Both editor tabs showed the same content, and the old test harness ignored language selectors. Translation and original tabs now show/search their respective text; the corrected tests cover changing tabs while searching and keeping an unsaved edit.
+- Logs were unstructured and difficult to inspect. Added readable event descriptions, severity/search/raw filters, counts for the loaded portion, technical detail expansion and pause-live control. Expanded details and scroll position are retained when updating. Compact progress exposes stage/status/final-output ETA and actual error cause without inventing percentages or estimates.
+
+| Test and exact steps | Expected | Actual / retest |
+| --- | --- | --- |
+| Fresh backend → real Qt → restore task `94f80114` (320.04-second original, 128 rows) | Source loads; no provider rerun or autoplay | Initial FAIL: repeated STOPPED cancelled conversion; final PASS after state fix |
+| Press right separator → 50 native Qt pointer moves → release | No column reflow while dragging; commit once and preserve total width | PASS. Before/during widths `[276.86,627.02,406.09]`, after `[276.86,527.02,506.09]`; zero workspace-width mutations during drag. 1.00s includes deliberately paced input and a 200ms wait; it is not a render-frame benchmark |
+| 90 pointer moves before one animation frame; cancel/release/resize/keyboard/native persistence | Coalesce guide writes, no stale guide, correct stored widths | PASS, 15 focused workspace regressions |
+| In real Qt click timeline at 160s → 165s → 40s → 160s | Correct picture/playhead, forwards and backwards | PASS. Final cold run: 6.219s / 0.437s / 7.344s / 0.687s. An earlier cold run took 10.640s / 0.453s / 9.891s / 0.781s. Cached run: 0.672s / 0.453s / 0.797s / 0.656s. Timings include input scheduling and polling |
+| Rapid clicks 250s → 70s → 210s, wait for real media | Last position wins | PASS: final WebM slot starts192s, local18.212s; readyState4 and no busy overlay |
+| Hold timeline at50s, drag through80s, release | No conversion on intermediate moves; one final request | PASS: zero preview POSTs during drag, one after release; final local7.938s in72s slot |
+| Click Lời gốc then Bản dịch & Phụ đề on real saved rows | Correct language visible and opposite text hidden | PASS; active-language search and preserved drafts also pass regression tests |
+| Open Nhật ký → unmatched search → clear → raw → readable → pause live | Real logs readable, filters apply, raw evidence retained | PASS in Qt. Copy/filter/traceback escaping covered separately; destructive clear and open-folder were not invoked |
+| Real mixed-language ASR: ~8s Windows SAPI English +12s existing Chinese speech | Both languages transcribed | Initial FAIL with default30s decode (Chinese omitted). Final PASS with8s multilingual windows:3 English and8 Chinese utterances identified. Test-created audio removed |
+| Real configured Muse/OpenCode request: `Good morning, everyone. 今天我们去博物馆。` | Vietnamese translation of both languages with valid schema | PASS: `Chào buổi sáng mọi người. Hôm nay chúng ta đi bảo tàng.` |
+| Full mixed-language UI → translation → TTS → MP4 | Valid final media | NOT RUN. A direct Edge-TTS fixture request returned HTTP403; the ASR test used SAPI plus existing audio instead. This is not a successful Edge-TTS test |
+
+Validation: final JavaScript suite **326 PASS**; final focused Python language/routes/preview/assets suite **103 PASS**. The backend-language agent also ran **593 PASS** across related suites, then **106 PASS** after adjusting multilingual windows; these counts overlap and are not summed. Media tests include real FFmpeg decoding/keyframe and HTTP206 range checks. JavaScript syntax and Git whitespace checks pass. There is no configured TypeScript/npm build for this Python/vanilla-JS app.
+
+Remaining limits: cold seeks still wait for codec conversion (measured6–11s here); this is not instant random access over the full original. Auto ASR and semantic language judgments are probabilistic, especially rapid code-switching/overlapping speech; all languages and OCR scripts are not proven. Previously recorded timing conflicts/content reviews and full-video export blockers remain. This pass does not claim every project error fixed or a new completed MP4. All checks were offscreen; no production window was opened on the user's desktop.
+
+Files changed: `static/{app,workspace,diagnostics}.js`, `static/style.css`, `templates/index.html`, `core/media_preview.py`, `core/source_language.py`, `main.py`, language plumbing in `core/streaming/{pipeline,session_store,chunked_source,source_revision}.py`, `core/engines/asr/{faster_whisper_engine,whisper_worker,review_evidence_worker}.py`, `core/engines/translation/semantic_translator.py`, `core/{video_intelligence,translation_review,screen_ocr}.py`, and associated tests. Task-owned QA processes were stopped; named temporary harness/screenshots/logs and the owned compatibility cache were removed. Existing user artifacts were not deleted.
+
 ## Magenta editor, resizable columns and error details — October 14, 2026
 
 Scope: user-supplied charcoal/magenta reference; no notification/avatar controls; adjustable column widths; show actual task errors. Existing Muse/provider configuration and media were retained. The reference's decorative waveform and unsupported cutting/effects controls were not presented as working features; the timeline shows actual segment readiness and supports seeking.

@@ -49,7 +49,9 @@ class _LocalAudioEvidence:
 
     BATCH_SIZE = 12
 
-    def collect(self, video_path, rows, cancel_check=None, progress_callback=None, *, checkpoint=None):
+    def collect(self, video_path, rows, cancel_check=None, progress_callback=None, *, checkpoint=None, source_language="zh"):
+        from core.source_language import whisper_language_options
+        language_options = whisper_language_options(source_language)
         self.last_error = None
         self.last_errors = {}
         from core.engines.asr.native_process import (
@@ -93,7 +95,7 @@ class _LocalAudioEvidence:
                 stages = {row["id"]: {"kind": "independent_audio_reading", "engine": engine,
                     "row": row, "decode": {"sample_rate": 16000, "channels": 1,
                         "sensevoice_itn": True} if engine == "sensevoice" else
-                        {"language": "zh", "task": "transcribe", "beam_size": 5,
+                        {**language_options, "task": "transcribe", "beam_size": 5,
                          "vad_filter": False, "condition_on_previous_text": False,
                          "compute_type": "int8", "cpu_threads": 4}}
                     for row in batch}
@@ -112,6 +114,7 @@ class _LocalAudioEvidence:
                         if not available[engine]:
                             raise FileNotFoundError(f"Local review recognizer is unavailable: {engine}")
                         request = {"video_path": str(source), "rows": missing, "engine": engine,
+                        "source_language": source_language,
                         "sensevoice_model_dir": str(sensevoice.model_dir.resolve()),
                         "whisper_model_path": str(whisper_path.resolve())}
                         # Only one native model lives at a time. The slot is
@@ -574,13 +577,14 @@ class AutomaticTranslationReviewer:
             audit.update(address_verified=False, semantic_verified=False,
                          status="unresolved", reason=reason, address_stale_source_ids=changed)
 
-    def __init__(self, client=None, screen_ocr=None, audio_evidence=None, *, checkpoint_dir=None):
+    def __init__(self, client=None, screen_ocr=None, audio_evidence=None, *, checkpoint_dir=None, source_language="zh"):
         # Injected test/plugin adapters cannot populate or consume production cache.
         self._checkpoint_enabled = (client is None and screen_ocr is None and audio_evidence is None) or checkpoint_dir is not None
         self._checkpoint_directory = checkpoint_dir
         self._injected_adapters = client is not None or screen_ocr is not None or audio_evidence is not None
+        self.source_language = source_language
         self.client = client
-        self.screen_ocr = screen_ocr if screen_ocr is not None else _ReviewScreenOCR()
+        self.screen_ocr = screen_ocr if screen_ocr is not None else _ReviewScreenOCR(source_language=source_language)
         self.audio_evidence = audio_evidence if audio_evidence is not None else _LocalAudioEvidence()
 
     @staticmethod
@@ -617,7 +621,7 @@ class AutomaticTranslationReviewer:
                 return [item for item in evidence if item["start"] < end and item["end"] > start]
             def close(self):
                 pass
-        reviewer = AutomaticTranslationReviewer(self.client, SavedOCR(), audio_evidence=False)
+        reviewer = AutomaticTranslationReviewer(self.client, SavedOCR(), audio_evidence=False, source_language=self.source_language)
         reviewed = reviewer.review("unused", list(saved["segments"].values()), saved.get("screen_texts", []),
                                    cancel_check=cancel_check, progress_callback=progress_callback)
         for sid, row in reviewed["segments"].items():
@@ -665,7 +669,7 @@ class AutomaticTranslationReviewer:
         failure = None
         failures = {}
         try:
-            options = {"checkpoint": checkpoint} if isinstance(self.audio_evidence, _LocalAudioEvidence) else {}
+            options = {"checkpoint": checkpoint, "source_language": self.source_language} if isinstance(self.audio_evidence, _LocalAudioEvidence) else {}
             evidence = self.audio_evidence.collect(video_path, targets, cancel_check,
                 (lambda value: progress_callback(value * .6)) if progress_callback else None, **options)
             check()

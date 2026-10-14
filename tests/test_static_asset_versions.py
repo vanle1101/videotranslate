@@ -9,13 +9,13 @@ from config import settings
 def test_index_versions_assets_from_current_file_metadata(tmp_path, monkeypatch):
     static = tmp_path / "static"
     static.mkdir()
-    for name in ("app.js", "style.css", "workspace.js"):
+    for name in ("app.js", "style.css", "workspace.js", "diagnostics.js"):
         (static / name).write_text("first", encoding="utf-8")
     monkeypatch.setattr(settings, "BASE_DIR", tmp_path)
     with TestClient(main.app) as client:
         first = client.get("/")
         assert first.status_code == 200
-        for name in ("app.js", "style.css", "workspace.js"):
+        for name in ("app.js", "style.css", "workspace.js", "diagnostics.js"):
             assert f"/static/{name}?v={(static / name).stat().st_mtime_ns}" in first.text
         script = static / "app.js"
         import os

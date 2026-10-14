@@ -7,6 +7,34 @@ const source = readFileSync(new URL('../static/app.js', import.meta.url), 'utf8'
 const template = readFileSync(new URL('../templates/index.html', import.meta.url), 'utf8');
 const stylesheet = readFileSync(new URL('../static/style.css', import.meta.url), 'utf8');
 
+test('language choice reaches local start and old sessions restore their Chinese default', async () => {
+  const ui = studio();
+  ui.el('source-language').value = 'en';
+  await ui.start();
+  const request = ui.requests.find(item => item.url === '/api/streaming/start-local-file');
+  assert.equal(JSON.parse(request.options.body).source_language, 'en');
+  ui.replies.set('/api/streaming/legacy', recoverySnapshot());
+  await ui.window.studioAttachTask('legacy');
+  assert.equal(ui.el('source-language').value, 'zh');
+  ui.replies.set('/api/streaming/mixed', {...recoverySnapshot(), source_language:'auto'});
+  await ui.window.studioAttachTask('mixed');
+  assert.equal(ui.el('source-language').value, 'auto');
+});
+
+test('compact progress retains real error cause and measured final-output ETA', async () => {
+  const ui = studio(); await ui.start(); const socket = ui.sockets.at(-1);
+  socket.receive({type:'progress',status:'RUNNING',phase:'tts',progress_pct:42,
+    eta_scope:'final',eta_seconds:180});
+  assert.equal(ui.el('task-phase-label').textContent, 'Tạo giọng Việt');
+  assert.equal(ui.el('task-status-badge').textContent, 'Đang chạy');
+  assert.equal(ui.el('task-eta-display').textContent, '≈ 3 phút');
+  socket.receive({type:'progress',status:'FAILED',phase:'tts',error:'EdgeTTSRequestError: không có âm thanh'});
+  assert.equal(ui.el('task-status-badge').textContent, 'Có lỗi');
+  assert.match(ui.el('task-error-summary').textContent, /EdgeTTSRequestError/);
+  assert.equal(ui.el('task-error-summary').classList.contains('hidden'), false);
+  assert.equal(ui.el('task-eta-display').textContent, '—');
+});
+
 test('measured final ETA appears beside percentage in minutes or hours without rounding a live job to zero', async () => {
   const ui = studio(); await ui.start(); const socket = ui.sockets.at(-1);
   for (const [seconds, expected] of [[.1,'1 phút'],[59.9,'1 phút'],[60,'1 phút'],[61,'2 phút'],
@@ -596,9 +624,9 @@ test('forward seek past preview requests a bounded source window and clearly pla
     start_seconds:148,end_seconds:268,coverage_seconds:120,source_duration:320});
   await ui.el('segments-timeline-track').emit('click',{clientX:50}); await ui.flush();
   const request=JSON.parse(ui.requests.filter(item=>item.url==='/api/preview').at(-1).options.body);
-  assert.equal(request.start_seconds,148);
-  assert.equal(request.end_seconds,268);
-  assert.equal(request.coverage_seconds,120);
+  assert.equal(request.start_seconds,144);
+  assert.equal(request.end_seconds,168);
+  assert.equal(request.coverage_seconds,24);
   video.currentSrc=video.src; video.duration=120;
   await video.emit('loadedmetadata'); await video.emit('canplay'); await video.emit('seeking'); await video.emit('seeked');
   assert.equal(video.currentTime,12);
@@ -640,10 +668,10 @@ test('finished translated sample does not prepare an unnecessary original-only c
 test('zero recognized rows do not block forward keyboard seek or original playback after retryable failure', async () => {
   const ui=await partiallyTranslatedSource({failed:true}), video=ui.el('video-player');
   ui.replies.set('/api/preview',{preview_id:'failed-source-end',status:'READY',video_url:'/api/preview/failed-source-end/media',
-    start_seconds:308,end_seconds:320,coverage_seconds:12,source_duration:320});
+    start_seconds:312,end_seconds:320,coverage_seconds:8,source_duration:320});
   await ui.el('segments-timeline-track').emit('keydown',{key:'End'}); await ui.flush();
   const request=JSON.parse(ui.requests.filter(item=>item.url==='/api/preview').at(-1).options.body);
-  assert.equal(request.start_seconds,307.99);
+  assert.equal(request.start_seconds,312);
   assert.equal(request.end_seconds,320);
   video.currentSrc=video.src; video.duration=12;
   await video.emit('loadedmetadata'); await video.emit('canplay');
@@ -679,8 +707,8 @@ test('transcript seek beyond ten minutes swaps a bounded window and retains glob
     start_seconds:888,end_seconds:1008,coverage_seconds:120,source_duration:1300});
   await ui.el('seg-row-1').querySelector('.transcript-time').click(); await ui.flush();
   const body=JSON.parse(ui.requests.filter(item=>item.url==='/api/preview').at(-1).options.body);
-  assert.equal(body.start_seconds,888); assert.equal(body.end_seconds,1008);
-  assert.equal(body.coverage_seconds,120);
+  assert.equal(body.start_seconds,888); assert.equal(body.end_seconds,912);
+  assert.equal(body.coverage_seconds,24);
   video.currentSrc=video.src; video.duration=120;
   await video.emit('loadedmetadata'); await video.emit('canplay'); await video.emit('seeking'); await video.emit('timeupdate');
   assert.equal(video.currentTime,12);
@@ -703,6 +731,85 @@ test('a later seek supersedes a pending window and a late old response cannot re
   release({ok:true,json:async()=>({preview_id:'old',status:'READY',video_url:'/api/preview/old/media',
     start_seconds:888,end_seconds:1008,coverage_seconds:120})}); await ui.flush();
   assert.equal(video.src,'/api/preview/newer/media');
+});
+
+test('drag scrubbing commits only the released position and ignores the following native click', async () => {
+  const ui=await compatibleLongStudio(), track=ui.el('segments-timeline-track');
+  const before=ui.requests.filter(item=>item.url==='/api/preview').length;
+  ui.replies.set('/api/preview',{status:'READY',video_url:'/api/preview/drag/media',
+    start_seconds:768,end_seconds:792,coverage_seconds:24,source_duration:1300});
+  await track.emit('pointerdown',{pointerId:1,button:0,clientX:10});
+  await track.emit('pointermove',{pointerId:1,clientX:30});
+  await track.emit('pointermove',{pointerId:1,clientX:60});
+  assert.equal(ui.requests.filter(item=>item.url==='/api/preview').length,before);
+  assert.equal(ui.el('bar-current-time').textContent,'13:00');
+  await track.emit('pointerup',{pointerId:1,clientX:60}); await ui.flush();
+  await track.emit('click',{clientX:60}); await ui.flush();
+  const requests=ui.requests.filter(item=>item.url==='/api/preview');
+  assert.equal(requests.length,before+1);
+  assert.equal(JSON.parse(requests.at(-1).options.body).start_seconds,768);
+});
+
+test('two seeks in the same pending slot convert once and land at the latest exact target', async () => {
+  const ui=await compatibleLongStudio(), video=ui.el('video-player'), track=ui.el('segments-timeline-track');
+  const before=ui.requests.filter(item=>item.url==='/api/preview').length;
+  let release;
+  ui.replies.set('/api/preview',()=>new Promise(resolve=>{release=resolve;}));
+  await track.emit('click',{clientX:900/13}); await ui.flush();
+  await track.emit('click',{clientX:901/13}); await ui.flush();
+  assert.equal(ui.requests.filter(item=>item.url==='/api/preview').length,before+1);
+  release({ok:true,json:async()=>({status:'READY',video_url:'/api/preview/latest/media',
+    start_seconds:888,end_seconds:912,coverage_seconds:24,source_duration:1300})}); await ui.flush();
+  video.currentSrc=video.src; video.duration=24;
+  await video.emit('loadedmetadata'); await video.emit('canplay');
+  assert.equal(video.currentTime,13);
+});
+
+test('a seek after response but before metadata survives the old resume position', async () => {
+  const ui=await compatibleLongStudio(), video=ui.el('video-player'), track=ui.el('segments-timeline-track');
+  ui.replies.set('/api/preview',{status:'READY',video_url:'/api/preview/loading/media',
+    start_seconds:888,end_seconds:912,coverage_seconds:24,source_duration:1300});
+  await track.emit('click',{clientX:900/13}); await ui.flush();
+  await track.emit('click',{clientX:906/13}); await ui.flush();
+  video.currentSrc=video.src; video.duration=24;
+  await video.emit('loadedmetadata'); await video.emit('canplay');
+  assert.ok(Math.abs(video.currentTime-18)<.001);
+});
+
+test('a seek during initial codec conversion is retained and opens the chosen source slot', async () => {
+  const ui=studio(); await ui.start();
+  const video=ui.el('video-player'), track=ui.el('segments-timeline-track');
+  ui.sockets.at(-1).receive({type:'init',duration:320,segments_count:0,segments:[]});
+  let release;
+  ui.replies.set('/api/preview',()=>new Promise(resolve=>{release=resolve;}));
+  video.error={code:4}; await video.emit('error'); await ui.flush();
+  await track.emit('click',{clientX:50});
+  release({ok:true,json:async()=>({status:'READY',video_url:'/api/preview/initial/media',
+    start_seconds:0,end_seconds:24,coverage_seconds:24,source_duration:320})}); await ui.flush();
+  ui.replies.set('/api/preview',{status:'READY',video_url:'/api/preview/chosen/media',
+    start_seconds:144,end_seconds:168,coverage_seconds:24,source_duration:320});
+  video.error=null; video.currentSrc=video.src; video.duration=24;
+  await video.emit('loadedmetadata'); await video.emit('canplay'); await ui.flush();
+  assert.equal(JSON.parse(ui.requests.filter(item=>item.url==='/api/preview').at(-1).options.body).start_seconds,144);
+  video.currentSrc=video.src;
+  await video.emit('loadedmetadata'); await video.emit('canplay');
+  assert.equal(video.currentTime,16);
+});
+
+test('returning to an already loaded slot cancels conversion without losing playing intent', async () => {
+  const ui=await compatibleLongStudio(), video=ui.el('video-player'), track=ui.el('segments-timeline-track');
+  await video.play();
+  let release;
+  ui.replies.set('/api/preview',()=>new Promise(resolve=>{release=resolve;}));
+  await track.emit('click',{clientX:900/13}); await ui.flush();
+  const pending=ui.requests.filter(item=>item.url==='/api/preview').at(-1);
+  await track.emit('click',{clientX:30/13}); await ui.flush();
+  assert.equal(pending.options.signal.aborted,true);
+  assert.ok(Math.abs(video.currentTime-30)<.001);
+  assert.equal(video.paused,false);
+  release({ok:true,json:async()=>({status:'READY',video_url:'/api/preview/stale/media',
+    start_seconds:888,end_seconds:912,coverage_seconds:24})}); await ui.flush();
+  assert.notEqual(video.src,'/api/preview/stale/media');
 });
 
 test('stop pagehide and changing source abort a pending compatibility window without late source replacement', async () => {
@@ -750,7 +857,7 @@ test('the end of a compatibility window advances at the exact global boundary in
   video.currentTime=120; video.ended=true;
   await video.emit('ended'); await ui.flush();
   const body=JSON.parse(ui.requests.filter(item=>item.url==='/api/preview').at(-1).options.body);
-  assert.equal(body.start_seconds,108); assert.equal(body.end_seconds,228);
+  assert.equal(body.start_seconds,120); assert.equal(body.end_seconds,144);
   video.currentSrc=video.src; video.duration=120; video.ended=false;
   await video.emit('loadedmetadata'); await video.emit('canplay'); await video.emit('timeupdate');
   assert.equal(video.currentTime,12);
@@ -1028,6 +1135,7 @@ test('selected catalog voice id is sent on URL, local and upload starts without 
   for (const path of ['url', 'local-file', 'upload']) {
     const ui = studio(undefined, { catalog: voiceCatalog }); await ui.flush();
     await ui.choose('vieneu:Trúc Ly');
+    ui.el('source-language').value = 'auto';
     if (path === 'url') {
       ui.el('video-url').value = 'https://v.douyin.com/example/';
       await ui.el('video-url').emit('input');
@@ -1042,6 +1150,7 @@ test('selected catalog voice id is sent on URL, local and upload starts without 
     const request = ui.requests.find(req => req.url === endpoint);
     const body = path === 'upload' ? Object.fromEntries(request.options.body.parts.map(part => [part.name, part.value])) : JSON.parse(request.options.body);
     assert.equal(body.voice_id, 'vieneu:Trúc Ly');
+    assert.equal(body.source_language, 'auto');
     assert.equal(body.voice, undefined);
     assert.equal(body.tts_engine, undefined);
     assert.equal(ui.el('voice-select').disabled, true);
@@ -4798,6 +4907,26 @@ test('fresh explicit start still autoplays once but duplicate ready events never
   socket.receive({type: 'ready_to_play'});
   assert.equal(ui.el('video-player').playCount, 1);
   assert.equal(ui.el('video-player').paused, true);
+});
+
+test('stopped project replay and reopening preserve the source preview conversion', async () => {
+  const ui = studio(); await ui.flush();
+  const snapshot = recoverySnapshot({progress:{status:'STOPPED',phase:'stopped',stage:'Đã dừng'}});
+  ui.replies.set('/api/streaming/fixture', snapshot);
+  await ui.window.openTaskInStudio('fixture');
+  const video = ui.el('video-player');
+  let finish, signal;
+  ui.replies.set('/api/preview', options => new Promise(resolve => {finish=resolve;signal=options.signal;}));
+  video.error={code:4}; await video.emit('error'); await ui.flush();
+  ui.sockets.at(-1).receive({type:'progress', ...snapshot.progress});
+  assert.equal(signal.aborted, false);
+  await ui.window.openTaskInStudio('fixture');
+  assert.equal(signal.aborted, false);
+  finish({ok:true,json:async()=>({status:'READY',video_url:'/api/preview/restored/media'})});
+  await ui.flush(); await video.emit('loadedmetadata'); await video.emit('canplay');
+  assert.match(video.src, /restored\/media$/);
+  assert.equal(video.paused, true);
+  assert.equal(ui.requests.filter(r=>r.options.method==='DELETE' && r.url.startsWith('/api/preview/')).length,0);
 });
 
 test('history codec conversion stays paused when ready replay arrives before during or after conversion', async () => {

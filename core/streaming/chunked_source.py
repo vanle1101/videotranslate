@@ -171,7 +171,7 @@ async def prepare_interval(session, start, nominal_end):
                     "asr", f"Đang nhận diện đoạn {start:.0f}–{scan_end:.0f} giây", None,
                     chunk_start=start, chunk_end=scan_end, asr_completed_seconds=measured,
                     batch_progress_pct=round(100 * (measured - start) / (scan_end - start), 1))))
-        recognized = await session._run_blocking(session.faster_whisper.transcribe, raw, language="zh",
+        recognized = await session._run_blocking(session.faster_whisper.transcribe, raw, language=getattr(session, "source_language", "zh"),
                                                 progress_callback=asr_progress)
         shifted = []
         for value in recognized:

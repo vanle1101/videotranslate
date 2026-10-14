@@ -136,6 +136,86 @@ def test_later_source_window_has_global_offsets_and_separate_cache_entry(preview
     assert float(probe.stdout) <= .3
 
 
+def test_nearby_seek_reuses_ready_window_with_its_actual_offsets(preview):
+    client, manager, source = preview
+    ready = wait_ready(client, client.post('/api/preview', json={
+        'file_path': str(source), 'start_seconds': .1, 'end_seconds': .5,
+    }).json())
+    with patch.object(manager._executor, 'submit') as submit:
+        nearby = manager.start(source, start_seconds=.2, end_seconds=.4)
+    submit.assert_not_called()
+    assert nearby['preview_id'] == ready['preview_id']
+    assert nearby['start_seconds'] == .1
+    assert nearby['end_seconds'] == .5
+    assert client.get(nearby['video_url'], headers={'Range': 'bytes=0-99'}).status_code == 206
+
+
+def test_nearby_seek_reuses_pending_window_without_duplicate_conversion(preview):
+    _, manager, source = preview
+    release = threading.Event()
+    real_convert = manager._convert
+
+    def delayed_convert(source, job):
+        assert release.wait(3)
+        real_convert(source, job)
+
+    with patch.object(manager, '_convert', delayed_convert):
+        try:
+            first = manager.start(source, start_seconds=.1, end_seconds=.5)
+            with patch.object(manager._executor, 'submit') as submit:
+                nearby = manager.start(source, start_seconds=.2, end_seconds=.4)
+            submit.assert_not_called()
+            assert nearby['preview_id'] == first['preview_id']
+            assert nearby['status'] == 'PROCESSING'
+        finally:
+            release.set()
+        manager._jobs[first['preview_id']]['future'].result(timeout=5)
+    assert manager.status(first['preview_id'])['status'] == 'READY'
+
+
+def test_missing_cached_file_is_rebuilt_for_same_window(preview):
+    client, manager, source = preview
+    ready = wait_ready(client, client.post('/api/preview', json={
+        'file_path': str(source), 'coverage_seconds': .4,
+    }).json())
+    manager.media(ready['preview_id']).unlink()
+    retry = client.post('/api/preview', json={'file_path': str(source), 'coverage_seconds': .4}).json()
+    assert retry['preview_id'] == ready['preview_id']
+    assert retry['status'] == 'PROCESSING'
+    ready = wait_ready(client, retry)
+    assert client.get(ready['video_url']).status_code == 200
+
+
+def test_compatibility_video_has_dense_keyframes_and_front_seek_index(preview):
+    client, manager, short_source = preview
+    source = short_source.with_name('seek-keyframes.mp4')
+    subprocess.run([
+        'ffmpeg', '-v', 'error', '-nostdin', '-y', '-f', 'lavfi', '-i',
+        'testsrc2=size=160x240:rate=24:duration=3.2', '-c:v', 'libx264',
+        '-pix_fmt', 'yuv420p', str(source),
+    ], check=True, capture_output=True, timeout=30)
+    ready = wait_ready(client, client.post('/api/preview', json={'file_path': str(source)}).json())
+    output = manager.media(ready['preview_id'])
+    probe = subprocess.run([
+        'ffprobe', '-v', 'error', '-skip_frame', 'nokey', '-select_streams', 'v:0',
+        '-show_frames', '-show_entries', 'frame=best_effort_timestamp_time', '-of', 'json', str(output),
+    ], check=True, capture_output=True, timeout=10)
+    timestamps = [float(frame['best_effort_timestamp_time']) for frame in json.loads(probe.stdout)['frames']]
+    assert len(timestamps) >= 4
+    assert max(right - left for left, right in zip(timestamps, timestamps[1:])) <= 1.05
+    data = output.read_bytes()
+    # WebM's Cues element precedes its first Cluster; ignore the SeekHead
+    # references by verifying the actual encoded element follows the tracks.
+    tracks_at = data.find(bytes.fromhex('1654ae6b'), 100)
+    cues_at = data.find(bytes.fromhex('1c53bb6b'), tracks_at + 4)
+    cluster_at = data.find(bytes.fromhex('1f43b675'), tracks_at + 4)
+    assert 0 < cues_at < cluster_at
+    for target in (2.7, .4, 1.9):
+        subprocess.run(['ffmpeg', '-v', 'error', '-nostdin', '-ss', str(target), '-i', str(output),
+                        '-frames:v', '1', '-f', 'null', '-'],
+                       check=True, capture_output=True, timeout=10)
+
+
 def test_preview_cancel_stops_conversion_and_deletes_media_on_eviction(preview):
     _, manager, source = preview
     original_limit = __import__('core.media_preview', fromlist=['MAX_RETAINED_JOBS']).MAX_RETAINED_JOBS

@@ -46,6 +46,7 @@ from core.streaming.export import HQExporter
 from core.streaming.session_store import list_saved_sessions, restore_saved_session, _read as read_saved_project
 from core.streaming.video_history import group_video_history, source_metadata
 from core.streaming.source_identity import processing_signature, local_file_signature
+from core.source_language import SourceLanguage
 from core.history_thumbnail import (
     ThumbnailError, attach_history_thumbnails, history_thumbnail_cache, resolve_history_source,
 )
@@ -135,6 +136,7 @@ class StreamUrlRequest(BaseModel):
     asr_engine: Optional[str] = None
     visual_translation: bool = False
     translation_mode: Literal["preview", "full"] = "preview"
+    source_language: SourceLanguage = "auto"
 
 class SeekRequest(BaseModel):
     task_id: str
@@ -984,7 +986,7 @@ def _same_local_source(left, right):
 
 
 def _saved_project_candidates(*, source_url=None, video_path=None, voice, engine,
-                              asr_engine, visual_translation, translation_mode):
+                              asr_engine, visual_translation, translation_mode, source_language="zh"):
     """Find durable projects which represent the requested source.
 
     The in-memory registry is intentionally not enough: it is empty after a
@@ -1026,6 +1028,8 @@ def _saved_project_candidates(*, source_url=None, video_path=None, voice, engine
             if fields.get("voice") != voice or fields.get("tts_engine_name") != engine:
                 continue
             if fields.get("asr_engine_name") != asr_engine or bool(fields.get("visual_translation")) != bool(visual_translation):
+                continue
+            if fields.get("source_language", "zh") != source_language:
                 continue
             saved_mode = fields.get("translation_mode", "full")
             # A full project is the durable continuation of a preview request
@@ -1069,11 +1073,11 @@ def _saved_project_candidates(*, source_url=None, video_path=None, voice, engine
 async def _restore_matching_saved_project(*, source_url=None, video_path=None,
                                           voice, engine, asr_engine,
                                           visual_translation, translation_mode,
-                                          source_downloader=None):
+                                          source_downloader=None, source_language="zh"):
     candidates = await asyncio.to_thread(_saved_project_candidates, source_url=source_url, video_path=video_path,
                                            voice=voice, engine=engine, asr_engine=asr_engine,
                                            visual_translation=visual_translation,
-                                           translation_mode=translation_mode)
+                                           translation_mode=translation_mode, source_language=source_language)
     # A just-created owner may not have written its first manifest yet. The
     # serialized start path must still see it before allocating another UUID.
     known = {item[0] for item in candidates}
@@ -1083,6 +1087,8 @@ async def _restore_matching_saved_project(*, source_url=None, video_path=None,
         if (getattr(owner, "voice", None) != voice or getattr(owner, "tts_engine_name", None) != engine
                 or getattr(owner, "asr_engine_name", None) != asr_engine
                 or bool(getattr(owner, "visual_translation", False)) != bool(visual_translation)):
+            continue
+        if getattr(owner, "source_language", "zh") != source_language:
             continue
         mode = getattr(owner, "translation_mode", "full")
         if mode != translation_mode and not (translation_mode == "preview" and mode == "full"):
@@ -1169,6 +1175,7 @@ async def _start_streaming_url_owned(req: StreamUrlRequest):
                 or existing.voice != voice or existing.tts_engine_name != engine
                 or existing.asr_engine_name != (req.asr_engine or settings.ASR_ENGINE)
                 or existing.visual_translation != req.visual_translation
+                or getattr(existing, "source_language", "zh") != req.source_language
                 or getattr(existing, "translation_mode", "full") != req.translation_mode
                 or getattr(existing, "_retry_config_signature", None) != config_signature
                 or existing.is_stopped):
@@ -1192,6 +1199,7 @@ async def _start_streaming_url_owned(req: StreamUrlRequest):
         asr_engine=req.asr_engine or settings.ASR_ENGINE,
         visual_translation=req.visual_translation,
         translation_mode=req.translation_mode,
+        source_language=req.source_language,
         source_downloader=downloader)
     if restored is not None:
         return {"task_id": restored.task_id, "video_url": restored.source_video_url,
@@ -1210,6 +1218,7 @@ async def _start_streaming_url_owned(req: StreamUrlRequest):
         asr_engine_name=req.asr_engine or settings.ASR_ENGINE,
         visual_translation=req.visual_translation,
         translation_mode=req.translation_mode,
+        source_language=req.source_language,
         event_callback=lambda event_type, data: broadcast_session_event(task_id, event_type, data)
     )
     session.auto_export_result = bool(req.visual_translation and settings.LLM_PROVIDER == "opencode")
@@ -1274,6 +1283,7 @@ async def start_streaming_upload(
     asr_engine: str = Form(settings.ASR_ENGINE),
     visual_translation: bool = Form(False),
     translation_mode: Literal["preview", "full"] = Form("preview"),
+    source_language: SourceLanguage = Form("auto"),
     ref_audio: Optional[UploadFile] = File(None)
 ):
     validate_visual_translation(visual_translation)
@@ -1303,6 +1313,7 @@ async def start_streaming_upload(
         asr_engine_name=asr_engine,
         visual_translation=visual_translation,
         translation_mode=translation_mode,
+        source_language=source_language,
         ref_audio=ref_audio_path,
         event_callback=lambda event_type, data: broadcast_session_event(task_id, event_type, data)
     )
@@ -1879,6 +1890,7 @@ class StreamLocalFileRequest(BaseModel):
     asr_engine: Optional[str] = None
     visual_translation: bool = False
     translation_mode: Literal["preview", "full"] = "preview"
+    source_language: SourceLanguage = "auto"
 
 
 def validate_visual_translation(enabled):
@@ -1913,7 +1925,7 @@ async def _start_streaming_local_file_owned(req: StreamLocalFileRequest):
         video_path=p, voice=voice, engine=engine,
         asr_engine=req.asr_engine or settings.ASR_ENGINE,
         visual_translation=req.visual_translation,
-        translation_mode=req.translation_mode)
+        translation_mode=req.translation_mode, source_language=req.source_language)
     if restored is not None:
         return {"task_id": restored.task_id, "video_url": restored.source_video_url,
                 "initial_buffer_seconds": restored.initial_buffer_seconds,
@@ -1929,6 +1941,7 @@ async def _start_streaming_local_file_owned(req: StreamLocalFileRequest):
         asr_engine_name=req.asr_engine or settings.ASR_ENGINE,
         visual_translation=req.visual_translation,
         translation_mode=req.translation_mode,
+        source_language=req.source_language,
         event_callback=lambda event_type, data: broadcast_session_event(task_id, event_type, data)
     )
     session.source_video_url = f"/api/local-file?path={quote(p.as_posix(), safe='')}"

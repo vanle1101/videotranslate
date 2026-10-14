@@ -127,21 +127,48 @@ class PreviewManager:
             end_seconds = round(start_seconds + MAX_COMPATIBILITY_SECONDS, 3)
         stat = source.stat()
         window_key = "full" if end_seconds is None else f"window:{start_seconds:.3f}-{end_seconds:.3f}"
-        identity = f"{source}|{stat.st_size}|{stat.st_mtime_ns}|{getattr(stat, 'st_ctime_ns', 0)}|{getattr(stat, 'st_ino', 0)}|{window_key}"
+        source_identity = f"{source}|{stat.st_size}|{stat.st_mtime_ns}|{getattr(stat, 'st_ctime_ns', 0)}|{getattr(stat, 'st_ino', 0)}"
+        identity = f"{source_identity}|{window_key}"
         key = hashlib.sha256(identity.encode()).hexdigest()[:24]
         with self._lock:
             if self._closed:
                 raise RuntimeError("Ứng dụng đang đóng")
             if key in self._jobs:
                 existing = self._jobs[key]
-                if existing["status"] in {"FAILED", "CANCELLED"}:
+                if (existing["status"] in {"FAILED", "CANCELLED"}
+                        or (existing["status"] == "READY" and not self._has_media(existing))):
                     self._drop_job_locked(key, existing)
-                else:
+                elif not existing["cancel"].is_set():
                     return self.status(key)
+                else:
+                    # The cancelling worker still owns this output path.  Its
+                    # finally block must finish before retrying the same key.
+                    raise RuntimeError("Bản xem trước đang dừng; hãy thử tua lại sau giây lát")
+            if end_seconds is not None:
+                # A near-by seek must not re-encode media already in a larger
+                # cached window. Return its real global bounds so the player
+                # translates source timestamps accurately. Keep partial files
+                # out of this cache until their worker publishes READY.
+                candidates = [
+                    (cached_key, cached) for cached_key, cached in self._jobs.items()
+                    if cached.get("source_identity") == source_identity
+                    and not cached["cancel"].is_set()
+                    and (cached["status"] == "PROCESSING"
+                         or (cached["status"] == "READY" and self._has_media(cached)))
+                    and cached.get("start_seconds", 0) <= start_seconds
+                    and (cached.get("end_seconds") is None
+                         or cached["end_seconds"] >= end_seconds)
+                ]
+                if candidates:
+                    cached_key, _ = min(candidates, key=lambda item: (
+                        item[1]["status"] != "READY",
+                        (item[1].get("end_seconds") or float("inf")) - item[1].get("start_seconds", 0)))
+                    return self.status(cached_key)
             root = self._directory()
             job = {"status": "PROCESSING", "cancel": threading.Event(), "output": root / f"{key}.webm",
                    "coverage_seconds": coverage_seconds, "source_duration": None, "partial": False,
                    "start_seconds": start_seconds, "end_seconds": end_seconds,
+                   "source_identity": source_identity,
                    "created_at": time.monotonic(), "finished_at": None, "last_access": time.monotonic()}
             self._jobs[key] = job
             job["future"] = self._executor.submit(self._convert, source, job)
@@ -210,6 +237,7 @@ class PreviewManager:
                 "-i", str(source), "-map", "0:v:0", "-map", "0:a:0?",
                 "-vf", "scale=w='min(640,iw)':h='min(640,ih)':force_original_aspect_ratio=decrease:force_divisible_by=2,fps=24",
                 "-c:v", "libvpx", "-deadline", "realtime", "-cpu-used", "8", "-threads", "2",
+                "-g", "24", "-keyint_min", "24",
                 "-b:v", str(bitrate), "-maxrate", str(bitrate), "-bufsize", str(bitrate * 2),
                 "-c:a", "libopus", "-b:a", "64k", "-ac", "2",
             ]
@@ -218,7 +246,11 @@ class PreviewManager:
             # the complete source.
             if partial:
                 command.extend(["-t", f"{effective_duration:.3f}"])
-            command.extend(["-fs", str(MAX_PREVIEW_BYTES), str(output)])
+            # One-second keyframes cap decode work after a random seek. Put
+            # the WebM seek index first so Qt needn't fetch the file's tail
+            # before locating those frames through a byte-range request.
+            command.extend(["-cues_to_front", "1", "-cluster_time_limit", "1000",
+                            "-fs", str(MAX_PREVIEW_BYTES), str(output)])
             run_media(command, cancel_check=job["cancel"].is_set, timeout=150)
             if not output.is_file() or output.stat().st_size <= 0:
                 raise RuntimeError("Bản xem trước không tạo được tệp hợp lệ")
@@ -259,12 +291,18 @@ class PreviewManager:
                     "end_seconds": job.get("end_seconds"),
                     "partial": bool(job.get("partial", False))}
 
+    @staticmethod
+    def _has_media(job):
+        try:
+            output = job.get("output")
+            return output is not None and output.is_file() and output.stat().st_size > 0
+        except OSError:
+            return False
+
     def media(self, key):
         with self._lock:
             job = self._jobs.get(key)
-            if (not job or job["status"] != "READY" or
-                    not job.get("output", Path()).is_file() or
-                    job["output"].stat().st_size <= 0):
+            if not job or job["status"] != "READY" or not self._has_media(job):
                 raise KeyError(key)
             job["last_access"] = time.monotonic()
             return job["output"]

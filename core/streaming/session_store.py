@@ -78,7 +78,7 @@ SESSION_FIELDS = frozenset((
     "screen_texts caption_style caption_style_revision caption_renderer_version caption_output_outdated translation_sources review_summary "
     "suppression_stats current_playback_time warnings rolling_context initialized auto_export_result "
     "_visual_incremental_started _visual_completed_seconds _visual_prepass_complete"
-    " translation_mode preview_seconds _chunked_source_started _source_prepared_seconds _preview_ready"
+    " source_language translation_mode preview_seconds _chunked_source_started _source_prepared_seconds _preview_ready"
     " _chunked_source_identity _visual_context_summary"
     " _chunk_jobs _visual_scanned_seconds _legacy_visual_prefix _parallel_chunk_planning"
     " _source_file_signature _processing_signature"
@@ -660,6 +660,8 @@ def _validate_project(data, task_id):
     for key in ("_visual_scanned_seconds", "_legacy_visual_prefix"):
         if not _finite(fields.get(key, 0)) or fields.get(key, 0) > duration + .1:
             raise ValueError("Mốc xử lý đoạn đã lưu không hợp lệ.")
+    from core.source_language import validate_source_language
+    validate_source_language(fields.get("source_language", "zh"))
     if fields.get("translation_mode", "full") not in {"preview", "full"}:
         raise ValueError("Chế độ dịch đã lưu không hợp lệ.")
     if not _finite(fields.get("preview_seconds", 24), .01) or fields.get("preview_seconds", 24) > 120:
@@ -1121,6 +1123,7 @@ def list_saved_sessions(*, excluded_task_ids=()):
                 **{key: available[key] for key in ("missing_speech_ids", "final_output_blocked", "content_review_state")},
                 "missing_media": available["missing_media"], "stage": available["missing_media"] or "Dự án đã lưu",
                 "can_translate_full": available["preview_can_continue"], "translation_mode": fields.get("translation_mode", "full"),
+                "source_language": fields.get("source_language", "zh"),
                 "processed_seconds": fields.get("_visual_completed_seconds", 0),
                 "output_filename": available["output_filename"],
                 "output_video_url": f"/api/outputs/{available['output_filename']}" if available["output_filename"] else "",
@@ -1156,6 +1159,7 @@ def _restore_saved_session_owned(task_id, event_callback=None):
     available = _availability(data)
     session = StreamingPipelineSession(task_id, Path(fields["video_path"]) if fields.get("video_path") else None,
         voice=fields["voice"], tts_engine_name=fields["tts_engine_name"], asr_engine_name=fields["asr_engine_name"],
+        source_language=fields.get("source_language", "zh"),
         visual_translation=fields.get("visual_translation", False), event_callback=event_callback, _restoring=True)
     session._history_updated_at = data["updated_at"]
     for key in SESSION_FIELDS:

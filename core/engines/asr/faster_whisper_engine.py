@@ -4,6 +4,7 @@ from config import settings
 from core.engines.asr.base import ASREngine
 from core.dialogue_segments import split_dialogue_segments
 from core.runtime_context import current_execution_context
+from core.source_language import whisper_language_options
 import asyncio
 
 class FasterWhisperFallbackEngine(ASREngine):
@@ -55,7 +56,7 @@ class FasterWhisperFallbackEngine(ASREngine):
         check_cancelled()
         segments_gen, _ = self.model.transcribe(
             str(audio_path),
-            language=language,
+            **whisper_language_options(language),
             vad_filter=True,
             vad_parameters={"min_silence_duration_ms": 300},
             beam_size=5,

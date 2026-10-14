@@ -7,7 +7,7 @@ document.addEventListener('DOMContentLoaded', () => {
   const minimums = [250, 360, 300];
   const columns = ['studio-controls', 'studio-preview', 'studio-sidebar'].map(id => document.getElementById(id));
   const handles = ['resize-left', 'resize-right'].map(id => document.getElementById(id));
-  let proportions = [...defaults], drag = null, layoutEdited = false, nativeBridge = null;
+  let proportions = [...defaults], drag = null, layoutEdited = false, nativeBridge = null, guideFrame = null;
   function validProportions(saved) {
     if (!Array.isArray(saved) || saved.length !== 3 || !saved.every(n => typeof n === 'number' && Number.isFinite(n) && n > 0)) return null;
     const sum = saved.reduce((a, b) => a + b, 0);
@@ -50,20 +50,23 @@ document.addEventListener('DOMContentLoaded', () => {
     try { localStorage.setItem(storageKey, JSON.stringify(proportions)); } catch (_) { /* Optional preference. */ }
     nativeBridge?.setColumnWidths?.(JSON.stringify(proportions));
   }
-  function moveBoundary(index, delta, widths) {
+  function moveBoundary(index, delta, widths, render = true) {
     const next = [...widths];
     const movement = Math.max(minimums[index] - widths[index], Math.min(delta, widths[index + 1] - minimums[index + 1]));
     next[index] += movement;
     next[index + 1] -= movement;
-    applyWidths(next);
+    if (render) applyWidths(next);
     return next;
   }
   function stopDrag(event, cancel = false) {
     if (!drag || (event?.pointerId !== undefined && event.pointerId !== drag.pointerId)) return;
     const finished = drag;
     drag = null;
+    if (guideFrame !== null) window.cancelAnimationFrame(guideFrame);
+    guideFrame = null;
     if (cancel) applyWidths(finished.widths);
-    else remember(finished.latest);
+    else { applyWidths(finished.latest); remember(finished.latest); }
+    finished.handle.style.removeProperty('transform');
     workspace.classList.remove('is-resizing');
     if (finished.handle.hasPointerCapture(finished.pointerId)) finished.handle.releasePointerCapture(finished.pointerId);
   }
@@ -87,7 +90,17 @@ document.addEventListener('DOMContentLoaded', () => {
       workspace.classList.add('is-resizing');
     });
     handle.addEventListener('pointermove', event => {
-      if (drag?.handle === handle && event.pointerId === drag.pointerId) drag.latest = moveBoundary(index, event.clientX - drag.x, drag.widths);
+      if (drag?.handle === handle && event.pointerId === drag.pointerId) {
+        // Move only a composited guide while dragging. Reflowing hundreds of
+        // transcript rows and video overlays on every mouse event stalls Qt.
+        drag.latest = moveBoundary(index, event.clientX - drag.x, drag.widths, false);
+        if (guideFrame === null) guideFrame = window.requestAnimationFrame(() => {
+          guideFrame = null;
+          if (drag?.handle === handle) {
+            handle.style.setProperty('transform', `translateX(${drag.latest[index] - drag.widths[index]}px)`);
+          }
+        });
+      }
     });
     handle.addEventListener('pointerup', event => stopDrag(event));
     handle.addEventListener('pointercancel', event => stopDrag(event, true));
@@ -138,6 +151,7 @@ document.addEventListener('DOMContentLoaded', () => {
     advanced.hidden = index !== 2;
     transcript.setAttribute('aria-labelledby', tabs[index === 1 ? 1 : 0].id);
     transcript.dataset.mode = index === 1 ? 'original' : 'translation';
+    filterTranscript();
     if (focus) tabs[index].focus();
   }
   tabs.forEach((tab, index) => {
@@ -153,7 +167,8 @@ document.addEventListener('DOMContentLoaded', () => {
     const query = normalize(search.value.trim());
     let visible = 0;
     list.querySelectorAll('.transcript-row').forEach(row => {
-      const text = [...row.querySelectorAll('.transcript-original, .transcript-translation')].map(el => el.textContent).join(' ');
+      const selector = transcript.dataset.mode === 'original' ? '.transcript-original' : '.transcript-translation';
+      const text = [...row.querySelectorAll(selector)].map(el => el.textContent).join(' ');
       // Keep unsaved edits visible even if a worker changes text during a search.
       row.hidden = !!query && !normalize(text).includes(query) && row.dataset.editing !== 'true';
       if (!row.hidden) visible++;
@@ -167,6 +182,7 @@ document.addEventListener('DOMContentLoaded', () => {
   });
   new MutationObserver(filterTranscript).observe(list, {childList: true, subtree: true, characterData: true, attributes: true, attributeFilter: ['data-editing']});
   filterTranscript();
+  transcript.dataset.mode = 'translation';
   const reveal = id => { const el = document.getElementById(id); el.scrollIntoView({block: 'nearest', behavior: 'auto'}); el.focus({preventScroll: true}); };
   document.getElementById('tool-captions').addEventListener('click', () => {
     selectTab(2, true);

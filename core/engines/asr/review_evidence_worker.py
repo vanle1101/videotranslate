@@ -10,6 +10,7 @@ import sys
 def collect_engine(request, emit):
     """Keep the previous two recognizers' exact independent decode settings."""
     from core.media_process import run_media
+    from core.source_language import whisper_language_options
     engine = request["engine"]
     rows = request["rows"]
     wav = Path(request["work_directory"]) / "speech.wav"
@@ -38,8 +39,10 @@ def collect_engine(request, emit):
                 text = stream.result.text.strip()
                 del stream, samples
             else:
-                decoded, _ = model.transcribe(str(wav), language="zh", task="transcribe",
-                    beam_size=5, vad_filter=False, condition_on_previous_text=False)
+                options = {**whisper_language_options(request.get("source_language", "zh")),
+                           "condition_on_previous_text": False}
+                decoded, _ = model.transcribe(str(wav), **options, task="transcribe",
+                    beam_size=5, vad_filter=False)
                 try:
                     text = " ".join(part.text.strip() for part in decoded).strip()
                 finally:

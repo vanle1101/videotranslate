@@ -1,3 +1,4 @@
+from core.source_language import validate_source_language, whisper_language_options
 import asyncio
 import contextvars
 from contextlib import contextmanager, nullcontext
@@ -198,6 +199,7 @@ class StreamingPipelineSession:
         visual_translation: bool = False,
         translation_mode: str = "full",
         _restoring: bool = False,
+        source_language: str = "zh",
     ):
         self.task_id = task_id
         # Directly constructed test/utility sessions are not silently persisted.
@@ -214,6 +216,7 @@ class StreamingPipelineSession:
         if translation_mode not in ("preview", "full"):
             raise ValueError("Chế độ dịch phải là preview hoặc full.")
         self.translation_mode = translation_mode
+        self.source_language = validate_source_language(source_language)
         self.preview_seconds = self.PREVIEW_SECONDS
         self._preview_ready = False
         self._chunked_source_started = False
@@ -280,7 +283,7 @@ class StreamingPipelineSession:
         self.video_intelligence = None
         if self.visual_translation and not _restoring:
             from core.video_intelligence import VideoIntelligence
-            self.video_intelligence = VideoIntelligence()
+            self.video_intelligence = VideoIntelligence(source_language=self.source_language)
         self.vieneu = None
         self.edge_tts = EdgeTTSFallbackEngine()
         self.aligner = TimingBudgetAligner()
@@ -579,7 +582,7 @@ class StreamingPipelineSession:
             except ValueError as exc:
                 raise SegmentEditConflict(str(exc)) from None
             self.asr_engine = self.faster_whisper
-            if self.asr_engine_name == "sensevoice" and self.sensevoice.is_available:
+            if self.source_language == "zh" and self.asr_engine_name == "sensevoice" and self.sensevoice.is_available:
                 self.asr_engine = self.sensevoice
         self._restored_interrupted = False
         self.is_stopped = False
@@ -1190,7 +1193,7 @@ class StreamingPipelineSession:
         try:
             with observe_cache_usage() as review_cache_usage:
                 result = await self._run_blocking(
-                    AutomaticTranslationReviewer().review, self.video_path, deepcopy(targets), deepcopy(self.screen_texts), **options)
+                    AutomaticTranslationReviewer(source_language=self.source_language).review, self.video_path, deepcopy(targets), deepcopy(self.screen_texts), **options)
             successful_rows = sum((row.get("verification") or {}).get("status") in
                                   {"verified", "corrected", "unresolved", "manual"}
                                   for row in result.get("segments", {}).values())
@@ -1776,7 +1779,7 @@ class StreamingPipelineSession:
         snapshot.update(self._review_metadata())
         snapshot["can_retry"] = self.can_retry
         snapshot["can_repair_failed"] = any(self._can_repair_failed_segment(row) for row in self.segments.values())
-        snapshot.update(translation_mode=self.translation_mode, preview_seconds=self.preview_seconds,
+        snapshot.update(source_language=self.source_language, translation_mode=self.translation_mode, preview_seconds=self.preview_seconds,
                         chunk_workers=getattr(self, "_parallel_chunk_workers", 1),
                         configured_chunk_workers=settings.TRANSLATION_CHUNK_WORKERS,
                         chunk_seconds=settings.TRANSLATION_CHUNK_SECONDS,
@@ -2206,13 +2209,15 @@ class StreamingPipelineSession:
         if self.visual_translation and self.video_intelligence is None:
             from core.video_intelligence import VideoIntelligence, validate_visual_provider
             validate_visual_provider()
-            self.video_intelligence = VideoIntelligence()
+            self.video_intelligence = VideoIntelligence(source_language=self.source_language)
         if not self.start_wall_time:
             self.start_wall_time = time.time()
         await self.report_progress("prepare", "Đang tách âm thanh từ video...")
         self.asr_engine = self.faster_whisper
         if not self.visual_translation and self.asr_engine_name == "sensevoice":
-            if self.sensevoice.is_available:
+            if self.source_language != "zh":
+                self.warnings.append("Nhận diện đa ngôn ngữ sử dụng Faster-Whisper.")
+            elif self.sensevoice.is_available:
                 self.asr_engine = self.sensevoice
             else:
                 self.warnings.append("SenseVoice chưa có model; sử dụng Faster-Whisper.")
@@ -2287,7 +2292,7 @@ class StreamingPipelineSession:
                             asr_loop.call_soon_threadsafe(lambda: asyncio.create_task(self.report_progress(
                                 "asr", f"Đang nhận diện lời nói · {end:.0f}/{self.total_duration:.0f} giây", pct)))
                     recognized = await self._run_blocking(
-                        self.faster_whisper.transcribe, self.raw_audio_16k, language="zh", progress_callback=asr_progress,
+                        self.faster_whisper.transcribe, self.raw_audio_16k, language=self.source_language, progress_callback=asr_progress,
                     )
                     raw_segs = await self._run_blocking(self._grounded_visual_segments, recognized)
                 else:
@@ -2619,7 +2624,8 @@ class StreamingPipelineSession:
                         setattr(source, name, deepcopy(getattr(row, name, None)))
                     source_rows.append(source)
             configuration = {"source": self._chunked_source_identity, "provider": settings.LLM_PROVIDER,
-                             "model": settings.OPENCODE_MODEL, "visual": self.visual_translation}
+                             "model": settings.OPENCODE_MODEL, "visual": self.visual_translation,
+                             "source_language": self.source_language}
             interval = reserve(self._chunk_jobs, cursor, end, input_hash(source_rows, configuration))
             transition(interval, "RUNNING")
             self._persist_if_enabled()
@@ -2747,12 +2753,11 @@ class StreamingPipelineSession:
         return min(settings.TRANSLATION_CHUNK_WORKERS, settings.OPENCODE_CONCURRENCY,
                    max(1, (os.cpu_count() or 1) - 1), memory_workers)
 
-    @staticmethod
-    def _new_chunk_intelligence():
+    def _new_chunk_intelligence(self):
         from core.video_intelligence import VideoIntelligence
         from core.screen_ocr import ChunkScreenOCR
-        engine = VideoIntelligence()
-        engine.screen_ocr = ChunkScreenOCR()
+        engine = VideoIntelligence(source_language=self.source_language)
+        engine.screen_ocr = ChunkScreenOCR(source_language=self.source_language)
         return engine
 
     def _parallel_source_snapshot(self, start, end):
@@ -2835,7 +2840,7 @@ class StreamingPipelineSession:
                 source, context = self._parallel_source_snapshot(start, end)
                 signature = input_hash(source, {"source": self._chunked_source_identity,
                     "provider": settings.LLM_PROVIDER, "model": settings.OPENCODE_MODEL,
-                    "visual": True, "parallel_context_version": 1})
+                    "visual": True, "parallel_context_version": 1, "source_language": self.source_language})
                 record = reserve(self._chunk_jobs, start, end, signature)
                 if record["state"] == "COMPLETED":
                     continue
@@ -3051,7 +3056,7 @@ class StreamingPipelineSession:
             if self.faster_whisper.model is None:
                 raise ValueError("Chưa có model nhận diện để đo mốc từ của câu dài.")
             measured, _ = self.faster_whisper.model.transcribe(
-                str(self.raw_audio_16k), language="zh", beam_size=5,
+                str(self.raw_audio_16k), **whisper_language_options(self.source_language), beam_size=5,
                 word_timestamps=True, vad_filter=False, clip_timestamps=[start, end],
             )
             words = []
@@ -3183,6 +3188,7 @@ class StreamingPipelineSession:
             **self._review_metadata(),
             "can_retry": self.can_retry,
             "translation_mode": self.translation_mode,
+            "source_language": self.source_language,
             "preview_seconds": self.preview_seconds,
             "processed_seconds": self._visual_completed_seconds,
             "source_prepared_seconds": self._source_prepared_seconds,
@@ -3338,7 +3344,7 @@ class StreamingPipelineSession:
                     "-i", str(self.raw_audio_16k), "-t", f"{seg.duration:.3f}",
                     "-c:a", "pcm_s16le", str(slice_wav),
                 ])
-                asr_res = await self._run_blocking(self.asr_engine.transcribe, slice_wav, language="zh")
+                asr_res = await self._run_blocking(self.asr_engine.transcribe, slice_wav, language=self.source_language)
                 seg.text_zh = " ".join(
                     part.get("text_zh", part.get("text", "")).strip() for part in (asr_res or [])
                 ).strip()
@@ -4253,6 +4259,7 @@ def create_streaming_session(
     event_callback: Optional[Callable] = None,
     visual_translation: bool = False,
     translation_mode: str = "full",
+    source_language: str = "zh",
 ) -> StreamingPipelineSession:
     sess = StreamingPipelineSession(
         task_id=task_id,
@@ -4265,6 +4272,7 @@ def create_streaming_session(
         event_callback=event_callback,
         visual_translation=visual_translation,
         translation_mode=translation_mode,
+        source_language=source_language,
     )
     active_streaming_sessions[task_id] = sess
     sess._persistence_enabled = True

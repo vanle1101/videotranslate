@@ -325,10 +325,10 @@ def test_restart_keeps_195_row_manifest_and_retries_only_three_missing_rows(isol
     async def run():
         if route != "local-file":
             result = await main.start_streaming_url(main.StreamUrlRequest(url=source_url,
-                voice=old.voice, tts_engine=old.tts_engine_name, asr_engine=old.asr_engine_name))
+                voice=old.voice, tts_engine=old.tts_engine_name, asr_engine=old.asr_engine_name, source_language=old.source_language))
         else:
             result = await main.start_streaming_local_file(main.StreamLocalFileRequest(file_path=str(source),
-                voice=old.voice, tts_engine=old.tts_engine_name, asr_engine=old.asr_engine_name))
+                voice=old.voice, tts_engine=old.tts_engine_name, asr_engine=old.asr_engine_name, source_language=old.source_language))
         assert result["task_id"] == old.task_id and result["resumed"]
         session = main.active_streaming_sessions[old.task_id]
         await session.worker_task

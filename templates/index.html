@@ -22,7 +22,7 @@
       <button id="tab-studio" class="nav-btn text-white bg-pink-600/80"><i class="fa-solid fa-house" aria-hidden="true"></i> Studio</button>
       <button id="tab-tasks" class="nav-btn text-gray-400"><i class="fa-solid fa-list-check" aria-hidden="true"></i> Lịch sử video</button>
       <button id="tab-models" class="nav-btn text-gray-400"><i class="fa-solid fa-layer-group" aria-hidden="true"></i> Models</button>
-      <button id="tab-diagnostics" class="nav-btn text-gray-400"><i class="fa-solid fa-wave-square" aria-hidden="true"></i> Diagnostics</button>
+      <button id="tab-diagnostics" class="nav-btn text-gray-400"><i class="fa-solid fa-wave-square" aria-hidden="true"></i> Nhật ký</button>
       <button id="tab-settings" class="nav-btn text-gray-400"><i class="fa-solid fa-gear" aria-hidden="true"></i> Cài đặt</button>
     </nav>
     <div id="hardware-pill" class="hardware-pill"><i class="fa-solid fa-microchip" aria-hidden="true"></i><span id="gpu-info-text">Đang kiểm tra phần cứng…</span></div>
@@ -61,16 +61,25 @@
           </div>
         </section>
           <div id="task-progress" class="hidden task-progress studio-card" aria-label="Tiến độ xử lý video">
-            <h2 class="studio-card-heading progress-title"><i class="fa-solid fa-wand-magic-sparkles" aria-hidden="true"></i>Xử lý video bằng AI</h2><div class="task-progress-heading" role="status" aria-live="polite"><span id="task-progress-stage">Đang gửi yêu cầu…</span><span class="flex flex-wrap items-baseline justify-end gap-x-2"><span id="task-progress-value">Chưa có %</span><span id="task-progress-eta" class="hidden text-gray-400"></span></span></div>
-            <div id="task-progress-track" class="task-progress-track" role="progressbar" aria-label="Tiến độ bước hiện tại" aria-valuemin="0" aria-valuemax="100"><div id="task-progress-bar" class="task-progress-bar"></div></div>
+            <div class="progress-card-title"><h2 class="studio-card-heading progress-title"><i class="fa-solid fa-spinner" aria-hidden="true"></i>Xử lý video bằng AI</h2><span id="task-status-badge" role="status">Chờ xử lý</span></div>
+            <dl class="progress-facts">
+              <dt><i class="fa-solid fa-gear" aria-hidden="true"></i>Bước hiện tại</dt><dd id="task-phase-label">Chuẩn bị</dd>
+              <dt><i class="fa-solid fa-circle-notch" aria-hidden="true"></i>Trạng thái</dt><dd id="task-status-label">Chờ xử lý</dd>
+              <dt><i class="fa-solid fa-bars-progress" aria-hidden="true"></i>Tiến độ</dt><dd class="progress-measure"><div id="task-progress-track" class="task-progress-track" role="progressbar" aria-label="Tiến độ bước hiện tại" aria-valuemin="0" aria-valuemax="100"><div id="task-progress-bar" class="task-progress-bar"></div></div><span id="task-progress-value">Chưa có %</span><span id="task-progress-eta" class="hidden text-gray-400"></span></dd>
+              <dt><i class="fa-regular fa-clock" aria-hidden="true"></i>Còn lại đến MP4</dt><dd id="task-eta-display">Chưa đủ dữ liệu</dd>
+            </dl>
+            <p id="task-error-summary" class="hidden task-error-summary" role="status"></p>
+            <details class="task-progress-details"><summary>Chi tiết xử lý</summary>
+            <p id="task-progress-stage" class="task-progress-heading" role="status" aria-live="polite">Đang gửi yêu cầu…</p>
             <p id="task-progress-detail" class="task-progress-detail">Phần trăm được tính riêng cho từng bước.</p>
             <p id="task-connection-status" role="status" class="hidden task-connection-status"></p>
             <p id="pipeline-warning" role="status" class="hidden pipeline-warning"></p>
+            </details>
           </div>
         <section class="studio-action-card studio-card" aria-labelledby="action-heading">
           <h2 id="action-heading" class="studio-card-heading"><span class="step-number" aria-hidden="true">2</span>Dịch &amp; lồng tiếng</h2>
           <p class="panel-description">Đối chiếu nguồn, dịch và căn nhịp lời đọc.</p>
-          <div class="translation-language"><span>Ngôn ngữ nguồn</span><div>🇨🇳 &nbsp; Tiếng Trung <small>(Tự động nhận diện)</small></div><span>Ngôn ngữ dịch</span><div>🇻🇳 &nbsp; Tiếng Việt</div></div>
+          <div class="translation-language"><label for="source-language">Ngôn ngữ nguồn</label><select id="source-language"><option value="auto">Tự động · Nhiều ngôn ngữ</option><option value="zh">Tiếng Trung</option><option value="en">Tiếng Anh</option><option value="ja">Tiếng Nhật</option><option value="ko">Tiếng Hàn</option></select><label for="target-language">Ngôn ngữ dịch</label><select id="target-language" aria-describedby="source-language-help"><option value="vi">Tiếng Việt</option></select><small id="source-language-help">Tự động nhận diện ngôn ngữ theo từng đoạn và dịch sang Việt. Chất lượng phụ thuộc âm thanh và khả năng nhận diện.</small></div>
           <label class="visual-translation-option" title="Đối chiếu lời nói với chữ trên video, rồi tự rà và sửa bản dịch trước khi tạo giọng."><input id="visual-translation" type="checkbox" aria-describedby="visual-translation-help" {% if settings.LLM_PROVIDER in ('gemini', 'openrouter-free', 'opencode') %}checked{% endif %}><span>AI kiểm tra bản dịch</span></label>
           <span id="visual-translation-help" class="sr-only">Đối chiếu lời nói với chữ trên video, rồi tự rà và sửa bản dịch trước khi tạo giọng.</span>
           <button id="btn-start" class="studio-start-button"><i class="fa-solid fa-play" aria-hidden="true"></i>Bắt đầu dịch</button>
@@ -155,7 +164,7 @@
       <aside id="studio-sidebar" class="studio-sidebar" aria-label="Transcript và giọng lồng tiếng">
         <section class="transcript-panel studio-card" aria-labelledby="transcript-heading">
           <h2 id="transcript-heading" class="sr-only">Bản dịch và phụ đề</h2>
-          <div class="transcript-tabs" role="tablist" aria-label="Biên tập lời thoại"><button id="editor-tab-translation" type="button" role="tab" aria-selected="true" aria-controls="editor-transcript">Bản dịch &amp; Phụ đề</button><button id="editor-tab-original" type="button" role="tab" aria-selected="false" aria-controls="editor-transcript" tabindex="-1">Transcript</button><button id="editor-tab-advanced" type="button" role="tab" aria-selected="false" aria-controls="editor-advanced" tabindex="-1">Tùy chỉnh nâng cao</button></div>
+          <div class="transcript-tabs" role="tablist" aria-label="Biên tập lời thoại"><button id="editor-tab-translation" type="button" role="tab" aria-selected="true" aria-controls="editor-transcript">Bản dịch &amp; Phụ đề</button><button id="editor-tab-original" type="button" role="tab" aria-selected="false" aria-controls="editor-transcript" tabindex="-1">Lời gốc</button><button id="editor-tab-advanced" type="button" role="tab" aria-selected="false" aria-controls="editor-advanced" tabindex="-1">Tùy chỉnh nâng cao</button></div>
           <div id="editor-transcript" role="tabpanel" aria-labelledby="editor-tab-translation">
           <div class="transcript-search"><i class="fa-solid fa-magnifying-glass" aria-hidden="true"></i><input id="transcript-search" type="search" placeholder="Tìm kiếm câu, từ khóa…" aria-label="Tìm lời gốc hoặc bản dịch"><span id="segments-count-badge" class="transcript-count">0 câu</span></div>
           <div class="transcript-toolbar"><label class="transcript-follow"><input id="transcript-follow" type="checkbox" checked> Theo vị trí phát</label><label class="transcript-option"><input id="transcript-show-time" type="checkbox" checked> Hiện thời gian</label><span class="transcript-time-note">Theo câu</span></div>
@@ -294,13 +303,13 @@
   <!-- ======================================================== -->
   <!-- 4. DIAGNOSTICS VIEW (LOG VIEWER) -->
   <!-- ======================================================== -->
-  <div id="view-diagnostics" class="app-view hidden max-w-6xl mx-auto p-6 space-y-4">
+  <div id="view-diagnostics" class="app-view hidden diagnostics-page">
     <div class="flex items-center justify-between pb-3 border-b border-gray-800">
       <div>
         <h2 class="text-base font-bold text-white flex items-center gap-2">
-          <i class="fa-solid fa-terminal text-yellow-400"></i> Nhật Ký & Chẩn Đoán (Diagnostics)
+          <i class="fa-solid fa-terminal text-yellow-400"></i> Nhật ký xử lý
         </h2>
-        <p class="text-xs text-gray-400">Theo dõi tải và dịch video · tự cập nhật mỗi 3 giây.</p>
+        <p class="text-xs text-gray-400">Xem điều gì đã xảy ra. Mở từng mục để xem chi tiết kỹ thuật.</p>
       </div>
       <div class="flex items-center gap-2">
         <button id="btn-copy-log" class="px-3 py-1.5 rounded-lg border border-gray-700 bg-gray-800 hover:bg-gray-700 text-xs text-gray-200 flex items-center gap-1.5">
@@ -315,6 +324,8 @@
       </div>
     </div>
 
+    <div class="diagnostic-counts" aria-label="Thống kê nhật ký đang tải"><div><span>Sự kiện</span><strong id="log-count-all">0</strong></div><div><span>Lỗi</span><strong id="log-count-errors">0</strong></div><div><span>Cảnh báo</span><strong id="log-count-warnings">0</strong></div></div>
+    <div class="diagnostic-filters"><label class="log-search-field"><i class="fa-solid fa-magnifying-glass" aria-hidden="true"></i><input id="log-search" type="search" placeholder="Tìm nội dung, mã tác vụ, câu lỗi…" aria-label="Tìm nhật ký"></label><label>Mức độ<select id="log-level"><option value="all">Tất cả</option><option value="error">Lỗi</option><option value="warning">Cảnh báo</option><option value="info">Thông tin</option></select></label><label>Hiển thị<select id="log-display"><option value="readable">Dễ đọc</option><option value="raw">Kỹ thuật</option></select></label><label><input id="log-live" type="checkbox" checked> Tự cập nhật</label></div>
     <!-- Log Category Tabs -->
     <div class="flex items-center gap-2 border-b border-gray-800 pb-2">
       <button data-cat="pipeline" class="diag-cat-btn px-3 py-1 rounded-lg text-xs font-mono font-bold bg-pink-600/80 text-white">Tác vụ</button>
@@ -608,6 +619,7 @@
   </div>
 
   <script src="/qtwebchannel.js"></script>
+  <script src="/static/diagnostics.js?v={{ settings.BASE_DIR.joinpath('static', 'diagnostics.js').stat().st_mtime_ns }}"></script>
   <script src="/static/workspace.js?v={{ settings.BASE_DIR.joinpath('static', 'workspace.js').stat().st_mtime_ns }}"></script>
   <script src="/static/app.js?v={{ settings.BASE_DIR.joinpath('static', 'app.js').stat().st_mtime_ns }}"></script>
 </body>

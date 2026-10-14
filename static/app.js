@@ -7,6 +7,7 @@ document.addEventListener("DOMContentLoaded", () => {
   const subtitleText = document.getElementById("subtitle-text");
   const screenTextOverlay = document.getElementById("screen-text-overlay");
   const visualTranslation = document.getElementById("visual-translation");
+  const sourceLanguageSelect = document.getElementById("source-language");
   const chineseSubMask = document.getElementById("chinese-sub-mask");
   const bufferingAlert = document.getElementById("buffering-alert");
   const bufferingText = document.getElementById("buffering-text");
@@ -70,7 +71,7 @@ document.addEventListener("DOMContentLoaded", () => {
   // user action.  Keep the value in one place so URL, upload and local-file
   // starts use the same contract.
   const PREVIEW_SECONDS = 24;
-  const COMPATIBILITY_MAX_SECONDS = 120;
+  const COMPATIBILITY_MAX_SECONDS = 24;
   const PREVIEW_READY_STATUS = "PREVIEW_READY";
   const isPreviewReady = status => String(status || "").toUpperCase() === PREVIEW_READY_STATUS;
   function hasMeasuredPreview(progress) {
@@ -274,6 +275,8 @@ document.addEventListener("DOMContentLoaded", () => {
   let previewCompatibilityRevision = 0;
   let previewCompatibilityJob = null;
   let previewCompatibilityTarget = null;
+  let previewCompatibilityWindowKey = null;
+  let previewDeferredSeek = null;
   let previewResumeTime = null;
   let playWhenPreviewReady = false;
   let autoPlayTaskId = null;
@@ -285,6 +288,8 @@ document.addEventListener("DOMContentLoaded", () => {
     previewCompatibilityRequest = null;
     cancelCompatibilityJob();
     previewCompatibilityTarget = null;
+    previewCompatibilityWindowKey = null;
+    previewDeferredSeek = null;
     previewCompatibilityRefresh = null;
     if (previewPending) {
       previewPending = false;
@@ -294,6 +299,7 @@ document.addEventListener("DOMContentLoaded", () => {
 
   function resetCompatibilityPreviewState() {
     cancelCompatibilityRequest();
+    previewDeferredSeek = null;
     previewCompatibilityCoverage = null;
     previewCompatibilityStart = 0;
     previewCompatibilityEnd = null;
@@ -1336,11 +1342,12 @@ document.addEventListener("DOMContentLoaded", () => {
   }
 
   function pauseStoppedSession(progress = currentProgress, pausePlayback = true) {
-    cancelCompatibilityRequest();
     // Stopping execution must not detach the saved project: Retry needs its ID
     // and users still need the transcript and already generated audio. In
     // particular, history restore receives STOPPED again over the live socket.
     if (pausePlayback) {
+      cancelCompatibilityRequest();
+      playWhenPreviewReady = false;
       cancelDubPlaybackWait();
       stopPlaybackFrames();
       stopSourceAudition();
@@ -1353,14 +1360,15 @@ document.addEventListener("DOMContentLoaded", () => {
     }
     autoPlayTaskId = null;
     isBufferingUnderrun = false;
-    playWhenPreviewReady = false;
     const socket = currentWs;
     currentWs = null;
     if (socket) socket.close();
     streamDisconnected = false;
-    bufferingText.textContent = "";
-    bufferingAlert.classList.add("hidden");
-    bufferingAlert.dataset.state = "stopped";
+    if (!previewPending) {
+      bufferingText.textContent = "";
+      bufferingAlert.classList.add("hidden");
+      bufferingAlert.dataset.state = "stopped";
+    }
     playerDownloadProgress?.classList.add("hidden");
     if (playerTaskStatus) {
       playerTaskStatus.textContent = progressMessage(progress, "Đã dừng tác vụ");
@@ -1504,9 +1512,24 @@ document.addEventListener("DOMContentLoaded", () => {
     taskProgress.dataset.status = status;
     taskProgressStage.textContent = `${status === "PAUSED" ? "Đã tạm dừng · " : ""}${progressMessage(currentProgress, isPreviewReady(status) ? "Đoạn xem trước đã sẵn sàng" : reviewInProgress() ? "AI đang kiểm tra lại bản dịch…" : "Đang xử lý video…")}`;
     taskProgressStage.title = taskProgressStage.textContent;
+    const stateLabel = {RUNNING: "Đang chạy", PAUSED: "Tạm dừng", FAILED: "Có lỗi", STOPPED: "Đã dừng", CANCELLED: "Đã hủy", CANCELLING: "Đang dừng", COMPLETED: "Hoàn tất", PREPARED: "Chờ xuất MP4", PREVIEW_READY: "Có bản xem trước"}[status] || "Đang chuẩn bị";
+    const phaseLabel = {download: "Tải video", resolve: "Lấy nguồn video", prepare: "Chuẩn bị video", visual: "Nhận diện & dịch", asr: "Nhận diện lời nói", tts: "Tạo giọng Việt", review: "Kiểm tra bản dịch", export: "Xuất MP4", export_error: "Xuất MP4", request: "Gửi yêu cầu"}[currentProgress.phase] || "Dịch & lồng tiếng";
+    for (const [id, text] of [["task-phase-label", phaseLabel], ["task-status-label", stateLabel], ["task-status-badge", stateLabel]]) {
+      const el = document.getElementById(id); if (el) el.textContent = text;
+    }
+    const errorSummary = document.getElementById("task-error-summary");
+    if (errorSummary) {
+      const hasError = status === "FAILED" || !!currentProgress.error || /Lỗi gần nhất:/.test(taskProgressStage.textContent);
+      errorSummary.classList.toggle("hidden", !hasError);
+      const cause = progressMessage(currentProgress).split("Lỗi gần nhất: ").at(-1);
+      errorSummary.textContent = hasError ? cause : "";
+      errorSummary.title = errorSummary.textContent;
+    }
     bufferingAlert.dataset.state = status === "FAILED" ? "error" : status === "PAUSED" ? "paused" : "loading";
     taskProgressValue.textContent = terminal && pct === null ? "" : displayed.label;
     showEta(taskProgressEta, currentProgress);
+    const etaDisplay = document.getElementById("task-eta-display");
+    if (etaDisplay) etaDisplay.textContent = taskEtaText(currentProgress).replace(/^Có video sau khoảng /, "≈ ") || (terminal ? "—" : "Đang đo thời gian");
     taskProgressTrack.classList.toggle("hidden", terminal && pct === null);
     taskProgressTrack.dataset.indeterminate = String(pct === null);
     taskProgressTrack.setAttribute("aria-valuetext", `${taskProgressStage.textContent}${pct === null ? ": chưa có số liệu phần trăm" : `: ${displayed.label}`}`);
@@ -1572,7 +1595,7 @@ document.addEventListener("DOMContentLoaded", () => {
     if (reviewText) transcriptStatus.textContent = reviewText;
     if (terminal) {
       resetWorkerBadges();
-      if (["STOPPED", "CANCELLED"].includes(status)) pauseStoppedSession(currentProgress, previousStatus !== status);
+      if (["STOPPED", "CANCELLED"].includes(status)) pauseStoppedSession(currentProgress, !!previousStatus && previousStatus !== status);
       else if (status === "FAILED" && currentProgress.phase === "review" && Object.values(segments).some(s => ["READY", "PLAYED"].includes(s.status))) {
         // A review failure is independent of draft playback. Repeated status
         // polls must not pause a draft the user explicitly chose to listen to.
@@ -1794,9 +1817,9 @@ document.addEventListener("DOMContentLoaded", () => {
     const currentEnd = Number(previewCompatibilityEnd);
     if (!initial && compatibilityWindowContains(target) && target < currentEnd - 1.5) return null;
     const windowSize = initial ? Math.min(24, COMPATIBILITY_MAX_SECONDS, prepared) : COMPATIBILITY_MAX_SECONDS;
-    const lead = initial ? 0 : Math.min(12, windowSize * .2);
-    let start = initial ? 0 : Math.max(0, target - lead);
-    if (prepared - start < 4 && start > 0) start = Math.max(0, prepared - windowSize);
+    // Stable slots reuse the same cached media for nearby seeks, instead of
+    // converting a different two-minute file for every clicked position.
+    const start = initial ? 0 : Math.floor(Math.min(target, prepared - .01) / windowSize) * windowSize;
     const end = Math.min(prepared, start + windowSize);
     if (end <= start + .1) return null;
     return {...previewDescriptor, start_seconds: Number(start.toFixed(3)),
@@ -1804,8 +1827,13 @@ document.addEventListener("DOMContentLoaded", () => {
   }
 
   async function requestCompatibilityWindow(targetTime, {initial = false, force = false, resume = null} = {}) {
-    if ((previewPending && !previewCompatibilityRefresh) || !previewDescriptor ||
-        !videoPlayer.currentSrc?.includes("/api/preview/")) return;
+    if (!previewDescriptor) return;
+    if (previewPending && !previewCompatibilityRefresh) {
+      previewDeferredSeek = targetTime;
+      if (resume !== null) playWhenPreviewReady = Boolean(resume);
+      return;
+    }
+    if (!videoPlayer.currentSrc?.includes("/api/preview/")) return;
     const prepared = compatibilityPreparedSeconds();
     if (!Number.isFinite(prepared) || prepared <= 0) return;
     const rawTarget = Math.max(0, Number(targetTime) || 0);
@@ -1818,8 +1846,12 @@ document.addEventListener("DOMContentLoaded", () => {
     const target = Math.min(rawTarget, Math.max(0, prepared - .01));
     const body = compatibilityWindowBody(target, prepared, initial);
     if (!body) return;
-    if (previewCompatibilityRefresh && previewCompatibilityTarget !== null &&
-        Math.abs(previewCompatibilityTarget - target) < 1.5) return previewCompatibilityRefresh;
+    const windowKey = `${body.start_seconds}:${body.end_seconds}`;
+    if (previewCompatibilityRefresh && previewCompatibilityWindowKey === windowKey) {
+      previewCompatibilityTarget = target;
+      if (resume !== null) playWhenPreviewReady = Boolean(resume);
+      return previewCompatibilityRefresh;
+    }
     previewCompatibilityRevision++;
     const revision = previewCompatibilityRevision;
     previewCompatibilityRequest?.abort?.();
@@ -1827,13 +1859,14 @@ document.addEventListener("DOMContentLoaded", () => {
     const controller = typeof AbortController !== "undefined" ? new AbortController() : null;
     previewCompatibilityRequest = controller;
     previewCompatibilityTarget = target;
+    previewCompatibilityWindowKey = windowKey;
     const generation = previewGeneration;
     const wasPlaying = resume === null
       ? (!videoPlayer.paused || !!dubPlaybackWait || (previewPending && playWhenPreviewReady)) : Boolean(resume);
     cancelDubPlaybackWait();
     previewPending = true;
     playWhenPreviewReady = wasPlaying;
-    if (wasPlaying) { internalPreviewPauseEvents++; videoPlayer.pause(); }
+    if (wasPlaying && !videoPlayer.paused) { internalPreviewPauseEvents++; videoPlayer.pause(); }
     activeAudio?.pause();
     bgmAudio?.pause();
     bufferingText.textContent = "Đang chuẩn bị đoạn xem trước tại vị trí đã chọn…";
@@ -1844,7 +1877,7 @@ document.addEventListener("DOMContentLoaded", () => {
         const data = await requestCompatiblePreview(body, generation, revision, controller?.signal);
         if (!data || generation !== previewGeneration || revision !== previewCompatibilityRevision) return;
         setPreviewCompatibilityWindow(data);
-        previewResumeTime = target;
+        previewResumeTime = previewCompatibilityTarget ?? target;
         videoPlayer.src = data.video_url;
         videoPlayer.load();
         return true;
@@ -2247,6 +2280,12 @@ document.addEventListener("DOMContentLoaded", () => {
     else bufferingText.textContent = "Đang chờ các câu dịch đầu tiên...";
     const shouldPlay = playWhenPreviewReady;
     playWhenPreviewReady = false;
+    if (previewDeferredSeek !== null) {
+      const target = previewDeferredSeek;
+      previewDeferredSeek = null;
+      seekPreviewTime(target, {resume: shouldPlay});
+      return;
+    }
     if (shouldPlay && !resultPreviewActive) videoPlayer.play().catch(reportPlayFailure);
   });
 
@@ -2800,6 +2839,7 @@ document.addEventListener("DOMContentLoaded", () => {
             initial_buffer_seconds: parseFloat(bufferSelect.value) || 10.0,
             ...voicePayload,
             asr_engine: document.body.dataset.asrEngine,
+            source_language: sourceLanguageSelect?.value || "auto",
             translation_mode: "preview",
             preview_seconds: PREVIEW_SECONDS,
             visual_translation: useVisualTranslation
@@ -2811,6 +2851,7 @@ document.addEventListener("DOMContentLoaded", () => {
         formData.append("initial_buffer_seconds", bufferSelect.value);
         for (const [name, value] of Object.entries(voicePayload)) formData.append(name, value);
         formData.append("asr_engine", document.body.dataset.asrEngine);
+        formData.append("source_language", sourceLanguageSelect?.value || "auto");
         formData.append("translation_mode", "preview");
         formData.append("preview_seconds", String(PREVIEW_SECONDS));
         formData.append("visual_translation", String(useVisualTranslation));
@@ -2827,6 +2868,7 @@ document.addEventListener("DOMContentLoaded", () => {
             initial_buffer_seconds: parseFloat(bufferSelect.value),
             ...voicePayload,
             asr_engine: document.body.dataset.asrEngine,
+            source_language: sourceLanguageSelect?.value || "auto",
             translation_mode: "preview",
             preview_seconds: PREVIEW_SECONDS,
             visual_translation: useVisualTranslation
@@ -3434,20 +3476,17 @@ document.addEventListener("DOMContentLoaded", () => {
   // and synchronize on animation frames so short lines retain their opening.
   function syncPlayback() {
     const curTime = previewGlobalTime();
-    if (!videoPlayer.paused && !previewCompatibilityRefresh && previewCompatibilityEnd !== null &&
-        curTime >= Number(previewCompatibilityEnd) - 1 &&
-        compatibilityPlaybackLimit() > Number(previewCompatibilityEnd) + .5) {
-      void requestCompatibilityWindow(curTime);
-    }
+    // A stable compatibility slot advances on ended. Replacing it before
+    // its boundary would repeatedly request the very same cached slot.
     if (dubPlaybackWait) {
       if (currentDubWait(dubPlaybackWait)) { resumeDubPlayback(dubPlaybackWait); return; }
       cancelDubPlaybackWait();
     }
     telPlaying.textContent = formatTime(curTime);
-    barCurrentTime.textContent = formatTime(curTime);
+    if (!timelineDrag) barCurrentTime.textContent = formatTime(curTime);
     const hasScreenSubtitle = renderScreenTexts(curTime);
 
-    if (totalVideoDuration > 0) {
+    if (totalVideoDuration > 0 && !timelineDrag) {
       const pct = (curTime / totalVideoDuration) * 100;
       if (playbackHeadMarker) playbackHeadMarker.style.left = `${Math.min(100, Math.max(0, pct))}%`;
       timelineTrack.setAttribute("aria-valuenow", String(Math.round(curTime)));
@@ -3672,17 +3711,35 @@ document.addEventListener("DOMContentLoaded", () => {
     if (!segment || !currentTaskId) return;
     const bounds = resolveDubTiming(segment);
     if (!bounds) { showMediaError("Mốc thời gian lồng tiếng không hợp lệ. Hãy xử lý lại câu này."); return; }
-    stopSourceAudition();
     const target = Math.max(0, Math.min(totalVideoDuration || bounds.end, bounds.start));
+    seekPreviewTime(target);
+  }
+
+  function seekPreviewTime(time, {resume = null} = {}) {
+    const target = Math.max(0, Math.min(totalVideoDuration || Number(time), Number(time)));
+    if (!Number.isFinite(target)) return;
+    stopSourceAudition();
     selectPlaybackAtTime(target);
-    if (videoPlayer.currentSrc?.includes("/api/preview/") && !compatibilityWindowContains(target)) {
-      void requestCompatibilityWindow(target, {force: true});
+    previewDeferredSeek = null;
+    // A codec conversion and a subsequent media load are different phases.
+    // Keep the latest intent through both instead of silently dropping it.
+    if (previewPending && !previewCompatibilityRefresh) {
+      previewDeferredSeek = target;
+      if (resume !== null) playWhenPreviewReady = Boolean(resume);
       return;
     }
+    if (videoPlayer.currentSrc?.includes("/api/preview/") && !compatibilityWindowContains(target)) {
+      void requestCompatibilityWindow(target, {force: true, resume});
+      return;
+    }
+    const shouldResume = resume === null ? previewPending && playWhenPreviewReady : Boolean(resume);
     if (previewCompatibilityRefresh) cancelCompatibilityRequest();
+    previewResumeTime = null;
+    playWhenPreviewReady = false;
     setPreviewGlobalTime(target);
     if (bgmAudio) bgmAudio.currentTime = previewGlobalTime();
     syncPlayback();
+    if (shouldResume && !resultPreviewActive) videoPlayer.play().catch(reportPlayFailure);
   }
 
   function stopSourceAudition(atEnd = false) {
@@ -4135,43 +4192,63 @@ document.addEventListener("DOMContentLoaded", () => {
     segmentsList.dataset.hideTime = String(!event.target.checked);
   });
 
-  // Seeking on timeline
-  timelineTrack.addEventListener("click", async (e) => {
-    if (!totalVideoDuration) return;
+  // Dragging previews the requested position immediately but only commits
+  // once on release, so scrubbing cannot spawn a transcode for every pixel.
+  let timelineDrag = null;
+  let suppressTimelineClick = false;
+  timelineTrack.style.touchAction = "none";
+  function timelineTarget(e) {
     const rect = timelineTrack.getBoundingClientRect();
-    const clickX = e.clientX - rect.left;
-    const pct = Math.max(0, Math.min(1, clickX / rect.width));
-    const targetTime = pct * totalVideoDuration;
-    stopSourceAudition();
-    selectPlaybackAtTime(targetTime);
-
-    if (videoPlayer.currentSrc?.includes("/api/preview/") && !compatibilityWindowContains(targetTime)) {
-      void requestCompatibilityWindow(targetTime, {force: true});
-      return;
-    }
-    if (previewCompatibilityRefresh) cancelCompatibilityRequest();
-    setPreviewGlobalTime(targetTime);
-    if (bgmAudio) bgmAudio.currentTime = targetTime;
+    return Math.max(0, Math.min(1, (e.clientX - rect.left) / Math.max(1, rect.width))) * totalVideoDuration;
+  }
+  function showTimelineDrag(target) {
+    if (playbackHeadMarker) playbackHeadMarker.style.left = `${100 * target / totalVideoDuration}%`;
+    barCurrentTime.textContent = formatTime(target);
+    timelineTrack.setAttribute("aria-valuenow", String(Math.round(target)));
+  }
+  timelineTrack.addEventListener("pointerdown", event => {
+    if (!totalVideoDuration || (event.button !== undefined && event.button !== 0)) return;
+    event.preventDefault();
+    suppressTimelineClick = false;
+    timelineDrag = {id: event.pointerId, target: timelineTarget(event)};
+    timelineTrack.setPointerCapture?.(event.pointerId);
+    timelineTrack.focus();
+    showTimelineDrag(timelineDrag.target);
+  });
+  timelineTrack.addEventListener("pointermove", event => {
+    if (!timelineDrag || event.pointerId !== timelineDrag.id) return;
+    timelineDrag.target = timelineTarget(event);
+    showTimelineDrag(timelineDrag.target);
+  });
+  timelineTrack.addEventListener("pointerup", event => {
+    if (!timelineDrag || event.pointerId !== timelineDrag.id) return;
+    const target = timelineTarget(event);
+    timelineDrag = null;
+    suppressTimelineClick = true;
+    timelineTrack.releasePointerCapture?.(event.pointerId);
+    seekPreviewTime(target);
+  });
+  timelineTrack.addEventListener("pointercancel", () => {
+    timelineDrag = null;
+    suppressTimelineClick = false;
     syncPlayback();
+  });
+  timelineTrack.addEventListener("click", event => {
+    if (suppressTimelineClick) { suppressTimelineClick = false; return; }
+    if (totalVideoDuration) seekPreviewTime(timelineTarget(event));
   });
   timelineTrack.addEventListener("keydown", event => {
     if (!["ArrowLeft", "ArrowRight", "Home", "End"].includes(event.key) || !totalVideoDuration) return;
     event.preventDefault();
-    const target = event.key === "Home" ? 0 : event.key === "End" ? totalVideoDuration : previewGlobalTime() + (event.key === "ArrowLeft" ? -5 : 5);
+    const position = previewDeferredSeek ?? previewCompatibilityTarget ?? previewResumeTime ?? previewGlobalTime();
+    const target = event.key === "Home" ? 0 : event.key === "End" ? totalVideoDuration : position + (event.key === "ArrowLeft" ? -5 : 5);
     const boundedTarget = Math.min(totalVideoDuration, Math.max(0, target));
-    stopSourceAudition();
-    selectPlaybackAtTime(boundedTarget);
-    if (videoPlayer.currentSrc?.includes("/api/preview/") && !compatibilityWindowContains(boundedTarget)) {
-      void requestCompatibilityWindow(boundedTarget, {force: true});
-      return;
-    }
-    if (previewCompatibilityRefresh) cancelCompatibilityRequest();
-    setPreviewGlobalTime(boundedTarget);
-    syncPlayback();
+    seekPreviewTime(boundedTarget);
   });
 
   // Worker controls
   function setWorkerSourceBusy(busy) {
+    if (sourceLanguageSelect) sourceLanguageSelect.disabled = busy;
     if (visualTranslation) visualTranslation.disabled = busy;
     videoUrlInput.disabled = busy;
     fileInput.disabled = busy;
@@ -4241,6 +4318,7 @@ document.addEventListener("DOMContentLoaded", () => {
       if (currentWs) currentWs.close();
       currentWs = null; currentTaskId = taskId; rememberTask(taskId); currentProgress = null;
       restoreSessionVoice(data, taskId);
+      if (sourceLanguageSelect) sourceLanguageSelect.value = data.source_language || data.progress?.source_language || "zh";
       syncCaptionStyleTask();
       resetTaskResult();
       segments = {}; resetScreenTexts(); renderSegmentsDrawer();
@@ -4761,6 +4839,24 @@ document.addEventListener("DOMContentLoaded", () => {
   let logPollTimer = null;
   let diagnosticsVisible = false;
   let renderedLogText = null;
+  let renderedLogFilter = "";
+  function renderReadableLog(category) {
+    const expanded = new Set([...logConsole.querySelectorAll('.diagnostics-entry[open] .diagnostics-raw')].map(el => el.textContent));
+    logConsole.innerHTML = window.studioDiagnostics.render(rawLogText, category);
+    if (expanded.size) logConsole.querySelectorAll('.diagnostics-entry').forEach(entry => {
+      if (expanded.has(entry.querySelector('.diagnostics-raw')?.textContent)) entry.open = true;
+    });
+  }
+
+  function refreshLogPresentation() {
+    if (!logConsole || !window.studioDiagnostics) return;
+    const top = logConsole.scrollTop;
+    renderReadableLog(currentLogCategory);
+    renderedLogText = rawLogText;
+    renderedLogFilter = window.studioDiagnostics.filtersKey();
+    logConsole.scrollTop = chkAutoScroll?.checked ? logConsole.scrollHeight : top;
+  }
+  window.addEventListener("studio:log-filter", refreshLogPresentation);
 
   function setDiagnosticsVisible(visible) {
     diagnosticsVisible = visible;
@@ -4780,7 +4876,7 @@ document.addEventListener("DOMContentLoaded", () => {
   window.addEventListener("pagehide", () => setDiagnosticsVisible(false));
 
   async function loadDiagnosticsLog(cat, { background = false } = {}) {
-    if (background && (!diagnosticsVisible || document.hidden)) return;
+    if (background && (!diagnosticsVisible || document.hidden || document.getElementById("log-live")?.checked === false)) return;
     const categoryChanged = cat !== currentLogCategory;
     currentLogCategory = cat;
     if (!logConsole) return;
@@ -4818,14 +4914,16 @@ document.addEventListener("DOMContentLoaded", () => {
           && (logConsole.contains(selection.anchorNode) || logConsole.contains(selection.focusNode))) return;
       rawLogText = nextLogText;
       const lines = rawLogText.split(/\r?\n/);
-      if (renderedLogText !== rawLogText) {
+      if (renderedLogText !== rawLogText || renderedLogFilter !== (window.studioDiagnostics?.filtersKey() || "")) {
         const scrollTop = logConsole.scrollTop;
         const scrollLeft = logConsole.scrollLeft;
-        logConsole.innerHTML = rawLogText ? lines.map(line => {
+        if (window.studioDiagnostics) renderReadableLog(cat);
+        else logConsole.innerHTML = rawLogText ? lines.map(line => {
           const level = /\b(ERROR|CRITICAL|Exception|Traceback)\b/.test(line) ? "log-line-error" : /\bWARNING\b/.test(line) ? "log-line-warning" : "";
           return `<span class="${level}">${escapeHtml(line)}</span>`;
         }).join("\n") : (cat === "pipeline" ? "Chưa có nhật ký tác vụ. Nội dung sẽ cập nhật khi tải hoặc dịch video." : "Chưa có nhật ký trong mục này.");
         renderedLogText = rawLogText;
+        renderedLogFilter = window.studioDiagnostics?.filtersKey() || "";
         if (!chkAutoScroll?.checked) {
           logConsole.scrollTop = scrollTop;
           logConsole.scrollLeft = scrollLeft;
@@ -4833,6 +4931,9 @@ document.addEventListener("DOMContentLoaded", () => {
       }
       const errors = lines.filter(line => /\b(ERROR|CRITICAL)\b/.test(line)).length;
       const warnings = lines.filter(line => /\bWARNING\b/.test(line)).length;
+      for (const [id,value] of [["log-count-all",lines.filter(line=>/^\d{4}-\d{2}-\d{2}/.test(line)).length], ["log-count-errors",errors], ["log-count-warnings",warnings]]) {
+        const element = document.getElementById(id); if(element) element.textContent=String(value);
+      }
       logSummary.textContent = `${logCategoryLabels[cat]} · ${rawLogText ? lines.filter(Boolean).length : 0} dòng gần nhất · ${errors} lỗi · ${warnings} cảnh báo`;
       if (chkAutoScroll && chkAutoScroll.checked) {
         logConsole.scrollTop = logConsole.scrollHeight;
@@ -4869,7 +4970,8 @@ document.addEventListener("DOMContentLoaded", () => {
       logCopyStatus.textContent = "Chưa có nội dung log để sao chép.";
       return;
     }
-    const copy = rawLogText;
+    const copy = window.studioDiagnostics ? window.studioDiagnostics.filteredText(rawLogText) : rawLogText;
+    if (!copy) { logCopyStatus.textContent = "Không có nhật ký khớp bộ lọc để sao chép."; return; }
     const category = currentLogCategory;
     try {
       let copied = false;
@@ -4887,18 +4989,28 @@ document.addEventListener("DOMContentLoaded", () => {
     }
   });
 
-  document.getElementById("btn-open-log-folder")?.addEventListener("click", () => {
+  document.getElementById("btn-open-log-folder")?.addEventListener("click", async () => {
     if (window.desktopBridge && typeof window.desktopBridge.openLogsFolder === "function") {
       window.desktopBridge.openLogsFolder();
     } else {
-      fetch("/api/diagnostics/open-folder", { method: "POST" });
+      try {
+        const response = await fetch("/api/diagnostics/open-folder", { method: "POST" });
+        if (!response.ok) throw new Error("Không mở được thư mục");
+      } catch (_) {
+        logCopyStatus.textContent = "Không mở được thư mục nhật ký. Kiểm tra kết nối ứng dụng rồi thử lại.";
+      }
     }
   });
 
   document.getElementById("btn-clear-log")?.addEventListener("click", async () => {
     if (confirm(`Bạn có chắc muốn xóa sạch log danh mục '${currentLogCategory}'?`)) {
-      await fetch(`/api/diagnostics/logs/clear?category=${currentLogCategory}`, { method: "POST" });
-      loadDiagnosticsLog(currentLogCategory);
+      try {
+        const response = await fetch(`/api/diagnostics/logs/clear?category=${currentLogCategory}`, { method: "POST" });
+        if (!response.ok) throw new Error("Không xóa được nhật ký");
+        await loadDiagnosticsLog(currentLogCategory);
+      } catch (_) {
+        logCopyStatus.textContent = "Không xóa được nhật ký. Nội dung hiện tại vẫn được giữ.";
+      }
     }
   });
 

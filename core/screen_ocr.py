@@ -22,7 +22,9 @@ class ScreenOCR:
     MAX_DIMENSION = 960
     MIN_CONFIDENCE = .75
 
-    def __init__(self, engine=None, *, cpu_threads=4):
+    def __init__(self, engine=None, *, cpu_threads=4, source_language="zh"):
+        from core.source_language import validate_source_language
+        self.source_language = validate_source_language(source_language)
         self._engine = engine
         if type(cpu_threads) is not int or not 1 <= cpu_threads <= 8:
             raise ValueError("OCR CPU threads must be between 1 and 8")
@@ -45,7 +47,7 @@ class ScreenOCR:
         self._engine = None
 
     @classmethod
-    def detections(cls, result, width: int, height: int) -> list[dict[str, Any]]:
+    def detections(cls, result, width: int, height: int, source_language="zh") -> list[dict[str, Any]]:
         """Keep confident Chinese text with a tight normalized axis-aligned box."""
         if width <= 0 or height <= 0:
             return []
@@ -54,9 +56,10 @@ class ScreenOCR:
             if not isinstance(item, (list, tuple)) or len(item) < 3:
                 continue
             points, text, confidence = item[:3]
-            if not isinstance(text, str) or not re.search(r"[\u3400-\u9fff]", text):
+            if (not isinstance(text, str) or not any(char.isalpha() for char in text)
+                    or source_language == "zh" and not re.search(r"[\u3400-\u9fff]", text)):
                 continue
-            text = re.sub(r"\s+", "", text).strip()
+            text = re.sub(r"\s+", "" if source_language == "zh" else " ", text).strip()
             try:
                 confidence = float(confidence)
                 xs = [float(point[0]) for point in points]
@@ -158,7 +161,7 @@ class ScreenOCR:
                 self._check_cancelled(cancel_check)
                 height, width = frame.shape[:2]
                 samples.append({"time": start + index / self.FPS,
-                                "detections": self.detections(result, width, height)})
+                                "detections": self.detections(result, width, height, self.source_language)})
                 if progress_callback:
                     progress_callback(index + 1, len(frames))
             self._check_cancelled(cancel_check)
@@ -169,8 +172,8 @@ class ChunkScreenOCR(ScreenOCR):
     """Allow many waiting AI chunks with at most two native OCR owners."""
     _admission = threading.BoundedSemaphore(2)
 
-    def __init__(self):
-        super().__init__(cpu_threads=1)
+    def __init__(self, *, source_language="zh"):
+        super().__init__(cpu_threads=1, source_language=source_language)
 
     def extract(self, *args, cancel_check=None, **kwargs):
         while not self._admission.acquire(timeout=.1):

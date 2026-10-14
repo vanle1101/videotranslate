@@ -56,7 +56,7 @@ def source_runtime_identity(session):
     whisper = _assets(model_root, ("model.bin", "config.json", "tokenizer.json", "vocabulary.json", "vocabulary.txt"))
     # Remote-managed model names have no proven asset revision here. Keep this
     # limitation explicit instead of asserting a pinned remote model version.
-    identity = {"revision": 2, "loaded_code": {name: _code(fn) for name, fn in functions.items()},
+    identity = {"revision": 2, "source_language": getattr(session, "source_language", "zh"), "loaded_code": {name: _code(fn) for name, fn in functions.items()},
         "worker_files": workers, "versions": versions, "whisper_assets": whisper,
         "whisper_asset_revision_known": (all(whisper[name] != "unavailable"
             for name in ("model.bin", "config.json", "tokenizer.json"))

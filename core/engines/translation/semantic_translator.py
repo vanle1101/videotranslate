@@ -67,12 +67,13 @@ def _source_semantics(rows, focus=()):
         result["omitted_legacy_rows"] = omitted
     return result
 
-VIDEOLINGO_SUMMARY_PROMPT = """Bạn là chuyên gia phân tích ngữ cảnh và thuật ngữ video ngắn Douyin/TikTok Trung Quốc - Việt Nam.
-Dựa trên toàn bộ bản transcript tiếng Trung sau, hãy thực hiện 3 việc:
+VIDEOLINGO_SUMMARY_PROMPT = """Bạn là chuyên gia phân tích ngữ cảnh và thuật ngữ video đa ngôn ngữ sang tiếng Việt.
+Đầu vào có thể đổi ngôn ngữ giữa các câu hoặc ngay trong một câu. Dịch tất cả lời có căn cứ sang tiếng Việt; trường text_zh/zh là tên dữ liệu cũ, không quy định nguồn phải là tiếng Trung.
+Dựa trên toàn bộ bản transcript ngôn ngữ nguồn sau, hãy thực hiện 3 việc:
 1. "theme": Tóm tắt chủ đề chính và ngữ cảnh/cảm xúc của video trong 1-2 câu.
-2. "terms": Trích xuất danh sách thuật ngữ, tên riêng, tiếng lóng mạng Trung Quốc (trà xanh, tổng tài, pua, cuốn, v.v.) và cách chuyển ngữ tương đương trong văn hóa TikTok Việt Nam.
+2. "terms": Trích xuất danh sách thuật ngữ, tên riêng, tiếng lóng trong ngôn ngữ nguồn và cách chuyển ngữ tương đương trong văn hóa TikTok Việt Nam.
 3. "pronouns": Mô tả từng cặp người nói/người nghe và CHIỀU xưng hô theo lượt,
-   dẫn câu Trung làm căn cứ, nêu phần chưa chắc. Không áp một cặp đại từ duy nhất
+   dẫn câu nguồn làm căn cứ, nêu phần chưa chắc. Không áp một cặp đại từ duy nhất
    cho tất cả nhân vật. Không tự đoán quan hệ từ chủ đề hoặc bản dịch cũ.
 
 Đầu ra định dạng JSON:
@@ -91,7 +92,7 @@ Ngữ cảnh: {theme}
 Cách xưng hô: {pronouns}
 Bảng thuật ngữ: {terms}
 
-Hãy dịch từng câu tiếng Trung sang tiếng Việt qua 3 cấp độ:
+Hãy dịch từng câu nguồn (kể cả tiếng Anh, Trung, Nhật, Hàn xen kẽ) sang tiếng Việt qua 3 cấp độ:
 1. "literal_vi": Dịch sát nghĩa gốc, đủ ý.
 2. "natural_vi": Dịch thoát ý, dùng văn nói đời thường của người Việt, dí dỏm/kịch tính theo đúng tinh thần TikTok, xưng hô nhất quán.
 3. "final_vi": Viết lời thoại tiếng Việt tự nhiên, đủ nghĩa và có dấu câu để đọc. Giữ quan hệ giữa chủ thể, hành động và đối tượng; giữ nguyên nghĩa thuật ngữ, số và đơn vị. Không cắt thành chuỗi từ khóa hay viết tắt để đạt số từ. Thời lượng chỉ là ngữ cảnh; phần mềm đo giọng thật sau khi dịch, không đếm từ để quyết định câu có đúng không.
@@ -592,12 +593,12 @@ Ngữ cảnh thoại nguồn (bản Việt kèm theo có thể sai):
 {ctx_text or '(Đầu video)'}
 
 Quy tắc bắt buộc:
-1. Dịch câu tiếng Trung được cung cấp sang tiếng Việt, không lặp lại nguyên văn tiếng Trung.
+1. Dịch câu nguồn được cung cấp sang tiếng Việt, không lặp lại nguyên văn nguồn.
 2. Xưng hô: {pronouns}
 3. Câu nguồn dài {duration:.1f} giây. Viết lời Việt gọn nhưng đủ nghĩa và đúng ngữ pháp. Không biến thuật ngữ thành từ rời, không bỏ quan hệ chủ thể/hành động/đối tượng, không viết tắt số hoặc đơn vị chỉ để giảm số từ. Phần mềm sẽ đo âm thanh thật để căn nhịp; không hy sinh nghĩa và văn nói để ép vào mốc câu.
 4. Trả về JSON duy nhất: {{"literal_vi": "...", "natural_vi": "...", "final_vi": "...", "needs_review": false, "review_reason": ""}}
-5. Giữ đúng ý gốc. Không thêm thông tin hoặc hành động không có trong câu tiếng Trung; ưu tiên đúng nghĩa hơn văn phong.
-6. Đầu vào có thể bị nhận dạng âm thanh sai. Nếu câu vô nghĩa, mâu thuẫn ngữ cảnh hoặc không đủ căn cứ để hiểu, KHÔNG bịa thành câu có vẻ hợp lý. Giữ bản dịch nháp sát nguồn và needs_review=true, giải thích ngắn bằng tiếng Việt để người dùng nghe lại. Không tự sửa từ tiếng Trung chỉ vì nghe giống nhau.
+5. Giữ đúng ý gốc. Không thêm thông tin hoặc hành động không có trong câu nguồn; ưu tiên đúng nghĩa hơn văn phong.
+6. Đầu vào có thể bị nhận dạng âm thanh sai. Nếu câu vô nghĩa, mâu thuẫn ngữ cảnh hoặc không đủ căn cứ để hiểu, KHÔNG bịa thành câu có vẻ hợp lý. Giữ bản dịch nháp sát nguồn và needs_review=true, giải thích ngắn bằng tiếng Việt để người dùng nghe lại. Không tự sửa từ nguồn chỉ vì nghe giống nhau.
 {VIETNAMESE_ADDRESS_POLICY}
 """
             target = focus_identity(rolling_context or [])
@@ -618,7 +619,7 @@ Ngữ cảnh thoại nguồn (bản Việt kèm theo có thể sai):
 {ctx_text or '(Đầu video)'}
 
 Quy tắc bắt buộc:
-1. Dịch câu tiếng Trung: "{clean_zh}"
+1. Dịch câu nguồn: "{clean_zh}"
 2. Xưng hô: {pronouns}
 3. Câu nguồn dài {duration:.1f} giây. Phần mềm đo thời lượng giọng thật sau khi dịch.
 4. Viết khẩu ngữ tự nhiên, đủ ý và đúng ngữ pháp, có dấu câu. Không cắt thành từ khóa hoặc viết tắt để ép số từ.
@@ -675,7 +676,7 @@ Quy tắc bắt buộc:
                          if measured_duration is not None else "")
         context = format_dialogue_context(rolling_context or [])
         system = f"""Bạn là biên tập viên lời thoại Việt cho video Douyin.
-Giữ chính xác chủ thể, phủ định, hành động và sắc thái của câu Trung; không thêm
+Giữ chính xác chủ thể, phủ định, hành động và sắc thái của câu nguồn; không thêm
 ý mới. Viết lại câu Việt nháp thành khẩu ngữ ngắn, tự nhiên để đọc trong khoảng
 {float(duration):.2f} giây. {measured_hint}Không áp dụng hạn mức số từ. Giữ dấu câu cần thiết
 cho ngữ điệu; không dùng từ viết tắt khó đọc, không bỏ mất ý chính chỉ để ngắn.
@@ -720,7 +721,7 @@ Trả duy nhất JSON: {{"literal_vi":"...","natural_vi":"...","final_vi":"...",
         semantics = _source_semantics(rolling_context, [target] if target else [])
         system += "\n" + SEMANTIC_TRANSLATION_POLICY
         user = (f"Mốc câu cần rút gọn: {json.dumps(target, ensure_ascii=False)}\n"
-                f"Ngữ cảnh gần đây:\n{context}\nsemantic_context: {json.dumps(semantics, ensure_ascii=False)}\n\nNguồn Trung: {clean_zh}\n"
+                f"Ngữ cảnh gần đây:\n{context}\nsemantic_context: {json.dumps(semantics, ensure_ascii=False)}\n\nNguyên văn nguồn: {clean_zh}\n"
                 f"Bản dịch hiện tại: {draft}\nViết lại cho nhịp đọc tự nhiên.")
         if feedback:
             user += ("\nDưới đây là số đo giọng thật và phản hồi các lần thử trước. "
@@ -754,7 +755,7 @@ Trả duy nhất JSON: {{"literal_vi":"...","natural_vi":"...","final_vi":"...",
         # A fluent rewrite is not evidence of fidelity. Verify the exact new
         # wording in a separate request, before any audio/text publication.
         verdict = self._validated_request(
-            'Kiểm định độc lập lời lồng tiếng Việt với câu Trung. Kiểm tra chủ thể, phủ định, '
+            'Kiểm định độc lập lời lồng tiếng Việt với câu nguồn. Kiểm tra chủ thể, phủ định, '
             'mức độ, tên, số, hành động và giọng điệu. Bỏ từ đệm được phép; không bỏ ý. '
             'Tách nguồn thành từng ý, đối chiếu từng ý với từ ngữ và cấu trúc thực có trong candidate, '
             'đặc biệt cách thức, góc nhìn, quan hệ không gian/thời gian. Không dùng previous '

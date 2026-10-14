@@ -17,6 +17,8 @@ def run(request_path, result_path):
     # result channel, including when launched by the desktop pythonw process.
     with contextlib.redirect_stdout(sys.stderr):
         model = load_whisper_model(request["model_size"], request["device"])
+        if request["options"].get("multilingual") and not model.model.is_multilingual:
+            raise ValueError("Tự động đa ngôn ngữ cần model Whisper đa ngôn ngữ; không dùng model .en.")
         segments, _ = model.transcribe(request["audio_path"], **request["options"])
         with Path(result_path).open("w", encoding="utf-8") as output:
             count = 0
