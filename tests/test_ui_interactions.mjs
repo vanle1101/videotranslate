@@ -2405,6 +2405,40 @@ test('download failure remains visible without a popup or false completion', asy
   assert.equal(ui.alerts.length, 0);
 });
 
+test('runtime status displays the cause from finished events and clears it on status-only retry', async () => {
+  const ui = studio(), socket = await startUrl(ui);
+  socket.receive({type:'finished', status:'failed', error:'Edge-TTS không trả audio sau 3 lần.'});
+  assert.match(ui.el('task-progress-stage').textContent, /Edge-TTS không trả audio/);
+  assert.match(ui.el('player-task-status').textContent, /Edge-TTS không trả audio/);
+  socket.receive({type:'progress',status:'RUNNING',phase:'tts'});
+  assert.doesNotMatch(ui.el('task-progress-stage').textContent,/Edge-TTS|thất bại|Lỗi:/);
+  assert.equal(ui.el('player-task-status').textContent,'');
+});
+
+test('polling and history expose the current error safely rather than a generic stage', async () => {
+  const ui = studio(), socket = await startUrl(ui);
+  socket.receive({type:'error',message:'Lỗi cũ'});
+  await ui.flush();
+  const failed = {task_id:'download-fixture',status:'FAILED',phase:'failed',stage:'Xử lý thất bại',
+    error:'Muse timeout <img src=x onerror=alert(1)>',saved:true};
+  ui.replies.set('/api/tasks',{tasks:[failed],videos:[failed]});
+  await ui.el('btn-refresh-tasks').click();
+  assert.match(ui.el('task-progress-stage').textContent,/Muse timeout/);
+  assert.doesNotMatch(ui.el('task-progress-stage').textContent,/Lỗi cũ/);
+  assert.match(ui.el('tasks-table-body').children[0].innerHTML,/Muse timeout &lt;img/);
+  socket.receive({type:'progress',status:'FAILED',phase:'failed',stage:'Căn tiếng vượt thời lượng'});
+  assert.match(ui.el('task-progress-stage').textContent,/Căn tiếng vượt thời lượng/);
+  assert.doesNotMatch(ui.el('task-progress-stage').textContent,/Muse timeout/);
+});
+
+test('a status-only failure never presents the last running stage as its error cause', async () => {
+  const ui=studio(), socket=await startUrl(ui);
+  socket.receive({type:'progress',status:'RUNNING',phase:'download',stage:'Đang tải video'});
+  socket.receive({type:'progress',status:'FAILED',phase:'failed'});
+  assert.match(ui.el('task-progress-stage').textContent,/chưa cung cấp chi tiết/);
+  assert.doesNotMatch(ui.el('task-progress-stage').textContent,/Đang tải video/);
+});
+
 test('Tasks shows download phase without null percent; disconnected realtime shows real status', async () => {
   const ui = studio(), socket = await startUrl(ui);
   ui.replies.set('/api/tasks', { tasks: [{ task_id: 'download-fixture', task_type: 'Dịch video', status: 'RUNNING', phase: 'download', stage: 'Đang tải video', progress_pct: null, can_stop: true }] });

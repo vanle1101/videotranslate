@@ -354,6 +354,52 @@ def test_corrupt_manifest_is_listed_but_cannot_open(persisted):
         restore_saved_session(persisted.task_id)
 
 
+def test_saved_history_preserves_failure_cause_and_resume_clears_it(persisted):
+    persisted.initialized = False
+    persisted.segments.clear()
+    persisted.error = "Muse timeout sau 120 giây"
+    persisted.persist()
+    row = list_saved_sessions()[0]
+    assert row["status"] == "FAILED"
+    assert "Muse timeout sau 120 giây" in row["stage"]
+    for _ in range(2):
+        restored = restore_saved_session(persisted.task_id)
+        assert "Muse timeout sau 120 giây" in restored.get_progress()["stage"]
+        restored.persist()
+        active_streaming_sessions.pop(persisted.task_id)
+    assert list_saved_sessions()[0]["stage"].count("Muse timeout sau 120 giây") == 1
+    restored.error = None
+    restored._restored_interrupted = False
+    restored.is_running = True
+    restored.persist()
+    assert "Muse timeout" not in list_saved_sessions()[0]["stage"]
+
+
+def test_legacy_saved_history_uses_real_failed_segment_detail(persisted):
+    segment = persisted.segments[0]
+    segment.status, segment.failed_stage = "FAILED", "TTS"
+    segment.error = "Edge-TTS không trả audio sau 3 lần"
+    persisted.error = "Một câu chưa tạo được giọng"
+    persisted.persist()
+    path = _project_path(persisted.task_id)
+    from core.streaming import session_store as store
+    data = store._read(persisted.task_id)
+    data["session"].pop("last_runtime_error", None)
+    path.write_text(store._encode_project(data), encoding="utf-8")
+    row = list_saved_sessions()[0]
+    assert "Câu 0: Edge-TTS không trả audio sau 3 lần" in row["stage"]
+
+
+def test_saved_failure_details_redact_configured_secrets(persisted, monkeypatch):
+    monkeypatch.setattr(settings, "GEMINI_API_KEY", "private-key-should-stay-secret")
+    persisted.initialized = False
+    persisted.segments.clear()
+    persisted.error = "Provider rejected private-key-should-stay-secret"
+    persisted.persist()
+    assert "private-key-should-stay-secret" not in _project_path(persisted.task_id).read_text(encoding="utf-8")
+    assert "[redacted]" in list_saved_sessions()[0]["stage"]
+
+
 def test_history_excluded_manifest_is_never_read_or_media_validated(persisted, monkeypatch):
     from core.streaming import session_store as store
     original_read = store._read

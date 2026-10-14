@@ -186,6 +186,7 @@ document.addEventListener("DOMContentLoaded", () => {
   if (typeof QWebChannel !== "undefined" && window.qt && window.qt.webChannelTransport) {
     new QWebChannel(window.qt.webChannelTransport, function(channel) {
       window.desktopBridge = channel.objects.desktopBridge;
+      window.restoreStudioLayout?.(window.desktopBridge);
       console.log("[Bridge] Native desktop bridge connected successfully.");
     });
   }
@@ -1369,7 +1370,14 @@ document.addEventListener("DOMContentLoaded", () => {
   }
 
   function progressMessage(progress, fallback = "") {
-    return progress?.stage || progress?.message || fallback;
+    const text = value => typeof value === "string" ? value.trim() : "";
+    if (String(progress?.status || "").toUpperCase() === "FAILED") {
+      // Runtime failures arrive as stage in progress snapshots, message in
+      // error events, and error in finished events. Preserve their cause.
+      const cause = text(progress.error) || text(progress.message) || text(progress.stage);
+      return cause || "Lỗi xử lý: máy chủ chưa cung cấp chi tiết. Mở Chẩn đoán để kiểm tra.";
+    }
+    return text(progress?.stage) || text(progress?.message) || fallback;
   }
 
   function updatePlayerDownloadProgress(progress, pct, terminal = false) {
@@ -1422,6 +1430,17 @@ document.addEventListener("DOMContentLoaded", () => {
     taskPollWarning = false;
     const previousPreparedSeconds = Number(currentProgress?.source_prepared_seconds);
     const previousStatus = currentProgress?.status;
+    if (previousStatus === "FAILED" && progress.status !== undefined && progress.status !== "FAILED") {
+      // A retry can start with a status-only patch; do not display the old
+      // failure as the new running stage while waiting for its first update.
+      currentProgress = {...currentProgress, error: null, message: null, stage: null};
+    }
+    if (progress.status === "FAILED" && previousStatus !== "FAILED" && progress.stage === undefined) {
+      currentProgress = {...currentProgress, stage: null, message: null, error: null};
+    }
+    if (progress.stage !== undefined && progress.error === undefined && progress.message === undefined) {
+      currentProgress = {...currentProgress, error: null, message: null};
+    }
     if (currentProgress && ((progress.phase !== undefined && progress.phase !== currentProgress.phase) ||
         (progress.status !== undefined && progress.status !== currentProgress.status) ||
         (progress.translation_mode !== undefined && progress.translation_mode !== currentProgress.translation_mode)) &&
@@ -1483,7 +1502,8 @@ document.addEventListener("DOMContentLoaded", () => {
     if (!streamDisconnected) taskConnectionStatus.classList.add("hidden");
     taskProgress.classList.remove("hidden");
     taskProgress.dataset.status = status;
-    taskProgressStage.textContent = `${status === "PAUSED" ? "Đã tạm dừng · " : ""}${currentProgress.stage || (isPreviewReady(status) ? "Đoạn xem trước đã sẵn sàng" : reviewInProgress() ? "AI đang kiểm tra lại bản dịch…" : "Đang xử lý video…")}`;
+    taskProgressStage.textContent = `${status === "PAUSED" ? "Đã tạm dừng · " : ""}${progressMessage(currentProgress, isPreviewReady(status) ? "Đoạn xem trước đã sẵn sàng" : reviewInProgress() ? "AI đang kiểm tra lại bản dịch…" : "Đang xử lý video…")}`;
+    taskProgressStage.title = taskProgressStage.textContent;
     bufferingAlert.dataset.state = status === "FAILED" ? "error" : status === "PAUSED" ? "paused" : "loading";
     taskProgressValue.textContent = terminal && pct === null ? "" : displayed.label;
     showEta(taskProgressEta, currentProgress);
@@ -3200,7 +3220,7 @@ document.addEventListener("DOMContentLoaded", () => {
       }
       else if (msg.type === "error") {
         const message = msg.message || msg.error || "Xử lý thất bại. Xem Diagnostics rồi thử lại.";
-        showTaskProgress({ phase: "failed", status: "FAILED", stage: message, progress_pct: null });
+        showTaskProgress({ phase: "failed", status: "FAILED", stage: message, error: message, message: null, progress_pct: null });
         updateTasksTable();
       }
       else if (msg.type === "finished") {
@@ -4506,7 +4526,7 @@ document.addEventListener("DOMContentLoaded", () => {
         const canOpen = historyTaskId(version.task_id) && !version.task_id.startsWith("export_") && version.can_open !== false;
         return `<div class="history-version" data-session-id="${escapeHtml(version.task_id || "")}">
           <div><span class="history-version-label">${label}</span>${versionDate ? `<time>${escapeHtml(versionDate)}</time>` : ""}
-          <span class="history-version-state">${historyStatus(version)}</span>${version.stage ? `<span class="history-version-stage">${escapeHtml(version.stage)}</span>` : ""}</div>
+          <span class="history-version-state">${historyStatus(version)}</span>${progressMessage(version) ? `<span class="history-version-stage">${escapeHtml(progressMessage(version))}</span>` : ""}</div>
           ${canOpen ? `<button onclick="window.openTaskInStudio('${version.task_id}')" class="history-button history-button-secondary">Mở bản này</button>` : '<span class="history-version-unavailable">Không mở được</span>'}
         </div>`;
       }).join("")}</div>
@@ -4529,7 +4549,7 @@ document.addEventListener("DOMContentLoaded", () => {
       <td class="history-progress-cell">${historyStatusBadge(task)}
         <div class="history-progress-content">
           ${terminalWithoutProgress ? "" : `<div class="history-progress-track" role="progressbar" aria-label="Tiến độ video"${pct === null ? ' aria-valuetext="Chưa có số liệu phần trăm" data-indeterminate="true"' : ` aria-valuemin="0" aria-valuemax="100" aria-valuenow="${pct}" data-indeterminate="false"`}><div class="history-progress-fill" style="width: ${pct === null ? 100 : pct}%"></div></div>`}
-          <span class="history-progress-label">${terminalWithoutProgress ? "" : `${escapeHtml(progressLabel)} · `}${etaLabel ? `${escapeHtml(etaLabel)} · ` : ""}${escapeHtml(task.stage || "")}</span>
+          <span class="history-progress-label">${terminalWithoutProgress ? "" : `${escapeHtml(progressLabel)} · `}${etaLabel ? `${escapeHtml(etaLabel)} · ` : ""}${escapeHtml(progressMessage(task))}</span>
         </div></td>
       <td class="history-duration-cell">${formatTime(task.duration)}</td>
       <td class="history-actions-cell"><div class="history-actions">${actions || '<span class="history-no-action">—</span>'}</div></td>
@@ -4590,7 +4610,7 @@ document.addEventListener("DOMContentLoaded", () => {
       }
       if (activeTask) {
         const statusChanged = activeTask.status !== currentProgress?.status;
-        const progressChanged = ["phase", "stage", "progress_pct", "stage_progress_pct", "processing_progress_pct", "processing_completed_segments", "processing_total_segments", "processing_scope", "processing_total_known", "downloaded_bytes", "total_bytes", "speed", "eta", "eta_seconds", "eta_scope", "eta_reason", "eta_missing_stages", "can_retry", "can_repair_failed", "can_pause", "can_resume", "can_stop", "can_review", "review_count", "output_video_url", "output_filename", "translation_mode", "can_translate_full", "preview_seconds", "processed_seconds", "source_prepared_seconds", "total_seconds", "review_scope", "chunk_workers", "configured_chunk_workers"]
+        const progressChanged = ["phase", "stage", "error", "message", "progress_pct", "stage_progress_pct", "processing_progress_pct", "processing_completed_segments", "processing_total_segments", "processing_scope", "processing_total_known", "downloaded_bytes", "total_bytes", "speed", "eta", "eta_seconds", "eta_scope", "eta_reason", "eta_missing_stages", "can_retry", "can_repair_failed", "can_pause", "can_resume", "can_stop", "can_review", "review_count", "output_video_url", "output_filename", "translation_mode", "can_translate_full", "preview_seconds", "processed_seconds", "source_prepared_seconds", "total_seconds", "review_scope", "chunk_workers", "configured_chunk_workers"]
           .some(key => activeTask[key] !== undefined && activeTask[key] !== currentProgress?.[key]) ||
           ["review_summary", "ai_queue"].some(key => activeTask[key] !== undefined &&
             JSON.stringify(activeTask[key]) !== JSON.stringify(currentProgress?.[key]));

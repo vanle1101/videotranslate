@@ -3,6 +3,7 @@ import sys
 import json
 import logging
 import shutil
+import math
 from pathlib import Path
 
 # Ensure application root is in sys.path
@@ -14,7 +15,7 @@ if str(APP_ROOT) not in sys.path:
 from config import settings, SafeStream
 
 from PySide6.QtCore import (
-    Qt, QThread, Signal, Slot, QObject, QTimer, QSize, QUrl, QEvent
+    Qt, QThread, Signal, Slot, QObject, QTimer, QSize, QUrl, QEvent, QSettings
 )
 from PySide6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
@@ -93,11 +94,49 @@ class DesktopBridge(QObject):
     videoSelected = Signal(str)
     exportSaved = Signal(str)
 
-    def __init__(self, main_window):
+    def __init__(self, main_window, layout_settings=None):
         # The bridge's native lifetime belongs to the window just like its
         # WebEngine view and channel; registerObject() does not take ownership.
         super().__init__(main_window)
         self.main_window = main_window
+        self._layout_settings = layout_settings if layout_settings is not None else QSettings("Douyin2TikTok", "AIStudio")
+
+    @staticmethod
+    def _column_proportions(raw):
+        try:
+            values = json.loads(raw)
+            if not isinstance(values, list) or len(values) != 3:
+                return None
+            if any(type(v) not in (float, int) or not math.isfinite(v) or v <= 0 for v in values):
+                return None
+            total = sum(values)
+            if not math.isfinite(total) or total <= 0:
+                return None
+            normalized = [v / total for v in values]
+            return normalized if all(v > 0 for v in normalized) else None
+        except (ValueError, TypeError, OverflowError):
+            return None
+
+    @Slot(result=str)
+    def getColumnWidths(self):
+        """Desktop preferences survive the backend's changing localhost port."""
+        values = self._column_proportions(self._layout_settings.value("editor/column-widths-v1", "null"))
+        return json.dumps(values)
+
+    @Slot(str, result=bool)
+    def setColumnWidths(self, raw):
+        values = self._column_proportions(raw)
+        if values is None:
+            return False
+        self._layout_settings.setValue("editor/column-widths-v1", json.dumps(values))
+        self._layout_settings.sync()
+        return self._layout_settings.status() == QSettings.Status.NoError
+
+    @Slot(result=bool)
+    def resetColumnWidths(self):
+        self._layout_settings.remove("editor/column-widths-v1")
+        self._layout_settings.sync()
+        return self._layout_settings.status() == QSettings.Status.NoError
 
     @Slot(result=str)
     def pickVideoFile(self) -> str:

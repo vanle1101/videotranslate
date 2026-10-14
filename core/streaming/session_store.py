@@ -166,6 +166,16 @@ def _redaction_values():
     return _secrets() if current is None else current
 
 
+def _history_error(value):
+    if not isinstance(value, str):
+        return None
+    # Exception representations can embed whole headers/cookies. Do not put
+    # those in a durable manifest, even if one configured key was redacted.
+    if re.search(r"authorization|api[_-]?key|headers|cookies?|bearer\s|access[_-]?token", value, re.I):
+        return "Lỗi dịch vụ; phần thông tin xác thực trong chi tiết lỗi đã được ẩn."
+    return _clean(value)[:2000]
+
+
 def _clean_diagnostic(value, *, depth):
     """Persist the reviewer's fixed diagnostic schema, never arbitrary errors."""
     if not isinstance(value, dict):
@@ -529,6 +539,10 @@ def _save_session(session):
         path = getattr(session, key, None)
         fields[key] = _local_path(str(Path(path).resolve()), generated=key in ("raw_audio_16k", "bgm_audio_path")) if path else None
     fields["source_url"] = _source_url(getattr(session, "source_url", None))
+    # Preserve history diagnostics without restoring a runtime failure flag.
+    # Once Resume clears error, the next checkpoint clears this field too.
+    error = getattr(session, "error", None)
+    fields["last_runtime_error"] = _history_error(error)
     # Output validation is transient: a history scan must never write its
     # current probe warning back into the project manifest.
     if "warnings" in fields:
@@ -612,8 +626,13 @@ def _validate_project(data, task_id):
             or data["state"] not in {"STOPPED", "FAILED", "RUNNING", "READY"}):
         raise ValueError("Tệp dự án không đúng định dạng.")
     fields, rows = data["session"], data["segments"]
-    if not isinstance(fields, dict) or set(fields) - (SESSION_FIELDS | set(PATH_FIELDS) | {"source_url", "output_filename", "review_filename"}):
+    if not isinstance(fields, dict) or set(fields) - (SESSION_FIELDS | set(PATH_FIELDS) | {"source_url", "output_filename", "review_filename", "last_runtime_error"}):
         raise ValueError("Cấu hình dự án không hợp lệ.")
+    saved_error = fields.get("last_runtime_error")
+    if saved_error is not None and (not isinstance(saved_error, str) or len(saved_error) > 2000):
+        raise ValueError("Chi tiết lỗi đã lưu không hợp lệ.")
+    if saved_error:
+        fields["last_runtime_error"] = _history_error(saved_error)
     for key in PATH_FIELDS:
         fields[key] = _local_path(fields.get(key), generated=key in ("raw_audio_16k", "bgm_audio_path"))
     for key in ("output_filename", "review_filename"):
@@ -1052,6 +1071,20 @@ def _availability(data):
         message = ("Bản MP4 cũ dùng cách dựng phụ đề/làm mờ trước đây; file cũ vẫn được giữ. "
                    "Xuất video lại để áp dụng kiểu phụ đề và vùng làm mờ mới." if legacy_default_caption else
                    "Lời dịch và giọng đã lưu; chưa có MP4 được kiểm định. Mở dự án và xuất video.")
+    if not ready and not preview_ready and data["state"] in {"FAILED", "STOPPED"}:
+        cause = fields.get("last_runtime_error") or ""
+        if "Lỗi gần nhất: " in cause:
+            cause = cause.split("Lỗi gần nhất: ")[-1]
+        row_causes = []
+        for row in rows:
+            if row["status"] == "FAILED" and row.get("error"):
+                detail = f"Câu {row['id']}: {row['error']}"
+                if detail not in row_causes and detail not in cause:
+                    row_causes.append(detail)
+        # Old manifests still contain segment errors; report those as evidence.
+        details = " · ".join(([cause] if cause else []) + row_causes[:3])
+        if details and details not in message:
+            message = f"{message} Lỗi gần nhất: {details[:2000]}".strip()
     return {"status": status, "missing_media": message, "ready": ready, "preview_ready": preview_ready,
             **output_gate,
             **preview_output,
@@ -1238,6 +1271,8 @@ def _restore_saved_session_owned(task_id, event_callback=None):
         session.error = (available["missing_media"] if available["preview_source_unprepared"] else
                         "Dịch video chưa xong; các câu đã dịch và giọng đọc được giữ. Bấm Tiếp tục để xử lý phần còn lại."
                          if visual_incomplete else "Chuẩn bị video bị gián đoạn; bấm Tiếp tục để khôi phục phần đã lưu.")
+        if "Lỗi gần nhất: " in available["missing_media"]:
+            session.error = available["missing_media"]
         if available["pending_download"]:
             session._source_downloader = _SavedSourceDownloader()
     if available["preview_ready"]:

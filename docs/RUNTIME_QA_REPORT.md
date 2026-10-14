@@ -1,5 +1,28 @@
 # Runtime QA report
 
+## Magenta editor, resizable columns and error details — October 14, 2026
+
+Scope: user-supplied charcoal/magenta reference; no notification/avatar controls; adjustable column widths; show actual task errors. Existing Muse/provider configuration and media were retained. The reference's decorative waveform and unsupported cutting/effects controls were not presented as working features; the timeline shows actual segment readiness and supports seeking.
+
+Root causes fixed: fixed column sizes could not be adjusted; localStorage alone loses layout across the desktop's random backend ports; compact player sizing could clip transport when a multiline task message appears; frontend error events and history rows used inconsistent error fields; saved checkpoints did not retain the top-level runtime error.
+
+Changes: themed template/CSS/SVGs, separate source/progress/action panels, translation/original/advanced tabs, transcript search, linked caption/audio/voice tools, two pointer/keyboard separators with reset, validated native QSettings layout persistence, normalized error display and redacted saved failure causes. Fullscreen navigation and workflow IDs are preserved.
+
+| Test / exact steps | Expected | Actual / retest |
+| --- | --- | --- |
+| Real offscreen Qt against production FastAPI; click Studio/History/Models/Diagnostics/Settings | Correct view shown | PASS |
+| Switch URL/file/library; open translation/original/advanced; use caption/audio/voice toolbar | Real controls reachable, correct tabs/focus | PASS |
+| Drag right separator, arrow-key left separator, reload, reset | Adjacent columns resize; total width preserved; preferences restored | PASS with actual Qt pointer/keyboard input |
+| Resize 1672×941 → 1366×768 → 1024×768 | No horizontal overflow or clipped player transport | Initial transport clipping FAIL; corrected intrinsic player sizing; final PASS |
+| Recreate native settings owner, load on another origin, reject malformed values | Layout survives changing localhost ports without touching other preferences | PASS: 12 native storage regressions, real Qt bridge restore; late callbacks and interrupted drags covered by JS tests |
+| Open saved project755a2fe4; advanced tab; search nonexistent text then clear; open/cancel an editable translation | Caption font/size/color/opacity/blur accessible, rows filtered, drafts safe | PASS with real saved source; no edit was submitted |
+| Native fullscreen → Settings → Back → fullscreen → Escape | No hidden fullscreen trap | PASS with real Qt clicks and native Escape |
+| Error-only/message-only events, retry, restored FAILED manifests | Actual failure detail visible, stale failure cleared, credentials hidden | PASS in regression tests; injected failures are not real provider tests |
+
+Final focused automated checks: **274 JavaScript tests PASS** (263 existing/extended app +11 workspace); **208 Python tests PASS** (session store, asset versions, Qt window, native layout). JavaScript syntax and git whitespace checks pass. No TypeScript/npm build applies to this Python/vanilla-JS desktop.
+
+Limits: this UI acceptance does not rerun paid/remote generation, native save dialogs, destructive deletion, or full MP4 export. Those controls remain wired to their existing handlers and covered where applicable by interaction regressions. Existing unresolved video timing/content issues below remain; no full-video completion or “all project errors fixed” claim is made. Offscreen GPU fallback warnings occurred; the UI rendered and the checked interactions passed. QA servers/workers and task-created screenshots/logs were removed after testing; normal Studio is launched separately for the user.
+
 ## Restart recovery acceptance — October 12, 2026, 21:58
 
 **PASS for restoring the existing project; full MP4 remains BLOCKED.** The reported E: project `265796c3` is not present on this machine. Its exact media/provider outcome is not claimed.
