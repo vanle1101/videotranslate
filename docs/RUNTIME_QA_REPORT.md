@@ -1,5 +1,18 @@
 # Runtime QA report
 
+## Retained translated-preview playback — October 15, 2026, 05:54
+
+The strengthened preview helper initially failed because it selected source text
+hidden by the Translation tab. It now uses the visible transcript timestamp
+button. Fresh offscreen UI attachment to retained preview `d5820a71`, selecting
+row15 and pressing Play, loaded the exact `/audio/d5820a71/15?rev=0` WAV. The
+native audio reached readyState4/time0.130904, unpaused/unmuted/volume1 with
+one `playing` event; video concurrently reached time9.09436/readyState4 with
+no seeking or media error. No alert occurred. **Preview media execution PASS.**
+The page was muted, so this does not claim listening/naturalness verification.
+No translation, promotion, editing or second backend was triggered; the page
+exited and the ongoing long-source task was left intact.
+
 ## New long-source run and lexical fidelity check — October 15, 2026, 05:31
 
 The production resumable downloader completed the new natural Douyin source

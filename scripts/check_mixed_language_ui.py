@@ -54,7 +54,13 @@ def check_translated_preview(page, snapshot):
     assert evaluate(page, MEDIA_OBSERVER)
     if evaluate(page, "!document.getElementById('video-player').paused"):
         click_ready(page, 'player-play-toggle')
-    click_ready(page, f"seg-zh-{row['id']}")
+    # Source text is intentionally hidden in the Translation tab. The time
+    # button is the visible seek control in both transcript modes.
+    selector = json.dumps(f"#seg-row-{row['id']} .transcript-time")
+    until(page, "(() => {const e=document.querySelector(" + selector +
+        ");return !!e && !e.disabled && e.getClientRects().length>0;})()")
+    assert evaluate(page, "(() => {const e=document.querySelector(" + selector +
+        ");e.scrollIntoView({block:'nearest'});e.click();return true;})()")
     until(page, "(() => {const v=document.getElementById('video-player');return v.readyState>=2 && !v.seeking;})()", timeout=120)
     # Match the precise revisioned WAV, not BGM, voice samples or source audio.
     expected = json.dumps(row['audio_url'])
