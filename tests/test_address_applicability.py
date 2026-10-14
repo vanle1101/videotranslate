@@ -306,6 +306,7 @@ def test_uncertain_first_person_warning_does_not_claim_a_sibling_relationship(mo
     ("Bố và mẹ đợi con.", ["Bố", "mẹ", "con"]),
     ("Mẹ mẹ đợi nhé.", ["Mẹ", "mẹ"]),
     ("Ba ba chờ ba phút.", ["Ba", "ba"]),
+    ("Chúng ta đi thôi; chúng tôi sẽ gọi lại.", ["Chúng ta", "chúng tôi"]),
 ])
 def test_address_selector_preserves_complete_phrases_and_repeated_occurrences(candidate, expected):
     assert address_expressions(candidate) == expected
@@ -326,6 +327,21 @@ def phrase_audit(uses):
     return {"address_applicable": True, "address_verified": True, "semantic_verified": True,
         "address_reason": "Đã đối chiếu đúng cụm được dùng với lời nguồn độc lập.",
         "address_uses": uses}
+
+
+@pytest.mark.parametrize("term", ["chúng ta", "chúng tôi", "chúng mình", "bọn mình", "các con"])
+def test_plural_address_keeps_grounded_whole_phrase_and_role(term):
+    source = "我们参观博物馆"
+    candidate = f"Hôm nay {term} đi thăm bảo tàng."
+    reading = phrase_reading(term, "self", source=source)
+    audit = phrase_audit([{"term": term, "role": "self"}])
+    assert not AutomaticTranslationReviewer._address_gate(reading, 10, audit, source, candidate)
+    # Lexical recognition cannot approve an ungrounded inclusive/exclusive
+    # choice or turn a self reference into a listener reference.
+    uncertain = phrase_reading(term, "self", certain=False, source=source)
+    assert AutomaticTranslationReviewer._address_gate(uncertain, 10, audit, source, candidate)
+    wrong_role = phrase_audit([{"term": term, "role": "listener"}])
+    assert AutomaticTranslationReviewer._address_gate(reading, 10, wrong_role, source, candidate)
 
 
 def test_actual_cogai_phrase_matches_grounded_listener_without_guessing_speaker():

@@ -1,5 +1,39 @@
 # Runtime QA report
 
+## Mixed-language production export — October 14, 2026, 15:50 retest
+
+**Runtime export/playback PASS; semantic approval remains REVIEW_REQUIRED.** This supersedes the in-progress snapshot below. The fixture is a synthetic 24-second video containing real Edge English and Chinese speech, not a real-world movie or long-video stress test. Production Muse, ASR, Edge-TTS, audio mixing, FFmpeg and Qt playback were used without provider mocks.
+
+- First run through actual Start controls preserved two English and two Chinese utterances, translated all four to Vietnamese and generated four speech files. Muse timed out once and succeeded on the bounded retry. The harness initially failed because it tried to click Translate Full before the WebSocket enabled that control; it now waits for the actual enabled/visible button.
+- Fresh process restored QA task `00b293c5` from disk, clicked Translate Full, waited for the production automatic export and opened the result player. No ASR or already generated speech was repeated. MP4: `workspace/outputs/douyin_translated_00b293c5_hq.mp4`, 238,757 bytes, 24.000 seconds, audio and video streams present; complete FFmpeg decode passed.
+- Qt result playback reached readyState4 and advanced to0.473822s, unpaused,640x360, no media error. Page reload retained the same task and four rows. Owned QA backend stopped and process exited successfully; no desktop input or visible browser was used.
+- One row is verified, three retain REVIEW_REQUIRED. Row0 has disagreement between recognizers (`Good morning.` / `Good morn-`); rows1/2 retain unresolved inclusive/exclusive pronoun evidence. Export is a playable translated draft, not certification of semantic accuracy. No uncertainty was cleared to make this test pass.
+- Fixed a separately confirmed lexical gate bug: plural forms such as `chúng ta` were split into `ta`, preventing exact matching against an independently grounded whole phrase. Whole-phrase extraction now preserves these terms, and regressions verify that missing evidence or wrong speaker role still fails. The saved three unresolved reviews have not yet been re-adjudicated with this fix.
+- Preserved explicit word-alignment `clip_timestamps` in the multilingual worker rather than replacing them with a fresh VAD scope. Source-language regression passed. Focused persistence/media/Edge/recovery/source run:308 PASS; context/address/source suite after the plural fix:175 PASS. These suites overlap and are not summed.
+
+Remaining: the source-evidence crop needs investigation, old320s project timing/review blockers remain, uncached source seeking still needs conversion time, and multi-hour runtime acceptance is unproven. This is not an all-project completion claim.
+
+## Read-ahead seeking and mixed-language retest — October 14, 2026, 15:25 snapshot
+
+**PASS for the measured source-player checks; mixed-language MP4 acceptance remains IN PROGRESS.** This section supersedes the earlier 24-second seeking configuration and the earlier statement that Edge-TTS retesting had not run. It does not supersede unresolved content/timing gates.
+
+Changes in commits `0c1c559` and `64c4b0d`: the compatibility player now requests aligned **12-second** windows and prepares only the next window during playback. Ready windows are reused; a different seek cancels obsolete queued work. Read-ahead never starts translation or moves the playhead. Completion of a speculative request cannot replace a newer user-selected position. Stop/pagehide cancel pending reads. The source remains unchanged; full-source transcoding is not the default. Edge-TTS is pinned to 7.3.1 with service-protocol validation; an outdated client now produces an actionable error instead of repeated opaque HTTP403 failures.
+
+| Test and exact steps | Expected | Actual / retest |
+| --- | --- | --- |
+| Start an owned backend → production Qt offscreen → select existing `video_f68bfcb73b13425eb6fd838372765879.mp4` (320.040635s) → click timeline near160s | Real picture and readable media at the chosen source time | PASS. Final measured cold seek3.953s, readyState4. A preceding CPU-contended run measured6.718s; do not describe cold access as instant |
+| From160s click162s →5s →160s | Forward and backward seeks reuse available windows | PASS:0.109s /0.235s /0.234s. Pointer coordinates are integer-quantized by Chromium; measured global positions differ by less than1s from requested targets |
+| Play continuously from159.825s across the168s window boundary until169.146s | Advance into the prepared next window and keep playing | PASS:9.813s wall time for9.321s of source progress; readyState4, paused=false. Approximately0.49s total overhead was observed, so gapless playback is **not** claimed |
+| Pause → rapidly click240s →20s →60s → wait for media | Last requested position wins; no late autoplay | PASS: final global60.247s, readyState4, paused=true |
+| Regression: play/read-ahead → boundary; pause while loading; different seek; pagehide | One conversion per needed slot; cancellation and stale responses cannot rewind/resume video | PASS in the JavaScript interaction harness. These injected response tests are separate from the real Qt/media measurements above |
+| Real UI QA project `00b293c5`, source `cleanup/qa/mixed-language-retest.mp4`, auto source language → Muse review → Edge-TTS | Preserve English and Chinese speech and translate into Vietnamese; generate real audio | IN PROGRESS at this snapshot. Persisted project has four translated utterances, stateRUNNING, output filename empty. Muse review reports1 verified and3 unresolved; uncertainty was not converted to approval |
+| Same QA job, first real Edge request after protocol update | Nonempty provider audio instead ofHTTP403 | PASS for this request: pipeline log15:25:20 records11,232audio bytes,3word boundaries,734ms. Raw audio was cached. This does not prove every provider request or final mix succeeds |
+| Same first sentence, measured voice vs source slot | Enforce natural-speed timing rather than force an invalid export | Correctly enters timing adjustment:1.000s speech vs0.600s slot; required speed1.6667 exceeds configured maximum1.15. No completed MP4 is asserted |
+
+Verification rerun for this documentation update: `node --test --test-reporter=spec tests/test_ui_interactions.mjs` — **274 PASS,0 FAIL**,4.580s. This is the app interaction suite alone; do not sum it with overlapping historical totals. Real player acceptance is reproducible with `scripts/check_source_seek_ui.py`; its owned backend shut down after the successful run, with no desktop control or provider generation during that source-only test.
+
+Files relevant to this retest: `static/app.js`, `core/media_preview.py`, `tests/test_ui_interactions.mjs`, `tests/test_media_preview.py`, `scripts/check_source_seek_ui.py`, `core/engines/tts/edge_fallback.py`, `requirements.txt`, and associated Edge/source-language/session regressions. Mixed-language testing uses `scripts/check_mixed_language_ui.py`; additional ASR changes remain under evaluation. Remaining limitations: first uncached windows still require seconds of conversion, decoder window switches are not proven gapless, semantic/source-language review remains probabilistic, and project `00b293c5` has not produced a verified final MP4 at this recorded snapshot. Earlier long-video timing conflicts are not declared resolved by these player/provider fixes.
+
 ## Column drag, seeking, language selection and readable logs — October 14, 2026
 
 **Accepted for the UI interactions below; this is not full translation/export acceptance.** Testing used the actual FastAPI backend and production Qt window offscreen, with real local media and HTTP requests. No desktop mouse/keyboard input or new translation job was required for the UI checks. Existing user media and checkpoints were retained.

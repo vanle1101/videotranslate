@@ -21,7 +21,7 @@ def run(request_path, result_path):
             raise ValueError("Tự động đa ngôn ngữ cần model Whisper đa ngôn ngữ; không dùng model .en.")
         options = dict(request["options"])
         audio = request["audio_path"]
-        if options.get("multilingual"):
+        if options.get("multilingual") and options.get("clip_timestamps", "0") == "0":
             from faster_whisper.audio import decode_audio
             from faster_whisper.vad import get_speech_timestamps, VadOptions
             audio = decode_audio(audio, sampling_rate=16000)

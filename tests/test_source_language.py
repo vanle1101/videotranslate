@@ -82,6 +82,25 @@ def test_auto_worker_keeps_speech_clips_on_original_timeline(tmp_path, monkeypat
     assert json.loads(result.read_text()) == {"event":"completed","segments":0}
 
 
+def test_auto_worker_preserves_explicit_word_alignment_clip(tmp_path, monkeypatch):
+    import core.asr
+    from core.engines.asr.whisper_worker import run
+    import json
+    calls = []
+    def transcribe(audio, **options):
+        calls.append((audio, options))
+        return iter([]), None
+    monkeypatch.setattr(core.asr, "load_whisper_model", lambda *a: SimpleNamespace(
+        model=SimpleNamespace(is_multilingual=True), transcribe=transcribe))
+    request, result = tmp_path/'request.json', tmp_path/'result.jsonl'
+    request.write_text(json.dumps({"compute_type":"int8","cpu_threads":2,"model_size":"small",
+        "device":"cpu","audio_path":"not-opened.wav","options":{"multilingual":True,
+        "vad_filter":False,"clip_timestamps":[10,15]}}))
+    run(request,result)
+    assert calls[0][1]['clip_timestamps'] == [10,15]
+    assert calls[0][0] == 'not-opened.wav'
+
+
 @pytest.fixture
 def language_project(tmp_path, monkeypatch):
     monkeypatch.setattr(settings, "BASE_DIR", tmp_path)

@@ -84,7 +84,7 @@ _ADDRESS_CUE = re.compile(r"[爸妈媽父母姐哥弟妹爷爺奶叔姨姑舅婶
 # Enumerate the phrases: repeated calls such as ``Mẹ, mẹ`` remain separate
 # occurrences, and this selector must never equate a phrase with its prefix.
 _ADDRESS_MULTIWORD = re.compile(
-    r"(?<!\w)(?:cô\s+gái|anh\s+trai|chị\s+gái|(?:em|con)\s+(?:gái|trai)|"
+    r"(?<!\w)(?:chúng\s+(?:ta|tôi|mình)|bọn\s+mình|các\s+con|cô\s+gái|anh\s+trai|chị\s+gái|(?:em|con)\s+(?:gái|trai)|"
     r"(?:bố|ba)\s+(?:mẹ|má)|(?:mẹ|má)\s+(?:bố|ba))(?!\w)", re.I)
 
 
@@ -309,7 +309,8 @@ def address_reading_prompt(rows, context):
         "uncertain=true. Không cần biết tên, giới tính, tuổi hay ruột thịt để giữ đúng lời gọi trực tiếp. "
         "Không suy sự chắc chắn này sang câu kế chỉ vì gần thời gian. uncertain là kết luận toàn bộ; "
         "true nếu còn vai chưa xác định. Mỗi *_address chỉ ghi cách xưng/gọi được đề xuất, không ghi giải thích. "
-        "Giữ nguyên cụm cách gọi đầy đủ, ví dụ 'cô gái' hay 'bố mẹ', không chỉ ghi từ đầu cụm. "
+        "Giữ nguyên cụm cách gọi đầy đủ, ví dụ 'cô gái', 'bố mẹ', 'chúng ta' hay 'chúng tôi', không chỉ ghi một từ của cụm. "
+        "Với we/我们, xét nguồn và ngữ cảnh có bao gồm người nghe hay không; không tự coi chúng ta và chúng tôi là tương đương. "
         "Cụm tập thể chỉ được xác nhận khi nguồn chứng minh chính nhóm đó; không tự bỏ qua vai chưa rõ. "
         "Mỗi ID có turn_check. ambiguous_roles chỉ chứa self/listener: ghi vai mà các cách phân "
         "lượt còn hợp lý khiến xưng hô khác nhau; [] khi đã có căn cứ loại các cách còn lại hoặc "
