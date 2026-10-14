@@ -56,6 +56,20 @@ def final_output_metadata(rows, review_summary=None):
             "content_review_state": "REVIEW_REQUIRED" if pending_review else "NO_PENDING_REVIEW"}
 
 
+def final_media_metadata(rows, valid_audio):
+    """Separate translated text from physically available, fitted speech."""
+    missing, unready = [], []
+    for row in rows:
+        if _value(row, "confirmed_silence", False) is True:
+            continue
+        if _value(row, "status") not in {"READY", "PLAYED"}:
+            unready.append(_value(row, "id"))
+        if str(_value(row, "final_vi", "") or "").strip() and not valid_audio(row):
+            missing.append(_value(row, "id"))
+    return {"missing_audio_ids": missing, "unready_segment_ids": unready,
+            "final_media_blocked": bool(missing or unready)}
+
+
 def preview_output_metadata(rows, valid_audio):
     """Require audible translated speech, or an actually speech-free prefix.
 

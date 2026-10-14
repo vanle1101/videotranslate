@@ -66,6 +66,17 @@ RUNNING/PAUSED/CANCELLING, while an idle complete draft with unresolved review
 remains exportable. **284 JavaScript interaction tests passed**, including the
 visible retry error/deadline and absence of an export POST during active work.
 
+Live API inspection also found `final_output_blocked=false` with six translated
+rows lacking audio. That flag had always represented translation-content gaps;
+separate backend/runtime/exporter guards prevented a bad export. Added explicit
+`missing_audio_ids`, `unready_segment_ids`, `final_media_blocked` metadata to
+progress, snapshots, telemetry and saved history using existing media validators.
+UI now blocks on that media gate and says how many translated rows lack valid
+speech. Content-only semantics remain compatible. **246 persistence/export tests**
+and **153 transcript/output-gate tests passed** (overlap); **284 existing UI tests**
+plus the new missing-audio regression passed. This is contract regression evidence,
+not a full-video export result.
+
 ## Recovery retest and cross-process ownership — October 15, 2026
 
 **Acceptance remains INCOMPLETE.** The real 320.040635-second project `76f5aa6b` has 187 valid speech files out of 193; IDs 87,119,135,143,145,146 still lack a usable fitted voice. No new complete MP4 is claimed for this run.

@@ -5488,6 +5488,18 @@ test('the durable missing-speech gate disables full export until explicitly clea
   assert.equal(ui.el('btn-export-hq').disabled, false);
 });
 
+test('missing fitted audio blocks export independently of complete translated text', async () => {
+  const ui = studio(); await ui.start();
+  const socket = ui.sockets.at(-1);
+  socket.receive({type:'progress',status:'PREPARED',phase:'prepared',final_output_blocked:false,
+    missing_speech_ids:[],final_media_blocked:true,missing_audio_ids:[1,2]});
+  assert.equal(ui.el('btn-export-hq').disabled,true);
+  assert.match(ui.el('btn-export-hq').title,/2 câu đã dịch nhưng chưa có giọng đọc hợp lệ/);
+  socket.receive({type:'progress',status:'PREPARED',phase:'prepared',final_media_blocked:false,
+    missing_audio_ids:[]});
+  assert.equal(ui.el('btn-export-hq').disabled,false);
+});
+
 test('a new run clears previous warnings and playable duration while resolving its source', async () => {
   const ui = studio(); await ui.start();
   ui.sockets.at(-1).receive({type:'progress',status:'COMPLETED',phase:'complete'});

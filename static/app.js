@@ -783,6 +783,7 @@ document.addEventListener("DOMContentLoaded", () => {
       ["incomplete", "failed"].includes(currentProgress?.review_summary?.status);
     btnExportHQ.disabled = !currentTaskId || !items.length ||
       missingSpeech ||
+      currentProgress?.final_media_blocked === true ||
       ["RUNNING", "PAUSED", "CANCELLING"].includes(currentProgress?.status) ||
       (currentProgress?.translation_mode === "preview" && currentProgress?.status !== "COMPLETED") || isPreviewReady(currentProgress?.status) ||
       captionStyleDirty || !!captionStyleRequest ||
@@ -792,7 +793,9 @@ document.addEventListener("DOMContentLoaded", () => {
       items.some(segment => !["READY", "PLAYED"].includes(segment.status)) ||
       (["FAILED", "STOPPED", "CANCELLED", "CANCELLING"].includes(currentProgress?.status)
         && currentProgress?.phase !== "export_error" && !editorialFailure);
-    btnExportHQ.title = missingSpeech ? "Còn câu có lời gốc nhưng chưa có lời Việt; kiểm tra lời trước khi xuất đầy đủ." :
+    btnExportHQ.title = currentProgress?.missing_audio_ids?.length ?
+      `${currentProgress.missing_audio_ids.length} câu đã dịch nhưng chưa có giọng đọc hợp lệ.` :
+      missingSpeech ? "Còn câu có lời gốc nhưng chưa có lời Việt; kiểm tra lời trước khi xuất đầy đủ." :
       outputIsDraft(currentProgress) ? "Bản nháp — cần kiểm tra. Xuất khi đủ nguồn, lời và giọng; giữ các ghi chú chưa xác minh." : "";
     if (btnReviewWorker) btnReviewWorker.disabled = !!pendingTaskAction || reviewInProgress() || automaticExportActive ||
       !!exportingTaskId || captionStyleDirty || !!captionStyleRequest || transcriptDrafts.size > 0 || pendingTranscriptSaves > 0;

@@ -666,6 +666,8 @@ def review_sidecar_payload(session):
 
 def session_output_details(session):
     gate = final_output_metadata(session.segments.values(), getattr(session, "review_summary", {}))
+    if hasattr(session, "final_media_metadata"):
+        gate.update(session.final_media_metadata())
     return {"output_video_url": "" if gate["final_output_blocked"] else getattr(session, "output_video_url", ""),
             "output_filename": "" if gate["final_output_blocked"] else getattr(session, "output_filename", ""),
             "review_url": "" if gate["final_output_blocked"] else getattr(session, "output_review_url", ""),

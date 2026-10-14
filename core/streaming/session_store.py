@@ -22,7 +22,7 @@ from urllib.parse import quote, urlsplit, urlunsplit, parse_qsl, urlencode
 
 from config import settings
 from core.streaming.audio_cache import resolve_dub_timing
-from core.streaming.output_gate import final_output_metadata, preview_output_metadata, missing_speech_message
+from core.streaming.output_gate import final_output_metadata, final_media_metadata, preview_output_metadata, missing_speech_message
 
 VERSION = 1
 MAX_BYTES = 16 * 1024 * 1024
@@ -1000,6 +1000,7 @@ def _availability(data):
     from core.subtitle_cues import CAPTION_RENDERER_VERSION
     fields, rows = data["session"], data["segments"]
     output_gate = final_output_metadata(rows, fields.get("review_summary", {}))
+    output_gate.update(final_media_metadata(rows, lambda row: _valid_row_audio(row, row.get("audio_path"))))
     missing = []
     pending_download = not fields.get("video_path") and bool(fields.get("source_url"))
     if not _exists(fields.get("video_path")) and not pending_download:

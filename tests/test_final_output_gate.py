@@ -286,6 +286,31 @@ def test_spoken_uncertain_draft_keeps_review_without_becoming_a_missing_speech_g
     assert gate["content_review_state"] == "REVIEW_REQUIRED"
 
 
+@pytest.mark.parametrize("status", ["FAILED", "WAITING", "TTS", "READY"])
+def test_media_gate_distinguishes_missing_audio_from_missing_translation(status):
+    from core.streaming.output_gate import final_media_metadata
+    row = {"id": 9, "status": status, "text_zh": "你好", "final_vi": "Xin chào",
+           "needs_review": True}
+    assert final_output_metadata([row])["missing_speech_ids"] == []
+    gate = final_media_metadata([row], lambda value: False)
+    assert gate["missing_audio_ids"] == [9]
+    assert gate["final_media_blocked"] is True
+    assert gate["unready_segment_ids"] == ([] if status == "READY" else [9])
+
+
+def test_media_gate_allows_audible_draft_and_confirmed_silence():
+    from core.streaming.output_gate import final_media_metadata
+    rows = [{"id": 1, "status": "READY", "final_vi": "Xin chào", "needs_review": True},
+            {"id": 2, "status": "READY", "confirmed_silence": True}]
+    calls = []
+    def valid(row):
+        calls.append(row["id"])
+        return True
+    gate = final_media_metadata(rows, valid)
+    assert not gate["final_media_blocked"] and gate["missing_audio_ids"] == []
+    assert calls == [1]
+
+
 @pytest.mark.parametrize("change", ["omit_speech", "revise_spoken_text", "change_silence_confirmation"])
 def test_publication_rechecks_current_speech_and_revision_without_overwriting_prior_file(omitted_speech, monkeypatch, tmp_path, change):
     sess = omitted_speech

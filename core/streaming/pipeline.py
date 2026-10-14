@@ -41,7 +41,7 @@ from core.streaming.retry_schedule import (schedule_retry, finish_retry, begin_r
     mark_intent, due_entries)
 from core.review_retry import review_input_hashes, schedule_review_failures, prune_review_retries, failure_descriptor
 from core.streaming.glossary import glossary_snapshot
-from core.streaming.output_gate import final_output_metadata, preview_output_metadata, missing_spoken_output_ids, missing_speech_message
+from core.streaming.output_gate import final_output_metadata, final_media_metadata, preview_output_metadata, missing_spoken_output_ids, missing_speech_message
 from core.engines.alignment.dub_timing import available_reflow_duration, plan_reflow, MAX_TAIL_LIMIT_EXTENSION
 
 class SegmentEditConflict(RuntimeError):
@@ -1850,6 +1850,9 @@ class StreamingPipelineSession:
                 chunked_source_started=self._chunked_source_started))
         return result
 
+    def final_media_metadata(self):
+        return final_media_metadata(self.segments.values(), self._has_valid_dub_audio)
+
     def _processing_progress_metadata(self):
         """Measure translated media work separately from review and final export.
 
@@ -1916,6 +1919,7 @@ class StreamingPipelineSession:
     def get_progress(self) -> Dict[str, Any]:
         snapshot = dict(self.progress)
         output_gate = final_output_metadata(self.segments.values(), self.review_summary)
+        output_gate.update(self.final_media_metadata())
         snapshot.update(output_gate)
         snapshot.update(self._processing_progress_metadata())
         from core.streaming.recovery import segment_state
@@ -3365,6 +3369,7 @@ class StreamingPipelineSession:
 
     def get_telemetry(self) -> Dict[str, Any]:
         output_gate = final_output_metadata(self.segments.values())
+        output_gate.update(self.final_media_metadata())
         return {
             "current_playback_time": round(self.current_playback_time, 2),
             "playable_until": self.playable_until,
