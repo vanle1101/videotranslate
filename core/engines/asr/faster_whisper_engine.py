@@ -57,7 +57,11 @@ class FasterWhisperFallbackEngine(ASREngine):
         segments_gen, _ = self.model.transcribe(
             str(audio_path),
             **whisper_language_options(language),
-            vad_filter=True,
+            # VAD concatenates retained speech before decoding. In auto mode
+            # that can merge different languages into the same short decode
+            # window and silently discard the first language. Preserve the
+            # source timeline so multilingual detection sees each real window.
+            vad_filter=language != "auto",
             vad_parameters={"min_silence_duration_ms": 300},
             beam_size=5,
             word_timestamps=True,

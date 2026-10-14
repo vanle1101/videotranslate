@@ -5,10 +5,12 @@ import time
 import uuid
 import wave
 import tempfile
+from importlib.metadata import version, PackageNotFoundError
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Dict, Any, Optional
 import edge_tts
+from edge_tts.constants import SEC_MS_GEC_VERSION
 import aiohttp
 from config import settings
 from core.engines.tts.base import TTSEngine
@@ -17,6 +19,24 @@ from core.runtime_context import current_execution_context
 
 
 EDGE_REQUEST_TIMEOUT = 45.0
+EDGE_MINIMUM_VERSION = (7, 3, 1)
+
+
+def _validate_edge_client():
+    """Fail before network work when an old install cannot speak the service protocol."""
+    try:
+        installed = tuple(int(part) for part in version("edge-tts").split(".")[:3])
+    except (PackageNotFoundError, ValueError):
+        installed = ()
+    if installed < EDGE_MINIMUM_VERSION:
+        raise EdgeTTSRequestError(
+            "Thư viện Edge-TTS đã cũ hoặc chưa cài đúng (cần 7.3.1 trở lên). "
+            "Cập nhật dependencies và khởi động lại Studio; bản dịch đã lưu được giữ nguyên.",
+            code="tts_client_outdated")
+    if not SEC_MS_GEC_VERSION.startswith("2-"):
+        raise EdgeTTSRequestError(
+            "Studio vẫn đang nạp phiên bản Edge-TTS cũ. Khởi động lại Studio để nạp bản cập nhật; "
+            "bản dịch đã lưu được giữ nguyên.", code="tts_client_outdated")
 
 
 class EdgeTTSRequestError(RuntimeError):
@@ -76,7 +96,8 @@ def _provider_error(error, *, exhausted=False):
     if isinstance(error, aiohttp.ClientResponseError):
         status = error.status
         if status in {401, 403}:
-            message = "Edge-TTS từ chối yêu cầu. Kiểm tra mạng hoặc thử lại sau."
+            message = (f"Edge-TTS từ chối yêu cầu (HTTP {status}). "
+                       "Kiểm tra phiên bản Edge-TTS, ngày giờ máy hoặc thử lại sau; bản dịch đã lưu được giữ nguyên.")
         elif status == 429:
             message = "Edge-TTS đang giới hạn lượt yêu cầu. Hãy thử lại sau."
         else:
@@ -163,6 +184,7 @@ class EdgeTTSFallbackEngine(TTSEngine):
         self._word_boundaries.pop(str(output_path.resolve()), None)
         if not text.strip():
             raise ValueError("Không có nội dung tiếng Việt để đọc.")
+        _validate_edge_client()
         # VieNeu preset names are not valid Microsoft voice IDs.
         chosen_voice = voice if voice and voice.startswith("vi-VN-") else self.voice
         rate_str = f"+{int((speed - 1.0) * 100)}%" if speed >= 1.0 else f"{int((speed - 1.0) * 100)}%"

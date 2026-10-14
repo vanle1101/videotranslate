@@ -28,6 +28,7 @@ def test_asr_uses_per_segment_detection_only_in_auto(language):
     assert [row["text_zh"] for row in rows] == ["你好", "Good morning"]
     assert options["language"] == (None if language == "auto" else language)
     assert bool(options.get("multilingual")) is (language == "auto")
+    assert options["vad_filter"] is (language != "auto")
     if language == "auto":
         assert options["chunk_length"] == 8
         assert options["condition_on_previous_text"] is False
@@ -49,6 +50,36 @@ def test_auto_ocr_keeps_english_word_boundaries_and_chinese():
     assert [row["text_zh"] for row in rows] == ["Good morning", "大家早上好"]
     # Existing Chinese-only projects retain the previous OCR policy.
     assert [row["text_zh"] for row in ScreenOCR.detections(observations, 200, 100)] == ["大家早上好"]
+
+
+@pytest.mark.parametrize("spans", [[], [{"start": 0, "end": 64000}, {"start": 160000, "end": 240000}]])
+def test_auto_worker_keeps_speech_clips_on_original_timeline(tmp_path, monkeypatch, spans):
+    import core.asr
+    import faster_whisper.audio
+    import faster_whisper.vad
+    from core.engines.asr.whisper_worker import run
+    import json
+    import numpy as np
+    samples = np.zeros(384000, dtype=np.float32)
+    calls = []
+    monkeypatch.setattr(faster_whisper.audio, "decode_audio", lambda *a, **k: samples)
+    monkeypatch.setattr(faster_whisper.vad, "get_speech_timestamps", lambda *a, **k: spans)
+    def transcribe(audio, **options):
+        calls.append((audio, options))
+        return iter([]), None
+    monkeypatch.setattr(core.asr, "load_whisper_model", lambda *a: SimpleNamespace(
+        model=SimpleNamespace(is_multilingual=True), transcribe=transcribe))
+    request, result = tmp_path/'request.json', tmp_path/'result.jsonl'
+    request.write_text(json.dumps({"compute_type":"int8","cpu_threads":2,"model_size":"small",
+        "device":"cpu","audio_path":"not-opened.wav","options":{"multilingual":True,"vad_filter":True}}))
+    run(request, result)
+    if spans:
+        assert calls[0][0] is samples
+        assert calls[0][1]["clip_timestamps"] == [0, 4, 10, 15]
+        assert calls[0][1]["vad_filter"] is False
+    else:
+        assert not calls
+    assert json.loads(result.read_text()) == {"event":"completed","segments":0}
 
 
 @pytest.fixture

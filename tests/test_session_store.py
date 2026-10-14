@@ -37,6 +37,19 @@ def test_measured_timing_conflict_and_real_failure_reason_survive_repeated_resto
         active_streaming_sessions.pop(persisted.task_id)
 
 
+@pytest.mark.parametrize("error", [None, "Câu chưa xử lý xong khi tác vụ dừng; bấm Tiếp tục từ bước đã lưu."])
+def test_restore_exposes_measured_timing_cause_instead_of_generic_stop(persisted, error):
+    segment = persisted.segments[0]
+    segment.status, segment.failed_stage = "FAILED", "ALIGNING"
+    segment.error, segment.timing_issue = error, timing_issue()
+    persisted.persist()
+    restored = restore_saved_session(persisted.task_id)
+    assert restored.segments[0].failed_stage == "ALIGNING"
+    assert "1.590" in restored.segments[0].error
+    assert "1.250" in restored.segments[0].error
+    assert restored.segments[0].status == "FAILED"
+
+
 @pytest.mark.parametrize("field,value", [
     ("code", "DONE"), ("required_seconds", "1.59"), ("required_seconds", True),
     ("required_seconds", 0), ("required_seconds", float("inf")),

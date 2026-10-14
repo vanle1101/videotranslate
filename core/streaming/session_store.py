@@ -1216,7 +1216,14 @@ def _restore_saved_session_owned(task_id, event_callback=None):
                 segment.failed_stage = row.get("failed_stage") or row["status"]
                 needs_preparation_resume = True
             segment.status = "FAILED"
-            if row["status"] == "FAILED" and row.get("error"):
+            generic_stopped = "Câu chưa xử lý xong khi tác vụ dừng; bấm Tiếp tục từ bước đã lưu."
+            if segment.timing_issue and (not row.get("error") or row.get("error") == generic_stopped):
+                issue = segment.timing_issue
+                segment.failed_stage = "ALIGNING"
+                segment.error = (f"Lời đọc cần {issue['required_seconds']:.3f} giây nhưng chỉ còn "
+                    f"{issue['available_seconds']:.3f} giây ở tốc độ tối đa {issue['max_speed']:.2f}x. "
+                    + issue['remedy'])
+            elif row["status"] == "FAILED" and row.get("error"):
                 segment.error = row["error"]
             elif not valid_audio and (segment.audio_path or row["id"] in available["missing_audio_ids"]):
                 issue, segment.error = _audio_recovery_issue(row, segment.audio_path)

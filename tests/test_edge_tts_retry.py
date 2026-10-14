@@ -13,6 +13,36 @@ from core.engines.tts.edge_fallback import EdgeTTSFallbackEngine, EdgeTTSRequest
 from core.runtime_context import execution_context
 
 
+@pytest.mark.parametrize("installed", ["6.1.10", "7.2.8", "7.3.0"])
+def test_obsolete_edge_client_fails_actionably_before_network(tmp_path, installed):
+    output = tmp_path / "speech.wav"
+    output.write_bytes(b"existing saved audio")
+    with patch("core.engines.tts.edge_fallback.version", return_value=installed), \
+            patch("core.engines.tts.edge_fallback.edge_tts.Communicate") as factory:
+        with pytest.raises(EdgeTTSRequestError, match="7.3.1") as caught:
+            EdgeTTSFallbackEngine().synthesize("Xin chào", output)
+    assert caught.value.code == "tts_client_outdated" and not caught.value.retryable
+    factory.assert_not_called()
+    assert output.read_bytes() == b"existing saved audio"
+
+
+def test_updated_edge_protocol_is_installed():
+    # Real SDK contract: a compatible version must actually advertise v2.
+    from edge_tts.constants import SEC_MS_GEC_VERSION
+    from core.engines.tts.edge_fallback import _validate_edge_client
+    _validate_edge_client()
+    assert SEC_MS_GEC_VERSION.startswith("2-")
+
+
+def test_upgraded_disk_package_with_stale_loaded_module_requires_restart(tmp_path):
+    with patch("core.engines.tts.edge_fallback.SEC_MS_GEC_VERSION", "1-143.0.3650.75"), \
+            patch("core.engines.tts.edge_fallback.edge_tts.Communicate") as factory:
+        with pytest.raises(EdgeTTSRequestError, match="Khởi động lại Studio") as caught:
+            EdgeTTSFallbackEngine().synthesize("Xin chào", tmp_path / "unused.wav")
+    assert caught.value.code == "tts_client_outdated"
+    factory.assert_not_called()
+
+
 def test_empty_service_responses_retry_fresh_stream_and_discard_partial_audio(tmp_path):
     attempts = []
 

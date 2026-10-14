@@ -24,7 +24,8 @@ google-genai>=1.0.0
 openai>=1.14.0
 
 # Text-to-Speech (TTS)
-edge-tts>=6.1.10
+# 7.3.1 uses the current service protocol; older clients receive HTTP 403.
+edge-tts==7.3.1
 
 # Audio & Video Processing
 pydub>=0.25.1
