@@ -624,9 +624,9 @@ test('forward seek past preview requests a bounded source window and clearly pla
     start_seconds:148,end_seconds:268,coverage_seconds:120,source_duration:320});
   await ui.el('segments-timeline-track').emit('click',{clientX:50}); await ui.flush();
   const request=JSON.parse(ui.requests.filter(item=>item.url==='/api/preview').at(-1).options.body);
-  assert.equal(request.start_seconds,144);
+  assert.equal(request.start_seconds,156);
   assert.equal(request.end_seconds,168);
-  assert.equal(request.coverage_seconds,24);
+  assert.equal(request.coverage_seconds,12);
   video.currentSrc=video.src; video.duration=120;
   await video.emit('loadedmetadata'); await video.emit('canplay'); await video.emit('seeking'); await video.emit('seeked');
   assert.equal(video.currentTime,12);
@@ -694,7 +694,7 @@ async function compatibleLongStudio() {
   ui.replies.set('/api/preview',{preview_id:'prefix',status:'READY',video_url:'/api/preview/prefix/media',
     start_seconds:0,end_seconds:120,coverage_seconds:120,source_duration:1300});
   video.error={code:4}; await video.emit('error'); await ui.flush();
-  assert.equal(JSON.parse(ui.requests.findLast(r => r.url === '/api/preview').options.body).coverage_seconds, 24,
+  assert.equal(JSON.parse(ui.requests.findLast(r => r.url === '/api/preview').options.body).coverage_seconds, 12,
     'A restored long task must open a short first window before larger seek conversions');
   video.error=null; video.currentSrc=video.src; video.duration=120;
   await video.emit('loadedmetadata'); await video.emit('canplay');
@@ -707,8 +707,8 @@ test('transcript seek beyond ten minutes swaps a bounded window and retains glob
     start_seconds:888,end_seconds:1008,coverage_seconds:120,source_duration:1300});
   await ui.el('seg-row-1').querySelector('.transcript-time').click(); await ui.flush();
   const body=JSON.parse(ui.requests.filter(item=>item.url==='/api/preview').at(-1).options.body);
-  assert.equal(body.start_seconds,888); assert.equal(body.end_seconds,912);
-  assert.equal(body.coverage_seconds,24);
+  assert.equal(body.start_seconds,900); assert.equal(body.end_seconds,912);
+  assert.equal(body.coverage_seconds,12);
   video.currentSrc=video.src; video.duration=120;
   await video.emit('loadedmetadata'); await video.emit('canplay'); await video.emit('seeking'); await video.emit('timeupdate');
   assert.equal(video.currentTime,12);
@@ -733,6 +733,57 @@ test('a later seek supersedes a pending window and a late old response cannot re
   assert.equal(video.src,'/api/preview/newer/media');
 });
 
+test('playing prefetches just the next slot and an ended event reuses it without another conversion', async () => {
+  const ui=await compatibleLongStudio(), video=ui.el('video-player');
+  ui.replies.set('/api/preview',{status:'READY',video_url:'/api/preview/read-ahead/media',
+    start_seconds:120,end_seconds:144,coverage_seconds:24,source_duration:1300});
+  const before=ui.requests.filter(item=>item.url==='/api/preview').length;
+  video.currentTime=30; await video.play(); await ui.flush();
+  for (let i=0;i<5;i++) await video.emit('timeupdate');
+  assert.equal(ui.requests.filter(item=>item.url==='/api/preview').length,before+1);
+  assert.equal(video.currentTime,30,'speculative conversion must not move playback');
+  video.currentTime=119.967; video.ended=true;
+  await video.emit('ended'); await ui.flush();
+  assert.equal(ui.requests.filter(item=>item.url==='/api/preview').length,before+1);
+  assert.equal(video.src,'/api/preview/read-ahead/media');
+  video.currentSrc=video.src; video.duration=24; video.ended=false;
+  // A pause while loading must still defeat boundary auto-resume.
+  await ui.el('player-play-toggle').click();
+  await video.emit('loadedmetadata'); await video.emit('canplay');
+  assert.equal(video.currentTime,0);
+  assert.equal(video.paused,true);
+});
+
+test('a different seek cancels speculative conversion and late prefetch cannot replace its media', async () => {
+  const ui=await compatibleLongStudio(), video=ui.el('video-player');
+  let release;
+  ui.replies.set('/api/preview',()=>new Promise(resolve=>{release=resolve;}));
+  video.currentTime=30; await video.play(); await ui.flush();
+  const speculative=ui.requests.filter(item=>item.url==='/api/preview').at(-1);
+  ui.replies.set('/api/preview',{status:'READY',video_url:'/api/preview/intent/media',
+    start_seconds:888,end_seconds:912,coverage_seconds:24,source_duration:1300});
+  await ui.el('segments-timeline-track').emit('click',{clientX:900/13}); await ui.flush();
+  assert.equal(speculative.options.signal.aborted,true);
+  release({ok:true,json:async()=>({status:'READY',video_url:'/api/preview/stale-prefetch/media',
+    start_seconds:120,end_seconds:144,coverage_seconds:24})}); await ui.flush();
+  assert.equal(video.src,'/api/preview/intent/media');
+});
+
+test('pagehide aborts a pending read-ahead and its late reply cannot revive playback', async () => {
+  const ui=await compatibleLongStudio(), video=ui.el('video-player');
+  let release;
+  ui.replies.set('/api/preview',()=>new Promise(resolve=>{release=resolve;}));
+  video.currentTime=30; await video.play(); await ui.flush();
+  const speculative=ui.requests.filter(item=>item.url==='/api/preview').at(-1);
+  await ui.window.emit('pagehide');
+  assert.equal(speculative.options.signal.aborted,true);
+  const src=video.src;
+  release({ok:true,json:async()=>({status:'READY',video_url:'/api/preview/stale-read-ahead/media',
+    start_seconds:120,end_seconds:144,coverage_seconds:24})}); await ui.flush();
+  assert.equal(video.src,src);
+  assert.equal(video.paused,true);
+});
+
 test('drag scrubbing commits only the released position and ignores the following native click', async () => {
   const ui=await compatibleLongStudio(), track=ui.el('segments-timeline-track');
   const before=ui.requests.filter(item=>item.url==='/api/preview').length;
@@ -747,7 +798,7 @@ test('drag scrubbing commits only the released position and ignores the followin
   await track.emit('click',{clientX:60}); await ui.flush();
   const requests=ui.requests.filter(item=>item.url==='/api/preview');
   assert.equal(requests.length,before+1);
-  assert.equal(JSON.parse(requests.at(-1).options.body).start_seconds,768);
+  assert.equal(JSON.parse(requests.at(-1).options.body).start_seconds,780);
 });
 
 test('two seeks in the same pending slot convert once and land at the latest exact target', async () => {
@@ -790,7 +841,7 @@ test('a seek during initial codec conversion is retained and opens the chosen so
     start_seconds:144,end_seconds:168,coverage_seconds:24,source_duration:320});
   video.error=null; video.currentSrc=video.src; video.duration=24;
   await video.emit('loadedmetadata'); await video.emit('canplay'); await ui.flush();
-  assert.equal(JSON.parse(ui.requests.filter(item=>item.url==='/api/preview').at(-1).options.body).start_seconds,144);
+  assert.equal(JSON.parse(ui.requests.filter(item=>item.url==='/api/preview').at(-1).options.body).start_seconds,156);
   video.currentSrc=video.src;
   await video.emit('loadedmetadata'); await video.emit('canplay');
   assert.equal(video.currentTime,16);
@@ -857,7 +908,7 @@ test('the end of a compatibility window advances at the exact global boundary in
   video.currentTime=120; video.ended=true;
   await video.emit('ended'); await ui.flush();
   const body=JSON.parse(ui.requests.filter(item=>item.url==='/api/preview').at(-1).options.body);
-  assert.equal(body.start_seconds,120); assert.equal(body.end_seconds,144);
+  assert.equal(body.start_seconds,120); assert.equal(body.end_seconds,132);
   video.currentSrc=video.src; video.duration=120; video.ended=false;
   await video.emit('loadedmetadata'); await video.emit('canplay'); await video.emit('timeupdate');
   assert.equal(video.currentTime,12);

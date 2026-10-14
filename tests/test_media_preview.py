@@ -169,7 +169,9 @@ def test_nearby_seek_reuses_pending_window_without_duplicate_conversion(preview)
             assert nearby['status'] == 'PROCESSING'
         finally:
             release.set()
-        manager._jobs[first['preview_id']]['future'].result(timeout=5)
+        # The assertion above concerns deduplication, not encoder throughput
+        # while concurrent ASR/Qt acceptance is consuming CPU.
+        manager._jobs[first['preview_id']]['future'].result(timeout=30)
     assert manager.status(first['preview_id'])['status'] == 'READY'
 
 
@@ -269,8 +271,8 @@ def test_initial_source_preview_requests_a_short_compatibility_prefix(preview):
     with patch.object(main.preview_manager, 'start', return_value=expected) as start:
         response = client.post('/api/preview', json={'file_path': str(source)})
     assert response.status_code == 200
-    start.assert_called_once_with(str(source), coverage_seconds=24.0,
-                                  start_seconds=0, end_seconds=24.0)
+    start.assert_called_once_with(str(source), coverage_seconds=12.0,
+                                  start_seconds=0, end_seconds=12.0)
 
 
 def test_source_window_clamps_to_video_duration_independently_of_translation_cursor(preview):
@@ -482,3 +484,59 @@ def test_queued_conversions_enforce_retention_after_they_finish(preview):
         for future in futures:
             future.result(timeout=3)
         assert len(manager._jobs) == len(list(manager._root.glob('*.webm'))) == 2
+
+
+def test_source_duration_is_probed_once_across_seek_windows_and_invalidates_on_change(preview):
+    _, manager, source = preview
+    from core.media_preview import run_media as real_run_media
+    with patch('core.media_preview.run_media', wraps=real_run_media) as run:
+        for start, end in [(0, .2), (.2, .4)]:
+            status = manager.start(source, start_seconds=start, end_seconds=end)
+            manager._jobs[status['preview_id']]['future'].result(timeout=5)
+            assert manager.status(status['preview_id'])['status'] == 'READY'
+        assert sum(call.args[0][0] == 'ffprobe' for call in run.call_args_list) == 1
+        before = source.stat()
+        os.utime(source, ns=(before.st_atime_ns, before.st_mtime_ns + 10_000_000))
+        status = manager.start(source, start_seconds=0, end_seconds=.2)
+        manager._jobs[status['preview_id']]['future'].result(timeout=5)
+        assert sum(call.args[0][0] == 'ffprobe' for call in run.call_args_list) == 2
+
+
+def test_cancel_queued_prefetch_releases_it_immediately_without_running_encoder(preview):
+    _, manager, source = preview
+    started = threading.Event()
+    release = threading.Event()
+    converted = []
+    real_convert = manager._convert
+
+    def convert(source, job):
+        converted.append(job['start_seconds'])
+        if job['start_seconds'] == 0:
+            started.set()
+            assert release.wait(5)
+        return real_convert(source, job)
+
+    with patch.object(manager, '_convert', convert):
+        first = manager.start(source, start_seconds=0, end_seconds=.15)
+        assert started.wait(2)
+        queued = manager.start(source, start_seconds=.15, end_seconds=.3)
+        assert manager.cancel(queued['preview_id'])['status'] == 'CANCELLED'
+        assert manager._jobs[queued['preview_id']]['future'].cancelled()
+        assert manager.status(queued['preview_id'])['video_url'] is None
+        requested = manager.start(source, start_seconds=.3, end_seconds=.45)
+        release.set()
+        manager._jobs[first['preview_id']]['future'].result(timeout=5)
+        manager._jobs[requested['preview_id']]['future'].result(timeout=5)
+    assert converted == [0, .3]
+    assert manager.status(requested['preview_id'])['status'] == 'READY'
+
+
+@pytest.mark.parametrize('duration', ['NaN', 'Infinity', '-1', '0'])
+def test_invalid_probed_duration_is_never_cached_or_encoded(preview, duration):
+    _, manager, source = preview
+    with patch('core.media_preview.run_media', return_value=json.dumps({'format': {'duration': duration}}).encode()) as run:
+        status = manager.start(source, coverage_seconds=.2)
+        manager._jobs[status['preview_id']]['future'].result(timeout=5)
+    assert manager.status(status['preview_id'])['status'] == 'FAILED'
+    assert manager._source_durations == {}
+    assert run.call_count == 1

@@ -71,7 +71,7 @@ document.addEventListener("DOMContentLoaded", () => {
   // user action.  Keep the value in one place so URL, upload and local-file
   // starts use the same contract.
   const PREVIEW_SECONDS = 24;
-  const COMPATIBILITY_MAX_SECONDS = 24;
+  const COMPATIBILITY_MAX_SECONDS = 12;
   const PREVIEW_READY_STATUS = "PREVIEW_READY";
   const isPreviewReady = status => String(status || "").toUpperCase() === PREVIEW_READY_STATUS;
   function hasMeasuredPreview(progress) {
@@ -277,12 +277,14 @@ document.addEventListener("DOMContentLoaded", () => {
   let previewCompatibilityTarget = null;
   let previewCompatibilityWindowKey = null;
   let previewDeferredSeek = null;
+  let previewPrefetch = null;
   let previewResumeTime = null;
   let playWhenPreviewReady = false;
   let autoPlayTaskId = null;
   let internalPreviewPauseEvents = 0;
 
   function cancelCompatibilityRequest() {
+    cancelPreviewPrefetch();
     previewCompatibilityRevision++;
     previewCompatibilityRequest?.abort?.();
     previewCompatibilityRequest = null;
@@ -311,6 +313,14 @@ document.addEventListener("DOMContentLoaded", () => {
     previewCompatibilityJob = null;
     if (/^[a-zA-Z0-9_-]{1,80}$/.test(id || ""))
       void fetch(`/api/preview/${id}`, {method: "DELETE", keepalive: true}).catch(() => {});
+  }
+
+  function cancelPreviewPrefetch() {
+    const entry = previewPrefetch;
+    previewPrefetch = null;
+    if (!entry || entry.data) return;
+    entry.controller.abort();
+    if (entry.job) void fetch(`/api/preview/${entry.job}`, {method: "DELETE", keepalive: true}).catch(() => {});
   }
   let translationReady = false;
   let audioPermissionNeeded = false;
@@ -1647,6 +1657,7 @@ document.addEventListener("DOMContentLoaded", () => {
   }
 
   function stopPreviewAudio() {
+    cancelPreviewPrefetch();
     autoPlayTaskId = null;
     playWhenPreviewReady = false;
     cancelDubPlaybackWait();
@@ -1755,7 +1766,7 @@ document.addEventListener("DOMContentLoaded", () => {
     const bounded = Number.isFinite(total) && total > 0 ? Math.min(prepared, total) : prepared;
     // Reopening a prepared multi-hour project should not transcode its
     // maximum window before the first picture can appear.
-    return Math.min(24, COMPATIBILITY_MAX_SECONDS, bounded);
+    return Math.min(COMPATIBILITY_MAX_SECONDS, bounded);
   }
 
   function compatibilityPreparedSeconds() {
@@ -1770,7 +1781,13 @@ document.addEventListener("DOMContentLoaded", () => {
       ? Math.min(sourceEnd, Number(currentProgress.processed_seconds)) : sourceEnd;
   }
 
-  async function requestCompatiblePreview(body, generation, revision, signal) {
+  async function requestCompatiblePreview(body, generation, revision, signal, background = null) {
+    const current = () => generation === previewGeneration && !signal?.aborted &&
+      (background ? !background.cancelled : revision === previewCompatibilityRevision);
+    const setJob = id => {
+      if (background) { background.job = id; if (background.adopted) previewCompatibilityJob = id; }
+      else previewCompatibilityJob = id;
+    };
     const deadline = Date.now() + 180000;
     let requestBody = body, requestOptions = {method: "POST", signal};
     let endpoint = "/api/preview";
@@ -1790,24 +1807,53 @@ document.addEventListener("DOMContentLoaded", () => {
     let response = await fetch(endpoint, requestOptions);
     let data = await response.json();
     if (!response.ok) throw new Error(data.detail || "Không thể chuẩn bị bản xem trước");
-    if (generation !== previewGeneration || revision !== previewCompatibilityRevision) {
+    if (!current()) {
       if (/^[a-zA-Z0-9_-]{1,80}$/.test(data.preview_id || ""))
         void fetch(`/api/preview/${data.preview_id}`, {method: "DELETE"}).catch(() => {});
       return null;
     }
-    previewCompatibilityJob = data.status === "PROCESSING" ? data.preview_id : null;
-    while (generation === previewGeneration && revision === previewCompatibilityRevision && data.status === "PROCESSING") {
+    setJob(data.status === "PROCESSING" ? data.preview_id : null);
+    while (current() && data.status === "PROCESSING") {
       if (Date.now() >= deadline) throw new Error("Tạo bản xem trước quá thời gian chờ; bấm mốc câu để thử lại.");
       await new Promise(resolve => setTimeout(resolve, 400));
-      if (generation !== previewGeneration || revision !== previewCompatibilityRevision) return null;
+      if (!current()) return null;
       response = await fetch(`/api/preview/${data.preview_id}`, {signal});
       data = await response.json();
       if (!response.ok) throw new Error(data.detail || "Không đọc được trạng thái bản xem trước");
     }
-    if (generation !== previewGeneration || revision !== previewCompatibilityRevision) return null;
+    if (!current()) return null;
     if (data.status !== "READY") throw new Error(data.error || "Không thể tạo bản xem trước");
-    previewCompatibilityJob = null;
+    setJob(null);
     return data;
+  }
+
+  function prefetchNextCompatibilityWindow() {
+    // Prepare only the next source slot while the current video plays. This
+    // bounded read-ahead never runs translation and never moves the playhead.
+    if (videoPlayer.paused || previewPending || previewCompatibilityRefresh || !previewDescriptor ||
+        previewDescriptor.file || previewCompatibilityEnd === null) return;
+    const end = Number(previewCompatibilityEnd);
+    const limit = compatibilityPlaybackLimit();
+    if (!Number.isFinite(limit) || limit <= end + .05) return;
+    const body = compatibilityWindowBody(end, compatibilityPreparedSeconds());
+    if (!body) return;
+    const key = `${body.start_seconds}:${body.end_seconds}`;
+    if (previewPrefetch?.key === key) return;
+    cancelPreviewPrefetch();
+    const entry = {key, controller: new AbortController(), generation: previewGeneration,
+      job: null, data: null, adopted: false, cancelled: false};
+    previewPrefetch = entry;
+    entry.promise = requestCompatiblePreview(body, entry.generation, previewCompatibilityRevision,
+      entry.controller.signal, entry).then(data => {
+        entry.data = data;
+        return data;
+      }).catch(error => {
+        // A speculative failure is retried through the normal visible seek
+        // path if the user actually reaches this slot.
+        if (previewPrefetch === entry) previewPrefetch = null;
+        if (entry.adopted) throw error;
+        return null;
+      });
   }
 
   function compatibilityWindowBody(targetTime, preparedSeconds, initial = false) {
@@ -1816,7 +1862,7 @@ document.addEventListener("DOMContentLoaded", () => {
     const target = Math.max(0, Math.min(Number(targetTime) || 0, prepared));
     const currentEnd = Number(previewCompatibilityEnd);
     if (!initial && compatibilityWindowContains(target) && target < currentEnd - 1.5) return null;
-    const windowSize = initial ? Math.min(24, COMPATIBILITY_MAX_SECONDS, prepared) : COMPATIBILITY_MAX_SECONDS;
+    const windowSize = initial ? Math.min(COMPATIBILITY_MAX_SECONDS, prepared) : COMPATIBILITY_MAX_SECONDS;
     // Stable slots reuse the same cached media for nearby seeks, instead of
     // converting a different two-minute file for every clicked position.
     const start = initial ? 0 : Math.floor(Math.min(target, prepared - .01) / windowSize) * windowSize;
@@ -1852,12 +1898,16 @@ document.addEventListener("DOMContentLoaded", () => {
       if (resume !== null) playWhenPreviewReady = Boolean(resume);
       return previewCompatibilityRefresh;
     }
+    const prefetched = previewPrefetch?.key === windowKey ? previewPrefetch : null;
+    if (!prefetched) cancelPreviewPrefetch();
+    else { previewPrefetch = null; prefetched.adopted = true; }
     previewCompatibilityRevision++;
     const revision = previewCompatibilityRevision;
     previewCompatibilityRequest?.abort?.();
     cancelCompatibilityJob();
-    const controller = typeof AbortController !== "undefined" ? new AbortController() : null;
+    const controller = prefetched?.controller || (typeof AbortController !== "undefined" ? new AbortController() : null);
     previewCompatibilityRequest = controller;
+    if (prefetched) previewCompatibilityJob = prefetched.job;
     previewCompatibilityTarget = target;
     previewCompatibilityWindowKey = windowKey;
     const generation = previewGeneration;
@@ -1869,12 +1919,15 @@ document.addEventListener("DOMContentLoaded", () => {
     if (wasPlaying && !videoPlayer.paused) { internalPreviewPauseEvents++; videoPlayer.pause(); }
     activeAudio?.pause();
     bgmAudio?.pause();
-    bufferingText.textContent = "Đang chuẩn bị đoạn xem trước tại vị trí đã chọn…";
+    bufferingText.textContent = `Đang mở video tại ${formatTime(target)}…`;
     bufferingAlert.dataset.state = "loading";
     bufferingAlert.classList.remove("hidden");
     const request = (async () => {
       try {
-        const data = await requestCompatiblePreview(body, generation, revision, controller?.signal);
+        let data = prefetched ? await prefetched.promise : await requestCompatiblePreview(body, generation, revision, controller?.signal);
+        if (!data && prefetched && !controller?.signal.aborted &&
+            generation === previewGeneration && revision === previewCompatibilityRevision)
+          data = await requestCompatiblePreview(body, generation, revision, controller?.signal);
         if (!data || generation !== previewGeneration || revision !== previewCompatibilityRevision) return;
         setPreviewCompatibilityWindow(data);
         previewResumeTime = previewCompatibilityTarget ?? target;
@@ -2714,7 +2767,7 @@ document.addEventListener("DOMContentLoaded", () => {
       // The compatibility WebM ended at the current window boundary. Move
       // the player to the next source window and preserve the user's intent
       // to keep watching instead of treating this as the end of the video.
-      void requestCompatibilityWindow(globalEnd, {force: true, resume: true});
+      void requestCompatibilityWindow(Number(previewCompatibilityEnd), {force: true, resume: true});
       return;
     }
     cancelDubPlaybackWait();
@@ -3476,6 +3529,7 @@ document.addEventListener("DOMContentLoaded", () => {
   // and synchronize on animation frames so short lines retain their opening.
   function syncPlayback() {
     const curTime = previewGlobalTime();
+    prefetchNextCompatibilityWindow();
     // A stable compatibility slot advances on ended. Replacing it before
     // its boundary would repeatedly request the very same cached slot.
     if (dubPlaybackWait) {

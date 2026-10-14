@@ -32,7 +32,10 @@ MAX_PREVIEW_BYTES = 90 * 1024 * 1024
 # therefore unaffected.
 MAX_COMPATIBILITY_SECONDS = 120
 MAX_RETAINED_JOBS = 8
-DEFAULT_COMPATIBILITY_SECONDS = 24.0
+# Decode a small first window, then let the player prefetch the next window
+# while this one plays. Downloaded H.264 still needs conversion on Qt builds
+# without that decoder; waiting for 24–120 seconds delays every cold seek.
+DEFAULT_COMPATIBILITY_SECONDS = 12.0
 
 
 def _normalise_coverage(value):
@@ -66,6 +69,7 @@ class PreviewManager:
         self._executor = None
         self._root = None
         self._jobs = {}
+        self._source_durations = {}
         self._closed = False
 
     def _directory(self):
@@ -204,12 +208,23 @@ class PreviewManager:
     def _convert(self, source, job):
         output = job["output"]
         try:
-            probe = json.loads(run_media([
-                "ffprobe", "-v", "error", "-show_entries", "format=duration", "-of", "json", str(source),
-            ], cancel_check=job["cancel"].is_set, capture_output=True, timeout=30))
-            duration = float(probe.get("format", {}).get("duration", 0))
-            if duration <= 0:
-                raise RuntimeError("Không đọc được thời lượng video")
+            identity = job.get("source_identity")
+            with self._lock:
+                duration = self._source_durations.get(identity)
+            if duration is None:
+                probe = json.loads(run_media([
+                    "ffprobe", "-v", "error", "-show_entries", "format=duration", "-of", "json", str(source),
+                ], cancel_check=job["cancel"].is_set, capture_output=True, timeout=30))
+                duration = float(probe.get("format", {}).get("duration", 0))
+                if not math.isfinite(duration) or duration <= 0:
+                    raise RuntimeError("Không đọc được thời lượng video")
+                if identity is not None:
+                    with self._lock:
+                        # The identity includes size, mtime, ctime and inode.
+                        # Replacements never reuse an old file's duration.
+                        self._source_durations[identity] = duration
+                        while len(self._source_durations) > MAX_RETAINED_JOBS:
+                            self._source_durations.pop(next(iter(self._source_durations)))
             requested_start = float(job.get("start_seconds") or 0)
             requested_end = job.get("end_seconds")
             if requested_start >= duration:
@@ -314,6 +329,16 @@ class PreviewManager:
                 raise KeyError(key)
             if job["status"] == "PROCESSING":
                 job["cancel"].set()
+                # A queued prefetch must not occupy the executor ahead of the
+                # next user seek, nor remain PROCESSING until another encode
+                # finishes. Active FFmpeg is interrupted by its cancel check.
+                future = job.get("future")
+                if future is not None and future.cancel():
+                    job["status"] = "CANCELLED"
+                    job["error"] = "Đã dừng tạo bản xem trước"
+                    job["finished_at"] = time.monotonic()
+                    if job.get("uploaded_source"):
+                        Path(job["uploaded_source"]).unlink(missing_ok=True)
             return self.status(key)
 
     def shutdown(self):
@@ -330,6 +355,7 @@ class PreviewManager:
                 # Only this manager's mkdtemp directory is removed.
                 shutil.rmtree(self._root)
             self._jobs.clear()
+            self._source_durations.clear()
             self._root = None
             self._executor = None
             self._closed = False
