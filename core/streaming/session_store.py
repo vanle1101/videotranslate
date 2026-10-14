@@ -1105,7 +1105,7 @@ def _availability(data):
         row_causes = []
         for row in rows:
             if row["status"] == "FAILED" and row.get("error"):
-                detail = f"Câu {row['id']}: {row['error']}"
+                detail = f"Câu {row['id'] + 1}: {row['error']}"
                 if detail not in row_causes and detail not in cause:
                     row_causes.append(detail)
         # Old manifests still contain segment errors; report those as evidence.

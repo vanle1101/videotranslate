@@ -480,7 +480,8 @@ def test_legacy_saved_history_uses_real_failed_segment_detail(persisted):
     data["session"].pop("last_runtime_error", None)
     path.write_text(store._encode_project(data), encoding="utf-8")
     row = list_saved_sessions()[0]
-    assert "Câu 0: Edge-TTS không trả audio sau 3 lần" in row["stage"]
+    assert "Câu 1: Edge-TTS không trả audio sau 3 lần" in row["stage"]
+    assert "Câu 0:" not in row["stage"]
 
 
 def test_saved_failure_details_redact_configured_secrets(persisted, monkeypatch):

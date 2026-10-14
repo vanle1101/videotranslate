@@ -16,6 +16,27 @@ Thirty-six rows remain review-required. Backend stopped cleanly; no full MP4 was
 rendered because two speech rows are missing. This run predates blind-fluency-v3.
 The next retest will load that correction and resume only the remaining work.
 
+That retest ran03:11–03:23 using blind-fluency-v3 and ended FAILED with the same
+two missing rows. A new faithful ID87 candidate passed source and blind review,
+but its measured fitted requirement remained1.48979s against1.13904s capacity.
+ID119 remained1.26229s against0.85033s with manual neighbors fixed. All191 valid
+WAVs,193 IDs and15 manual edits survived;36 review-required rows remain. No new
+full MP4 exists. Further identical retries are not proof of feasibility; remaining
+acceptance is blocked by these measured timing/content constraints. No evidence
+establishes successful30-minute/one-hour/multi-hour translation or real20-way
+throughput on this host. Short mixed-language playback must not be generalized.
+
+The real Stop/restart acceptance then ran through the production Qt UI on the
+same saved task: Retry → wait for live work → Stop. It returned STOPPED in4.234s,
+preserved191 READY WAV hashes, all193 stable IDs and15 manual rows, rejected late
+writes, and exposed `can_retry=true` after the owned backend shut down. Targeted
+history/session regression: **231 passed in20.05s**. This proves cancellation and
+resume safety, not a completed full export.
+
+The UI now reports human-facing sentence numbers as one-based (`Câu 88`, `Câu
+120`) instead of exposing zero-based internal IDs in the error banner; API IDs and
+checkpoint IDs remain unchanged.
+
 Task-owned pytest temporary folders1222/1223 could not be removed: automatic
 command approval rejected the scoped PowerShell cleanup with `blocked by policy`.
 They were left intact; user projects and media were not deleted.
