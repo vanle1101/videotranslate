@@ -1,6 +1,8 @@
 import asyncio
 import json
 import logging
+import math
+import random
 import time
 import uuid
 import wave
@@ -8,6 +10,8 @@ import tempfile
 from importlib.metadata import version, PackageNotFoundError
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
+from email.utils import parsedate_to_datetime
+from datetime import timezone
 from typing import Dict, Any, Optional
 import edge_tts
 from edge_tts.constants import SEC_MS_GEC_VERSION
@@ -19,6 +23,10 @@ from core.runtime_context import current_execution_context
 
 
 EDGE_REQUEST_TIMEOUT = 45.0
+EDGE_ATTEMPTS_PER_WAVE = 6
+# A service delay beyond a week is not an actionable in-process retry. Reject
+# it explicitly instead of overflowing a persisted clock or retrying early.
+EDGE_MAX_RETRY_AFTER = 7 * 24 * 60 * 60
 EDGE_MINIMUM_VERSION = (7, 3, 1)
 
 
@@ -42,12 +50,45 @@ def _validate_edge_client():
 class EdgeTTSRequestError(RuntimeError):
     """Safe provider category retained by runtime/recovery diagnostics."""
 
-    def __init__(self, message, *, code, status=None, tls_verify_code=None, retryable=False):
+    def __init__(self, message, *, code, status=None, tls_verify_code=None, retryable=False, retry_after=None):
         super().__init__(message)
         self.code = code
         self.status = status
         self.tls_verify_code = tls_verify_code
         self.retryable = retryable is True
+        self.retry_after = (retry_after if type(retry_after) in (int, float)
+                            and math.isfinite(retry_after) and retry_after >= 0 else None)
+
+
+def _retry_after(error):
+    """Read only the service cooldown; never expose headers or response text."""
+    headers = getattr(error, "headers", None)
+    if not headers:
+        return None
+    value = next((value for key, value in headers.items() if str(key).lower() == "retry-after"), None)
+    if not isinstance(value, str) or not value.strip():
+        return None
+    try:
+        seconds = float(value)
+    except ValueError:
+        try:
+            deadline = parsedate_to_datetime(value)
+            if deadline.tzinfo is None:
+                deadline = deadline.replace(tzinfo=timezone.utc)
+            seconds = max(0., deadline.timestamp() - time.time())
+        except (ValueError, TypeError, OverflowError):
+            return None
+    if math.isfinite(seconds) and seconds > EDGE_MAX_RETRY_AFTER:
+        raise EdgeTTSRequestError(
+            "Edge-TTS yêu cầu chờ thử lại quá 7 ngày. Đã dừng tự thử lại câu này; "
+            "bản dịch được giữ. Kiểm tra dịch vụ trước khi tiếp tục.",
+            code="tts_retry_after_unsupported", retryable=False)
+    return seconds if math.isfinite(seconds) and seconds >= 0 else None
+
+
+def _backoff_seconds(attempt, retry_after=None):
+    base = min(60., 2. * 2 ** attempt)
+    return max(min(60., base + random.uniform(0., base * .25)), retry_after or 0.)
 
 
 def _tls_verify_code(error):
@@ -103,18 +144,19 @@ def _provider_error(error, *, exhausted=False):
         else:
             message = "Edge-TTS không phản hồi đúng. Hãy thử lại sau."
         if exhausted:
-            message = "Không kết nối ổn định tới Edge-TTS sau 3 lần thử. " + message
+            message = f"Không kết nối ổn định tới Edge-TTS sau {EDGE_ATTEMPTS_PER_WAVE} lần thử. " + message
         return EdgeTTSRequestError(message, code=_failure_category(error), status=status,
-                                   retryable=_retryable(error))
+                                   retryable=_retryable(error),
+                                   retry_after=_retry_after(error) if _retryable(error) else None)
     if isinstance(error, edge_tts.exceptions.NoAudioReceived):
-        return EdgeTTSRequestError("Edge-TTS chưa trả về âm thanh" + (" sau 3 lần thử" if exhausted else "")
+        return EdgeTTSRequestError("Edge-TTS chưa trả về âm thanh" + (f" sau {EDGE_ATTEMPTS_PER_WAVE} lần thử" if exhausted else "")
             + ". Bản dịch được giữ; sẽ thử lại riêng câu này sau các câu khác.",
             code="tts_empty_audio", retryable=True)
     if isinstance(error, (aiohttp.ClientError, asyncio.TimeoutError)):
         message = ("Edge-TTS hết thời gian chờ. Hãy thử lại câu này." if isinstance(error, asyncio.TimeoutError)
                    else "Không kết nối được tới Edge-TTS. Kiểm tra mạng rồi thử lại.")
         if exhausted:
-            message = "Không kết nối ổn định tới Edge-TTS sau 3 lần thử. " + message
+            message = f"Không kết nối ổn định tới Edge-TTS sau {EDGE_ATTEMPTS_PER_WAVE} lần thử. " + message
         return EdgeTTSRequestError(message, code=_failure_category(error), retryable=_retryable(error))
     if isinstance(error, (TypeError, ValueError)):
         return ValueError("Cấu hình giọng Edge-TTS không hợp lệ; kiểm tra giọng và tốc độ đọc.")
@@ -206,7 +248,7 @@ class EdgeTTSFallbackEngine(TTSEngine):
                 # Communicate stream is single-use, so retry with a new instance
                 # and discard any partial file before requesting the same voice.
                 boundary_mode = "WordBoundary"
-                for attempt in range(3):
+                for attempt in range(EDGE_ATTEMPTS_PER_WAVE):
                     check_cancel()
                     started = time.monotonic()
                     try:
@@ -255,10 +297,12 @@ class EdgeTTSFallbackEngine(TTSEngine):
                             boundary_mode = "SentenceBoundary"
                         mp3_path.unlink(missing_ok=True)
                         metadata_path.unlink(missing_ok=True)
-                        if attempt == 2:
+                        if attempt + 1 == EDGE_ATTEMPTS_PER_WAVE:
                             raise _provider_error(error, exhausted=True) from None
-                        await _await_cancellable(asyncio.sleep((3.0, 8.0)[attempt]),
-                                                 execution.cancel_check, 10.0)
+                        delay = _backoff_seconds(attempt, _retry_after(error))
+                        logger.info("TTS_RETRY_WAIT run_id=%s request_id=%s attempt=%d delay_seconds=%.3f",
+                                    execution.run_id, request_id, attempt + 1, delay)
+                        await _await_cancellable(asyncio.sleep(delay), execution.cancel_check, delay + 1.)
 
             try:
                 asyncio.get_running_loop()

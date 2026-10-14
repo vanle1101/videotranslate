@@ -15,6 +15,22 @@ class FasterWhisperFallbackEngine(ASREngine):
     def __init__(self, model_size: Optional[str] = None):
         self.model_size = model_size or settings.WHISPER_MODEL_SIZE
         self.model = None
+        self._last_runtime_info = {}
+
+    @property
+    def runtime_info(self):
+        current = getattr(self.model, "runtime_info", None)
+        return dict(current or self._last_runtime_info)
+
+    @property
+    def runtime_label(self):
+        info = self.runtime_info
+        if info.get("fallback_reason") == "cuda_inference_oom":
+            return "CPU int8 — GPU hết bộ nhớ khi nhận giọng"
+        if info.get("fallback_reason") == "cuda_model_load_failed":
+            return "CPU int8 — không nạp được model trên GPU"
+        device = info.get("device")
+        return f"{device.upper()} {info.get('compute_type', '')}".strip() if device in {"cpu", "cuda"} else ""
 
     @property
     def name(self) -> str:
@@ -38,7 +54,8 @@ class FasterWhisperFallbackEngine(ASREngine):
             "name": self.name,
             "engine": "faster-whisper",
             "is_available": self.is_available,
-            "is_fallback": True
+            "is_fallback": True,
+            "runtime": self.runtime_info
         }
 
     def transcribe(
@@ -99,6 +116,7 @@ class FasterWhisperFallbackEngine(ASREngine):
             close = getattr(segments_gen, "close", None)
             if callable(close):
                 close()
+            self._last_runtime_info = dict(getattr(self.model, "runtime_info", {}))
         check_cancelled()
         # Return complete utterances instead of Whisper's sometimes long VAD
         # chunks.  The helper uses only measured word timestamps and leaves a

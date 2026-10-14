@@ -3,6 +3,8 @@ import asyncio
 import logging
 import ssl
 from pathlib import Path
+from types import SimpleNamespace
+from email.utils import formatdate
 from unittest.mock import AsyncMock, Mock, patch
 
 import pytest
@@ -11,6 +13,88 @@ from edge_tts.exceptions import NoAudioReceived
 
 from core.engines.tts.edge_fallback import EdgeTTSFallbackEngine, EdgeTTSRequestError
 from core.runtime_context import execution_context
+
+
+@pytest.mark.parametrize("header,expected", [("720",720), ("12.5",12.5),
+    ("-1",None),("nan",None),("inf",None),("garbage",None),("",None),(None,None)])
+def test_retry_after_numeric_and_invalid_values(header, expected):
+    from core.engines.tts.edge_fallback import _provider_error
+    error=aiohttp.ClientResponseError(None,(),status=429,headers={"retry-after":header})
+    typed=_provider_error(error,exhausted=True)
+    assert typed.retry_after == expected and typed.retryable
+
+
+@pytest.mark.parametrize("header_kind", ["numeric","date"])
+def test_exhausted_retry_after_survives_six_attempts_into_durable_schedule(tmp_path,header_kind):
+    from core.streaming.retry_schedule import schedule_retry
+    now=1_800_000_000.
+    header="720" if header_kind == "numeric" else formatdate(now+720,usegmt=True)
+    error=aiohttp.ClientResponseError(None,(),status=429,headers={"Retry-After":header})
+    with patch("core.engines.tts.edge_fallback.time.time",return_value=now), \
+            patch("core.engines.tts.edge_fallback.edge_tts.Communicate",side_effect=error) as factory, \
+            patch("core.engines.tts.edge_fallback.asyncio.sleep",new_callable=AsyncMock) as sleep:
+        with pytest.raises(EdgeTTSRequestError) as caught:
+            EdgeTTSFallbackEngine().synthesize("Xin chào",tmp_path/"speech.mp3")
+    assert factory.call_count == 6 and sleep.await_count == 5
+    assert all(call.args[0]>=720 for call in sleep.await_args_list)
+    assert caught.value.retry_after == 720
+    session=SimpleNamespace(_retry_schedule=[],_restart_intent="active")
+    record=schedule_retry(session,"speech","1",caught.value,"a"*64,now=now)
+    assert record["next_attempt_at"]==now+720
+    assert record["error_code"]=="tts_rate_limited"
+
+
+def test_backoff_is_exponential_with_bounded_jitter_and_provider_floor():
+    from core.engines.tts.edge_fallback import _backoff_seconds
+    with patch("core.engines.tts.edge_fallback.random.uniform",side_effect=lambda low,high:high):
+        assert [_backoff_seconds(attempt) for attempt in range(7)]==[2.5,5,10,20,40,60,60]
+        assert _backoff_seconds(0,720)==720
+    with patch("core.engines.tts.edge_fallback.random.uniform",return_value=0):
+        assert _backoff_seconds(0)==2
+
+
+@pytest.mark.parametrize("header",["1e308",formatdate(1_800_000_000+8*86400,usegmt=True)])
+def test_excessive_retry_after_is_terminal_without_early_retry_or_unbounded_wait(tmp_path,header):
+    from core.streaming.retry_schedule import schedule_retry
+    output=tmp_path/"speech.mp3"
+    output.write_bytes(b"previous accepted audio")
+    error=aiohttp.ClientResponseError(None,(),status=429,headers={"Retry-After":header})
+    with patch("core.engines.tts.edge_fallback.time.time",return_value=1_800_000_000), \
+            patch("core.engines.tts.edge_fallback.edge_tts.Communicate",side_effect=error) as factory, \
+            patch("core.engines.tts.edge_fallback.asyncio.sleep",new_callable=AsyncMock) as sleep:
+        with pytest.raises(EdgeTTSRequestError,match="quá 7 ngày") as caught:
+            EdgeTTSFallbackEngine().synthesize("Xin chào",output)
+    factory.assert_called_once()
+    sleep.assert_not_awaited()
+    assert caught.value.code=="tts_retry_after_unsupported" and not caught.value.retryable
+    session=SimpleNamespace(_retry_schedule=[],_restart_intent="active")
+    assert schedule_retry(session,"speech","1",caught.value,"a"*64) is None
+    assert session._retry_schedule==[] and output.read_bytes()==b"previous accepted audio"
+    assert not list(tmp_path.glob("edge_tts_*"))
+
+
+def test_stop_interrupts_long_retry_after_wait_without_second_request(tmp_path):
+    output=tmp_path/"speech.mp3"
+    output.write_bytes(b"previous accepted audio")
+    cancelled=False
+    drained=[]
+    async def wait(seconds):
+        nonlocal cancelled
+        assert seconds>=720
+        try:
+            cancelled=True
+            await asyncio.Event().wait()
+        finally:
+            drained.append(True)
+    error=aiohttp.ClientResponseError(None,(),status=429,headers={"Retry-After":"720"})
+    with execution_context("edge-stop-backoff",lambda:cancelled), \
+            patch("core.engines.tts.edge_fallback.edge_tts.Communicate",side_effect=error) as factory, \
+            patch("core.engines.tts.edge_fallback.asyncio.sleep",side_effect=wait):
+        with pytest.raises(asyncio.CancelledError):
+            EdgeTTSFallbackEngine().synthesize("Xin chào",output)
+    factory.assert_called_once()
+    assert drained==[True] and output.read_bytes()==b"previous accepted audio"
+    assert not list(tmp_path.glob("edge_tts_*"))
 
 
 @pytest.mark.parametrize("installed", ["6.1.10", "7.2.8", "7.3.0"])
@@ -68,7 +152,9 @@ def test_empty_service_responses_retry_fresh_stream_and_discard_partial_audio(tm
     assert len(attempts) == 3
     assert all(args == ("Xin chào", "vi-VN-NamMinhNeural") for args, _ in attempts)
     assert [kwargs["boundary"] for _, kwargs in attempts] == ["WordBoundary", "SentenceBoundary", "SentenceBoundary"]
-    assert [call.args[0] for call in sleep.await_args_list] == [3.0, 8.0]
+    assert len(sleep.await_args_list) == 2
+    assert 2 <= sleep.await_args_list[0].args[0] <= 2.5
+    assert 4 <= sleep.await_args_list[1].args[0] <= 5
     assert not list(tmp_path.glob("edge_tts_*"))
 
 
@@ -98,10 +184,10 @@ def test_repeated_empty_responses_fail_cleanly_and_preserve_previous_output(tmp_
     response = Mock(save=AsyncMock(side_effect=NoAudioReceived("empty service response")))
     with patch("core.engines.tts.edge_fallback.edge_tts.Communicate", return_value=response) as factory, \
             patch("core.engines.tts.edge_fallback.asyncio.sleep", new_callable=AsyncMock):
-        with pytest.raises(EdgeTTSRequestError, match="sau 3 lần thử") as caught:
+        with pytest.raises(EdgeTTSRequestError, match="sau 6 lần thử") as caught:
             EdgeTTSFallbackEngine().synthesize("Xin chào", output)
     assert caught.value.code == "tts_empty_audio" and caught.value.retryable and caught.value.status is None
-    assert factory.call_count == 3
+    assert factory.call_count == 6
     assert output.read_bytes() == b"existing user audio"
     assert not list(tmp_path.glob("edge_tts_*"))
 
@@ -145,7 +231,7 @@ def test_transient_transport_failures_retry_and_log_safe_request_identity(tmp_pa
 
 @pytest.mark.parametrize("status", [400, 401, 403, 404])
 def test_nontransient_http_errors_are_not_retried(tmp_path, status):
-    error = aiohttp.ClientResponseError(None, (), status=status)
+    error = aiohttp.ClientResponseError(None, (), status=status, headers={"Retry-After":"1e308"})
     with patch("core.engines.tts.edge_fallback.edge_tts.Communicate", side_effect=error) as factory:
         with pytest.raises(EdgeTTSRequestError, match="Edge-TTS") as caught:
             EdgeTTSFallbackEngine().synthesize("Xin chào", tmp_path / "speech.mp3")
@@ -227,9 +313,9 @@ def test_total_service_timeout_is_bounded_and_drains_each_attempt(tmp_path):
     with patch("core.engines.tts.edge_fallback.EDGE_REQUEST_TIMEOUT", .01), \
             patch("core.engines.tts.edge_fallback.asyncio.sleep", new_callable=AsyncMock), \
             patch("core.engines.tts.edge_fallback.edge_tts.Communicate", return_value=Mock(save=save)) as factory:
-        with pytest.raises(RuntimeError, match="kết nối ổn định.*3 lần"):
+        with pytest.raises(RuntimeError, match="kết nối ổn định.*6 lần"):
             EdgeTTSFallbackEngine().synthesize("Xin chào", tmp_path / "speech.mp3")
-    assert factory.call_count == 3 and len(drained) == 3
+    assert factory.call_count == 6 and len(drained) == 6
     assert not list(tmp_path.iterdir())
 
 
@@ -248,7 +334,7 @@ def test_exhausted_transient_failures_keep_safe_type_for_late_recovery(tmp_path,
         with pytest.raises(EdgeTTSRequestError) as caught:
             EdgeTTSFallbackEngine().synthesize("Xin chào", output)
     assert caught.value.code == code and caught.value.status == status and caught.value.retryable is True
-    assert factory.call_count == 3 and "private-" not in str(caught.value)
+    assert factory.call_count == 6 and "private-" not in str(caught.value)
     assert output.read_bytes() == b"previous accepted audio" and not list(tmp_path.glob("edge_tts_*"))
 
 

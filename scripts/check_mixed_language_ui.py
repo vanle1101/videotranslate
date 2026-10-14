@@ -31,6 +31,8 @@ def click_ready(page, element_id, timeout=30):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('source', type=Path)
+    parser.add_argument('--expect-source', choices=['mixed', 'zh'], default='mixed',
+        help='Assert the observed source scripts; default retains the mixed-language check.')
     parser.add_argument('--resume', help='Resume only a QA project for this exact source')
     parser.add_argument('--review', action='store_true', help='Run real review of the restored QA project through its UI')
     parser.add_argument('--timeout', type=int, default=1200)
@@ -38,7 +40,8 @@ def main():
     if args.review and not args.resume:
         parser.error('--review requires --resume')
     source = args.source.resolve(strict=True)
-    assert source.is_relative_to((ROOT / 'cleanup/qa').resolve()), 'Use an explicit QA input'
+    assert any(source.is_relative_to((ROOT / name).resolve())
+        for name in ('cleanup/qa', 'workspace/inputs')), 'Use an explicit retained or QA input'
     assert args.timeout > 0, 'Timeout must be positive'
     if args.resume:
         from core.streaming.session_store import _read
@@ -133,7 +136,8 @@ def main():
         assert all(row.get('status') in {'READY','PLAYED'} or row.get('confirmed_silence') for row in rows), rows
         assert snapshot.get('final_output_blocked') is False, {'output_gate':snapshot.get('final_output_blocked'),'rows':rows}
         assert any(any('\u4e00' <= c <= '\u9fff' for c in row.get('text_zh','')) for row in rows), rows
-        assert any(any(c.isascii() and c.isalpha() for c in row.get('text_zh','')) for row in rows), rows
+        if args.expect_source == 'mixed':
+            assert any(any(c.isascii() and c.isalpha() for c in row.get('text_zh','')) for row in rows), rows
         event('TRANSLATION_ROWS',[{k:row.get(k) for k in ('id','text_zh','final_vi','status','needs_review','audio_url')} for row in rows])
         if snapshot.get('output_video_url') and not snapshot.get('output_outdated'):
             until(page,"!document.getElementById('task-result-link').classList.contains('hidden')")

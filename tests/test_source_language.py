@@ -79,7 +79,9 @@ def test_auto_worker_keeps_speech_clips_on_original_timeline(tmp_path, monkeypat
         assert calls[0][1]["vad_filter"] is False
     else:
         assert not calls
-    assert json.loads(result.read_text()) == {"event":"completed","segments":0}
+    assert [json.loads(line) for line in result.read_text().splitlines()] == [
+        {"event":"runtime", "device":"cpu", "compute_type":"int8"},
+        {"event":"completed","segments":0}]
 
 
 def test_auto_worker_preserves_explicit_word_alignment_clip(tmp_path, monkeypatch):

@@ -25,6 +25,21 @@ def evidence(text="你来了", **changes):
             "bbox": [.2, .7, .4, .06], **changes}
 
 
+@pytest.mark.parametrize("visual", [False, True])
+def test_actual_cpu_fallback_is_visible_after_model_release(free_config, visual):
+    session = StreamingPipelineSession("runtime-label", free_config / "video.mp4", visual_translation=visual)
+    session.asr_engine = session.faster_whisper
+    engine = session.faster_whisper
+    runtime = {"device": "cpu", "compute_type": "int8", "fallback_reason": "cuda_inference_oom"}
+    engine.model = SimpleNamespace(runtime_info=runtime)
+    assert "CPU int8" in session.source_processing_label()
+    assert "GPU hết bộ nhớ" in session.source_processing_label()
+    engine._last_runtime_info = dict(runtime)
+    engine.model = None
+    assert "CPU int8" in session.source_processing_label()
+    assert engine.get_info()["runtime"] == runtime
+
+
 def translation(text="你来了", **changes):
     return {"id": 0, "start": 0, "end": 2, "text_zh": text, "literal_vi": "Anh đến rồi",
             "natural_vi": "Anh đến rồi", "final_vi": "Anh đến rồi",

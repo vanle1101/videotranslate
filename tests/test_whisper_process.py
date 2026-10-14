@@ -77,6 +77,114 @@ def test_native_crash_does_not_publish_partial_transcription(fake_worker):
     assert calls[0]["process"].poll() == 7
 
 
+def test_cuda_inference_oom_discards_partial_rows_and_reaps_before_cpu(fake_worker, monkeypatch):
+    audio, install = fake_worker
+    calls = install('''
+import json, sys
+request=json.load(open(sys.argv[2],encoding='utf-8'))
+device=request['device']
+with open(sys.argv[1], 'w') as out:
+    out.write(json.dumps({'event':'runtime','device':device,'compute_type':request['compute_type']})+'\\n')
+    out.write(json.dumps({'event':'segment','segment':{'start':0,'end':1,
+        'text':'discard gpu' if device=='cuda' else 'complete cpu','words':[]}})+'\\n')
+    out.write(json.dumps({'event':'failed','code':'cuda_inference_oom','device':'cuda'}
+        if device=='cuda' else {'event':'completed','segments':1})+'\\n')
+''')
+    original_records = module.iter_native_records
+    def checked_records(*args, **kwargs):
+        if args[1]["device"] == "cpu":
+            assert calls[0]["process"].poll() is not None
+        return original_records(*args, **kwargs)
+    monkeypatch.setattr(module, "iter_native_records", checked_records)
+    model = module.SubprocessWhisperModel("small", device="cuda")
+    rows, _ = model.transcribe(audio, language="ko")
+    assert [row.text for row in rows] == ["complete cpu"]
+    assert [call["request"]["device"] for call in calls] == ["cuda", "cpu"]
+    assert calls[1]["request"]["compute_type"] == "int8"
+    assert calls[0]["request"]["options"] == calls[1]["request"]["options"] == {"language":"ko"}
+    assert all(call["process"].poll() is not None for call in calls)
+    assert model.runtime_info == {"device":"cpu", "compute_type":"int8", "fallback_reason":"cuda_inference_oom"}
+
+
+def test_cancel_during_cpu_fallback_drains_both_workers(fake_worker):
+    audio, install = fake_worker
+    calls = install('''
+import json, sys, time
+request=json.load(open(sys.argv[2],encoding='utf-8'))
+if request['device']=='cuda':
+    open(sys.argv[1],'w').write(json.dumps({'event':'failed','code':'cuda_inference_oom','device':'cuda'})+'\\n')
+else:
+    time.sleep(30)
+''')
+    with execution_context("cancel-cpu-fallback", lambda: len(calls) == 2):
+        rows, _ = module.SubprocessWhisperModel("small", device="cuda").transcribe(audio)
+        with pytest.raises(asyncio.CancelledError):
+            list(rows)
+    assert len(calls) == 2
+    assert all(call["process"].poll() is not None for call in calls)
+    assert module._WORKER_SLOT.acquire(blocking=False)
+    module._WORKER_SLOT.release()
+
+
+def test_cpu_failure_after_cuda_oom_is_terminal_and_publishes_nothing(fake_worker):
+    audio, install = fake_worker
+    calls = install('''
+import json, sys
+request=json.load(open(sys.argv[2],encoding='utf-8'))
+with open(sys.argv[1],'w') as out:
+    out.write(json.dumps({'event':'segment','segment':{'start':0,'end':1,'text':'partial','words':[]}})+'\\n')
+    out.write(json.dumps({'event':'failed','code':'cuda_inference_oom','device':request['device']})+'\\n')
+''')
+    rows, _ = module.SubprocessWhisperModel("small", device="cuda").transcribe(audio)
+    with pytest.raises(module.ASRProcessError):
+        next(rows)
+    assert len(calls) == 2
+
+
+def test_cuda_stderr_without_typed_worker_failure_never_triggers_retry(fake_worker):
+    audio, install = fake_worker
+    calls = install("import sys; print('CUDA out of memory', file=sys.stderr); sys.exit(7)")
+    rows, _ = module.SubprocessWhisperModel("small", device="cuda").transcribe(audio)
+    with pytest.raises(module.ASRProcessError):
+        list(rows)
+    assert len(calls) == 1
+
+
+@pytest.mark.parametrize("message,device,expected", [
+    ("CUDA failed with error out of memory", "cuda", True),
+    ("CUDA out of memory", "cuda", True),
+    ("cudaErrorMemoryAllocation", "cuda", True),
+    ("CUDA out of memory", "cpu", False),
+    ("mkl_malloc failed to allocate memory", "cpu", False),
+    ("CUDA driver initialization failed", "cuda", False),
+])
+def test_worker_oom_classification_is_specific(message, device, expected):
+    from core.engines.asr.whisper_worker import _is_cuda_oom
+    assert _is_cuda_oom(RuntimeError(message), device) is expected
+    assert not _is_cuda_oom(ValueError(message), device)
+
+
+def test_real_worker_emits_typed_failure_after_lazy_inference_oom(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+    from core.engines.asr.whisper_worker import run
+    import core.asr
+    def segments():
+        yield SimpleNamespace(start=0., end=1., text="partial", words=[])
+        raise RuntimeError("CUDA failed with error out of memory")
+    model = SimpleNamespace(model=SimpleNamespace(device="cuda", compute_type="float16"),
+                            transcribe=lambda *a, **kw: (segments(), None))
+    monkeypatch.setattr(core.asr, "load_whisper_model", lambda *a: model)
+    monkeypatch.setattr(settings, "WHISPER_COMPUTE_TYPE", "int8")
+    monkeypatch.setattr(settings, "ASR_CPU_THREADS", 1)
+    request, result = tmp_path / "request.json", tmp_path / "result.jsonl"
+    request.write_text(json.dumps({"model_size":"small", "device":"cuda", "compute_type":"float16",
+        "cpu_threads":1, "audio_path":"fixture.wav", "options":{"language":"ko"}}))
+    run(request, result)
+    records = [json.loads(line) for line in result.read_text().splitlines()]
+    assert [row["event"] for row in records] == ["runtime", "segment", "failed"]
+    assert records[-1] == {"event":"failed", "code":"cuda_inference_oom", "device":"cuda"}
+
+
 def test_timeout_kills_reaps_worker_and_releases_slot(fake_worker, monkeypatch):
     audio, install = fake_worker
     monkeypatch.setattr(settings, "ASR_PROCESS_TIMEOUT", .2, raising=False)

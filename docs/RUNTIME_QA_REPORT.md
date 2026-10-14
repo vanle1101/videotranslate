@@ -1,5 +1,44 @@
 # Runtime QA report
 
+## Inference recovery and provider cooldown audit — October 15, 2026
+
+**Overall acceptance remains incomplete.** Real Chinese-source UI task `fdc6ca35`
+is in progress; it has not yet produced a verified new MP4. The retained 320-second
+task still has 191/193 valid speech files and two measured timing conflicts.
+
+Root causes fixed:
+- Whisper caught CUDA errors during construction only. Inference OOM after a
+  partial result could fail the source stage. The child now emits a typed failure;
+  the parent discards partial CUDA rows, drains that process, and retries once on
+  CPU/int8. Unknown failures are not inferred from stderr. Actual device/fallback
+  details flow to the source-processing label and remain available after release.
+- Edge-TTS lost `Retry-After` and retried after fixed 3/8-second waits. It now owns
+  six attempts per wave, exponential backoff starting at 2 seconds with jitter
+  capped at 60 seconds, and respects numeric/date provider cooldowns. Waits are
+  cancellable; the durable scheduler retains the final cooldown. Unsupported
+  cooldowns over seven days fail explicitly instead of sleeping indefinitely or
+  retrying early. Authentication/TLS failures remain terminal.
+
+Validation: 77 ASR/Edge focused tests passed before the final backoff refinement;
+90 language/source/UI-label contract tests passed; agent Edge/scheduler suite
+passed 102 tests plus four terminal-header checks. These are fault-injection and
+contract results, not evidence of real GPU OOM or real HTTP429 acceptance.
+JavaScript syntax and Git whitespace checks passed. The live UI test retains its
+launch-time engine code; it does not certify the later engine changes.
+
+The real Chinese-only preview test `fdc6ca35` ran through production Qt with
+Muse, reached OCR and 40 text batches, then stopped at about 11m40s with eight
+translation rows in `RETRY_PENDING`. Muse logged repeated ~60-second timeouts
+and one provider failure; no placeholder translation or MP4 was published.
+The checkpoint is resumable and the owned QA backend exited cleanly. This is a
+**FAIL for preview output**, while checkpoint preservation and independent retry
+remain PASS. It exposes current provider latency/response instability as an
+acceptance blocker; it is not evidence that the new ASR fallback failed.
+
+Files: `core/engines/asr/{whisper_worker,whisper_process,faster_whisper_engine}.py`,
+`core/engines/tts/edge_fallback.py`, `core/streaming/pipeline.py`, and related
+ASR/language/Edge/UI-label regression tests.
+
 ## Real recovery result — October 15, 2026, 03:10
 
 **Incomplete:191/193 valid WAVs, FAILED IDs87 and119.** The fresh production

@@ -3249,6 +3249,12 @@ class StreamingPipelineSession:
         return result
 
     def source_processing_label(self):
+        label = self._source_processing_label()
+        engine = self.faster_whisper if self.visual_translation else getattr(self, "asr_engine", None)
+        runtime_label = getattr(engine, "runtime_label", "")
+        return f"{label} · {runtime_label}" if isinstance(runtime_label, str) and runtime_label else label
+
+    def _source_processing_label(self):
         if not self.visual_translation:
             return getattr(getattr(self, "asr_engine", None), "name", self.asr_engine_name)
         providers = {source["provider"] for source in self.translation_sources}

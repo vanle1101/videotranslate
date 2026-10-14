@@ -7,6 +7,16 @@ from pathlib import Path
 import sys
 
 
+def _is_cuda_oom(error, device):
+    # CTranslate2 exposes inference allocation failures as RuntimeError, not a
+    # dedicated Python OOM class. Classify only its known CUDA diagnostics at
+    # the exception boundary; never interpret arbitrary child stderr as retry.
+    return (device == "cuda" and isinstance(error, RuntimeError) and any(
+        marker in str(error).lower() for marker in (
+            "cuda failed with error out of memory", "cuda out of memory",
+            "cudaerrormemoryallocation")))
+
+
 def run(request_path, result_path):
     request = json.loads(Path(request_path).read_text(encoding="utf-8"))
     from config import settings
@@ -19,6 +29,9 @@ def run(request_path, result_path):
         model = load_whisper_model(request["model_size"], request["device"])
         if request["options"].get("multilingual") and not model.model.is_multilingual:
             raise ValueError("Tự động đa ngôn ngữ cần model Whisper đa ngôn ngữ; không dùng model .en.")
+        device = getattr(model.model, "device", request["device"])
+        runtime = {"event": "runtime", "device": device,
+                   "compute_type": getattr(model.model, "compute_type", request["compute_type"])}
         options = dict(request["options"])
         audio = request["audio_path"]
         if options.get("multilingual") and options.get("clip_timestamps", "0") == "0":
@@ -33,19 +46,30 @@ def run(request_path, result_path):
             options["clip_timestamps"] = [bound / 16000 for span in spans
                                            for bound in (span["start"], span["end"])]
             if not spans:
-                Path(result_path).write_text(json.dumps({"event":"completed","segments":0})+'\n',encoding='utf-8')
+                Path(result_path).write_text(json.dumps(runtime) + '\n' +
+                    json.dumps({"event":"completed","segments":0})+'\n',encoding='utf-8')
                 return
-        segments, _ = model.transcribe(audio, **options)
         with Path(result_path).open("w", encoding="utf-8") as output:
+            output.write(json.dumps(runtime) + "\n")
+            output.flush()
             count = 0
-            for segment in segments:
-                record = {"event": "segment", "segment": {"start": float(segment.start),
-                    "end": float(segment.end), "text": segment.text,
-                    "words": [{"word": word.word, "start": float(word.start), "end": float(word.end)}
-                              for word in (segment.words or [])]}}
-                output.write(json.dumps(record, ensure_ascii=False, allow_nan=False) + "\n")
+            try:
+                segments, _ = model.transcribe(audio, **options)
+                for segment in segments:
+                    record = {"event": "segment", "segment": {"start": float(segment.start),
+                        "end": float(segment.end), "text": segment.text,
+                        "words": [{"word": word.word, "start": float(word.start), "end": float(word.end)}
+                                  for word in (segment.words or [])]}}
+                    output.write(json.dumps(record, ensure_ascii=False, allow_nan=False) + "\n")
+                    output.flush()
+                    count += 1
+            except RuntimeError as error:
+                if not _is_cuda_oom(error, device):
+                    raise
+                output.write(json.dumps({"event": "failed", "code": "cuda_inference_oom",
+                    "device": "cuda"}) + "\n")
                 output.flush()
-                count += 1
+                return
             output.write(json.dumps({"event": "completed", "segments": count}) + "\n")
             output.flush()
 
