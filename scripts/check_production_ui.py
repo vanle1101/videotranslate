@@ -275,7 +275,7 @@ def check_retry_stop(page, base, task_id):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("task_id", choices=["38680e43", "e978c201", "5258c661", "76f5aa6b", "00b293c5"])
+    parser.add_argument("task_id", choices=["38680e43", "e978c201", "5258c661", "76f5aa6b", "00b293c5", "fdc6ca35"])
     parser.add_argument("--style", action="store_true", help="Save/reload a temporary QA caption style and restore the prior style. Marks its old render outdated.")
     parser.add_argument("--skip-playback", action="store_true")
     parser.add_argument("--retry-stop", action="store_true", help="Retry and stop real work through UI (authorized lifecycle projects only).")

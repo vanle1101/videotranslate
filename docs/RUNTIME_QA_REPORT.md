@@ -1,5 +1,42 @@
 # Runtime QA report
 
+## Long recovery result and fresh-runtime acceptance — October 15, 2026, 04:52
+
+**Long full export: FAIL / timing conflicts remain.** Real production UI recovery
+of `76f5aa6b` ended at 04:46:55 with **191/193 valid WAVs, 2 FAILED, 36 content
+reviews required**. All 193 source IDs and 15 manual rows were preserved. No
+long MP4 was published. ID 87 needed 1.566420s versus 1.139042s available; ID 119
+needed 1.257725s versus 0.850333s available. Normal and neighbor proposals were
+rejected for meaning/fluency/duplication or measured overflow. Existing evidence
+does not establish speaker continuity sufficiently to merge these cues, and a
+manual following row remains fixed. No speed-limit increase, cut speech or
+timeline bypass was used. The owned recovery backend shut down cleanly.
+
+This run exposed misleading failure classification: a rejected pacing proposal
+could leave the cosmetic TTS stage active and be reported as synthesis failure.
+Typed pacing/budget errors now record ALIGNING across review publication,
+recovery and the main worker; rewrite progress also owns ALIGNING. Warnings
+describe timing and are retired after successful speech. **194 focused tests
+passed in 18.04s**, followed by **62 recovery tests in 7.64s**, including both
+rejected-rewrite and measured-budget classification regressions.
+
+Fresh backend source-seek acceptance after the file-transfer fix: **PASS**.
+160/162/5/160s seeks took 2.687/0.110/0.125/0.109s respectively; decoder-boundary
+playback and latest-intent rapid seeking passed. A separate fresh production UI
+opened `fdc6ca35`, retained all 12 rows and played its output at 0.464585s,
+readyState 4, duration 32.625s, no media error. Five content-review flags remain.
+
+Fresh production UI Retry → Stop on `76f5aa6b`: **PASS**. The harness verified
+191 existing WAV hashes, all source IDs, all 15 manual rows, matching stopped
+UI/backend state, five seconds without late writes, and Retry availability.
+Latest saved long-job state is STOPPED after this lifecycle test; it is not
+completed. All three fresh UI harnesses closed their owned backends normally.
+
+Outstanding: two long timing conflicts, short-row source/orthography ambiguity,
+fresh Korean speech with Chinese subtitles acceptance, real long/multi-hour
+benchmarks, and real failure-path partial-publication verification. No overall
+completion or universal quality claim is made.
+
 ## Independent target spelling and source seeking — October 15, 2026, 04:47
 
 Added bounded target-only spelling review for retained ASCII Vietnamese drafts.

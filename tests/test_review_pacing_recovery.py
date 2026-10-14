@@ -47,6 +47,25 @@ def reviewed_session(tmp_path, monkeypatch):
     return session
 
 
+@pytest.mark.parametrize("kind", ["budget", "rejected_rewrite"])
+def test_deferred_pacing_reports_alignment_failure_after_tts_stage(reviewed_session, monkeypatch, kind):
+    session = reviewed_session
+    row = session.segments[112]
+    session._visual_completed_seconds = session.total_duration
+    row.status = "WAITING"
+    async def failed(target):
+        target.status = "TTS"  # Old UI rewrite stage used this cosmetic value.
+        if kind == "budget":
+            raise pipeline.SpeechBudgetError("Measured duration exceeds slot")
+        raise pipeline.PacingReviewRejected("Repeated wording", candidate="Dài quá.", code="duplicate")
+    monkeypatch.setattr(session, "_synthesize_segment", failed)
+    asyncio.run(session._resume_deferred_speech_rows([(row, row.revision)]))
+    assert row.status == "FAILED" and row.failed_stage == "ALIGNING"
+    assert any("chưa căn được thời lượng giọng" in warning for warning in session.warnings)
+    assert session.segments[113].status == "WAITING"
+    assert not getattr(session, "_retry_schedule", [])
+
+
 def review_response():
     return {"segments": {
         112: {"id": 112, "text_zh": "我真的不是回来", "final_vi": "Thật sự không phải về đây.",
@@ -566,7 +585,8 @@ def test_review_audio_failure_retains_corrected_revision_and_only_measured_timin
     monkeypatch.setattr(session, "_fit_dub", fail_fit)
     asyncio.run(session._review_translations(regenerate_audio=True))
 
-    assert focus.status == "FAILED" and focus.failed_stage == "TTS"
+    assert focus.status == "FAILED"
+    assert focus.failed_stage == ("TTS" if failure_kind == "provider" else "ALIGNING")
     assert focus.revision == 1
     assert focus.text_zh == "我真的不是回来"
     assert focus.final_vi == "Thật sự không phải về đây."

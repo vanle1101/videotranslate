@@ -1333,7 +1333,7 @@ class StreamingPipelineSession:
                             segment.superseded_audio_paths.append(segment.audio_path)
                         self._apply_review_metadata(segment, row)
                         segment.revision += 1
-                        segment.status, segment.failed_stage = "FAILED", "TTS"
+                        segment.status, segment.failed_stage = "FAILED", self._speech_failure_stage(error, "TTS")
                         segment.error = str(error)
                         segment.audio_path = segment.audio_url = None
                         segment.tts_duration, segment.speed_ratio = 0., 1.
@@ -1388,6 +1388,14 @@ class StreamingPipelineSession:
             self.warnings[:] = [warning for warning in self.warnings if warning not in REVIEW_FAILURE_WARNINGS]
         await self.emit("review_complete", {"review_summary": self.review_summary,
             "warnings": list(self.warnings), "screen_texts": self.screen_texts})
+
+    @staticmethod
+    def _speech_failure_stage(error, stage):
+        # Rewriting is part of fitting already-measured speech. Its last UI
+        # label must not misclassify a rejected rewrite as a provider TTS error.
+        if isinstance(error, (SpeechBudgetError, PacingReviewRejected)):
+            return "ALIGNING"
+        return stage
 
     async def _resume_speech_rows(self, rows, *, defer_pacing=False):
         """Publish simple fits before admitting slower semantic pacing requests.
@@ -1446,10 +1454,12 @@ class StreamingPipelineSession:
                     await self.emit("segment_update", row.to_dict())
                     self._persist_if_enabled()
                     continue
-                row.failed_stage = row.status if row.status in {"TTS", "ALIGNING"} else "TTS"
+                row.failed_stage = self._speech_failure_stage(error,
+                    row.status if row.status in {"TTS", "ALIGNING"} else "TTS")
                 row.status, row.error = "FAILED", str(error)
                 self._schedule_speech_retry(row, error)
-                warning = f"Câu {row.id + 1} chưa tạo được giọng; giữ phần đã xong và tiếp tục các câu sau."
+                problem = "chưa căn được thời lượng giọng" if row.failed_stage == "ALIGNING" else "chưa tạo được giọng"
+                warning = f"Câu {row.id + 1} {problem}; giữ phần đã xong và tiếp tục các câu sau."
                 if warning not in self.warnings:
                     self.warnings.append(warning)
                 logging.getLogger("errors").error(
@@ -1488,10 +1498,12 @@ class StreamingPipelineSession:
                     raise
                 if row.revision != revision:
                     continue
-                row.failed_stage = row.status if row.status in {"TTS", "ALIGNING"} else "TTS"
+                row.failed_stage = self._speech_failure_stage(error,
+                    row.status if row.status in {"TTS", "ALIGNING"} else "TTS")
                 row.status, row.error = "FAILED", str(error)
                 self._schedule_speech_retry(row, error)
-                warning = f"Câu {row.id + 1} chưa tạo được giọng; giữ phần đã xong và tiếp tục các câu sau."
+                problem = "chưa căn được thời lượng giọng" if row.failed_stage == "ALIGNING" else "chưa tạo được giọng"
+                warning = f"Câu {row.id + 1} {problem}; giữ phần đã xong và tiếp tục các câu sau."
                 if warning not in self.warnings:
                     self.warnings.append(warning)
                 logging.getLogger("errors").error(
@@ -4273,7 +4285,7 @@ class StreamingPipelineSession:
                 # An edit/review owns its new state. Never rewrite it with the
                 # outcome of this older automatic retry.
                 if self._pacing_failure_owned(seg, record):
-                    seg.failed_stage, seg.status, seg.error = seg.status, "FAILED", str(error)
+                    seg.failed_stage, seg.status, seg.error = self._speech_failure_stage(error, seg.status), "FAILED", str(error)
                     await self.emit("segment_update", seg.to_dict())
                 logging.getLogger("errors").error(
                     "[%s] PACING_FINAL_RECOVERY_FAILED segment_id=%s error_type=%s",
@@ -4281,8 +4293,9 @@ class StreamingPipelineSession:
 
     def _retire_speech_failure(self, seg):
         seg.error = None
-        warning = f"Câu {seg.id + 1} chưa tạo được giọng; giữ phần đã xong và tiếp tục các câu sau."
-        self.warnings[:] = [value for value in self.warnings if value != warning]
+        warnings = {f"Câu {seg.id + 1} {problem}; giữ phần đã xong và tiếp tục các câu sau."
+            for problem in ("chưa tạo được giọng", "chưa căn được thời lượng giọng")}
+        self.warnings[:] = [value for value in self.warnings if value not in warnings]
 
     def _retire_superseded_speech(self, seg):
         # Deferred review hides old speech immediately, but its bytes remain
@@ -4368,7 +4381,7 @@ class StreamingPipelineSession:
                     raise asyncio.CancelledError
                 if pacing_recovery and not self._pacing_failure_owned(seg, pacing_recovery):
                     raise SegmentEditConflict("Lời thoại đã thay đổi trong khi căn lại; giữ bản sửa mới.")
-                seg.status = "ALIGNING" if stage == "ALIGNING" else "TTS"
+                seg.status = "ALIGNING" if stage in {"ALIGNING", "REWRITING"} else "TTS"
                 label = {"TTS": "Đang tạo giọng đọc", "ALIGNING": "Đang căn nhịp đọc",
                          "REWRITING": "AI đang rút gọn và kiểm tra nghĩa lời đọc"}[stage]
                 await self._segment_progress("align" if stage == "ALIGNING" else "tts", f"{label} câu {seg.id + 1}")
@@ -4687,7 +4700,7 @@ class StreamingPipelineSession:
                         seg.status if seg else "UNKNOWN", type(exc).__name__,
                     )
                     if seg:
-                        seg.failed_stage = seg.status
+                        seg.failed_stage = self._speech_failure_stage(exc, seg.status)
                         seg.status = "FAILED"
                         seg.error = message
                         scheduled = (self._schedule_speech_retry(seg, exc)
