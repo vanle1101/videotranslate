@@ -29,6 +29,20 @@ provider execution/basic final playback only, not translated-preview playback.
 Stronger preview/coverage/seek assertions are being added; earlier verdicts are
 not expanded beyond their observed evidence.
 
+At 05:38, task `5bea8fe5` reached Preview Ready with eight rows containing
+actual Vietnamese WAVs and 24.26s processed coverage, then the original running
+harness clicked Translate Full. Five additional recognized rows were outside
+that preview scope. Full mode retained the same task and existing speech and
+reported configured/effective chunk workers 20/20. This running process predates
+the strengthened playback assertions; its preview label alone is not reported
+as verified audible preview. The new checks are committed in `e9bfc31` and
+`b53c37d` and await fresh execution.
+
+A separate attempt to reopen the Korean fixture while this run owned the
+workspace was rejected by the production workspace lease. No competing writer
+started, and the attempted second backend shut down. Its media checks did not
+run. The long task remains the sole active backend; no lease bypass was used.
+
 ## Additional retained recovery and long-source selection — October 15, 2026, 05:20
 
 **Retained natural Douyin 15-second project `38680e43`: FAIL full recovery.**
