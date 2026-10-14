@@ -1,5 +1,25 @@
 # Runtime QA report
 
+## Real recovery result — October 15, 2026, 03:10
+
+**Incomplete:191/193 valid WAVs, FAILED IDs87 and119.** The fresh production
+History→Retry run started02:34 and ended naturally at03:10. It recovered135,145
+and146 using real Muse/Edge-TTS, bounded rewrites and neighbor timing adjustment;
+speed never exceeded1.15. ID119's neighbor117 actually failed measured synthesis
+at1.6153s versus1.3832s budget; remaining proposals then ran, proving the new loop
+is exercised in production, although that row did not recover. Cached duplicate
+feedback no longer consumed identical instant requests; new attempts had actual
+provider responses, some still rejecting or repeating content.
+
+All193 IDs and all15 manual rows' text/revision/timing/audio SHA256 were preserved.
+Thirty-six rows remain review-required. Backend stopped cleanly; no full MP4 was
+rendered because two speech rows are missing. This run predates blind-fluency-v3.
+The next retest will load that correction and resume only the remaining work.
+
+Task-owned pytest temporary folders1222/1223 could not be removed: automatic
+command approval rejected the scoped PowerShell cleanup with `blocked by policy`.
+They were left intact; user projects and media were not deleted.
+
 ## Latest retained recovery result — October 15, 2026, 02:19
 
 Follow-up root causes found in that run:
