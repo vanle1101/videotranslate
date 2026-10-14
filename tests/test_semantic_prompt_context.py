@@ -156,7 +156,9 @@ def test_source_translation_and_recheck_share_full_semantic_unit_with_one_row_ba
     assert all(context["units"][0]["source_ids"] == [112, 113] for context in contexts)
     assert set(result["segments"]) == {112, 113}
     # Stable complete-unit input hashes participate in each persisted batch key.
-    stages = [call.args[0] for call in processor._write_checkpoint.call_args_list]
+    stages = [call.args[0] for call in processor._write_checkpoint.call_args_list
+              if call.args[0].get("kind") == "text_batch"]
+    assert len(stages) == 2
     assert all(isinstance(stage["context"], str) and len(stage["context"]) == 64 for stage in stages)
 
 

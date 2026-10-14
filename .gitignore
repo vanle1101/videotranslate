@@ -7,6 +7,7 @@ workspace/models/
 workspace/tools/
 workspace/muse-profile/
 workspace/private/
+workspace/.studio-workspace.lease
 workspace/inputs/*
 workspace/outputs/*
 workspace/logs/

@@ -285,8 +285,12 @@ def test_uncertain_draft_is_audible_before_edit_and_edit_replaces_audio_without_
         async with client() as api:
             audio = await api.get(draft["audio_url"])
             assert audio.status_code == 200 and audio.content == (draft["final_vi"] + " aligned").encode()
-            exported = await api.post("/api/streaming/export-hq", json={"task_id": session.task_id})
-            assert exported.status_code == 409
+            # Editorial uncertainty labels a complete spoken draft; it no
+            # longer blocks export. This fixture uses text bytes as fake WAVs;
+            # actual render/media gates are covered by export integration QA.
+            progress = session.get_progress()
+            assert progress["final_output_blocked"] is False
+            assert progress["output_is_draft"] is True
             response = await api.patch(route(session), json={"final_vi": "Câu đã nghe và sửa"})
             assert response.status_code == 200, response.text
             saved = response.json()["segment"]
@@ -1606,7 +1610,7 @@ def test_failed_edit_preserves_current_result_reference(session):
     assert not any(event == "result_invalidated" for event, _ in session.events)
 
 
-def test_incomplete_second_review_is_not_completed_and_blocks_export(session, monkeypatch):
+def test_incomplete_second_review_stays_visible_without_blocking_spoken_draft(session, monkeypatch):
     from core.translation_review import AutomaticTranslationReviewer
     monkeypatch.setattr(settings, "LLM_PROVIDER", "opencode")
     row = dict(session.segments[0].to_dict(), needs_review=True,
@@ -1620,9 +1624,9 @@ def test_incomplete_second_review_is_not_completed_and_blocks_export(session, mo
         progress = session.get_progress()
         assert progress["review_summary"]["status"] == "incomplete"
         assert progress["status"] == "FAILED" and progress["can_review"]
-        async with client() as api:
-            result = await api.post('/api/streaming/export-hq', json={"task_id": session.task_id})
-            assert result.status_code == 409
+        assert progress["final_output_blocked"] is False
+        assert progress["output_is_draft"] is True
+        assert progress["output_quality_label"] == "Bản nháp — cần kiểm tra"
     asyncio.run(run())
 
 

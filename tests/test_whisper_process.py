@@ -163,7 +163,7 @@ with open(sys.argv[1], 'w', encoding='utf-8') as out:
     assert result == {row["id"]: {"sensevoice": "你好", "faster-whisper-small": "你好"} for row in rows}
     assert [call["request"]["engine"] for call in calls] == [
         "sensevoice", "faster-whisper-small", "sensevoice", "faster-whisper-small"]
-    assert [len(call["request"]["rows"]) for call in calls] == [12, 12, 1, 1]
+    assert [len(call["request"]["rows"]) for call in calls] == [8, 8, 5, 5]
     assert progress == sorted(progress) and progress[-1] == 100
     assert all(call["process"].poll() == 0 for call in calls)
     assert not list(settings.TEMP_DIR.glob("review-asr-worker-*"))
@@ -203,7 +203,7 @@ def test_later_evidence_failure_retains_and_caches_only_complete_readings(eviden
     program = '''
 import json, sys
 request=json.load(open(sys.argv[2],encoding='utf-8'))
-if request['engine']=='sensevoice' and request['rows'][0]['id']==12:
+if request['engine']=='sensevoice' and request['rows'][0]['id']==8:
     with open(sys.argv[1],'w',encoding='utf-8') as out:
         out.write(json.dumps({'event':'evidence','id':12,'engine':'sensevoice','text':'wrong partial'})+'\\n')
     sys.exit(7)
@@ -219,22 +219,23 @@ with open(sys.argv[1],'w',encoding='utf-8') as out:
     rows = [{"id": index, "start": index, "end": index + 1} for index in range(13)]
     evidence = _LocalAudioEvidence()
     result = evidence.collect(audio, rows, checkpoint=checkpoint)
-    assert all(result[index] == {"sensevoice": "你好", "faster-whisper-small": "你好"} for index in range(12))
+    assert all(result[index] == {"sensevoice": "你好", "faster-whisper-small": "你好"} for index in range(8))
+    assert all(result[index] == {"faster-whisper-small": "你好"} for index in range(8, 13))
     assert result[12] == {"faster-whisper-small": "你好"}
-    assert set(evidence.last_errors) == {12}
+    assert set(evidence.last_errors) == set(range(8, 13))
     assert set(evidence.last_errors[12]) == {"sensevoice"}
-    assert len(calls) == 4 and len(list(directory.glob("*.review"))) == 25
+    assert len(calls) == 4 and len(list(directory.glob("*.review"))) == 21
     assert "wrong partial" not in "".join(path.read_text(encoding="utf-8") for path in directory.glob("*.review"))
 
     # A terminal marker is still required: use a healthy worker rather than
     # accepting the failed child's incomplete first attempt.
     previous_calls = len(calls)
     calls = install(program.replace(
-        "if request['engine']=='sensevoice' and request['rows'][0]['id']==12:", "if False:"))
+        "if request['engine']=='sensevoice' and request['rows'][0]['id']==8:", "if False:"))
     recovered = _LocalAudioEvidence().collect(audio, rows, checkpoint=checkpoint)
     assert recovered == {row["id"]: {"sensevoice": "你好", "faster-whisper-small": "你好"} for row in rows}
     assert len(calls) == previous_calls + 1
-    assert calls[-1]["request"]["rows"] == [rows[12]] and calls[-1]["request"]["engine"] == "sensevoice"
+    assert calls[-1]["request"]["rows"] == rows[8:13] and calls[-1]["request"]["engine"] == "sensevoice"
     assert len(list(directory.glob("*.review"))) == 26
     assert calls[-1]["process"].poll() == 0
     assert not list(settings.TEMP_DIR.glob("review-asr-worker-*"))

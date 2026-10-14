@@ -39,6 +39,7 @@ from core.engines.alignment.speech_timing import (build_speech_timing, take_tts_
 from core.streaming.audio_cache import resolve_dub_timing
 from core.streaming.retry_schedule import (schedule_retry, finish_retry, begin_retry,
     mark_intent, due_entries)
+from core.streaming.glossary import glossary_snapshot
 from core.streaming.output_gate import final_output_metadata, preview_output_metadata, missing_spoken_output_ids, missing_speech_message
 from core.engines.alignment.dub_timing import available_reflow_duration, plan_reflow, MAX_TAIL_LIMIT_EXTENSION
 
@@ -292,6 +293,8 @@ class StreamingPipelineSession:
         self.sensevoice = SenseVoiceEngine()
         self.faster_whisper = FasterWhisperFallbackEngine()
         self.translator = SemanticTranslator()
+        self.shared_glossary = glossary_snapshot(self)
+        self.translator.glossary = glossary_snapshot(self)
         self.video_intelligence = None
         if self.visual_translation and not _restoring:
             from core.video_intelligence import VideoIntelligence
@@ -485,6 +488,12 @@ class StreamingPipelineSession:
                 row["verification"] = dict(item.verification)
             if item.id == segment.id:
                 row["is_focus"] = True
+                # Count shared terminology in the selector's budget, and send
+                # it once. Appending it to every selected row made a second
+                # normalization silently discard neighbouring source turns.
+                terminology = glossary_snapshot(self)
+                if terminology["terms"]:
+                    row["terminology_context"] = terminology
             draft = (focus_vi if item.id == segment.id and isinstance(focus_vi, str)
                      else reviewed.get("final_vi", getattr(item, "final_vi", "")))
             if isinstance(draft, str) and draft:
@@ -1209,8 +1218,10 @@ class StreamingPipelineSession:
         eta_review_started = stage_measurement_start(self)
         try:
             with observe_cache_usage() as review_cache_usage:
+                reviewer = AutomaticTranslationReviewer(source_language=self.source_language)
+                reviewer.glossary = glossary_snapshot(self)
                 result = await self._run_blocking(
-                    AutomaticTranslationReviewer(source_language=self.source_language).review, self.video_path, deepcopy(targets), deepcopy(self.screen_texts), **options)
+                    reviewer.review, self.video_path, deepcopy(targets), deepcopy(self.screen_texts), **options)
             successful_rows = sum((row.get("verification") or {}).get("status") in
                                   {"verified", "corrected", "unresolved", "manual"}
                                   for row in result.get("segments", {}).values())
@@ -1222,9 +1233,13 @@ class StreamingPipelineSession:
         # Audio edits publish one row at a time. Every pacing request must see
         # the same complete reviewed exchange, including future source fixes,
         # while each row's visible text/audio still commits transactionally.
+        if glossary_snapshot(self)["version"] != reviewer.glossary["version"]:
+            raise SegmentEditConflict("Bảng thuật ngữ đã đổi; không áp dụng kết quả rà cũ.")
         review_context = deepcopy(result["segments"])
         for sid, row in sorted(result["segments"].items(), key=lambda item: (self.segments[item[0]].start, item[0])):
             await self._wait_for_edit_publication()
+            if glossary_snapshot(self)["version"] != reviewer.glossary["version"]:
+                raise SegmentEditConflict("Bảng thuật ngữ đã đổi; giữ phần đã lưu và rà lại phần còn thiếu.")
             segment = self.segments[sid]
             if (sid not in target_revisions or segment.revision != target_revisions[sid]
                     or (segment.verification or {}).get("status") == "manual"):
@@ -1871,6 +1886,8 @@ class StreamingPipelineSession:
                         retry_chunks=sum(row["state"] == "RETRY_PENDING" for row in self._chunk_jobs))
         retry_records = getattr(self, "_retry_schedule", [])
         snapshot.update(retry_pending_count=sum(r["state"] == "RETRY_PENDING" for r in retry_records),
+                        retry_error_codes=sorted({r["error_code"] for r in retry_records
+                            if r["state"] == "RETRY_PENDING"}),
                         retry_next_attempt_at=min((r["next_attempt_at"] for r in retry_records
                             if r["state"] == "RETRY_PENDING"), default=None))
         snapshot["elapsed_seconds"] = (max(0, time.monotonic() - self._run_started_at)
@@ -2477,6 +2494,7 @@ class StreamingPipelineSession:
                         source = SegmentItem(item.id, item.start, item.end, item.duration)
                         source.text_zh = item.asr_text or item.text_zh
                         source_rows.append(source)
+                    self.video_intelligence.glossary = glossary_snapshot(self)
                     self._visual_result = await self._run_blocking(
                         self.video_intelligence.prepass,
                         self.video_path,
@@ -2729,7 +2747,7 @@ class StreamingPipelineSession:
                     source_rows.append(source)
             configuration = {"source": self._chunked_source_identity, "provider": settings.LLM_PROVIDER,
                              "model": settings.OPENCODE_MODEL, "visual": self.visual_translation,
-                             "source_language": self.source_language}
+                             "source_language": self.source_language, "glossary_version": glossary_snapshot(self)["version"]}
             interval = reserve(self._chunk_jobs, cursor, end, input_hash(source_rows, configuration))
             self._reconcile_source_retry(interval)
             transition(interval, "RUNNING")
@@ -2783,6 +2801,8 @@ class StreamingPipelineSession:
                 async def publish():
                     entered.set()
                     try:
+                        if glossary_snapshot(self)["version"] != configuration["glossary_version"]:
+                            raise SegmentEditConflict("Bảng thuật ngữ đã đổi; bỏ kết quả dịch cũ.")
                         await self._publish_visual_chunk(result, start, stop)
                     finally:
                         finished.set()
@@ -2810,6 +2830,7 @@ class StreamingPipelineSession:
                             "text_zh": row.text_zh or row.asr_text, "asr_text": row.asr_text,
                             "source_needs_review": row.source_method == "audio"}
                            for row in self.segments.values()]
+                self.video_intelligence.glossary = glossary_snapshot(self)
                 result = await self._run_blocking(self.video_intelligence.prepass, self.video_path, source_rows,
                     total_duration=self.total_duration, start_time=cursor, end_time=end,
                     context_segments=context, previous_summary=getattr(self, "_visual_context_summary", ""),
@@ -2864,6 +2885,7 @@ class StreamingPipelineSession:
         from core.video_intelligence import VideoIntelligence
         from core.screen_ocr import ChunkScreenOCR
         engine = VideoIntelligence(source_language=self.source_language)
+        engine.glossary = glossary_snapshot(self)
         engine.screen_ocr = ChunkScreenOCR(source_language=self.source_language)
         return engine
 
@@ -2953,12 +2975,14 @@ class StreamingPipelineSession:
                 source, context = self._parallel_source_snapshot(start, end)
                 signature = input_hash(source, {"source": self._chunked_source_identity,
                     "provider": settings.LLM_PROVIDER, "model": settings.OPENCODE_MODEL,
-                    "visual": True, "parallel_context_version": 1, "source_language": self.source_language})
+                    "visual": True, "parallel_context_version": 1, "source_language": self.source_language,
+                    "glossary_version": glossary_snapshot(self)["version"]})
                 record = reserve(self._chunk_jobs, start, end, signature)
                 self._reconcile_source_retry(record)
                 if record["state"] == "COMPLETED":
                     continue
                 owners = {row.id: self._visual_review_state(self.segments[row.id]) for row in source}
+                owners["glossary_version"] = glossary_snapshot(self)["version"]
                 async def execute(record=record, source=source, context=context):
                     if not current():
                         raise asyncio.CancelledError
@@ -3019,6 +3043,8 @@ class StreamingPipelineSession:
                     async for outcome in pool.run(jobs):
                         record, owners = metadata[(outcome.work.start, outcome.work.end)]
                         batches, error = outcome.value if outcome.error is None else ([], outcome.error)
+                        if owners["glossary_version"] != glossary_snapshot(self)["version"]:
+                            batches, error = [], SegmentEditConflict("Bảng thuật ngữ đã đổi; bỏ kết quả dịch cũ.")
                         published = set()
                         for result, lo, hi in batches:
                             await self._wait_for_edit_publication()
@@ -3345,7 +3371,8 @@ class StreamingPipelineSession:
         def invoke():
             if settings.LLM_PROVIDER == "opencode":
                 from core.engines.translation.opencode_client import _shared_execution_layer
-                _shared_execution_layer().set_run_concurrency(self.task_id, self.ai_concurrency)
+                _shared_execution_layer().set_run_concurrency(self.task_id,
+                    getattr(self, "ai_concurrency", settings.TRANSLATION_CHUNK_WORKERS))
             with execution_context(self.task_id, lambda: check() or cancellation.is_set()):
                 return function(*args, **kwargs)
 
@@ -3961,7 +3988,7 @@ class StreamingPipelineSession:
     @staticmethod
     def _pacing_source_context(context):
         return [{**{key: row.get(key) for key in ("id", "start", "end", "text_zh", "asr_text",
-                                               "source_needs_review", "source_truncated")},
+                                               "source_needs_review", "source_truncated", "terminology_context")},
                  **{name: deepcopy(row[name]) for name in SOURCE_METADATA_FIELDS if name in row}}
                 for row in (context or []) if isinstance(row, dict) and "id" in row]
 

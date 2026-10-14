@@ -45,6 +45,9 @@ def api(tmp_path, monkeypatch, source):
     monkeypatch.setattr(main, "active_streaming_sessions", {})
     with TestClient(main.app) as client:
         yield client, cache
+        # These endpoint fixtures are path-only records, not runtime owners.
+        # Remove them before the real lifespan drains production sessions.
+        main.active_streaming_sessions.clear()
     cache.clear()
 
 

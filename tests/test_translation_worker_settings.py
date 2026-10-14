@@ -80,6 +80,7 @@ def assert_worker_page(client, expected_selected):
 @pytest.fixture
 def worker_api(tmp_path, monkeypatch):
     monkeypatch.setattr(main.settings, "BASE_DIR", tmp_path)
+    monkeypatch.setattr(main.settings, "WORKSPACE_DIR", tmp_path / "workspace")
     monkeypatch.setattr(main.settings, "TRANSLATION_CHUNK_WORKERS", 5)
     monkeypatch.setattr(main.settings, "OPENCODE_CONCURRENCY", 5)
     monkeypatch.setattr(main, "active_streaming_sessions", {})
@@ -96,6 +97,9 @@ def worker_api(tmp_path, monkeypatch):
     env_file.write_text("# Existing configuration\nUSER_SETTING=preserved\n", encoding="utf-8")
     with TestClient(main.app) as client:
         yield client, env_file
+        # Settings tests install path/state-only fake sessions, with no worker
+        # lifecycle to drain. Production ownership is exercised separately.
+        main.active_streaming_sessions.clear()
 
 
 def test_settings_returns_selected_workers_and_exact_presets(worker_api):

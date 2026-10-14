@@ -1,5 +1,38 @@
 # Runtime QA report
 
+## Recovery retest and cross-process ownership — October 15, 2026
+
+**Acceptance remains INCOMPLETE.** The real 320.040635-second project `76f5aa6b` has 187 valid speech files out of 193; IDs 87,119,135,143,145,146 still lack a usable fitted voice. No new complete MP4 is claimed for this run.
+
+### Actual user flow observed
+
+- Started a fresh production backend and its real Qt UI offscreen, muted. Opened History → retained project → Retry. No provider, HTTP, media or runtime state was mocked.
+- The 1,800-second observation ran from approximately 00:18 to 00:48. Existing audio was reused; source/review work continued, followed by real Muse pacing and Edge-TTS requests.
+- At 00:42:35 ID87 measured 1.9474s against a 1.1390s fitting window. A proposed rewrite produced actual audio, then measured 1.7025s after silence compaction; it still exceeded the unchanged 1.15 voice speed ceiling. Duplicate, unnatural and semantically rejected proposals were not published as success.
+- The harness reached its observation deadline during neighbour rescue, requested normal Stop, saved the checkpoint, and shut down its owned backend. This is an incomplete run, not a provider timeout or successful recovery.
+- Afterwards the manifest contained 193 stable IDs, 187 validated WAVs, 15 manually approved rows and 36 review-required rows. The deadline branch did not run its content-hash assertion; it therefore does **not** prove byte-for-byte manual preservation for this observation. The harness now checks IDs/manual hashes after shutdown even on deadline or failure.
+
+### Root causes and changes
+
+- An offline API test server could discover a live project and start a second recovery writer. Tests now isolate restart discovery; production acquires a Windows kernel workspace lease before recovery, retains it until all owners/native workers drain, and rejects a second backend. A crash releases kernel ownership; the marker is never deleted/recreated as a locking mechanism.
+- A history read racing startup discovery could leave an idle restored session excluded from resume. Discovery now reuses that idle owner once, respecting explicit Stop/Pause and source/configuration checks.
+- Adding a glossary after context selection exceeded the context budget on the next normalization. Shared terminology is now accounted for during selection, sent once, and focus markers survive repeated normalization. Source turns are no longer silently lost on that path.
+- Source-correction schema failures discarded successful siblings. Two structural repairs now precede recursive splitting; validated children have independent checkpoints and failed singletons remain explicitly unverified ASR drafts. Transport failures retain their typed retry owner.
+- Per-video text batches now share a bounded executor and frozen source/glossary context. OCR/ASR retain their separate native limits; results merge by source order. This is verified with controlled tests, not a real 20/50-request throughput claim.
+- Speech cache normalization omitted the measured pacing proposal count; it now preserves and validates that metadata.
+- The UI still disabled export for an editorial review failure after the backend had adopted draft export. It now accepts the explicit backend gate for a complete spoken draft, while runtime failures, missing speech, pending edits and active review remain blocked.
+
+Files: `core/services/workspace_lease.py`, `core/streaming/glossary.py`, `core/streaming/pipeline.py`, `core/streaming/session_store.py`, `core/translation_context.py`, `core/video_intelligence.py`, `core/engines/translation/semantic_translator.py`, `core/engines/alignment/speech_cache.py`, `main.py`, `static/app.js`, `templates/index.html`, `scripts/check_retained_recovery_ui.py`, associated regression tests and `.gitignore`.
+
+Validation is still in progress. Broad regression runs found stale batch-size/draft-policy fixtures as well as the actual context/cache/UI defects above. Passing targeted tests are not substituted for complete production recovery. Real multi-hour/new-language acceptance and the six retained timing failures remain outstanding.
+
+### Retests on the updated runtime
+
+- Production Qt History → `00b293c5` → play → Export → play: **PASS**. A fresh backend loaded the new ownership code, rendered `workspace/outputs/douyin_translated_00b293c5_hq.mp4` (238,136 bytes), validated it, and played the new result at 640×360, duration 24.008s, currentTime 0.447915s, readyState 4, no media error. Owned backend exited. This reused the fixture's saved real-provider speech; it was not a new generation or a long-video test.
+- UI interaction suite: **283 PASS**. Focused schema/glossary/context/speech-cache suite: **114 PASS**. Source schema/parallel/checkpoint suites: **165 PASS** (overlapping coverage; counts are not additive). Selected text-worker/admission suite: **23 PASS**.
+- Controlled executor benchmark, **SIMULATED**, 100 independent tasks sleeping 50ms each; no Muse, TTS or video rendering: selected/peak/elapsed = 1/1/5.052s, 20/20/0.257s, 30/30/0.206s, 40/40/0.156s, 50/50/0.112s. This proves local admission can reach the requested concurrency; it does not predict real provider speed or long-video ETA.
+- Latest complete regression traversal: 3,596 passed, 2 skipped, 127 subtests passed; 2 failures were remaining Whisper-review fixtures expecting twelve-row batches. Updated those fixtures to the eight-row contract, retaining failure isolation/cache assertions; all 25 Whisper-process tests then passed. A fresh complete green run is still pending. Four newly added concurrency cases and the glossary budget regression also passed separately.
+
 ## Durable retries and asynchronous export — October 15, 2026
 
 **Full acceptance remains INCOMPLETE.** No new full 320-second MP4 is claimed.

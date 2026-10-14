@@ -121,6 +121,9 @@ def dialogue_context(rows, focus=(), *, max_rows=64, max_chars=18000):
         if confirmation is not None:
             item["speaker_confirmation"] = confirmation
         item["text_zh"] = source[:1500]
+        if isinstance(row.get("terminology_context"), dict):
+            from core.streaming.glossary import validate_glossary
+            item["terminology_context"] = validate_glossary(row["terminology_context"])
         if row.get("is_focus") is True:
             item["is_focus"] = True
         # The selector can be called more than once (for example when a
@@ -151,6 +154,7 @@ def dialogue_context(rows, focus=(), *, max_rows=64, max_chars=18000):
         normalized.append((index, item))
     if not normalized:
         return []
+    focus = list(focus) or [row for row in rows if row.get("is_focus") is True]
     focus_ids = {row.get("id") for row in focus if "id" in row}
     focused = [i for i, (_, item) in enumerate(normalized) if item.get("id") in focus_ids]
     if not focused:

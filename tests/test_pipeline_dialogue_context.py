@@ -74,6 +74,20 @@ def test_asr_only_future_source_stays_marked_uncertain():
     assert context[1]["source_needs_review"] is True
 
 
+def test_supplied_glossary_is_budgeted_once_and_context_survives_reformatting():
+    from core.streaming.glossary import set_shared_glossary
+    segments = [_segment(i, i, "普通句子" * 40, "Bản nháp.") for i in range(200)]
+    session = _session(*segments)
+    expected = set_shared_glossary(session, [{"src": "小林", "tgt": "Tiểu Lâm", "note": "Tên riêng",
+        "provenance": {"kind": "user_supplied", "reference": "fixture"}}])
+    context = session._dialogue_context_before(segments[0])
+    normalized = dialogue_context(context)
+    assert [row["id"] for row in normalized] == [row["id"] for row in context]
+    assert normalized[0]["is_focus"] is True
+    assert normalized[0]["terminology_context"] == expected
+    assert sum("terminology_context" in row for row in normalized) == 1
+
+
 def test_source_context_identity_changes_when_owned_speaker_proof_changes():
     current = _segment(0, 0, "我不是回来开玩笑的", "Không phải về để đùa.")
     session = _session(current)

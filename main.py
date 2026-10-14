@@ -80,6 +80,20 @@ def _source_start_lock():
 
 
 _restart_discovery_task = None
+_workspace_lease = None
+_backend_shutting_down = False
+_backend_background_tasks = set()
+
+
+def _background_task(coroutine):
+    """Keep even not-yet-started source owners visible to shutdown."""
+    if _backend_shutting_down:
+        coroutine.close()
+        raise RuntimeError("Studio đang dừng; chưa thể bắt đầu tác vụ mới.")
+    task = asyncio.create_task(coroutine)
+    _backend_background_tasks.add(task)
+    task.add_done_callback(_backend_background_tasks.discard)
+    return task
 
 
 async def resume_interrupted_projects():
@@ -87,12 +101,15 @@ async def resume_interrupted_projects():
     from core.streaming.session_store import list_restart_candidates
     from core.streaming.retry_schedule import mark_intent, can_auto_resume
     candidates = await asyncio.to_thread(list_restart_candidates,
-        excluded_task_ids=tuple(active_streaming_sessions))
+        excluded_task_ids=tuple(key for key, value in active_streaming_sessions.items()
+                               if value.is_running or value.is_stopped))
     for candidate in candidates:
         task_id = candidate["task_id"]
         try:
             async with _source_start_lock():
-                if task_id in active_streaming_sessions:
+                existing = active_streaming_sessions.get(task_id)
+                if existing is not None and (existing.is_running or existing.is_stopped
+                        or getattr(existing, "_restart_dispatched", False)):
                     continue
                 session = await editable_session(task_id)
                 if (session is None or not getattr(session, "_restart_auto_resume", False)
@@ -107,6 +124,7 @@ async def resume_interrupted_projects():
                     session._persist_if_enabled()
                     continue
                 if session.can_retry:
+                    session._restart_dispatched = True
                     await session.retry_failed_synthesis()
                     logging.getLogger("pipeline").info("PROJECT_AUTO_RESUMED run_id=%s", task_id)
                 else:
@@ -122,16 +140,71 @@ async def resume_interrupted_projects():
 
 
 async def _start_restart_discovery():
-    global _restart_discovery_task
-    _restart_discovery_task = asyncio.create_task(resume_interrupted_projects())
+    global _restart_discovery_task, _workspace_lease, _backend_shutting_down
+    from core.services.workspace_lease import acquire, WorkspaceLeaseBusy
+    if _workspace_lease is not None:
+        raise WorkspaceLeaseBusy(settings.WORKSPACE_DIR, _workspace_lease.path)
+    # Nonblocking acquisition before discovery or runtime mutation. Keep this
+    # synchronous so cancellation cannot orphan an acquisition in a thread.
+    lease = acquire(settings.WORKSPACE_DIR)
+    _workspace_lease = lease
+    _backend_shutting_down = False
+    try:
+        _restart_discovery_task = _background_task(resume_interrupted_projects())
+    except BaseException:
+        _workspace_lease = None
+        lease.release()
+        raise
 
 
 async def _stop_restart_discovery():
-    global _restart_discovery_task
+    global _restart_discovery_task, _workspace_lease, _backend_shutting_down
+    if _workspace_lease is None:
+        return
+    _backend_shutting_down = True
     task, _restart_discovery_task = _restart_discovery_task, None
     if task is not None and not task.done():
         task.cancel()
         await asyncio.gather(task, return_exceptions=True)
+    # The lock is intentionally retained if any drain fails or is cancelled.
+    # Only process exit can then release it safely; never invite another owner
+    # while a native worker may still publish a checkpoint/output.
+    await _drain_workspace_runtime()
+    lease, _workspace_lease = _workspace_lease, None
+    lease.release()
+
+
+async def _drain_workspace_runtime():
+    sessions = list(active_streaming_sessions.values())
+    for export in active_export_tasks.values():
+        if export.get("status") in {"RUNNING", "CANCELLING"}:
+            export.update(cancelled=True, status="CANCELLING")
+    exports = {owner for session in sessions for owner in
+               (getattr(session, "export_task", None), getattr(session, "auto_export_task", None))
+               if owner is not None and not owner.done()}
+    for owner in exports:
+        owner.cancel()
+    if exports:
+        await asyncio.gather(*exports, return_exceptions=True)
+    owners = set(_backend_background_tasks)
+    for session in sessions:
+        owners.update(owner for owner in
+            (getattr(session, "start_task", None), getattr(session, "worker_task", None),
+             getattr(session, "review_task", None), getattr(session, "_chunk_followup_task", None),
+             *getattr(session, "edit_tasks", ())) if owner is not None and not owner.done())
+        session.shutdown()
+    owners.discard(asyncio.current_task())
+    for owner in owners:
+        if not owner.done():
+            owner.cancel()
+    if owners:
+        await asyncio.gather(*owners, return_exceptions=True)
+    # Private preview executors and bridge processes are not covered by the
+    # loop's default executor. Stop them first; then join all native I/O threads.
+    await asyncio.to_thread(preview_manager.shutdown)
+    await asyncio.to_thread(voice_preview_manager.shutdown)
+    await asyncio.to_thread(muse_service.shutdown)
+    await asyncio.get_running_loop().shutdown_default_executor()
 
 
 app.add_event_handler("startup", _start_restart_discovery)
@@ -693,6 +766,8 @@ def export_revision_signature(session):
 
 
 def schedule_reviewed_export(task_id):
+    if _backend_shutting_down:
+        return
     session = get_streaming_session(task_id)
     if (session is None or getattr(session, "auto_export_result", False) is not True
             or getattr(session, "review_summary", {}).get("status") == "running"
@@ -1298,7 +1373,7 @@ async def _start_streaming_url_owned(req: StreamUrlRequest):
             # The session persists and broadcasts actionable startup errors.
             pass
 
-    asyncio.create_task(start_source())
+    _background_task(start_source())
 
     return {
         "task_id": task_id,
@@ -1385,7 +1460,7 @@ async def start_streaming_upload(
     session.auto_export_result = bool(visual_translation and settings.LLM_PROVIDER == "opencode")
     session._processing_signature = processing_signature()
 
-    asyncio.create_task(run_session(session))
+    _background_task(run_session(session))
 
     session.source_video_url = f"/api/inputs/{saved_path.name}"
 
@@ -2046,7 +2121,7 @@ async def _start_streaming_local_file_owned(req: StreamLocalFileRequest):
     session.source_video_url = f"/api/local-file?path={quote(p.as_posix(), safe='')}"
     session.auto_export_result = bool(req.visual_translation and settings.LLM_PROVIDER == "opencode")
     session._processing_signature = processing_signature()
-    asyncio.create_task(run_session(session))
+    _background_task(run_session(session))
 
     return {
         "task_id": task_id,

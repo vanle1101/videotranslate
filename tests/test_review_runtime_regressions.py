@@ -111,7 +111,9 @@ def test_later_batch_uses_evidence_qualified_corrected_context():
     result = reviewer.review("unused", [source(i) for i in range(13)], [])
     context = json.loads(prompts[2].split("Ngữ cảnh lân cận (không tạo thêm ID): ", 1)[1])
     assert result["segments"][10]["verification"]["status"] == "corrected"
-    assert next(row for row in context if row["start"] == 10)["final_vi"] == "Xin chào"
+    # Eight targets per batch: the first request for the second batch has
+    # reviewed context 0..7; target 10 has not been reviewed yet.
+    assert next(row for row in context if row["start"] == 7)["final_vi"] == "Xin chào"
 
 
 def test_subset_review_retains_remote_source_context_without_reviewing_other_ids():
@@ -261,8 +263,9 @@ def test_address_request_failure_isolated_to_audio_semantic_batch(cancelled):
     reviewer = AutomaticTranslationReviewer(client, Mock(), audio)
     error = asyncio.CancelledError("cancelled") if cancelled else RuntimeError("private-address-failure")
     reviewer._address_reading = Mock(side_effect=[error, {}])
-    reply = {"segments": [{**source(12), "literal_vi": "Xin chào", "natural_vi": "Xin chào",
-        "final_vi": "Xin chào", "semantic_verified": True, "verification_reason": "Giữ lời chào."}],
+    reply = {"segments": [{**source(i), "literal_vi": "Xin chào", "natural_vi": "Xin chào",
+        "final_vi": "Xin chào", "semantic_verified": True, "verification_reason": "Giữ lời chào."}
+        for i in range(8, 13)],
         "screen_texts": [], "summary": ""}
     client.translate.return_value = reply
     data = {"segments": {i: {**source(i), "needs_review": True,
@@ -275,8 +278,8 @@ def test_address_request_failure_isolated_to_audio_semantic_batch(cancelled):
         client.translate.assert_not_called()
         return
     result = reviewer.resolve_audio_uncertainty("unused", data)
-    assert all(result["segments"][i]["verification"]["status"] == "incomplete" for i in range(12))
-    assert result["segments"][12]["verification"]["status"] == "corrected"
+    assert all(result["segments"][i]["verification"]["status"] == "incomplete" for i in range(8))
+    assert all(result["segments"][i]["verification"]["status"] == "corrected" for i in range(8, 13))
     assert result["segments"][12]["final_vi"] == "Xin chào"
     assert reviewer._address_reading.call_count == 2 and client.translate.call_count == 2
     assert "private-address-failure" not in json.dumps(result)

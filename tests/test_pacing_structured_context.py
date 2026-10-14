@@ -79,7 +79,20 @@ def test_schema_repair_exhaustion_is_typed_and_never_becomes_a_translation(monke
     monkeypatch.setattr(translator, "_opencode_request", request)
     with pytest.raises(StructuredResponseError) as caught:
         translator.translate_single_segment("妈妈", 1)
-    assert caught.value.code == code and request.call_count == 2
+    assert caught.value.code == code and request.call_count == 3
+
+
+def test_second_schema_repair_keeps_original_source_and_returns_only_valid_content(monkeypatch):
+    monkeypatch.setattr(settings, "OPENCODE_SCHEMA_REPAIR_ATTEMPTS", 2)
+    translator = SemanticTranslator("opencode")
+    request = Mock(side_effect=['{"literal_vi":', '{"final_vi":null}', json.dumps(line())])
+    monkeypatch.setattr(translator, "_opencode_request", request)
+    result = translator.translate_single_segment("逗爸爸玩的", 1.25, rows())
+    assert result["final_vi"] == line()["final_vi"]
+    assert request.call_count == 3
+    initial = request.call_args_list[0].args
+    assert all(call.args[0] == initial[0] and initial[1] in call.args[1]
+               for call in request.call_args_list[1:])
 
 
 def test_zero_repairs_means_one_request_and_no_retry_for_transport_errors(monkeypatch):
@@ -251,7 +264,7 @@ def test_summary_schema_has_bounded_repair_and_cannot_use_malformed_glossary(mon
     monkeypatch.setattr(translator, "_opencode_request", request)
     with pytest.raises(StructuredResponseError) as caught:
         translator._extract_context_and_glossary('[]')
-    assert caught.value.code == code and request.call_count == 2
+    assert caught.value.code == code and request.call_count == 3
 
 
 def test_pacing_actual_adapter_caches_distinct_draft_fidelity_fluency_contracts(real_adapter_offline_boundary, monkeypatch):

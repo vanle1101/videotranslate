@@ -228,6 +228,13 @@ class SemanticTranslator(TranslationEngine):
         from core.engines.translation.opencode_client import OpenCodeClientError, OpenCodeZenClient
         from core.engines.translation.openrouter_client import OpenRouterClientError, OpenRouterFreeClient
         from core.services.muse_service import MuseError, MuseService, muse_service
+        glossary = getattr(self, "glossary", None)
+        if glossary is not None:
+            from core.streaming.glossary import validate_glossary
+            glossary = validate_glossary(glossary)
+            system_prompt += ("\nBảng thuật ngữ chung theo phiên bản, chỉ tham khảo chính tả; "
+                              "không là bằng chứng về quan hệ hoặc người nói:\n"
+                              + json.dumps(glossary, ensure_ascii=False, sort_keys=True))
         try:
             if self.provider == "gemini":
                 client = GeminiClient()
@@ -274,8 +281,10 @@ class SemanticTranslator(TranslationEngine):
             raise RuntimeError(f"{exc} Hãy thử lại hoặc đổi cấu hình dịch.") from exc
         except (GeminiError, MuseError, OpenRouterClientError) as exc:
             raise RuntimeError(f"{exc} Hãy thử lại hoặc đổi cấu hình dịch.") from exc
-        except Exception as exc:
-            raise RuntimeError("API không dịch được. Hãy thử lại hoặc đổi cấu hình dịch.") from exc
+        except Exception:
+            # Unknown SDK text may include secrets. Only typed provider errors
+            # above are safe evidence for transport recovery.
+            raise RuntimeError("API không dịch được. Hãy thử lại hoặc đổi cấu hình dịch.") from None
 
     def _translation_error(self, message: str, *, code="semantic_content", path="$") -> RuntimeError:
         label = {"gemini": "Gemini", "muse": "Muse", "opencode": "OpenCode", "openrouter-free": "OpenRouter"}.get(self.provider, "AI")
@@ -284,7 +293,7 @@ class SemanticTranslator(TranslationEngine):
     def _validated_request(self, system, prompt, validator, *, schema_id, task_kind, max_tokens=2048):
         """Repair structure only; a valid negative verdict is final for this draft."""
         original_prompt = prompt
-        attempts = schema_attempts(1)
+        attempts = schema_attempts(2)
         for attempt in range(1, attempts + 1):
             checked = {}
             contract = {"schema_id": schema_id, "task_kind": task_kind, "max_tokens": max_tokens,

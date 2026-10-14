@@ -83,7 +83,7 @@ SESSION_FIELDS = frozenset((
     " _chunked_source_identity _visual_context_summary"
     " _chunk_jobs _visual_scanned_seconds _legacy_visual_prefix _parallel_chunk_planning"
     " _source_file_signature _processing_signature"
-    " _retry_schedule _restart_intent"
+    " _retry_schedule _restart_intent shared_glossary"
 ).split())
 PATH_FIELDS = ("video_path", "ref_audio", "raw_audio_16k", "bgm_audio_path")
 META_FIELDS = frozenset((
@@ -537,11 +537,13 @@ def _save_session(session):
         if signature:
             session._source_file_signature = signature
     fields = {key: _clean(getattr(session, key)) for key in SESSION_FIELDS
-              if key != "_retry_schedule" and hasattr(session, key)}
+              if key not in {"_retry_schedule", "shared_glossary"} and hasattr(session, key)}
     from core.streaming.retry_schedule import validate_schedule, restart_intent
     # Retry metadata has its own strict schema. Generic semantic metadata
     # filtering must not silently drop its scheduling fields.
     fields["_retry_schedule"] = deepcopy(validate_schedule(getattr(session, "_retry_schedule", [])))
+    from core.streaming.glossary import glossary_snapshot
+    fields["shared_glossary"] = glossary_snapshot(session)
     for key in PATH_FIELDS:
         path = getattr(session, key, None)
         fields[key] = _local_path(str(Path(path).resolve()), generated=key in ("raw_audio_16k", "bgm_audio_path")) if path else None
@@ -639,6 +641,9 @@ def _validate_project(data, task_id):
     from core.streaming.retry_schedule import validate_schedule, restart_intent
     validate_schedule(fields.get("_retry_schedule", []))
     restart_intent(fields, data["state"])
+    from core.streaming.glossary import validate_glossary
+    if "shared_glossary" in fields:
+        fields["shared_glossary"] = validate_glossary(fields["shared_glossary"])
     saved_error = fields.get("last_runtime_error")
     if saved_error is not None and (not isinstance(saved_error, str) or len(saved_error) > 2000):
         raise ValueError("Chi tiết lỗi đã lưu không hợp lệ.")
@@ -804,7 +809,12 @@ def _validate_project(data, task_id):
             raise ValueError("Khoảng nghỉ lồng tiếng chưa được chuẩn bị hoặc trùng câu kế tiếp.")
     # Bounded tree and finite numbers; do not permit manifest-injected credentials.
     for key, value in fields.items():
-        fields[key] = deepcopy(validate_schedule(value)) if key == "_retry_schedule" else _clean(value)
+        if key == "_retry_schedule":
+            fields[key] = deepcopy(validate_schedule(value))
+        elif key == "shared_glossary":
+            fields[key] = validate_glossary(value)
+        else:
+            fields[key] = _clean(value)
     for row in rows:
         for key, value in row.items():
             row[key] = _clean_segment_field(key, value)
@@ -1212,6 +1222,9 @@ def _restore_saved_session_owned(task_id, event_callback=None):
             setattr(session, key, fields[key])
     from core.streaming.retry_schedule import recover_schedule, restart_intent, can_auto_resume
     session._retry_schedule = recover_schedule(fields.get("_retry_schedule", []))
+    from core.streaming.glossary import glossary_snapshot
+    session.shared_glossary = glossary_snapshot(session)
+    session.translator.glossary = glossary_snapshot(session)
     session._restart_intent = restart_intent(fields, data["state"])
     # Loading history remains read-only with respect to execution. Startup may
     # explicitly consume this hint; a saved user Stop/Pause never qualifies.

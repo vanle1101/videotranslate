@@ -62,7 +62,15 @@ def test_one_restore_failure_does_not_block_next_project(owner, monkeypatch):
     owner.retry_failed_synthesis.assert_awaited_once()
 
 
-def test_shutdown_cancels_and_drains_discovery(owner, monkeypatch):
+def test_shutdown_cancels_and_drains_discovery(owner, monkeypatch, tmp_path):
+    monkeypatch.setattr(main.settings, "WORKSPACE_DIR", tmp_path / "workspace")
+    monkeypatch.setattr(main, "_workspace_lease", None)
+    monkeypatch.setattr(main, "_restart_discovery_task", None)
+    monkeypatch.setattr(main, "_backend_background_tasks", set())
+    monkeypatch.setattr(main, "_backend_shutting_down", False)
+    monkeypatch.setattr(main, "active_export_tasks", {})
+    for name in ("preview_manager", "voice_preview_manager", "muse_service"):
+        monkeypatch.setattr(main, name, SimpleNamespace(shutdown=Mock()))
     async def wait_forever():
         await asyncio.Event().wait()
     monkeypatch.setattr(main, "resume_interrupted_projects", wait_forever)

@@ -35,6 +35,72 @@ test('compact progress retains real error cause and measured final-output ETA', 
   assert.equal(ui.el('task-eta-display').textContent, '—');
 });
 
+test('durable retry exposes actual cause and countdown separately from measured progress and MP4 ETA', async () => {
+  const ui = studio(); await ui.start(); const socket = ui.sockets.at(-1);
+  socket.receive({type:'progress',status:'RUNNING',phase:'retry',progress_pct:null,
+    retry_pending_count:2,retry_next_attempt_at:Date.now()/1000+300,
+    retry_error_codes:['provider_timeout','tts_empty_audio'],eta_scope:'final',eta_seconds:30});
+  assert.equal(ui.el('task-status-label').textContent,'Chờ thử lại');
+  assert.equal(ui.el('task-phase-label').textContent,'Phục hồi lỗi dịch vụ');
+  assert.match(ui.el('task-error-summary').textContent,/AI phản hồi quá thời gian \(provider_timeout\)/);
+  assert.match(ui.el('task-error-summary').textContent,/tts_empty_audio/);
+  assert.equal(ui.el('task-error-summary').classList.contains('hidden'),false);
+  assert.match(ui.el('task-retry-notice').textContent,/2 phần chờ thử lại.*sau khoảng.*chưa phải thời gian có MP4/);
+  assert.equal(ui.el('task-progress-track').dataset.indeterminate,'true');
+  assert.equal(ui.el('task-progress-eta').textContent,'Đang phục hồi lỗi; sẽ tính lại thời gian');
+  socket.receive({type:'progress',status:'PAUSED'});
+  assert.match(ui.el('task-retry-notice').textContent,/Bấm Tiếp tục/);
+  assert.doesNotMatch(ui.el('task-retry-notice').textContent,/sau khoảng/);
+  socket.receive({type:'progress',status:'RUNNING',retry_next_attempt_at:Date.now()/1000-1});
+  assert.match(ui.el('task-retry-notice').textContent,/đang chờ bộ điều phối/);
+  assert.doesNotMatch(ui.el('task-retry-notice').textContent,/NaN|Infinity|Hoàn tất/);
+});
+
+test('retry-only polling changes and recovery clearing reach visible compact status', async () => {
+  const ui=studio();await ui.start();const socket=ui.sockets.at(-1);
+  const task={task_id:'fixture',status:'RUNNING',phase:'tts',progress_pct:42};
+  socket.receive({type:'progress',...task,retry_pending_count:0});
+  ui.replies.set('/api/tasks',{tasks:[{...task,retry_pending_count:1,retry_next_attempt_at:Date.now()/1000+360,
+    retry_error_codes:['tts_rate_limited']}]});
+  await ui.el('btn-refresh-tasks').click();
+  assert.match(ui.el('task-error-summary').textContent,/tts_rate_limited/);
+  assert.match(ui.el('task-retry-notice').textContent,/1 phần chờ thử lại/);
+  assert.equal(ui.el('task-progress-value').textContent,'42%');
+  ui.replies.set('/api/tasks',{tasks:[{...task,retry_pending_count:0,retry_next_attempt_at:null,retry_error_codes:[]}]});
+  await ui.el('btn-refresh-tasks').click();
+  assert.equal(ui.el('task-error-summary').classList.contains('hidden'),true);
+  assert.equal(ui.el('task-retry-notice').classList.contains('hidden'),true);
+  assert.equal(ui.el('task-retry-notice').textContent,'');
+});
+
+test('AI admission counts remain visible without segment-state metadata', async () => {
+  const ui=studio();await ui.start();const socket=ui.sockets.at(-1);
+  socket.receive({type:'progress',status:'RUNNING',phase:'visual',progress_pct:null,
+    ai_queue:{selected_concurrency:20,active_requests:2,queued_requests:7,wait_reason:'provider_backoff'}});
+  assert.match(ui.el('task-progress-detail').textContent,/Đã chọn 20: 2 đang chạy, 7 đang chờ/);
+  assert.match(ui.el('task-progress-detail').textContent,/Đang đợi dịch vụ cho phép thử lại/);
+  assert.equal(ui.el('task-progress-track').dataset.indeterminate,'true');
+});
+
+test('retry countdown refreshes without new provider progress and never invents a missing deadline', async () => {
+  let now=Date.now();
+  class Clock extends Date { static now() { return now; } }
+  const ui=studio(undefined,{Date:Clock});await ui.start();const socket=ui.sockets.at(-1);
+  const task={task_id:'fixture',status:'RUNNING',phase:'retry',progress_pct:42,
+    retry_pending_count:1,retry_next_attempt_at:now/1000+300,retry_error_codes:['provider_timeout']};
+  socket.receive({type:'progress',...task});
+  ui.replies.set('/api/tasks',{tasks:[task]});
+  assert.match(ui.el('task-retry-notice').textContent,/5 phút 0 giây/);
+  now+=61000;await ui.tickIntervals(2000);
+  assert.match(ui.el('task-retry-notice').textContent,/3 phút 59 giây/);
+  assert.equal(ui.el('task-progress-value').textContent,'42%');
+  for (const deadline of [null,'300',NaN,Infinity]) {
+    socket.receive({type:'progress',retry_next_attempt_at:deadline});
+    assert.match(ui.el('task-retry-notice').textContent,/Đang chờ lịch thử lại từ máy chủ/);
+    assert.doesNotMatch(ui.el('task-retry-notice').textContent,/NaN|Infinity|sau khoảng/);
+  }
+});
+
 test('measured final ETA appears beside percentage in minutes or hours without rounding a live job to zero', async () => {
   const ui = studio(); await ui.start(); const socket = ui.sockets.at(-1);
   for (const [seconds, expected] of [[.1,'1 phút'],[59.9,'1 phút'],[60,'1 phút'],[61,'2 phút'],
@@ -1067,6 +1133,7 @@ function studio(cookieReply = { configured: false, count: 0, message: '' }, voic
     return { ok: !reply.failure, json: async () => reply };
   };
   vm.runInNewContext(source, {
+    Date: voiceConfig.Date || Date,
     document, window, Audio, WebSocket, fetch, console, AbortController, alert: value => alerts.push(value),
     Option: function(text, value) { this.text = text; this.value = value; },
     FormData: class {
@@ -5234,7 +5301,7 @@ test('null export stage progress never appears as a fabricated percentage in mod
   assert.doesNotMatch(ui.el('task-progress-value').textContent, /null|5%|NaN/);
 });
 
-test('incomplete automatic review stays playable, exposes retry, and blocks export without showing a false success', async () => {
+test('incomplete review permits an explicitly gated spoken draft while runtime failures still block export', async () => {
   const ui = studio(); await ui.start();
   const socket = ui.sockets.at(-1);
   socket.receive({type:'progress', status:'FAILED', phase:'review', stage:'AI kiểm tra lại chưa hoàn tất.',
@@ -5245,6 +5312,13 @@ test('incomplete automatic review stays playable, exposes retry, and blocks expo
   assert.match(ui.el('transcript-status').textContent, /chưa kiểm tra đủ nguồn/i);
   assert.equal(ui.el('btn-review-worker').classList.contains('hidden'), false);
   assert.equal(ui.el('btn-review-worker').disabled, false);
+  assert.equal(ui.el('btn-export-hq').disabled, true);
+  socket.receive({type:'progress', status:'FAILED', phase:'review', translation_mode:'full',
+    final_output_blocked:false, output_is_draft:true,
+    review_summary:{status:'incomplete', incomplete:1}});
+  assert.equal(ui.el('btn-export-hq').disabled, false);
+  assert.match(ui.el('btn-export-hq').title, /Bản nháp/);
+  socket.receive({type:'progress', status:'FAILED', phase:'failed', final_output_blocked:false});
   assert.equal(ui.el('btn-export-hq').disabled, true);
   assertWorkerSourceBusy(ui, false);
   assert.equal(ui.el('video-player').paused, true);

@@ -332,7 +332,8 @@ def test_verified_text_batch_survives_next_batch_timeout(source, monkeypatch):
     monkeypatch.setattr(first.screen_ocr, "extract", Mock(return_value=[]))
     monkeypatch.setattr(first, "_correct_source", correction)
     monkeypatch.setattr(first, "_request_text_result", request)
-    with pytest.raises(VideoIntelligenceError, match="timeout"):
+    # Typed provider failures must reach the durable retry coordinator intact.
+    with pytest.raises(OpenCodeClientError, match="timeout"):
         first.prepass(source, rows, 13)
     assert requests == [list(range(4)), list(range(4)), list(range(4, 8))]
     second = VideoIntelligence()

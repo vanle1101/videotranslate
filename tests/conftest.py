@@ -10,6 +10,19 @@ import pytest
 _TEST_LOG_HANDLERS = []
 
 
+@pytest.fixture(autouse=True)
+def isolate_startup_recovery(monkeypatch, request):
+    # Offline suites may launch the actual HTTP server. Never let that startup
+    # discover and mutate a user's active projects. Dedicated coordinator tests
+    # override this with their own explicitly controlled candidate manifests.
+    if request.node.path.name not in {"test_session_store.py", "test_retry_schedule.py",
+            "test_restart_coordinator.py", "test_restart_history_race.py", "test_shared_glossary.py"}:
+        monkeypatch.setattr("core.streaming.session_store.list_restart_candidates", lambda **kwargs: [])
+    # ASGITransport-only tests intentionally omit lifespan. A previous test's
+    # shutdown fence must not masquerade as their application's running state.
+    monkeypatch.setattr("main._backend_shutting_down", False)
+
+
 def pytest_sessionstart(session):
     # Install before collection imports ServiceManager. Offline provider/error
     # fixtures must never pollute the user's live Diagnostics files. Records

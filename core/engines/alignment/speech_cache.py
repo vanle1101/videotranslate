@@ -289,6 +289,11 @@ def _validated_result(result, identity):
             return None
         previous = start
     validated = {name: result[name] for name in fields}
+    if "pacing_proposals_used" in result:
+        proposals = result["pacing_proposals_used"]
+        if isinstance(proposals, bool) or not isinstance(proposals, int) or not 0 <= proposals <= 5:
+            return None
+        validated["pacing_proposals_used"] = proposals
     try:
         _reject_secrets(validated)
         serialized = _json(validated)

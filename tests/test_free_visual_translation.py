@@ -125,7 +125,7 @@ def test_opencode_failure_preserves_provider_without_openrouter_fallback(free_co
     forbidden = Mock(side_effect=AssertionError("No provider switch"))
     monkeypatch.setattr("core.video_intelligence.OpenRouterFreeClient", forbidden)
     processor = VideoIntelligence()
-    with pytest.raises(VideoIntelligenceError, match="OpenCode FreeTierError"):
+    with pytest.raises(OpenCodeRequestError, match="OpenCode FreeTierError"):
         processor._translate_text([{"id": 0, "start": 0, "end": 2, "asr_text": "你来了"}], [evidence()], "", 0, 2)
     forbidden.assert_not_called()
 
@@ -289,7 +289,7 @@ def test_schema_retry_requests_complete_response_and_preserves_review(free_confi
 
 
 @pytest.mark.parametrize("invalid", ["missing_field", "missing_id", "changed_time"])
-def test_schema_retry_fails_after_one_invalid_repair(free_config, monkeypatch, invalid):
+def test_schema_retry_fails_after_two_invalid_repairs(free_config, monkeypatch, invalid):
     client, observed = install_responses(monkeypatch)
     replies = list(client.translate.side_effect)
     rejected = json.loads(replies[1])
@@ -299,10 +299,11 @@ def test_schema_retry_fails_after_one_invalid_repair(free_config, monkeypatch, i
         rejected["segments"] = []
     else:
         rejected["segments"][0]["end"] = 3
-    client.translate.side_effect = [replies[0], json.dumps(rejected), json.dumps(rejected)]
+    rejected["screen_texts"] = []
+    client.translate.side_effect = [json.dumps(rejected)] * 3
     with pytest.raises(VideoIntelligenceError):
-        VideoIntelligence()._translate_text(
-            [{"id": 0, "start": 0, "end": 2, "asr_text": "你来了"}], observed, "", 0, 2)
+        VideoIntelligence()._request_text_result(client, "fixture",
+            [{"id": 0, "start": 0, "end": 2, "asr_text": "你来了"}], [], 0, 2)
     assert client.translate.call_count == 3
 
 
@@ -372,7 +373,7 @@ def test_ordered_exact_ocr_fragments_can_ground_a_complete_sentence():
 
 @pytest.mark.parametrize("uncertain", [False, True])
 def test_review_joins_full_chunk_evidence_across_independently_sliced_batches(free_config, monkeypatch, uncertain):
-    # 25 OCR IDs but one sentence: the supporting speech box lands in batch 2,
+    # 25 OCR IDs but one sentence: the supporting speech box lands in batch 4,
     # while the sentence and its correction are returned in batch 1.
     observed = [evidence(text="标题", id=f"o{i}") for i in range(24)]
     observed.append(evidence(id="o24"))
@@ -380,17 +381,23 @@ def test_review_joins_full_chunk_evidence_across_independently_sliced_batches(fr
                                 "needs_review": False, "review_reason": ""}]}
     first = {"segments": [translation()], "screen_texts": [
         {"id": f"o{i}", "text_vi": "Tiêu đề", "kind": "title", "needs_review": False, "review_reason": ""}
-        for i in range(24)], "summary": ""}
-    second = {"segments": [], "screen_texts": [{"id": "o24", "text_vi": "Anh đến rồi",
+        for i in range(7)], "summary": ""}
+    middle = [{"segments": [], "screen_texts": [
+        {"id": f"o{i}", "text_vi": "Tiêu đề", "kind": "title", "needs_review": False, "review_reason": ""}
+        for i in range(offset, offset+8)], "summary": ""} for offset in (7, 15)]
+    second = {"segments": [], "screen_texts": [
+        {"id": "o23", "text_vi": "Tiêu đề", "kind": "title", "needs_review": False, "review_reason": ""},
+        {"id": "o24", "text_vi": "Anh đến rồi",
         "kind": "subtitle", "needs_review": uncertain, "review_reason": "Chữ mờ" if uncertain else ""}], "summary": ""}
     verified_second = deepcopy(second)
-    verified_second["screen_texts"][0].update(needs_review=False, review_reason="")
+    verified_second["screen_texts"][1].update(needs_review=False, review_reason="")
     client = Mock(has_credentials=True, model="example/translator:free")
-    client.translate.side_effect = list(map(json.dumps, [correction, first, first, second, verified_second]))
+    client.translate.side_effect = list(map(json.dumps, [correction, first, first,
+        middle[0], middle[0], middle[1], middle[1], second, verified_second]))
     monkeypatch.setattr("core.video_intelligence.OpenRouterFreeClient", Mock(return_value=client))
     result = VideoIntelligence()._translate_text(
         [{"id": 0, "start": 0, "end": 2, "asr_text": "你来了"}], observed, "", 0, 2)
-    assert client.translate.call_count == 5
+    assert client.translate.call_count == 9
     assert result["segments"][0]["needs_review"] is uncertain
     screen = next(item for item in result["screen_texts"] if item["id"] == "o24")
     assert screen["needs_review"] is uncertain
@@ -437,9 +444,9 @@ def test_source_repair_contract_error_stays_reviewable_with_original_asr(free_co
         [{"id": 0, "start": 0, "end": 2, "asr_text": "你来了"}], [], "")
     assert result[0]["text_zh"] == "你来了" and result[0]["needs_review"]
     assert result[0]["evidence_ids"] == []
-    # Source repair gets one bounded schema repair attempt, then falls back to
-    # the original ASR as an explicit review item.
-    assert client.translate.call_count == 2
+    # A singleton gets two bounded schema repairs, then remains original ASR
+    # as an explicit review item; it cannot be divided further.
+    assert client.translate.call_count == 3
 
 
 def test_source_repair_does_not_swallow_cancellation_or_quota(free_config):

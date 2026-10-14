@@ -15,6 +15,10 @@ import os
 import re
 import tempfile
 import unicodedata
+import threading
+from concurrent.futures import ThreadPoolExecutor
+from contextlib import contextmanager
+from contextvars import copy_context
 from copy import deepcopy
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional
@@ -32,6 +36,70 @@ from core.structured_response import (
     StructuredResponseError, parse_object, validate_schema, request_structured,
     TRANSLATION_SCHEMA, SOURCE_SCHEMA, schema_attempts,
 )
+
+
+_TEXT_POOLS_LOCK = threading.Lock()
+_TEXT_POOLS = {}
+
+
+@contextmanager
+def _run_text_pool(run_id, workers):
+    """One bounded pool across simultaneous source chunks of the same video.
+
+    Only text work enters this pool. Native OCR/ASR instances stay with their
+    existing owners. The last caller drains and closes the pool; no idle service
+    or executor remains after this wave. Provider admission still owns requests.
+    """
+    with _TEXT_POOLS_LOCK:
+        entry = _TEXT_POOLS.get(run_id)
+        if entry is None:
+            entry = {"pool": ThreadPoolExecutor(max_workers=workers, thread_name_prefix="text-batch"),
+                     "slots": threading.BoundedSemaphore(workers * 2), "users": 0}
+            _TEXT_POOLS[run_id] = entry
+        entry["users"] += 1
+    try:
+        yield entry
+    finally:
+        with _TEXT_POOLS_LOCK:
+            entry["users"] -= 1
+            close = entry["users"] == 0
+            if close:
+                _TEXT_POOLS.pop(run_id, None)
+        if close:
+            entry["pool"].shutdown(wait=True, cancel_futures=True)
+
+
+def _parallel_text_map(run_id, workers, operation, count, check_cancelled):
+    """Bound queued work, copy task identity, drain siblings, merge by source ID."""
+    futures, results, first_error = [], [], None
+    with _run_text_pool(run_id, workers) as entry:
+        try:
+            for index in range(count):
+                check_cancelled()
+                while not entry["slots"].acquire(timeout=.1):
+                    check_cancelled()
+                try:
+                    check_cancelled()
+                    future = entry["pool"].submit(copy_context().run, operation, index)
+                except BaseException:
+                    entry["slots"].release()
+                    raise
+                future.add_done_callback(lambda done: entry["slots"].release())
+                futures.append(future)
+        except BaseException as error:
+            first_error = error
+            for future in futures:
+                future.cancel()
+        for future in futures:
+            try:
+                results.append(future.result())
+            except BaseException as error:
+                if first_error is None:
+                    first_error = error
+        if first_error is not None:
+            raise first_error
+        check_cancelled()
+        return results
 
 
 def _capture_visual_revision():
@@ -234,6 +302,14 @@ class VideoIntelligence:
             callback({"visual_step": step, "chunk_start": start, "chunk_end": end,
                       "processed_seconds": start, "total_seconds": self._video_duration, **details})
 
+    def _text_workers(self):
+        from core.runtime_context import current_execution_context
+        from core.engines.translation.opencode_client import _shared_execution_layer
+        context = current_execution_context()
+        if self.provider != "opencode" or context.run_id == "unscoped":
+            return 1
+        return max(1, min(50, int(_shared_execution_layer().snapshot(context.run_id)["selected_concurrency"])))
+
     @staticmethod
     def _checkpoint_digest(value):
         # JSON persists integer segment-map keys as strings. Canonicalize before
@@ -278,6 +354,7 @@ class VideoIntelligence:
                             getattr(self, "_source_dialogue", []) or [self._source_context_row(seg) for seg in segments],
                             [self._source_context_row(seg) for seg in segments]),
                         "semantic_policy": SEMANTIC_TRANSLATION_POLICY,
+                        "glossary": getattr(self, "glossary", None),
                         "chunking": [self.MAX_CHUNK_SECONDS, self.TARGET_CHUNK_SECONDS, self.MAX_WIDTH],
                         "ocr": [ScreenOCR.FPS, ScreenOCR.MAX_DIMENSION, ScreenOCR.MIN_CONFIDENCE],
                         "code": list(_PROCESS_VISUAL_REVISION)}
@@ -600,14 +677,87 @@ class VideoIntelligence:
         """Keep contract failures reviewable without inventing corrected speech."""
         try:
             return self._correct_source_checked(client, payload, observed, context, cancel_check)
-        except VideoIntelligenceError:
+        except VideoIntelligenceError as failure:
             self._check_cancelled(cancel_check)
-            return {row["id"]: {"text_zh": row.get("asr_text", ""), "evidence_ids": [],
+            recovered = getattr(failure, "partial_corrections", {})
+            return {row["id"]: recovered.get(row["id"], {"text_zh": row.get("asr_text", ""), "evidence_ids": [],
                                 "needs_review": True,
-                                "review_reason": "AI chưa xác minh được bản nhận giọng; nghe lại trước khi tạo giọng."}
+                                "source_supported": False,
+                                "review_reason": "AI chưa xác minh được bản nhận giọng; nghe lại trước khi tạo giọng."})
                     for row in payload}
 
     def _correct_source_checked(self, client, payload, observed, context, cancel_check=None):
+        """Two repairs per scope, then halve without repeating successful siblings.
+
+        A failed singleton remains an explicit review item at the caller. Its
+        valid siblings keep their own checkpoint and are never replaced by the
+        failed row's ASR fallback. Transport errors escape without splitting.
+        """
+        if not payload:
+            return {}
+        model = getattr(client, "model", None)
+        checkpointable = isinstance(model, str) and bool(model.strip())
+        identity = self._checkpoint_digest({"payload": payload, "observed": observed,
+            "context": context, "provider": getattr(self, "provider", None),
+            "model": model if checkpointable else None, "policy": SEMANTIC_TRANSLATION_POLICY})
+
+        def write(stage, value):
+            if checkpointable:
+                self._write_checkpoint(stage, value, cancel_check)
+
+        def preserve_flags(corrections, flags):
+            for sid, reason in flags.items():
+                if int(sid) in corrections:
+                    corrections[int(sid)].update(needs_review=True, review_reason=reason,
+                                                 source_supported=False)
+            return corrections
+
+        def request(rows):
+            self._check_cancelled(cancel_check)
+            stage = {"kind": "structured_source_subbatch_v1", "request": identity,
+                     "ids": [row["id"] for row in rows]}
+            saved = self._read_checkpoint(stage) if checkpointable else None
+            if isinstance(saved, dict) and isinstance(saved.get("raw"), str):
+                try:
+                    return self._validate_source_response(saved["raw"], rows, observed)
+                except VideoIntelligenceError:
+                    pass
+            flags = saved.get("flags", {}) if isinstance(saved, dict) and saved.get("split") else {}
+            try:
+                if isinstance(saved, dict) and saved.get("split") is True:
+                    raise VideoIntelligenceError("Tiếp tục lô nguồn đã chia.")
+                # Context is frozen; only Requested ASR changes at a split.
+                result = self._correct_source_once(client, rows, observed, context, cancel_check)
+            except VideoIntelligenceError as failure:
+                self._check_cancelled(cancel_check)
+                flags = {**flags, **getattr(failure, "source_review_flags", {})}
+                if len(rows) <= 1:
+                    raise
+                write(stage, {"split": True, "flags": flags})
+                result, failed = {}, None
+                middle = len(rows) // 2
+                for child in (rows[:middle], rows[middle:]):
+                    try:
+                        result.update(request(child))
+                    except VideoIntelligenceError as error:
+                        self._check_cancelled(cancel_check)
+                        result.update(getattr(error, "partial_corrections", {}))
+                        failed = error
+                preserve_flags(result, flags)
+                if failed is not None:
+                    failed.partial_corrections = result
+                    raise failed
+            preserve_flags(result, flags)
+            # Revalidate IDs/evidence after merge and before storing a success.
+            raw = json.dumps({"segments": [{"id": row["id"], **result[row["id"]]}
+                                           for row in rows]}, ensure_ascii=False)
+            checked = self._validate_source_response(raw, rows, observed)
+            write(stage, {"raw": raw})
+            return checked
+
+        return request(payload)
+
+    def _correct_source_once(self, client, payload, observed, context, cancel_check=None):
         """Repair recognition before translation, with validated evidence IDs."""
         if not payload:
             return {}
@@ -625,7 +775,8 @@ class VideoIntelligence:
             f"Requested ASR: {json.dumps(payload, ensure_ascii=False)}\n"
             f"Measured OCR: {json.dumps(observed, ensure_ascii=False)}\nContext: {context}\n"
             + SEMANTIC_TRANSLATION_POLICY)
-        attempts = schema_attempts(1)
+        attempts = schema_attempts(2)
+        failed_flags = {}
         for attempt in range(attempts):
             self._check_cancelled(cancel_check)
             try:
@@ -634,10 +785,15 @@ class VideoIntelligence:
                     schema_id="source-correction-v1", task_kind="translation", attempt=attempt + 1,
                     max_tokens=2500 if getattr(self, "provider", None) == "opencode" else 5000)
                 self._check_cancelled(cancel_check)
+                for sid, reason in failed_flags.items():
+                    corrections[sid].update(needs_review=True, review_reason=reason, source_supported=False)
                 return corrections
             except VideoIntelligenceError as error:
                 self._check_cancelled(cancel_check)
+                failed_flags.update(self._failed_review_flags(
+                    getattr(error, "raw_response", None), payload, [])['segments'])
                 if attempt == attempts - 1:
+                    error.source_review_flags = failed_flags
                     raise
                 prompt += ("\nPhản hồi trước sai cấu trúc: " + str(error)
                     + ". Trả lại toàn bộ JSON mới đúng schema, đủ các ID yêu cầu; không đoán lời nguồn "
@@ -883,8 +1039,8 @@ class VideoIntelligence:
     def _versioned_terminology_context(cls, source_rows, glossary=None):
         """Version supplied terminology and source evidence; infer no relations.
 
-        The streaming path has no persisted glossary yet. An empty table is
-        explicit rather than inventing names by aligning whole draft sentences.
+        An empty table is explicit rather than inventing names by aligning
+        whole draft sentences. Persisted tables retain their provenance version.
         """
         terms = []
         supplied = glossary.get("terms", []) if isinstance(glossary, dict) else []
@@ -900,7 +1056,9 @@ class VideoIntelligence:
         source = [{key: row[key] for key in ("id", "start", "end", "text_zh", "asr_text", "revision") if key in row}
                   for row in source_rows if isinstance(row, dict)]
         source.sort(key=lambda row: (row.get("start", 0), str(row.get("id", ""))))
-        return {"version": cls._checkpoint_digest({"schema": 1, "terms": terms, "source": source}),
+        shared_version = glossary.get("version") if isinstance(glossary, dict) else None
+        return {"version": cls._checkpoint_digest({"schema": 1, "terms": terms, "source": source,
+                    "shared_version": shared_version}), "shared_version": shared_version,
                 "terms": terms, "provenance": "supplied-table" if terms else "no-supplied-table",
                 "policy": "Reference spellings only; not evidence of speaker identity, kinship or correct translation."}
 
@@ -1188,7 +1346,9 @@ class VideoIntelligence:
             batches = len(target_batches)
             source_dialogue = [dict(row) for row in (getattr(self, "_source_dialogue", []) or payload)
                                if isinstance(row, dict)]
-            for index in range(batches):
+            glossary = deepcopy(getattr(self, "glossary", None))
+
+            def translate_batch(index, source_dialogue, summary):
                 self._check_cancelled(cancel_check)
                 batch_payload, batch_screens = target_batches[index]
                 source_evidence, truncated_evidence = (self._source_batch_evidence(batch_payload, observed)
@@ -1199,7 +1359,7 @@ class VideoIntelligence:
                                    "wider_source_dialogue": dialogue_context(source_dialogue, payload),
                                    "readonly_source_neighbors": self._batch_readonly_context(source_dialogue, batch_payload),
                                    "terminology_context": self._versioned_terminology_context(
-                                       source_dialogue, getattr(self, "glossary", None)),
+                                       source_dialogue, glossary),
                                    "semantic_context": self._semantic_context(source_dialogue, batch_payload),
                                    "ocr": [{"start": row["start"], "end": row["end"],
                                              "text_zh": row["text_zh"]} for row in context_screens.values()],
@@ -1207,11 +1367,12 @@ class VideoIntelligence:
                 context = json.dumps(context_payload, ensure_ascii=False)
                 batch_stage = {"kind": "text_batch", "start": start, "end": end, "index": index,
                                "provider": provider, "model": model_setting, "quota_fallback": quota_fallback,
+                               "batch_context_policy": "frozen-v1" if workers > 1 and batches > 1 else "ordered-v1",
                                # Include the complete wider dialogue. A prior
                                # cache entry must not survive a changed remote
                                # address cue or corrected source turn.
                                "context": self._text_batch_context_digest(
-                                   payload, observed, combined["summary"], context_payload)}
+                                   payload, observed, summary, context_payload)}
                 saved_batch = self._read_checkpoint(batch_stage)
                 if isinstance(saved_batch, dict):
                     try:
@@ -1233,19 +1394,12 @@ class VideoIntelligence:
                     except (VideoIntelligenceError, KeyError, TypeError, ValueError):
                         pass
                     else:
-                        all_corrections.update({int(key): value for key, value in saved_corrections.items()})
-                        self._apply_source_corrections_to_context(source_dialogue,
-                            {int(key): value for key, value in saved_corrections.items()})
-                        combined["segments"].update(saved_result["segments"])
-                        combined["screen_texts"].extend(saved_result["screen_texts"])
-                        combined["summary"] = saved_result["summary"] or combined["summary"]
-                        continue
+                        return saved_result, {int(key): value for key, value in saved_corrections.items()}
                 self._report_stage("source", start, end, batch_index=index + 1, batch_total=batches)
                 corrections = self._correct_source(client, batch_payload, source_evidence, context, cancel_check)
                 for sid in truncated_evidence:
                     corrections[sid].update(needs_review=True, source_supported=False,
                         review_reason="Đoạn có quá nhiều vùng chữ; chỉ đối chiếu một phần OCR, cần kiểm tra nguồn riêng.")
-                all_corrections.update(corrections)
                 self._apply_source_corrections_to_context(source_dialogue, corrections)
                 # The translation request must see the corrected current batch
                 # and any prior corrected turns, while the cache key above
@@ -1253,7 +1407,7 @@ class VideoIntelligence:
                 context_payload["wider_source_dialogue"] = dialogue_context(source_dialogue, payload)
                 context_payload["readonly_source_neighbors"] = self._batch_readonly_context(source_dialogue, batch_payload)
                 context_payload["terminology_context"] = self._versioned_terminology_context(
-                    source_dialogue, getattr(self, "glossary", None))
+                    source_dialogue, glossary)
                 context_payload["semantic_context"] = self._semantic_context(source_dialogue, batch_payload)
                 context = json.dumps(context_payload, ensure_ascii=False)
                 corrected_payload = [{**row, "corrected_text_zh": corrections[row["id"]]["text_zh"],
@@ -1280,7 +1434,7 @@ class VideoIntelligence:
                           f"Mốc câu cần xuất: {json.dumps(corrected_payload, ensure_ascii=False)}\n"
                           f"ID OCR cần xuất, vị trí/thời gian cố định: {json.dumps(batch_screens, ensure_ascii=False)}\n"
                           f"Toàn bộ ngữ cảnh đoạn (chỉ tham khảo): {context}\n"
-                          f"Ngữ cảnh trước: {combined['summary'] or '(không có)'}\nĐoạn nguồn [{start:.3f}, {end:.3f}].")
+                          f"Ngữ cảnh trước: {summary or '(không có)'}\nĐoạn nguồn [{start:.3f}, {end:.3f}].")
                 self._report_stage("translate", start, end, batch_index=index + 1, batch_total=batches)
                 raw, result = self._request_text_result(
                     client, prompt, batch_payload, batch_screens, start, end, cancel_check)
@@ -1326,9 +1480,37 @@ class VideoIntelligence:
                 result = self._expand_repeated_screens(verified, occurrences)
                 self._write_checkpoint(batch_stage, {"result": result,
                     "corrections": {str(key): value for key, value in corrections.items()}}, cancel_check)
-                combined["segments"].update(result["segments"])
-                combined["screen_texts"].extend(result["screen_texts"])
-                combined["summary"] = result["summary"] or combined["summary"]
+                return result, corrections
+
+            from core.runtime_context import current_execution_context
+            execution = current_execution_context()
+            # Other adapters have not adopted per-video admission yet. Do not
+            # invent a concurrency guarantee for those providers.
+            workers = self._text_workers() if provider == "opencode" else 1
+            if workers > 1 and batches > 1:
+                original_cancel = cancel_check
+                cancel_check = lambda: bool((original_cancel and original_cancel()) or
+                    (execution.cancel_check and execution.cancel_check()))
+                # Every batch reads the same immutable source snapshot and
+                # supplied glossary. A sibling's draft/summary is never evidence.
+                # Current-batch OCR corrections remain private to its requests.
+                frozen_dialogue = deepcopy(source_dialogue)
+                batch_results = _parallel_text_map(execution.run_id, workers,
+                    lambda index: translate_batch(index, deepcopy(frozen_dialogue), previous_summary),
+                    batches, lambda: self._check_cancelled(cancel_check))
+                for result, corrections in batch_results:
+                    all_corrections.update(corrections)
+                    combined["segments"].update(result["segments"])
+                    combined["screen_texts"].extend(result["screen_texts"])
+                    combined["summary"] = result["summary"] or combined["summary"]
+            else:
+                for index in range(batches):
+                    result, corrections = translate_batch(index, source_dialogue, combined["summary"])
+                    all_corrections.update(corrections)
+                    self._apply_source_corrections_to_context(source_dialogue, corrections)
+                    combined["segments"].update(result["segments"])
+                    combined["screen_texts"].extend(result["screen_texts"])
+                    combined["summary"] = result["summary"] or combined["summary"]
             self._check_cancelled(cancel_check)
             if not quota_fallback:
                 combined = self._review_primary_text(combined, payload, observed, all_corrections)
@@ -1632,7 +1814,7 @@ class VideoIntelligence:
             crossing = [s for s in segments if self._get(s, "start") < end < self._get(s, "end")]
             if crossing:
                 end = min(float(self._get(s, "start")) for s in crossing)
-            if end_time is not None and self.provider == "opencode":
+            if end_time is not None and self.provider == "opencode" and self._text_workers() == 1:
                 # A bounded request alone is insufficient if all of its
                 # neighbours must finish before any audio becomes visible.
                 # Publish each speech batch, with the full known source context

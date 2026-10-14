@@ -737,6 +737,9 @@ document.addEventListener("DOMContentLoaded", () => {
 
   function taskEtaText(progress) {
     if (String(progress?.status || "RUNNING").toUpperCase() !== "RUNNING") return "";
+    if (Number.isInteger(progress?.retry_pending_count) && progress.retry_pending_count > 0) {
+      return "Đang phục hồi lỗi; sẽ tính lại thời gian";
+    }
     const seconds = progress?.eta_seconds;
     if (progress?.eta_scope !== "final" || typeof seconds !== "number" || !Number.isFinite(seconds) || seconds <= 0) {
       if (progress?.eta_reason === "content_blocked") return "Cần sửa câu chưa có lời dịch trước khi ước tính MP4";
@@ -775,6 +778,9 @@ document.addEventListener("DOMContentLoaded", () => {
     const missingSpeech = currentProgress?.final_output_blocked === true || items.some(segment =>
       !String(segment.final_vi ?? segment.text_vi ?? "").trim() && segment.confirmed_silence !== true &&
       (String(segment.text_zh || segment.asr_text || "").trim() || segment.needs_review));
+    const editorialFailure = currentProgress?.status === "FAILED" &&
+      currentProgress?.phase === "review" && currentProgress?.final_output_blocked === false &&
+      ["incomplete", "failed"].includes(currentProgress?.review_summary?.status);
     btnExportHQ.disabled = !currentTaskId || !items.length ||
       missingSpeech ||
       (currentProgress?.translation_mode === "preview" && currentProgress?.status !== "COMPLETED") || isPreviewReady(currentProgress?.status) ||
@@ -784,7 +790,7 @@ document.addEventListener("DOMContentLoaded", () => {
       transcriptDrafts.size > 0 || pendingTranscriptSaves > 0 ||
       items.some(segment => !["READY", "PLAYED"].includes(segment.status)) ||
       (["FAILED", "STOPPED", "CANCELLED", "CANCELLING"].includes(currentProgress?.status)
-        && currentProgress?.phase !== "export_error");
+        && currentProgress?.phase !== "export_error" && !editorialFailure);
     btnExportHQ.title = missingSpeech ? "Còn câu có lời gốc nhưng chưa có lời Việt; kiểm tra lời trước khi xuất đầy đủ." :
       outputIsDraft(currentProgress) ? "Bản nháp — cần kiểm tra. Xuất khi đủ nguồn, lời và giọng; giữ các ghi chú chưa xác minh." : "";
     if (btnReviewWorker) btnReviewWorker.disabled = !!pendingTaskAction || reviewInProgress() || automaticExportActive ||
@@ -1407,6 +1413,42 @@ document.addEventListener("DOMContentLoaded", () => {
     return text(progress?.stage) || text(progress?.message) || fallback;
   }
 
+  function retryErrorText(progress) {
+    const labels = {
+      provider_timeout: "AI phản hồi quá thời gian", provider_transport: "Mất kết nối dịch vụ AI",
+      provider_rate_limited: "Dịch vụ AI giới hạn yêu cầu", provider_server: "Máy chủ AI tạm lỗi",
+      provider_queue_full: "Hàng đợi AI đầy", provider_queue_timeout: "Chờ lượt AI quá thời gian",
+      provider_circuit_open: "Dịch vụ AI tạm ngưng nhận yêu cầu sau nhiều lỗi",
+      tts_timeout: "Tạo giọng quá thời gian", tts_transport: "Mất kết nối dịch vụ giọng đọc",
+      tts_rate_limited: "Dịch vụ giọng đọc giới hạn yêu cầu", tts_empty_audio: "Dịch vụ giọng đọc chưa trả âm thanh",
+      tts_http_error: "Dịch vụ giọng đọc tạm lỗi HTTP",
+    };
+    const codes = Array.isArray(progress?.retry_error_codes) ? progress.retry_error_codes : [];
+    return [...new Set(codes.filter(code => typeof code === "string" && /^[A-Za-z0-9_.:-]{1,160}$/.test(code)))]
+      .map(code => labels[code] ? `${labels[code]} (${code})` : code).join(" · ");
+  }
+
+  function updateTaskRetryNotice() {
+    const notice = document.getElementById("task-retry-notice");
+    if (!notice) return;
+    const count = currentProgress?.retry_pending_count;
+    const visible = Number.isInteger(count) && count > 0;
+    notice.classList.toggle("hidden", !visible);
+    if (!visible) { notice.textContent = ""; return; }
+    const status = currentProgress?.status;
+    if (["PAUSED", "STOPPED", "CANCELLED", "CANCELLING", "FAILED"].includes(status)) {
+      notice.textContent = `${count} phần chờ thử lại được giữ. ${status === "CANCELLING" ? "Đang dừng an toàn." : "Bấm Tiếp tục để xử lý phần còn thiếu."}`;
+      return;
+    }
+    const deadline = currentProgress?.retry_next_attempt_at;
+    const valid = typeof deadline === "number" && Number.isFinite(deadline) && deadline > 0;
+    const seconds = valid ? Math.max(0, Math.ceil(deadline - Date.now() / 1000)) : null;
+    const wait = seconds === null ? "Đang chờ lịch thử lại từ máy chủ."
+      : seconds === 0 ? "Đã đến lượt thử lại; đang chờ bộ điều phối."
+      : `Đợt thử lại kế tiếp sau khoảng ${Math.floor(seconds / 60)} phút ${seconds % 60} giây.`;
+    notice.textContent = `${count} phần chờ thử lại. ${wait} Phần đã xong được giữ. Đây là thời gian chờ thử lại, chưa phải thời gian có MP4.`;
+  }
+
   function updatePlayerDownloadProgress(progress, pct, terminal = false) {
     const downloading = progress?.phase === "download" && !terminal;
     playerDownloadProgress?.classList.toggle("hidden", !downloading);
@@ -1526,19 +1568,22 @@ document.addEventListener("DOMContentLoaded", () => {
     taskProgress.dataset.status = status;
     taskProgressStage.textContent = `${status === "PAUSED" ? "Đã tạm dừng · " : ""}${progressMessage(currentProgress, isPreviewReady(status) ? "Đoạn xem trước đã sẵn sàng" : reviewInProgress() ? "AI đang kiểm tra lại bản dịch…" : "Đang xử lý video…")}`;
     taskProgressStage.title = taskProgressStage.textContent;
-    const stateLabel = {RUNNING: "Đang chạy", PAUSED: "Tạm dừng", FAILED: "Có lỗi", STOPPED: "Đã dừng", CANCELLED: "Đã hủy", CANCELLING: "Đang dừng", COMPLETED: "Hoàn tất", PREPARED: "Chờ xuất MP4", PREVIEW_READY: "Có bản xem trước"}[status] || "Đang chuẩn bị";
-    const phaseLabel = {download: "Tải video", resolve: "Lấy nguồn video", prepare: "Chuẩn bị video", visual: "Nhận diện & dịch", asr: "Nhận diện lời nói", tts: "Tạo giọng Việt", review: "Kiểm tra bản dịch", export: "Xuất MP4", export_error: "Xuất MP4", request: "Gửi yêu cầu"}[currentProgress.phase] || "Dịch & lồng tiếng";
+    const stateLabel = status === "RUNNING" && currentProgress.phase === "retry" ? "Chờ thử lại"
+      : {RUNNING: "Đang chạy", PAUSED: "Tạm dừng", FAILED: "Có lỗi", STOPPED: "Đã dừng", CANCELLED: "Đã hủy", CANCELLING: "Đang dừng", COMPLETED: "Hoàn tất", PREPARED: "Chờ xuất MP4", PREVIEW_READY: "Có bản xem trước"}[status] || "Đang chuẩn bị";
+    const phaseLabel = {download: "Tải video", resolve: "Lấy nguồn video", prepare: "Chuẩn bị video", visual: "Nhận diện & dịch", asr: "Nhận diện lời nói", tts: "Tạo giọng Việt", review: "Kiểm tra bản dịch", retry: "Phục hồi lỗi dịch vụ", export: "Xuất MP4", export_error: "Xuất MP4", request: "Gửi yêu cầu"}[currentProgress.phase] || "Dịch & lồng tiếng";
     for (const [id, text] of [["task-phase-label", phaseLabel], ["task-status-label", stateLabel], ["task-status-badge", stateLabel]]) {
       const el = document.getElementById(id); if (el) el.textContent = text;
     }
     const errorSummary = document.getElementById("task-error-summary");
     if (errorSummary) {
-      const hasError = status === "FAILED" || !!currentProgress.error || /Lỗi gần nhất:/.test(taskProgressStage.textContent);
+      const retryCause = currentProgress.retry_pending_count > 0 ? retryErrorText(currentProgress) : "";
+      const hasError = status === "FAILED" || !!currentProgress.error || !!retryCause || /Lỗi gần nhất:/.test(taskProgressStage.textContent);
       errorSummary.classList.toggle("hidden", !hasError);
-      const cause = progressMessage(currentProgress).split("Lỗi gần nhất: ").at(-1);
-      errorSummary.textContent = hasError ? cause : "";
+      const cause = (typeof currentProgress.error === "string" && currentProgress.error.trim()) || progressMessage(currentProgress).split("Lỗi gần nhất: ").at(-1);
+      errorSummary.textContent = retryCause && status !== "FAILED" && !currentProgress.error ? `Lỗi tạm thời: ${retryCause}` : hasError ? cause : "";
       errorSummary.title = errorSummary.textContent;
     }
+    updateTaskRetryNotice();
     bufferingAlert.dataset.state = status === "FAILED" ? "error" : status === "PAUSED" ? "paused" : "loading";
     taskProgressValue.textContent = terminal && pct === null ? "" : displayed.label;
     showEta(taskProgressEta, currentProgress);
@@ -1568,34 +1613,35 @@ document.addEventListener("DOMContentLoaded", () => {
         taskProgressDetail.textContent += " AI vẫn đang rà nội dung; số này chưa xác nhận chất lượng dịch.";
       }
     }
+    const counters = [];
     const states = currentProgress.segment_states;
     if (states && typeof states === "object") {
       const count = key => Number.isInteger(states[key]) && states[key] >= 0 ? states[key] : 0;
-      const counters = [`${count("COMPLETED")} câu đã xử lý`, `${count("REVIEW_REQUIRED")} cần rà`,
-        `${count("FAILED")} lỗi`, `${count("RETRY_PENDING")} chờ thử lại`];
+      counters.push(`${count("COMPLETED")} câu đã xử lý`, `${count("REVIEW_REQUIRED")} cần rà`,
+        `${count("FAILED")} lỗi`, `${count("RETRY_PENDING")} chờ thử lại`);
       if (Number.isInteger(currentProgress.completed_chunks) && Number.isInteger(currentProgress.total_chunks)) {
         counters.push(`${currentProgress.completed_chunks}/${currentProgress.total_chunks} đoạn đã tiếp nhận`);
       }
-      if (currentProgress.ai_queue && Number.isInteger(currentProgress.ai_queue.active_requests)) {
-        const queue = currentProgress.ai_queue;
-        const selected = Number.isInteger(queue.selected_concurrency) ? queue.selected_concurrency : null;
-        counters.push(`AI${selected === null ? "" : ` · Đã chọn ${selected}`}: ${queue.active_requests} đang chạy, ${queue.queued_requests || 0} đang chờ`);
-        const reasons = {run_limit: "Đã đủ số yêu cầu AI đồng thời của video", concurrency_limit: "Đã đủ số yêu cầu AI đồng thời của video",
-          rate_limit: "Dịch vụ đang giới hạn yêu cầu", provider_backoff: "Đang đợi dịch vụ cho phép thử lại",
-          circuit_open: "Dịch vụ tạm lỗi; đang chờ thử lại", retry_backoff: "Đang chờ tới lượt thử lại",
-          source_not_ready: "Đang chờ câu nguồn", paused: "Đã tạm dừng", fair_queue: "Đang chia lượt công bằng giữa các video",
-          video_limit: "Đã đủ số yêu cầu AI đồng thời của video", half_open_probe: "Đang kiểm tra dịch vụ phục hồi",
-          duplicate_or_fair_queue: "Đang chờ lượt hoặc kết quả yêu cầu trùng"};
-        const waitReason = queue.wait_reason || queue.admission_reason;
-        if (waitReason && !["idle", "running"].includes(waitReason)) counters.push(reasons[waitReason] || "Đang chờ bộ điều phối AI");
-      }
-      if (currentProgress.translation_mode === "full" && Number.isInteger(currentProgress.chunk_workers) &&
-          currentProgress.chunk_workers > 0 && Number.isInteger(currentProgress.configured_chunk_workers) &&
-          currentProgress.configured_chunk_workers >= currentProgress.chunk_workers) {
-        counters.push(`Xử lý nguồn: tối đa ${currentProgress.chunk_workers} đoạn; tách riêng số yêu cầu AI`);
-      }
-      taskProgressDetail.textContent += ` ${counters.join(" · ")}.`;
     }
+    if (currentProgress.ai_queue && Number.isInteger(currentProgress.ai_queue.active_requests)) {
+      const queue = currentProgress.ai_queue;
+      const selected = Number.isInteger(queue.selected_concurrency) ? queue.selected_concurrency : null;
+      counters.push(`AI${selected === null ? "" : ` · Đã chọn ${selected}`}: ${queue.active_requests} đang chạy, ${queue.queued_requests || 0} đang chờ`);
+      const reasons = {run_limit: "Đã đủ số yêu cầu AI đồng thời của video", concurrency_limit: "Đã đủ số yêu cầu AI đồng thời của video",
+        rate_limit: "Dịch vụ đang giới hạn yêu cầu", provider_backoff: "Đang đợi dịch vụ cho phép thử lại",
+        circuit_open: "Dịch vụ tạm lỗi; đang chờ thử lại", retry_backoff: "Đang chờ tới lượt thử lại",
+        source_not_ready: "Đang chờ câu nguồn", paused: "Đã tạm dừng", fair_queue: "Đang chia lượt công bằng giữa các video",
+        video_limit: "Đã đủ số yêu cầu AI đồng thời của video", half_open_probe: "Đang kiểm tra dịch vụ phục hồi",
+        duplicate_or_fair_queue: "Đang chờ lượt hoặc kết quả yêu cầu trùng"};
+      const waitReason = queue.wait_reason || queue.admission_reason;
+      if (waitReason && !["idle", "running"].includes(waitReason)) counters.push(reasons[waitReason] || "Đang chờ bộ điều phối AI");
+    }
+    if (currentProgress.translation_mode === "full" && Number.isInteger(currentProgress.chunk_workers) &&
+        currentProgress.chunk_workers > 0 && Number.isInteger(currentProgress.configured_chunk_workers) &&
+        currentProgress.configured_chunk_workers >= currentProgress.chunk_workers) {
+      counters.push(`Xử lý nguồn: tối đa ${currentProgress.chunk_workers} đoạn; tách riêng số yêu cầu AI`);
+    }
+    if (counters.length) taskProgressDetail.textContent += ` ${counters.join(" · ")}.`;
     const speakerFrames = currentProgress.speaker_completed_frames, speakerTotal = currentProgress.speaker_total_frames;
     if (Number.isInteger(speakerFrames) && Number.isInteger(speakerTotal) && speakerTotal > 0 && speakerFrames >= 0 && speakerFrames <= speakerTotal) {
       taskProgressDetail.textContent += ` Phân biệt giọng: ${speakerFrames}/${speakerTotal} khung âm thanh (${formatProgressPercent(speakerFrames * 100 / speakerTotal)} của đoạn).`;
@@ -4758,7 +4804,8 @@ document.addEventListener("DOMContentLoaded", () => {
         const statusChanged = activeTask.status !== currentProgress?.status;
         const progressChanged = ["phase", "stage", "error", "message", "progress_pct", "stage_progress_pct", "processing_progress_pct", "processing_completed_segments", "processing_total_segments", "processing_scope", "processing_total_known", "downloaded_bytes", "total_bytes", "speed", "eta", "eta_seconds", "eta_scope", "eta_reason", "eta_missing_stages", "can_retry", "can_repair_failed", "can_pause", "can_resume", "can_stop", "can_review", "review_count", "output_video_url", "output_filename", "translation_mode", "can_translate_full", "preview_seconds", "processed_seconds", "source_prepared_seconds", "total_seconds", "review_scope", "chunk_workers", "configured_chunk_workers"]
           .some(key => activeTask[key] !== undefined && activeTask[key] !== currentProgress?.[key]) ||
-          ["review_summary", "ai_queue"].some(key => activeTask[key] !== undefined &&
+          ["retry_pending_count", "retry_next_attempt_at", "completed_chunks", "total_chunks"].some(key => activeTask[key] !== undefined && activeTask[key] !== currentProgress?.[key]) ||
+          ["review_summary", "ai_queue", "retry_error_codes", "segment_states"].some(key => activeTask[key] !== undefined &&
             JSON.stringify(activeTask[key]) !== JSON.stringify(currentProgress?.[key]));
         if (taskPollWarning || streamDisconnected || statusChanged || progressChanged) {
           showTaskProgress(activeTask);
@@ -4816,6 +4863,7 @@ document.addEventListener("DOMContentLoaded", () => {
   }
   document.getElementById("btn-refresh-tasks")?.addEventListener("click", updateTasksTable);
   setInterval(() => {
+    updateTaskRetryNotice();
     if (currentTaskId || !document.getElementById("view-tasks").classList.contains("hidden") || streamDisconnected) updateTasksTable();
   }, 2000);
 
