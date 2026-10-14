@@ -242,7 +242,9 @@ def test_timeout_retries_after_owned_process_cleanup_and_logs_each_attempt(
     monkeypatch.setattr(oc, "_terminate_process_tree", terminated.append)
     monkeypatch.setattr(oc.time, "sleep", lambda seconds: None)
     with caplog.at_level(logging.INFO, logger="ai"), execution_context("timeout-retry"):
-        assert oc.OpenCodeZenClient(api_key="private-key", timeout=1, max_retries=1).translate("private-prompt") == "Xin chào"
+        # The first mocked communicate explicitly raises TimeoutExpired; allow
+        # the successful Windows pipe thread time to be scheduled under load.
+        assert oc.OpenCodeZenClient(api_key="private-key", timeout=10, max_retries=1).translate("private-prompt") == "Xin chào"
     assert len(starts) == 2
     assert all(not Path(options["cwd"]).exists() for options in starts)
     lines = [record.getMessage() for record in caplog.records if record.name == "ai"]
@@ -339,7 +341,7 @@ def test_real_timeout_retry_reaps_first_child_before_starting_successful_child(i
             assert not any(thread.name == f"opencode-io-{children[0].pid}" for thread in threading.enumerate())
             child = "import sys; sys.stdin.read(); print('{\"type\":\"text\",\"part\":{\"text\":\"verified\"}}')"
         else:
-            child = "import time; time.sleep(30)"
+            child = "import time; time.sleep(120)"
         process = real_popen([sys.executable, "-u", "-c", child], **kwargs)
         children.append(process)
         return process
@@ -347,7 +349,9 @@ def test_real_timeout_retry_reaps_first_child_before_starting_successful_child(i
     monkeypatch.setattr(oc.subprocess, "Popen", start)
     monkeypatch.setattr(oc, "_retry_delay", lambda seconds, context: oc._check_cancelled(context))
     try:
-        assert oc.OpenCodeZenClient(api_key="fixture-key", timeout=1, max_retries=1).translate("hello") == "verified"
+        # Still a real timeout on child one; child two must be allowed normal
+        # interpreter startup while the host runs native video acceptance.
+        assert oc.OpenCodeZenClient(api_key="fixture-key", timeout=10, max_retries=1).translate("hello") == "verified"
         assert len(children) == 2
         assert all(child.poll() is not None for child in children)
         assert all(not root.exists() for root in roots)

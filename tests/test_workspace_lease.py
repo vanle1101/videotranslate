@@ -34,7 +34,7 @@ def spawn(root):
 
 
 def finish(process, command="release"):
-    output, errors = process.communicate(command + "\n", timeout=10)
+    output, errors = process.communicate(command + "\n", timeout=30)
     assert not errors
     return output
 
@@ -56,10 +56,11 @@ def test_same_process_conflict_release_and_marker_retention(tmp_path):
 @pytest.mark.parametrize("command,exit_code", [("release", 0), ("crash", 23)])
 def test_real_subprocess_conflict_and_kernel_release(tmp_path, command, exit_code):
     owner = spawn(tmp_path)
+    contender = None
     try:
         assert owner.stdout.readline().strip() == "acquired"
         contender = spawn(tmp_path)
-        output, errors = contender.communicate(timeout=10)
+        output, errors = contender.communicate(timeout=30)
         assert output.strip() == "busy" and not errors and contender.returncode == 7
         with pytest.raises(WorkspaceLeaseBusy):
             acquire(tmp_path)
@@ -68,9 +69,10 @@ def test_real_subprocess_conflict_and_kernel_release(tmp_path, command, exit_cod
         with acquire(tmp_path):
             pass
     finally:
-        if owner.poll() is None:
-            owner.kill()
-            owner.communicate(timeout=10)
+        for process in (contender, owner):
+            if process is not None and process.poll() is None:
+                process.kill()
+                process.communicate(timeout=30)
 
 
 def test_different_workspaces_do_not_block_each_other(tmp_path):

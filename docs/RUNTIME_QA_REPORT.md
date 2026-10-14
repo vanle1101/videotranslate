@@ -1,5 +1,32 @@
 # Runtime QA report
 
+## Latest retained recovery result — October 15, 2026, 02:19
+
+**Full-video acceptance: FAILED / incomplete.** Fresh production Qt UI (offscreen,
+muted) opened History → `76f5aa6b` → Retry using real Muse and Edge-TTS. The run
+ended naturally in FAILED, rather than reaching its 7,200-second observation
+deadline. The staged-neighbor repair recovered ID143: its neighbor142 and focus
+now have actual fitted speech. Validated WAV count increased from187 to **188/193**.
+Remaining failures: **87,119,135,145,146**. Review-required count remains36.
+No full320.040635-second MP4 was produced. Fifteen manual rows retained their text,
+revision, timeline and audio SHA256; all193 source IDs survived. The owned backend
+shut down successfully. The running process predated the latest explicit-Review
+handoff and missing-audio metadata changes, so this run does not validate those.
+
+The remaining pacing proposals were rejected for measured duration, duplicate
+wording, semantic mismatch or unnatural phrasing. No time/speed/meaning gate was
+relaxed to obtain a pass. Further diagnosis must use those specific failures;
+repeating identical expensive requests is not evidence of recovery.
+
+Offline regression on the following revision initially returned **3,631 passed,
+4 failed, 2 skipped, 127 subtests passed** in793.39s under concurrent native QA.
+Failures were test harness scheduling allowances: media readiness10s, two
+subprocess/pipe startup allowances1s and a lease contender10s. Increased test-only
+allowances while retaining the real timeout/cleanup assertions. Fixed lease-test
+finally cleanup to reap its contender as well as its owner. No production timeout
+was raised. Focused retest: **143 passed in29.03s**. Full fresh traversal pending.
+Production JavaScript interaction regression: **285 passed**, zero failures.
+
 ## Review transport recovery and neighboring speech — October 15, 2026
 
 Acceptance remains **INCOMPLETE**. The ongoing real 320-second recovery still has

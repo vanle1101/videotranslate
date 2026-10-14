@@ -35,7 +35,9 @@ def preview(tmp_path):
 
 
 def wait_ready(client, status):
-    deadline = time.monotonic() + 10
+    # This checks readable/seekable media, not a ten-second performance SLA.
+    # Concurrent native acceptance work can delay an otherwise valid encode.
+    deadline = time.monotonic() + 30
     while status['status'] == 'PROCESSING' and time.monotonic() < deadline:
         time.sleep(0.05)
         status = client.get('/api/preview/' + status['preview_id']).json()
