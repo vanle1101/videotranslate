@@ -99,8 +99,8 @@ def synthesize_natural_speech(*, text, source, duration, output_path, engine, al
     except (OSError, ValueError, TypeError, KeyError):
         logger.warning("PACING_HISTORY_IDENTITY_UNAVAILABLE run_id=%s", execution.run_id)
     history = pacing_checkpoint.load(history_key, cancel_check=execution.cancel_check)
-    # Historical proof is diagnostic only. No old candidate is synthesized or
-    # approved from this history; a new proposal must pass today's validators.
+    # Historical proof is diagnostic only. An explicitly capable adapter may
+    # revalidate one exact alternative, but only fresh gates permit synthesis.
     historical_measured = history["measured"]
     measurements = [{"text": row["text"], "measured_seconds": row["measured_seconds"]}
                     for row in historical_measured]
@@ -109,6 +109,21 @@ def synthesize_natural_speech(*, text, source, duration, output_path, engine, al
     rejection_feedback = history["feedback"]
     seen_candidates.update(pacing_candidate_key(row["text"])
                            for row in rejection_feedback.get("rejected_candidates", []))
+    historical_retry = None
+    if (translator is not None
+            and getattr(type(translator), "supports_pacing_revalidation", False) is True
+            and callable(getattr(type(translator), "revalidate_pacing_candidate", None))):
+        rejected = {pacing_candidate_key(row["text"])
+                    for row in rejection_feedback.get("rejected_candidates", [])
+                    if row.get("code") != "duplicate"}
+        eligible = [row for row in historical_measured
+                    if pacing_candidate_key(row["text"]) != pacing_candidate_key(current)
+                    and pacing_candidate_key(row["text"]) not in rejected
+                    and isinstance(row.get("pacing_verification"), dict)
+                    and (row["pacing_verification"].get("status") == "verified"
+                         or allow_review_draft and row["pacing_verification"].get("status") == "draft")]
+        if eligible:
+            historical_retry = min(eligible, key=lambda row: row["measured_seconds"])
 
     def checkpoint_failure():
         # The original is always measured again; deduplicate that observation
@@ -272,9 +287,20 @@ def synthesize_natural_speech(*, text, source, duration, output_path, engine, al
                             proposal_options["source_language"] = source_language
                         if allow_review_draft:
                             proposal_options["allow_review_draft"] = True
-                        proposed = translator.rewrite_for_pacing(
-                            source, current, request_budget, context,
-                            measured_duration=measured, feedback=review_feedback, **proposal_options)
+                        revalidating = historical_retry
+                        historical_retry = None  # At most one attempt, also on rejection.
+                        if revalidating is not None:
+                            logger.info("PACING_REVALIDATE_HISTORY run_id=%s speech_id=%s proposal=%d",
+                                        execution.run_id, speech_id, proposals_used)
+                            old_proof = revalidating["pacing_verification"]
+                            proposed = translator.revalidate_pacing_candidate(
+                                source, current, revalidating["text"], context,
+                                needs_review=old_proof.get("status") == "draft",
+                                review_reason=old_proof.get("review_reason", ""), **proposal_options)
+                        else:
+                            proposed = translator.rewrite_for_pacing(
+                                source, current, request_budget, context,
+                                measured_duration=measured, feedback=review_feedback, **proposal_options)
                         candidate = proposed.get("final_vi")
                         proof = proposed.get("pacing_verification")
                         if (not isinstance(candidate, str) or not candidate.strip()
@@ -283,7 +309,9 @@ def synthesize_natural_speech(*, text, source, duration, output_path, engine, al
                                         and proof.get("status") == "draft" and proof.get("semantic_verified") is True)
                                 or proof.get("text") != candidate):
                             raise RuntimeError("Thiếu xác minh cho lời đọc đã rút gọn.")
-                        if pacing_candidate_key(candidate) in seen_candidates:
+                        if revalidating is not None and candidate != revalidating["text"]:
+                            raise RuntimeError("Kiểm định đã đổi lời đọc lịch sử; chưa chấp nhận kết quả.")
+                        if revalidating is None and pacing_candidate_key(candidate) in seen_candidates:
                             raise PacingReviewRejected("AI lặp lại lời đã thử; cần cách diễn đạt ngắn hơn.",
                                 candidate=candidate, reason="Lặp lời đã đo nhưng chưa vừa thời lượng.", code="duplicate")
                         break

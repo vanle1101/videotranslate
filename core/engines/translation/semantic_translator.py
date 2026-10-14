@@ -829,6 +829,54 @@ Trả duy nhất JSON: {{"literal_vi":"...","natural_vi":"...","final_vi":"...",
         if pacing_candidate_key(candidate["final_vi"]) in {pacing_candidate_key(line) for line in tried}:
             raise PacingReviewRejected("AI lặp lại lời đã thử; cần cách diễn đạt ngắn hơn.",
                                       candidate=candidate["final_vi"], reason="Lặp lời đã đo hoặc đã bác bỏ.", code="duplicate")
+        return self._verify_pacing_candidate(text_zh, current_vi, candidate, rolling_context,
+            source_language=source_language, allow_review_draft=allow_review_draft)
+
+    # Adapters must explicitly opt into exact-candidate revalidation. Dynamic
+    # attributes (for example a generic Mock/proxy) are not a capability claim.
+    supports_pacing_revalidation = True
+
+    def revalidate_pacing_candidate(self, text_zh, current_vi, candidate_text,
+                                   rolling_context=None, *, source_language=None,
+                                   allow_review_draft=False, needs_review=False,
+                                   review_reason=""):
+        """Recheck exact historical wording against current context, without old proof."""
+        if not isinstance(candidate_text, str) or not candidate_text.strip():
+            raise ValueError("Lời đọc cần kiểm định không hợp lệ.")
+        candidate = {"final_vi": candidate_text.strip(), "needs_review": bool(needs_review),
+                     "review_reason": str(review_reason or "")}
+        return self._verify_pacing_candidate(text_zh, current_vi, candidate, rolling_context,
+            source_language=source_language, allow_review_draft=allow_review_draft)
+
+    def _verify_pacing_candidate(self, text_zh, current_vi, candidate, rolling_context=None,
+                                *, source_language=None, allow_review_draft=False):
+        clean_zh, draft = str(text_zh or "").strip(), str(current_vi or "").strip()
+        if source_language is not None and (not isinstance(source_language, str)
+                or not re.fullmatch(r"[a-zA-Z][a-zA-Z0-9_-]{0,31}", source_language)):
+            raise ValueError("Mã ngôn ngữ nguồn không hợp lệ.")
+        language_hint = source_language or "auto"
+        language_policy = (
+            "Nguồn thoại có thể thuộc bất kỳ ngôn ngữ nào hoặc xen kẽ nhiều ngôn ngữ. "
+            "Tự nhận diện ngôn ngữ của nguyên văn từng câu; không mặc định tiếng Trung. "
+            "text_zh/zh chỉ là tên trường cũ. Đối chiếu trực tiếp nguyên văn nguồn đang xét, "
+            "không dịch vòng qua phụ đề Trung hay thay lời Hàn/Anh bằng chữ OCR. "
+            "Ngôn ngữ cấu hình là gợi ý, không phải bằng chứng phủ nhận nguồn thực. "
+            "Các ví dụ ngữ pháp Trung chỉ áp dụng khi câu nguồn thực sự là tiếng Trung. "
+            "Giữ tên, số, phủ định, hành động, quan hệ và sắc thái của chính ngôn ngữ nguồn."
+        )
+        if not clean_zh or not draft or self.provider not in self.STRICT_PROVIDERS:
+            raise RuntimeError("Cần nguồn thoại và nhà cung cấp AI để rút gọn lời đọc mà giữ đúng nghĩa.")
+        context = format_dialogue_context(rolling_context or [])
+        target = focus_identity(rolling_context or [])
+        semantics = _source_semantics(rolling_context, [target] if target else [])
+        if added_rude_address(draft, candidate["final_vi"]):
+            raise PacingReviewRejected("Bản rút gọn tự đổi xưng hô sang tao/mày; giữ lời trước đó.",
+                                      candidate=candidate["final_vi"],
+                                      reason="Rút thời lượng không được tự thêm sắc thái thô trong xưng hô.",
+                                      code="semantic_mismatch")
+        if candidate.get("needs_review") and not allow_review_draft:
+            raise PacingReviewRejected("AI chưa tìm được lời đọc ngắn hơn mà chắc chắn giữ đủ nghĩa.",
+                                      candidate=candidate["final_vi"], reason=candidate.get("review_reason", ""), code="uncertain")
         # A fluent rewrite is not evidence of fidelity. Verify the exact new
         # wording in a separate request, before any audio/text publication.
         verdict = self._validated_request(
