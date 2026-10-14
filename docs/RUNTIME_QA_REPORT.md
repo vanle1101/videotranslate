@@ -37,6 +37,11 @@ fresh Korean speech with Chinese subtitles acceptance, real long/multi-hour
 benchmarks, and real failure-path partial-publication verification. No overall
 completion or universal quality claim is made.
 
+Cleanup limitation: automatic approval review rejected removal of the explicitly
+scoped current-turn pytest directories and `cleanup/qa/orthography-source-frame.jpg`
+with `blocked by policy`. They were left in place; no alternate deletion path was
+attempted. Existing user data was not deleted. Owned UI servers exited normally.
+
 ## Independent target spelling and source seeking — October 15, 2026, 04:47
 
 Added bounded target-only spelling review for retained ASCII Vietnamese drafts.
