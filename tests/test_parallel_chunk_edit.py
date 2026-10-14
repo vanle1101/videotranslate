@@ -30,6 +30,13 @@ def test_parallel_draft_waits_for_atomic_manual_edit_and_keeps_its_mask(preview,
         edit = None
         try:
             await asyncio.wait_for(asyncio.to_thread(entered.wait, 5), 6)
+            # Real workers may take minutes before their first result. Their
+            # admission must leave the old source-preparation phase immediately.
+            progress = session.get_progress()
+            assert progress["phase"] == "visual"
+            assert progress["parallel_wave_chunks"] == 2
+            assert "dịch song song 2 đoạn" in progress["stage"]
+            assert progress["progress_pct"] is None
             focus = next(row for row in session.segments.values() if row.start >= 60)
             registered, commit = asyncio.Event(), asyncio.Event()
             manual_audio = session.segments_dir / "manual.wav"

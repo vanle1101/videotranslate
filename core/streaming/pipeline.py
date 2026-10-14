@@ -3180,6 +3180,13 @@ class StreamingPipelineSession:
             self._persist_if_enabled()
             ai_workers = VideoAIExecutor(self.task_id, workers)
             try:
+                if jobs:
+                    # Source preparation has finished for this immutable wave.
+                    # Publishing only after its first provider result leaves the
+                    # UI showing ASR/preparation throughout real AI requests.
+                    await self.report_progress("visual",
+                        f"Đang phân tích và dịch song song {len(jobs)} đoạn…", None,
+                        parallel_wave_chunks=len(jobs))
                 async with OrderedChunkRunner(workers, admission_event=self.pause_event,
                                               is_current=current) as pool:
                     async for outcome in pool.run(jobs):

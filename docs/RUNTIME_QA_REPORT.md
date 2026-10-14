@@ -43,6 +43,17 @@ workspace was rejected by the production workspace lease. No competing writer
 started, and the attempted second backend shut down. Its media checks did not
 run. The long task remains the sole active backend; no lease bypass was used.
 
+At 05:45 the long task exposed a real status mismatch: all 453.508934 seconds
+were recognized, eight parallel chunk owners were admitted, and the AI queue
+reported five live Muse requests, while the API/UI phase still said `prepare`
+with the last audio-preparation message. The parallel wave now publishes its
+`visual` phase before admission, describing the measured job count without
+fabricated progress. A blocked-native-worker regression checks the observable
+phase before any provider result. **41 parallel/progress tests passed in
+16.97s.** The live process still uses its loaded old version; runtime retest
+of this fix is pending. At 05:37:58, malformed JSON in a real review response
+was repaired by the existing bounded path; it did not abort or restart the job.
+
 ## Additional retained recovery and long-source selection — October 15, 2026, 05:20
 
 **Retained natural Douyin 15-second project `38680e43`: FAIL full recovery.**
