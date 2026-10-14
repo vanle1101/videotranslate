@@ -76,14 +76,14 @@ def _checked(data):
 
 def load(key, *, cancel_check=None):
     _cancel(cancel_check)
-    if key is None:
+    if not isinstance(key, str) or not re.fullmatch(r"[a-f0-9]{64}", key):
         return {"measured": [], "feedback": {}}
     try:
         path = _root() / (key + ".json")
         if path.is_symlink() or path.stat().st_size > 256 * 1024:
             raise ValueError("Invalid history file")
         record = json.loads(path.read_text(encoding="utf-8"))
-        if record.get("version") != VERSION or record.get("key") != key:
+        if not isinstance(record, dict) or record.get("version") != VERSION or record.get("key") != key:
             raise ValueError("Stale history")
         encoded = json.dumps(record["data"], sort_keys=True, ensure_ascii=False, allow_nan=False).encode()
         if hashlib.sha256(encoded).hexdigest() != record.get("sha256"):
@@ -95,7 +95,7 @@ def load(key, *, cancel_check=None):
 
 def store(key, measured, feedback, *, cancel_check=None):
     _cancel(cancel_check)
-    if key is None:
+    if not isinstance(key, str) or not re.fullmatch(r"[a-f0-9]{64}", key):
         return
     temporary = None
     try:

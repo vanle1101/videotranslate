@@ -111,6 +111,21 @@ def test_manual_mode_does_not_load_or_write_history(durable, aligner, monkeypatc
     assert not (durable / "cache/pacing_history").exists()
 
 
+@pytest.mark.parametrize("raw", ["[]", "null", '"wrong"', "5"])
+def test_nonobject_history_is_ignored(durable, raw):
+    key = "b" * 64
+    cache.store(key, [], {})
+    (durable / "cache/pacing_history" / (key + ".json")).write_text(raw)
+    assert cache.load(key) == {"measured": [], "feedback": {}}
+
+
+@pytest.mark.parametrize("key", ["../outside", "", 12])
+def test_invalid_history_key_never_creates_files(durable, key):
+    cache.store(key, [], {})
+    assert cache.load(key) == {"measured": [], "feedback": {}}
+    assert not (durable / "cache/pacing_history").exists()
+
+
 def test_changed_loaded_policy_model_and_speed_change_identity(durable, aligner, monkeypatch):
     args = options(durable, aligner, object(), object())
     args.pop("output_path")
