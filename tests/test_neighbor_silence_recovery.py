@@ -277,3 +277,40 @@ def test_timing_conflict_reports_capacity_with_manual_intervals_fixed(rescue):
     rescue._remember_pacing_failure(focus, error, [])
     assert focus.timing_issue["available_seconds"] == pytest.approx(.5)
     assert focus.timing_issue["required_seconds"] == .7
+
+
+@pytest.mark.parametrize("outcome", ["fits", "too_long", "cancelled"])
+def test_compacted_neighbor_can_still_be_shortened_without_losing_staged_audio(rescue, monkeypatch, outcome):
+    row = rescue.segments[0]
+    row.verification = {"status": "verified"}
+    originals = Path(row.audio_path).read_bytes()
+    rescue.tts_engine = object()
+    rescue.translator = Mock()
+    rescue.translator.rewrite_for_pacing.return_value = {"final_vi": "Giữ lời.",
+        "pacing_verification": {"status": "verified", "text": "Giữ lời."}}
+    monkeypatch.setattr(rescue, "_dialogue_context_before", lambda *a: [])
+
+    def speech(**kwargs):
+        _fixture_speech(kwargs["output_path"], .4)
+        if outcome == "too_long":
+            raise SpeechBudgetError("Controlled remaining timing conflict")
+        if outcome == "cancelled":
+            raise asyncio.CancelledError
+        return {"text": kwargs["text"], "tts_duration": .4, "speed_ratio": 1., "boundaries": []}
+
+    monkeypatch.setattr("core.streaming.pipeline.synthesize_natural_speech", speech)
+    rows = rescue._dub_rows()
+    if outcome == "cancelled":
+        with pytest.raises(asyncio.CancelledError):
+            asyncio.run(rescue._prepare_dub_rescue(rows, rescue.segments[1], .85))
+        assert not list(rescue.segments_dir.glob("seg_*.wav"))
+    else:
+        _, staged = asyncio.run(rescue._prepare_dub_rescue(rows, rescue.segments[1], .85))
+        assert set(staged) == {0}
+        assert len(list(rescue.segments_dir.glob("seg_*.wav"))) == 1
+        assert staged[0]["spoken"]["text"] == ("Giữ lời." if outcome == "fits" else "Giữ nguyên lời.")
+        if outcome == "too_long":
+            assert rescue._dub_audio_duration(staged[0]["audio_path"]) < 1.
+    assert rescue.translator.rewrite_for_pacing.call_count == 1
+    assert Path(row.audio_path).read_bytes() == originals
+    assert row.final_vi == "Giữ nguyên lời."

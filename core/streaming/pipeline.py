@@ -3758,7 +3758,7 @@ class StreamingPipelineSession:
             # independent source/meaning/address check used for focus rewrites.
             for sid in [ordered[pos] for pos in (index - 1, index - 2) if pos >= 0]:
                 item = self.segments[sid]
-                if (sid in staged or not eligible(item)
+                if (not eligible(item)
                         or (item.verification or {}).get("status") not in {"verified", "corrected"}):
                     continue
                 row = next(row for row in shadow if row["id"] == sid)
@@ -3808,7 +3808,7 @@ class StreamingPipelineSession:
                         or proof.get("text") != proposal.get("final_vi")):
                     raise RuntimeError("Thiếu xác minh cho lời đọc liền kề đã rút gọn.")
                 path = self.segments_dir / f"seg_{sid}_{uuid.uuid4().hex}.wav"
-                staged[sid] = {"audio_path": str(path.resolve())}
+                previous = staged.get(sid)
                 try:
                     spoken = await self._run_blocking(synthesize_natural_speech,
                         text=proposal["final_vi"], source=item.text_zh, duration=budget,
@@ -3816,14 +3816,23 @@ class StreamingPipelineSession:
                         voice=self._segment_voice(item), ref_audio=self.ref_audio, context=context)
                 except SpeechBudgetError:
                     path.unlink(missing_ok=True)
-                    staged.pop(sid, None)
                     continue
+                except BaseException:
+                    path.unlink(missing_ok=True)
+                    raise
                 spoken["pacing_verification"] = proposal["pacing_verification"]
                 if proof.get("status") == "draft":
                     spoken.update(needs_review=True, review_reason=proof.get("review_reason")
                                   or "Lời rút gọn là bản nháp, cần kiểm tra.")
-                if not await stage(item, path, spoken):
-                    staged.pop(sid, None)
+                try:
+                    accepted = await stage(item, path, spoken)
+                except BaseException:
+                    path.unlink(missing_ok=True)
+                    raise
+                if not accepted:
+                    continue
+                if previous:
+                    Path(previous["audio_path"]).unlink(missing_ok=True)
                 break
             return shadow, staged
         except BaseException:

@@ -47,6 +47,18 @@ Files: `core/review_retry.py`, `core/translation_review.py`,
 `tests/test_review_retry.py`, `tests/test_review_retry_scheduler.py`,
 `tests/test_neighbor_silence_recovery.py`.
 
+Further live-log diagnosis found that `sid in staged` excluded a predecessor
+from semantic shortening after even a tiny silence/tempo improvement. This
+prevented direct-neighbor rescue for IDs119 and143. The preparation stage now
+allows a shorter validated replacement of its own staged PCM, retains the old
+stage on a timing rejection and deletes both task-owned candidates on cancellation.
+Original/user audio stays untouched. **75 timing/recovery tests passed**, including
+replacement, rejection and cancellation. This fix still needs a fresh runtime.
+
+The next full offline traversal completed with **3,624 passed, 2 skipped,
+127 subtests passed** in544.19s. It preceded the final staged-neighbor change;
+the75 focused checks above cover that change. Counts overlap.
+
 ## Recovery retest and cross-process ownership — October 15, 2026
 
 **Acceptance remains INCOMPLETE.** The real 320.040635-second project `76f5aa6b` has 187 valid speech files out of 193; IDs 87,119,135,143,145,146 still lack a usable fitted voice. No new complete MP4 is claimed for this run.
