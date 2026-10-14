@@ -11,6 +11,7 @@ import pytest
 from config import settings
 from core.streaming.pipeline import StreamingPipelineSession, SegmentItem
 from core.engines.alignment.dub_timing import available_reflow_duration
+from core.engines.alignment.timing_aligner import SpeechBudgetError
 
 
 @pytest.fixture
@@ -122,3 +123,100 @@ def test_neighbor_rewrite_logs_bounded_rejections_without_dialogue(rescue, monke
     assert caplog.text.count("PACING_NEIGHBOR_REWRITE_REJECTED") == 3
     assert "focus_id=1 neighbor_id=0 attempt=3 code=semantic_mismatch" in caplog.text
     assert "PRIVATE-" not in caplog.text
+
+
+def _fixture_speech(path, seconds):
+    """Offline synthetic PCM for publication tests, never a provider result."""
+    with wave.open(str(path), "wb") as audio:
+        audio.setparams((1, 2, 24000, 0, "NONE", "not compressed"))
+        audio.writeframes(np.full(round(seconds * 24000), 1000, dtype="<i2").tobytes())
+
+
+@pytest.mark.parametrize("fitted_seconds,expected_status", [(.5, "READY"), (.6, None)])
+def test_ordinary_synthesis_preserves_manual_neighbor_times_and_audio(
+        rescue, monkeypatch, fitted_seconds, expected_status):
+    # Automatic synthesis previously omitted the opt-in flag and moved these
+    # intervals to make a too-long waveform appear to fit.
+    rescue.segments[0].verification = {"status": "manual"}
+    for sid in (0, 2):
+        row = rescue.segments[sid]
+        row.dub_start, row.dub_end = row.start, row.end
+    originals = {sid: (rescue.segments[sid].to_dict(), Path(rescue.segments[sid].audio_path).read_bytes())
+                 for sid in (0, 2)}
+    focus = rescue.segments[1]
+    focus.text_zh = "来源"
+    rescue.tts_engine = object()
+    rescue.translator = None
+    monkeypatch.setattr(rescue, "_dialogue_context_before", lambda *a: [])
+    calls = []
+
+    def synthesis(**kwargs):
+        calls.append(kwargs)
+        _fixture_speech(kwargs["output_path"], fitted_seconds)
+        return {"text": kwargs["text"], "tts_duration": fitted_seconds,
+                "speed_ratio": 1., "boundaries": [], "pacing_verification": None}
+
+    monkeypatch.setattr("core.streaming.pipeline.synthesize_natural_speech", synthesis)
+    if expected_status is None:
+        # The queue owner records FAILED; synthesis must propagate the error.
+        with pytest.raises(SpeechBudgetError):
+            asyncio.run(rescue._synthesize_segment(focus))
+        assert focus.status != "READY"
+    else:
+        asyncio.run(rescue._synthesize_segment(focus))
+        assert focus.status == expected_status
+    assert len(calls) == 1
+    assert calls[0]["max_duration"] == pytest.approx(.5)
+    for sid, (state, pcm) in originals.items():
+        assert rescue.segments[sid].to_dict() == state
+        assert Path(rescue.segments[sid].audio_path).read_bytes() == pcm
+    assert not list(rescue.segments_dir.glob("pending_*.wav"))
+    if expected_status is None:
+        assert focus.audio_path is None
+        assert not (rescue.segments_dir / "seg_1.wav").exists()
+
+
+def test_rejected_rescue_uses_fixed_capacity_and_cleans_staged_neighbors(rescue, monkeypatch):
+    # Its recorded interval reserves 1 second although the waveform is .8 s.
+    # Moving/shrinking this manual interval would incorrectly fund the rescue.
+    _fixture_speech(rescue.segments[2].audio_path, .8)
+    originals = {sid: (row.to_dict(), Path(row.audio_path).read_bytes())
+                 for sid, row in rescue.segments.items() if row.audio_path}
+    rescue.tts_engine = object()
+    rescue.translator = object()
+    focus = rescue.segments[1]
+    calls = []
+
+    def too_long(**kwargs):
+        calls.append(kwargs)
+        error = SpeechBudgetError("Offline timing conflict")
+        error.required_dub_duration = .65
+        raise error
+
+    monkeypatch.setattr("core.streaming.pipeline.synthesize_natural_speech", too_long)
+    rows = rescue._dub_rows()
+    shadow, staged = asyncio.run(rescue._prepare_dub_rescue(rows, focus, .65))
+    try:
+        assert staged  # Real padding was reclaimed but is not enough.
+        assert available_reflow_duration(shadow, 1, total_duration=2.5) > .65
+        assert available_reflow_duration(shadow, 1, total_duration=2.5, fixed_ids={2}) < .65
+    finally:
+        for update in staged.values():
+            Path(update["audio_path"]).unlink()
+    with pytest.raises(SpeechBudgetError, match="Offline timing conflict"):
+        asyncio.run(rescue._fit_dub(focus, text=focus.final_vi, source="来源",
+            output_path=rescue.segments_dir / "focus.wav", translator=rescue.translator,
+            neighbor_rescue=True))
+    assert len(calls) == 1  # No second synthesis on an unusable rescue budget.
+    for sid, (state, pcm) in originals.items():
+        assert rescue.segments[sid].to_dict() == state
+        assert Path(rescue.segments[sid].audio_path).read_bytes() == pcm
+    assert sorted(p.name for p in rescue.segments_dir.iterdir()) == ["original-0.wav", "original-2.wav"]
+
+
+def test_explicit_fixed_neighbor_is_not_rewritten_or_compacted(rescue):
+    rows = rescue._dub_rows()
+    shadow, staged = asyncio.run(rescue._prepare_dub_rescue(
+        rows, rescue.segments[1], .6, fixed_ids={0}))
+    assert not staged
+    assert shadow == rows

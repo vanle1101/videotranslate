@@ -1,5 +1,24 @@
 # Runtime QA report
 
+## Retained-project recovery and manual timing protection — October 14, 2026, 22:51
+
+**Full 320-second output: NOT COMPLETE.** Real offscreen History → Retry on retained project `76f5aa6b` ran for a bounded 30 minutes, then normal Stop saved its checkpoint and the owned backend exited. It increased playable speech from 186 to 187 of 193 rows (96.9%). ID39 now has complete speech with its original `Anh Dã!` wording. IDs87,119,143,145,146 failed semantic/pacing checks; ID135 was interrupted at the deadline. After fresh restoration there are 38 PLAYED,149 READY,6 FAILED,187 valid WAVs and38 rows requiring content review. Content-review counts overlap ready speech. No full MP4 was produced by this long-project run. The ETA correctly remained unavailable while recovery had no defensible throughput estimate.
+
+Root cause found in subsequent inspection: ordinary Retry could reflow neighboring manual intervals, while only the final pacing-recovery branch requested fixed manual timing. All `_fit_dub` paths now preserve existing neighboring manual intervals. Neighbor rescue uses those same fixed IDs for eligibility and available capacity, and the final planner/publication guard agrees. Insufficient space rejects the attempt without publishing staged audio. The 1.15 speed ceiling, semantic gate and full-waveform checks remain intact.
+
+Real cached-PCM/FFmpeg measurements showed why preserving manual timing matters: ID119 could fit1.250292s only in an unrestricted plan that moved manual intervals; fixed-manual capacity was0.870917s. ID39's earlier unrestricted measurement similarly depended on moving manual intervals. These measurements are not proof of safe recovery. The long run above loaded the preceding code, so its one recovered row does not certify the new timing protection retroactively. No user dialogue or approval was fabricated to clear the remaining failures.
+
+| Test / steps | Expected | Actual / retest |
+| --- | --- | --- |
+| Fresh production backend → History `76f5aa6b` → Retry → Stop; compare durable rows and WAV SHA256; wait for late responses | Reuse saved rows; stop without losing audio or altering manual neighbors | PASS on patched code:193 segment IDs,187 existing WAVs,15 manual rows preserved; UI/backend STOPPED; Retry remains available; no late row mutation during the observation window. Log shows cached speech for ID87, no restarted ASR |
+| Restart separate production backend → History `00b293c5` → play exported result | Saved translated video still plays | PASS:4 rows restored, Qt readyState4,640×360,time0.440835s,unpaused,no media error; backend exited. Prior real provider/export/full-decode acceptance remains documented below |
+| Ordinary synthesis and failed neighbor rescue, including real FFmpeg PCM tests | Manual text/audio/timing preserved; staged files cleaned | PASS: parent rerun67 tests in16.84s; agent related seven-suite run370 PASS (overlapping, not added) |
+| Acceptance completion contract: missing/wrong counters, output ownership, preview, unfinished rows | Fail closed before declaring a final result | PASS:1 valid snapshot and15 invalid variations checked; harness also requires full production media validation and playback |
+
+One initial offscreen lifecycle harness stalled before opening the project; backend inspection showed the project still STOPPED and no new processing. Its precisely identified QA process was terminated. A fresh diagnostic harness passed the lifecycle flow; the cause of that isolated offscreen startup stall is not established. No user desktop input was sent.
+
+Files changed in this follow-up: `core/streaming/pipeline.py`, `tests/test_neighbor_silence_recovery.py`, `scripts/check_production_ui.py`, `scripts/check_running_studio_eta.py`, this report. Remaining:6 unfinished speech rows,38 content reviews, full long-video MP4 acceptance, and multi-hour stress acceptance. The successful24s synthetic mixed-language fixture does not prove those outcomes.
+
 ## Neighbor-silence recovery correction — October 14, 2026
 
 Root cause: a failed focus row already reclaimed its own PCM padding, but neighbor rescue only tried tempo changes and semantic rewrites. Successful neighboring WAVs could still reserve unused digital edge padding. `_prepare_dub_rescue` now stages compaction of that padding before proposing neighbor rewrites, preserving the existing20msguard and skipping manual rows. Word timing is transformed through tempo and cut maps in order; the combined speed cap remains1.15. Originals are kept until the existing revision-checked publication. Cancellation cleans staged files only. No duration guard or semantic approval was loosened.

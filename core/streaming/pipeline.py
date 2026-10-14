@@ -771,7 +771,7 @@ class StreamingPipelineSession:
                             focus_vi=text,
                             _review_context=_review_context,
                         ) if review_result is not None else None),
-                        preserve_manual_timing=recovery_edit)
+                    )
                 spoken_text = spoken.get("text", text)
                 if spoken_text != text:
                     proof = spoken.get("pacing_verification")
@@ -3427,19 +3427,26 @@ class StreamingPipelineSession:
             cache.pop(next(iter(cache)))
         return duration
 
-    async def _prepare_dub_rescue(self, rows, focus, required_duration):
+    async def _prepare_dub_rescue(self, rows, focus, required_duration, *, fixed_ids=()):
         """Stage bounded automatic neighbor repairs; publish nothing here."""
         shadow = deepcopy(rows)
         staged = {}
         known = self._source_prepared_seconds
+        # Manual dialogue is user-owned, including its existing dub interval.
+        # Use the same immutable neighbors for budget discovery and planning.
+        fixed_ids = set(fixed_ids) | {
+            row["id"] for row in rows if row["id"] != focus.id
+            and (self.segments[row["id"]].verification or {}).get("status") == "manual"
+        }
         ordered = [row["id"] for row in shadow]
         index = ordered.index(focus.id)
         nearby = [ordered[pos] for distance in (1, 2)
                   for pos in (index - distance, index + distance) if 0 <= pos < len(ordered)]
         def capacity():
-            return available_reflow_duration(shadow, focus.id, total_duration=known)
+            return available_reflow_duration(shadow, focus.id, total_duration=known,
+                                             fixed_ids=fixed_ids)
         def eligible(item):
-            return (item.status in {"READY", "PLAYED"} and item.audio_path
+            return (item.id not in fixed_ids and item.status in {"READY", "PLAYED"} and item.audio_path
                     and item.final_vi.strip() and (item.verification or {}).get("status") != "manual")
         async def stage(item, path, spoken):
             measured = self._dub_audio_duration(path)
@@ -3649,13 +3656,13 @@ class StreamingPipelineSession:
             capacity = min(capacity, duration + .35)
         return rows, duration, capacity, known_duration, tail_limit
 
-    async def _fit_dub(self, seg, *, text, source, output_path, translator=None, context=None, on_stage=None, neighbor_rescue=False, pacing_verification=None, preserve_manual_timing=False):
+    async def _fit_dub(self, seg, *, text, source, output_path, translator=None, context=None, on_stage=None, neighbor_rescue=False, pacing_verification=None):
         rows, duration, capacity, known_duration, tail_limit = self._dub_fit_window(seg, self._dub_rows())
         fixed_timing_ids = {
             row["id"] for row in rows
             if (row.get("id") != seg.id and
                 (self.segments.get(row["id"]).verification or {}).get("status") == "manual")
-        } if preserve_manual_timing else set()
+        }
         if fixed_timing_ids:
             # Keep the provider's original fitting ceiling. Manual rows can
             # only reduce the usable reflow space; a larger timeline capacity
@@ -3686,8 +3693,11 @@ class StreamingPipelineSession:
                 if (not neighbor_rescue or not self._chunked_source_started or translator is None
                         or not isinstance(required, (int, float)) or not math.isfinite(required)):
                     raise
-                rows, staged = await self._prepare_dub_rescue(rows, seg, required)
-                capacity = available_reflow_duration(rows, seg.id, total_duration=known_duration)
+                rows, staged = await self._prepare_dub_rescue(rows, seg, required,
+                                                            fixed_ids=fixed_timing_ids)
+                _, _, window_capacity, _, _ = self._dub_fit_window(seg, rows)
+                capacity = min(window_capacity, available_reflow_duration(
+                    rows, seg.id, total_duration=known_duration, fixed_ids=fixed_timing_ids))
                 if capacity < required or not staged:
                     raise
                 # If the failed focus attempt actually measured a shorter,
@@ -3723,8 +3733,8 @@ class StreamingPipelineSession:
                 for identity, bounds in plan.items():
                     resolve_dub_timing({**self.segments[identity].to_dict(), **bounds})
                 start, end = plan[seg.id]["dub_start"], plan[seg.id]["dub_end"]
-            if preserve_manual_timing and any(
-                    (self.segments[sid].verification or {}).get("status") == "manual"
+            if any(
+                    sid in fixed_timing_ids
                     and (bounds["dub_start"], bounds["dub_end"]) != resolve_dub_timing(self.segments[sid].to_dict())
                     for sid, bounds in plan.items()):
                 raise SpeechBudgetError("Căn lại sẽ thay đổi thời gian câu đã sửa tay; giữ nguyên bản sửa.")
@@ -4041,7 +4051,7 @@ class StreamingPipelineSession:
                             and (seg.verification or {}).get("status") != "manual" else None, on_stage=speech_stage,
                         context=context, neighbor_rescue=allow_pacing and pacing_recovery is None
                             and (seg.verification or {}).get("status") != "manual",
-                        **({"pacing_verification": pacing_recovery["proof"], "preserve_manual_timing": True} if pacing_recovery else {}))
+                        **({"pacing_verification": pacing_recovery["proof"]} if pacing_recovery else {}))
             # Fitting already emitted ALIGNING. Publish the complete WAV and
             # every changed timing without yielding to a concurrent edit/Stop.
             tts_dur, ratio, boundaries = spoken["tts_duration"], spoken["speed_ratio"], spoken["boundaries"]

@@ -235,13 +235,18 @@ def export_through_ui(page, base, task_id, *, fresh_after=None):
 
 def check_retry_stop(page, base, task_id):
     """Run actual worker requests through buttons, stop, and inspect durable audio."""
-    assert task_id == "e978c201", "Only the existing stopped lifecycle QA task may retry"
+    assert task_id in {"e978c201", "76f5aa6b"}, "Only explicitly authorized lifecycle projects may retry"
     snapshot = backend(base, f"/api/streaming/{task_id}")
     assert snapshot["progress"].get("can_retry"), snapshot["progress"]
-    manifest = json.loads((ROOT / "workspace/projects" / f"{task_id}.json").read_text(encoding="utf-8"))
+    from core.streaming.session_store import _read
+    manifest = _read(task_id)
     paths = [Path(row["audio_path"]) for row in manifest["segments"]
              if row["status"] in {"READY", "PLAYED"} and row.get("audio_path")]
     before = {str(path):hashlib.sha256(path.read_bytes()).hexdigest() for path in paths}
+    row_ids = [row['id'] for row in manifest['segments']]
+    manual_before = {row['id']: {key: row.get(key) for key in
+        ('final_vi', 'audio_path', 'dub_start', 'dub_end', 'revision', 'verification')}
+        for row in manifest['segments'] if (row.get('verification') or {}).get('status') == 'manual'}
     assert before, "Lifecycle QA must start with real preserved READY audio"
     assert click(page, "btn-retry-worker")
     until(page, "document.getElementById('task-progress').dataset.status==='RUNNING'", timeout=30)
@@ -260,15 +265,20 @@ def check_retry_stop(page, base, task_id):
     late = backend(base, f"/api/streaming/{task_id}")
     assert [(row["id"],row["status"],row.get("revision"),row.get("final_vi")) for row in late["segments"]] == stopped_rows, "Late result mutated stopped task"
     assert late["progress"].get("can_retry"), late["progress"]
-    event("RETRY_STOP", {"stop_seconds":elapsed,"preserved_ready_wavs":len(before),"late_writes":False,"ui_status":ui_state(page)["status"],"backend_status":late["progress"]["status"],"can_retry":True})
+    durable = _read(task_id)
+    assert [row['id'] for row in durable['segments']] == row_ids, 'Resume changed source segment identities'
+    for row in durable['segments']:
+        if row['id'] in manual_before:
+            assert {key:row.get(key) for key in manual_before[row['id']]} == manual_before[row['id']], 'Resume changed manual dialogue'
+    event("RETRY_STOP", {"stop_seconds":elapsed,"preserved_ready_wavs":len(before),"preserved_manual_rows":len(manual_before),"preserved_segment_ids":len(row_ids),"late_writes":False,"ui_status":ui_state(page)["status"],"backend_status":late["progress"]["status"],"can_retry":True})
 
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("task_id", choices=["38680e43", "e978c201", "5258c661"])
+    parser.add_argument("task_id", choices=["38680e43", "e978c201", "5258c661", "76f5aa6b", "00b293c5"])
     parser.add_argument("--style", action="store_true", help="Save/reload a temporary QA caption style and restore the prior style. Marks its old render outdated.")
     parser.add_argument("--skip-playback", action="store_true")
-    parser.add_argument("--retry-stop", action="store_true", help="Retry and stop real work through UI (e978c201 only).")
+    parser.add_argument("--retry-stop", action="store_true", help="Retry and stop real work through UI (authorized lifecycle projects only).")
     parser.add_argument("--review", action="store_true", help="Run real Muse review and automatic export through the UI before playback.")
     parser.add_argument("--edit", action="store_true", help="Edit QA row 6 through UI, reopen it, and restore its original wording with real speech.")
     parser.add_argument("--export", action="store_true", help="Export after requested edit/style checks and verify real playback.")
