@@ -71,6 +71,16 @@ def _checked(data):
                 or len(row["text"]) > 2000 or not isinstance(row.get("reason"), str)
                 or len(row["reason"]) > 1000 or not isinstance(row.get("code"), str)):
             raise ValueError("Invalid rejection")
+    observations = feedback.get("measured_candidates", [])
+    if not isinstance(observations, list) or len(observations) > 16:
+        raise ValueError("Invalid feedback measurements")
+    for row in observations:
+        if (not isinstance(row, dict) or not isinstance(row.get("text"), str)
+                or not 0 < len(row["text"]) <= 4000):
+            raise ValueError("Invalid feedback wording")
+        if "measured_seconds" in row and (type(row["measured_seconds"]) not in (int, float)
+                or not math.isfinite(row["measured_seconds"]) or row["measured_seconds"] <= 0):
+            raise ValueError("Invalid feedback duration")
     return deepcopy(data)
 
 
@@ -128,3 +138,61 @@ def store(key, measured, feedback, *, cancel_check=None):
                 temporary.unlink(missing_ok=True)
             except OSError:
                 logging.getLogger("pipeline").warning("PACING_HISTORY_CLEANUP_FAILED")
+
+
+class NeighborPacingHistory:
+    """History for an external bounded proposal loop, never a loop of its own.
+
+    Callers retain proposal limits, proof validation, measured synthesis and
+    atomic timeline publication. This object persists observations only.
+    """
+    def __init__(self, *, scope, feedback, cancel_check=None, **identity_options):
+        self.cancel_check = cancel_check
+        self.key = None
+        try:
+            key = identity(**identity_options)
+            _reject_secrets(scope)
+            if key is not None:
+                self.key = hashlib.sha256(json.dumps(["neighbor-v1", key, scope],
+                    sort_keys=True, ensure_ascii=False, allow_nan=False).encode()).hexdigest()
+        except (OSError, ValueError, TypeError, KeyError):
+            logging.getLogger("pipeline").warning("NEIGHBOR_HISTORY_IDENTITY_UNAVAILABLE")
+        saved = load(self.key, cancel_check=cancel_check)
+        self.measured = saved["measured"]
+        # Current timing is authoritative; old rejection detail remains useful.
+        self.feedback = {**saved["feedback"], **deepcopy(feedback)}
+        observed = {row["text"]: {"text": row["text"], "measured_seconds": row["measured_seconds"]}
+                    for row in self.measured}
+        for row in [*saved["feedback"].get("measured_candidates", []), *feedback.get("measured_candidates", [])]:
+            observed[row["text"]] = deepcopy(row)
+        self.feedback["measured_candidates"] = list(observed.values())[-16:]
+
+    def reject_duplicate(self, candidate):
+        from core.engines.translation.semantic_translator import pacing_candidate_key, PacingReviewRejected
+        key = pacing_candidate_key(candidate)
+        tried = [row["text"] for row in self.feedback.get("measured_candidates", [])]
+        tried += [row["text"] for row in self.feedback.get("rejected_candidates", [])]
+        if key in {pacing_candidate_key(text) for text in tried}:
+            raise PacingReviewRejected("AI lặp lời đã kiểm tra trong cùng điều kiện.",
+                candidate=candidate, reason="Lời đã bị từ chối hoặc đo vượt thời lượng.", code="duplicate")
+
+    def rejected(self, error):
+        from core.engines.translation.semantic_translator import accumulate_pacing_rejection
+        self.feedback = accumulate_pacing_rejection(self.feedback, error)
+        store(self.key, self.measured, self.feedback, cancel_check=self.cancel_check)
+
+    def timing_failed(self, *, text, proof, error, max_speed):
+        candidate = getattr(error, "measured_candidate", None)
+        seconds = candidate.get("measured_seconds") if isinstance(candidate, dict) else None
+        if type(seconds) not in (float, int) or not math.isfinite(seconds) or seconds <= 0:
+            required = getattr(error, "required_dub_duration", None)
+            seconds = ((required - .012) * max_speed if type(required) in (float, int)
+                       and math.isfinite(required) and required > .012 else None)
+        self.feedback = deepcopy(self.feedback)
+        self.feedback["measured_candidates"] = [*self.feedback.get("measured_candidates", []),
+            {"text": text, **({"measured_seconds": seconds} if seconds is not None else {})}][-16:]
+        if seconds is not None:
+            self.measured = [*self.measured, {"text": text, "measured_seconds": seconds,
+                                            "pacing_verification": deepcopy(proof)}][-16:]
+        store(self.key, self.measured, self.feedback, cancel_check=self.cancel_check)
+        return seconds

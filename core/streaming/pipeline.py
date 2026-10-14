@@ -26,8 +26,7 @@ from core.runtime_errors import redacted_detail
 from core.streaming.segmenter import AudioSegmenter
 from core.engines.asr.sensevoice_engine import SenseVoiceEngine
 from core.engines.asr.faster_whisper_engine import FasterWhisperFallbackEngine
-from core.engines.translation.semantic_translator import (SemanticTranslator, PacingReviewRejected,
-    accumulate_pacing_rejection)
+from core.engines.translation.semantic_translator import SemanticTranslator, PacingReviewRejected
 from core.engines.tts.vieneu_engine import VieNeuEngine
 from core.engines.tts.edge_fallback import EdgeTTSFallbackEngine, EdgeTTSRequestError
 from core.voice_catalog import resolve_voice
@@ -3857,6 +3856,21 @@ class StreamingPipelineSession:
                 context = self._dialogue_context_before(item)
                 feedback = {"raw_budget_seconds": budget * self.aligner.max_speed,
                             "measured_candidates": [{"text": item.final_vi, "measured_seconds": item.tts_duration}]}
+                from core.engines.alignment.pacing_checkpoint import NeighborPacingHistory
+                history = NeighborPacingHistory(
+                    scope={"focus": [focus.id, focus.revision, focus.start, focus.end,
+                                     *resolve_dub_timing(focus.to_dict())],
+                           "neighbor": [item.id, item.revision, item.start, item.end,
+                                        *resolve_dub_timing(item.to_dict())],
+                           "required_duration": required_duration, "prepared_seconds": known,
+                           "fixed_ids": sorted(fixed_ids)},
+                    feedback=feedback, cancel_check=self._execution_cancelled,
+                    source=item.text_zh, text=item.final_vi, duration=budget,
+                    voice=self._segment_voice(item), engine=getattr(self, "tts_engine", None), aligner=self.aligner,
+                    translator=self.translator, context=context, ref_audio=self.ref_audio,
+                    max_duration=budget, max_duration_limit=None, allow_bidirectional_reflow=False,
+                    source_language=self.source_language, max_pacing_proposals=5, allow_review_draft=True)
+                feedback = history.feedback
                 accepted = False
                 for rewrite_attempt in range(5):
                     logging.getLogger("pipeline").info(
@@ -3867,6 +3881,12 @@ class StreamingPipelineSession:
                             item.text_zh, item.final_vi, budget * self.aligner.max_speed * .98,
                             context, measured_duration=item.tts_duration, feedback=feedback,
                             source_language=self.source_language, allow_review_draft=True)
+                        proof = proposal.get("pacing_verification")
+                        if (not isinstance(proof, dict) or not (proof.get("status") == "verified"
+                                or proof.get("status") == "draft" and proof.get("semantic_verified") is True)
+                                or proof.get("text") != proposal.get("final_vi")):
+                            raise RuntimeError("Thiếu xác minh cho lời đọc liền kề đã rút gọn.")
+                        history.reject_duplicate(proposal["final_vi"])
                         logging.getLogger("pipeline").info(
                             "PACING_NEIGHBOR_REWRITE_ACCEPTED run_id=%s focus_id=%s neighbor_id=%s attempt=%d",
                             self.task_id, focus.id, item.id, rewrite_attempt + 1)
@@ -3874,7 +3894,8 @@ class StreamingPipelineSession:
                         logging.getLogger("pipeline").info(
                             "PACING_NEIGHBOR_REWRITE_REJECTED run_id=%s focus_id=%s neighbor_id=%s attempt=%d code=%s",
                             self.task_id, focus.id, item.id, rewrite_attempt + 1, exc.code)
-                        feedback = accumulate_pacing_rejection(feedback, exc)
+                        history.rejected(exc)
+                        feedback = history.feedback
                         continue
                     except asyncio.CancelledError:
                         logging.getLogger("pipeline").info(
@@ -3886,11 +3907,6 @@ class StreamingPipelineSession:
                             "PACING_NEIGHBOR_REWRITE_FAILED run_id=%s focus_id=%s neighbor_id=%s attempt=%d error_type=%s",
                             self.task_id, focus.id, item.id, rewrite_attempt + 1, type(exc).__name__)
                         raise
-                    proof = proposal.get("pacing_verification")
-                    if (not isinstance(proof, dict) or not (proof.get("status") == "verified"
-                            or proof.get("status") == "draft" and proof.get("semantic_verified") is True)
-                            or proof.get("text") != proposal.get("final_vi")):
-                        raise RuntimeError("Thiếu xác minh cho lời đọc liền kề đã rút gọn.")
                     path = self.segments_dir / f"seg_{sid}_{uuid.uuid4().hex}.wav"
                     previous = staged.get(sid)
                     try:
@@ -3902,16 +3918,9 @@ class StreamingPipelineSession:
                         path.unlink(missing_ok=True)
                         # Meaning acceptance is not an acoustic fit. Use the
                         # remaining proposal slots with the actual PCM measurement.
-                        candidate = getattr(failure, "measured_candidate", None)
-                        seconds = (candidate.get("measured_seconds") if isinstance(candidate, dict) else None)
-                        if not isinstance(seconds, (int, float)) or isinstance(seconds, bool) or not math.isfinite(seconds) or seconds <= 0:
-                            required = getattr(failure, "required_dub_duration", None)
-                            seconds = ((required - .012) * self.aligner.max_speed
-                                if isinstance(required, (int, float)) and math.isfinite(required) and required > .012 else None)
-                        feedback = deepcopy(feedback)
-                        feedback["measured_candidates"].append({"text": proposal["final_vi"],
-                            **({"measured_seconds": seconds} if seconds is not None else {})})
-                        feedback["measured_candidates"] = feedback["measured_candidates"][-6:]
+                        seconds = history.timing_failed(text=proposal["final_vi"], proof=proof,
+                            error=failure, max_speed=self.aligner.max_speed)
+                        feedback = history.feedback
                         logging.getLogger("pipeline").info(
                             "PACING_NEIGHBOR_TIMING_REJECTED run_id=%s focus_id=%s neighbor_id=%s attempt=%d measured_seconds=%s budget_seconds=%.6f",
                             self.task_id, focus.id, item.id, rewrite_attempt + 1, seconds, budget)

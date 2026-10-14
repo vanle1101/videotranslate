@@ -1,5 +1,22 @@
 # Runtime QA report
 
+## Neighbor recovery history — October 15, 2026, 04:38
+
+Root cause: the separate neighboring-cue rescue loop recreated rejection and
+measured-duration feedback on every retry. It now loads bounded durable history
+under an exact source/context/voice/budget/focus/neighbor revision identity,
+rejects previously failed wording before synthesis, and persists semantic and
+acoustic failures. Current proof, audio measurement, manual-edit protection and
+atomic timeline publication remain mandatory; old history cannot approve audio.
+
+**44 focused regressions passed in 8.15s**, including reopening a rescue attempt,
+receiving its prior rejection, skipping duplicate synthesis, accepting only a
+new currently validated proposal, and preserving original/manual audio.
+This change is not loaded by the long recovery already running; that attempt is
+being allowed to finish. No additional capacity or guaranteed timing fit is
+claimed. Files: `core/engines/alignment/pacing_checkpoint.py`,
+`core/streaming/pipeline.py`, `tests/test_neighbor_pacing_history.py`.
+
 ## Full offline retest and real playback result — October 15, 2026, 04:36
 
 Offline regression rerun after the transfer/probe fixes: **3,722 passed,
