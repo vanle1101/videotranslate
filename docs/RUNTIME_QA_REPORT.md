@@ -2,6 +2,18 @@
 
 ## Rate-limit diagnosis and execution fix — October 15, 2026, 06:52
 
+**Real production retest:** backend56405/PID27252 restored the same75 source
+rows and26 WAV hashes. Request `5e4b1fdc0d8a4fad86d2d011a4f28fcd` detected
+`provider_rate_limited/cli_rate_limit` after5.641s on attempt1. Snapshot showed
+1actual request,0immediate retries,0CLI children and a live cooldown. Independent
+Edge-TTS work continued, reaching35audio rows by06:53. Durable source/review
+retry records remained present; manual/source data was not reset. This is a
+PASS for real rate-limit detection, process release and independent progress,
+not full-video completion. Some admission errors were displayed generically as
+`provider_circuit_open`; the boundary now preserves the typed rate-limit reason.
+That follow-up passed115adapter tests,1symlink-privilege test skipped; its fresh
+runtime loading is still pending.
+
 The request-owned log parser recognizes actual OpenCode stream-error records,
 requiring matching provider/model and a structured error field. It does not
 classify prompt text, unrelated providers or model-authored log-shaped strings.

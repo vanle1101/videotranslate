@@ -58,6 +58,19 @@ def make_process(stdout=None, stderr="", returncode=0):
     return process
 
 
+def test_rate_limited_admission_keeps_reason_for_ui_and_durable_retry(isolated, monkeypatch):
+    layer = oc._shared_execution_layer()
+    error = oc.OpenCodeRequestError("safe rate limit", retryable=True, code="provider_rate_limited")
+    layer._defer_rate_limit(error)
+    monkeypatch.setattr(oc.subprocess, "Popen", lambda *a, **kw: pytest.fail("cooldown must not launch CLI"))
+    with pytest.raises(oc.OpenCodeRequestError) as caught:
+        oc.OpenCodeZenClient(api_key="fixture-key").translate("source")
+    assert caught.value.code == "provider_rate_limited"
+    assert 290 < caught.value.retry_after <= 300
+    from core.streaming.retry_schedule import transient_failure
+    assert transient_failure(caught.value) == "provider_rate_limited"
+
+
 def cli_rate_line(*, model="big-pickle", error="APIError: Rate limit exceeded. Please try again later.", extra=""):
     return ('timestamp=2026-10-16T00:00:00.000Z level=ERROR run=isolated '
             f'message="stream error" providerID=opencode modelID={model} '

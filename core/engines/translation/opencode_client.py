@@ -741,7 +741,9 @@ class OpenCodeZenClient:
                 record("PROVIDER_CANCELLED", error=error)
             raise error from None
         except AIExecutionError as failure:
-            code = ("provider_circuit_open" if isinstance(failure, AICircuitOpenError)
+            code = ("provider_rate_limited" if isinstance(failure, AICircuitOpenError)
+                    and getattr(failure, "code", None) == "provider_rate_limited"
+                    else "provider_circuit_open" if isinstance(failure, AICircuitOpenError)
                     else "provider_queue_full" if isinstance(failure, AIQueueFullError)
                     else "provider_queue_timeout" if isinstance(failure, AIQueueTimeoutError)
                     else "provider_failed")
