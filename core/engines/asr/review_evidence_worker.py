@@ -6,9 +6,11 @@ import json
 from pathlib import Path
 import sys
 
+EVIDENCE_TAIL_SILENCE_SECONDS = .8
+
 
 def collect_engine(request, emit):
-    """Keep the previous two recognizers' exact independent decode settings."""
+    """Read the exact source span independently, with silent decoder padding."""
     from core.media_process import run_media
     from core.source_language import whisper_language_options
     engine = request["engine"]
@@ -29,7 +31,12 @@ def collect_engine(request, emit):
         for row in rows:
             run_media(["ffmpeg", "-v", "error", "-nostdin", "-y", "-ss", str(row["start"]),
                        "-t", str(row["end"] - row["start"]), "-i", request["video_path"],
-                       "-vn", "-ac", "1", "-ar", "16000", str(wav)])
+                       "-vn", "-ac", "1", "-ar", "16000",
+                       # Decoder context only: retain the exact source crop.
+                       # Borrowing real audio could import another speaker's
+                       # words. Digital silence lets short final phonemes be
+                       # decoded without extending the evidence's source span.
+                       "-af", f"apad=pad_dur={EVIDENCE_TAIL_SILENCE_SECONDS}", str(wav)])
             if recognizer is not None:
                 import soundfile as sf
                 samples, rate = sf.read(str(wav), dtype="float32")

@@ -439,6 +439,10 @@ def test_evidence_workers_preserve_decoding_and_clean_pcm_even_on_failure(tmp_pa
     def ffmpeg(argv, cancel=None):
         from pathlib import Path
         path = Path(argv[-1])
+        # Extra decoder silence never borrows another row's spoken content.
+        assert argv[argv.index("-ss") + 1] == str(segment()["start"])
+        assert argv[argv.index("-t") + 1] == str(segment()["end"] - segment()["start"])
+        assert argv[argv.index("-af") + 1] == "apad=pad_dur=0.8"
         path.write_bytes(b"pcm")
         wav_paths.append(path)
     monkeypatch.setattr(media, "run_media", ffmpeg)
@@ -471,6 +475,38 @@ def test_evidence_workers_preserve_decoding_and_clean_pcm_even_on_failure(tmp_pa
             {"event": "evidence", "id": 0, "engine": "faster-whisper-small", "text": "真的"}]
     assert all(not path.exists() for path in wav_paths)
     assert engines[0].recognizer is None
+
+
+def test_evidence_decoder_silence_never_imports_neighbor_audio(tmp_path, monkeypatch):
+    """Real FFmpeg crop: preserve owned samples, append zero samples only."""
+    import sys
+    import wave
+    import numpy as np
+    from types import SimpleNamespace
+    from core.engines.asr.review_evidence_worker import collect_engine
+    source = tmp_path / "source.wav"
+    samples = np.full(16000, 20000, dtype="<i2")
+    samples[3200:8000] = 1000  # Owned .2–.5 seconds; loud neighbors must be absent.
+    with wave.open(str(source), "wb") as audio:
+        audio.setparams((1, 2, 16000, 0, "NONE", "not compressed"))
+        audio.writeframes(samples.tobytes())
+    class Decoder:
+        def __init__(self, *args, **kwargs):
+            pass
+        def transcribe(self, path, **kwargs):
+            with wave.open(str(path), "rb") as audio:
+                pcm = np.frombuffer(audio.readframes(audio.getnframes()), dtype="<i2")
+            assert len(pcm) == 17600  # .3 seconds source + .8 seconds decoder silence.
+            assert np.all(pcm[:4800] == 1000)
+            assert np.all(pcm[4800:] == 0)
+            return iter([SimpleNamespace(text="owned words")]), None
+    monkeypatch.setitem(sys.modules, "faster_whisper", SimpleNamespace(WhisperModel=Decoder))
+    emitted = []
+    collect_engine({"video_path": str(source), "work_directory": str(tmp_path),
+        "whisper_model_path": "unused", "engine": "faster-whisper-small",
+        "rows": [{"id": 0, "start": .2, "end": .5}]}, emitted.append)
+    assert emitted[0]["text"] == "owned words"
+    assert not (tmp_path / "speech.wav").exists()
 
 
 def test_saved_evidence_review_does_not_reload_ocr_or_audio(review):

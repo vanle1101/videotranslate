@@ -1,0 +1,84 @@
+{
+  "task_id": "76f5aa6b",
+  "scope": "real fresh Edge requests; measured existing text only; no project edits or semantic approval",
+  "manifest_unchanged": true,
+  "results": [
+    {
+      "id": 39,
+      "text": "Anh Dã!",
+      "voice": "vi-VN-HoaiMyNeural",
+      "available_seconds": 0.7313333333333389,
+      "max_speed": 1.15,
+      "measured_seconds": 0.8594583333333333,
+      "required_seconds": 0.7473550724637682,
+      "fits_measured_budget": false,
+      "status": "TIMING_CONFLICT"
+    },
+    {
+      "id": 87,
+      "text": "Phía sau có cất chìa khóa dự phòng.",
+      "voice": "vi-VN-HoaiMyNeural",
+      "available_seconds": 1.1390416666666567,
+      "max_speed": 1.15,
+      "measured_seconds": 1.9474166666666666,
+      "required_seconds": 1.6934057971014493,
+      "fits_measured_budget": false,
+      "status": "TIMING_CONFLICT"
+    },
+    {
+      "id": 119,
+      "text": "Đều sẽ sống tốt hơn.",
+      "voice": "vi-VN-HoaiMyNeural",
+      "available_seconds": 1.2417083333332926,
+      "max_speed": 1.15,
+      "measured_seconds": 1.4378333333333333,
+      "required_seconds": 1.250289855072464,
+      "fits_measured_budget": false,
+      "status": "TIMING_CONFLICT"
+    },
+    {
+      "id": 135,
+      "text": "Tối nay anh ấy không được đi đâu hết.",
+      "voice": "vi-VN-HoaiMyNeural",
+      "available_seconds": 1.421083333333371,
+      "max_speed": 1.15,
+      "measured_seconds": 2.011416666666667,
+      "required_seconds": 1.7490579710144931,
+      "fits_measured_budget": false,
+      "status": "TIMING_CONFLICT"
+    },
+    {
+      "id": 143,
+      "text": "Không nói đâu.",
+      "voice": "vi-VN-HoaiMyNeural",
+      "available_seconds": 0.5810833333333676,
+      "max_speed": 1.15,
+      "measured_seconds": 0.91425,
+      "required_seconds": 0.795,
+      "fits_measured_budget": false,
+      "status": "TIMING_CONFLICT"
+    },
+    {
+      "id": 145,
+      "text": "Không nói đâu.",
+      "voice": "vi-VN-HoaiMyNeural",
+      "available_seconds": 0.621083333333388,
+      "max_speed": 1.15,
+      "measured_seconds": 0.91425,
+      "required_seconds": 0.795,
+      "fits_measured_budget": false,
+      "status": "TIMING_CONFLICT"
+    },
+    {
+      "id": 146,
+      "text": "Vậy bố đi cũng không tìm được.",
+      "voice": "vi-VN-HoaiMyNeural",
+      "available_seconds": 1.2410833333333642,
+      "max_speed": 1.15,
+      "measured_seconds": 1.702625,
+      "required_seconds": 1.4805434782608697,
+      "fits_measured_budget": false,
+      "status": "TIMING_CONFLICT"
+    }
+  ]
+}

@@ -51,6 +51,7 @@ class _LocalAudioEvidence:
 
     def collect(self, video_path, rows, cancel_check=None, progress_callback=None, *, checkpoint=None, source_language="zh"):
         from core.source_language import whisper_language_options
+        from core.engines.asr.review_evidence_worker import EVIDENCE_TAIL_SILENCE_SECONDS
         language_options = whisper_language_options(source_language)
         self.last_error = None
         self.last_errors = {}
@@ -93,6 +94,7 @@ class _LocalAudioEvidence:
             for engine in ("sensevoice", "faster-whisper-small"):
                 check_cancelled(check)
                 stages = {row["id"]: {"kind": "independent_audio_reading", "engine": engine,
+                    "decoder_tail_silence_seconds": EVIDENCE_TAIL_SILENCE_SECONDS,
                     "row": row, "decode": {"sample_rate": 16000, "channels": 1,
                         "sensevoice_itn": True} if engine == "sensevoice" else
                         {**language_options, "task": "transcribe", "beam_size": 5,

@@ -1,5 +1,11 @@
 # Runtime QA report
 
+## Short-source evidence and retained timing conflicts — October 14, 2026, 22:07
+
+The real0–0.6s English evidence crop returned `Good morn-` from Whisper despite containing the word. Adding0.4s of digital silence still sometimes returned `Good morni-`;0.8s returned `Good morning` on two real native-worker runs. SenseVoice also returned the whole phrase. The worker now keeps exactly the original source start/end and appends only zero samples, with the padding included in the evidence cache key. A real FFmpeg regression checks byte-equivalent owned PCM and zero-only padding, with no neighboring audio imported. All four fixture rows now agree between the two local recognizers under existing text normalization. This is source corroboration, not automatic semantic approval. A fresh production UI review of `00b293c5` is running to test downstream behavior; result pending.
+
+Separately, seven fresh real Edge requests used the unchanged stored texts/voice for the seven retained failures of320s project `76f5aa6b`. All succeeded as provider requests, but **all seven still exceed the independently audited available timeline** after silence compaction and the1.15speed ceiling. The narrowest misses are16ms(ID39) and9ms(ID119), before fit safety margin; other rows require substantially more time. No words were cut and the project manifest stayed byte-identical. Measurements: `docs/reports/timing-recheck-2026-10-14.json`. This rules out the obsolete Edge protocol as the remaining timing root cause. The project remains186READY/PLAYED,7FAILED,38review-required; these counts overlap and do not certify final completion.
+
 ## Mixed-language production export — October 14, 2026, 15:50 retest
 
 **Runtime export/playback PASS; semantic approval remains REVIEW_REQUIRED.** This supersedes the in-progress snapshot below. The fixture is a synthetic 24-second video containing real Edge English and Chinese speech, not a real-world movie or long-video stress test. Production Muse, ASR, Edge-TTS, audio mixing, FFmpeg and Qt playback were used without provider mocks.

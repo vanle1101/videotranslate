@@ -32,8 +32,11 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('source', type=Path)
     parser.add_argument('--resume', help='Resume only a QA project for this exact source')
+    parser.add_argument('--review', action='store_true', help='Run real review of the restored QA project through its UI')
     parser.add_argument('--timeout', type=int, default=1200)
     args = parser.parse_args()
+    if args.review and not args.resume:
+        parser.error('--review requires --resume')
     source = args.source.resolve(strict=True)
     assert source.is_relative_to((ROOT / 'cleanup/qa').resolve()), 'Use an explicit QA input'
     assert args.timeout > 0, 'Timeout must be positive'
@@ -96,6 +99,10 @@ def main():
                 wait(200)
             assert task_id, 'No matching project created'
         event('TASK',{'task_id':task_id,'source':str(source)})
+        if args.review:
+            click_ready(page, 'btn-review-worker')
+            until(page,"document.getElementById('task-progress').dataset.status==='RUNNING'")
+            event('REVIEW_REQUESTED', {'task_id':task_id})
         deadline=time.monotonic()+args.timeout
         last=None
         promoted=False
@@ -120,6 +127,8 @@ def main():
         else:
             raise AssertionError({'timeout':args.timeout,'progress':progress})
         rows=snapshot['segments']
+        if args.review:
+            assert progress.get('review_summary', {}).get('status') == 'completed', progress
         assert rows and all(row.get('final_vi','').strip() or row.get('confirmed_silence') for row in rows)
         assert all(row.get('status') in {'READY','PLAYED'} or row.get('confirmed_silence') for row in rows), rows
         assert snapshot.get('final_output_blocked') is False, {'output_gate':snapshot.get('final_output_blocked'),'rows':rows}
