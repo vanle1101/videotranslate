@@ -3800,7 +3800,7 @@ class StreamingPipelineSession:
                 context = self._dialogue_context_before(item)
                 feedback = {"raw_budget_seconds": budget * self.aligner.max_speed,
                             "measured_candidates": [{"text": item.final_vi, "measured_seconds": item.tts_duration}]}
-                proposal = None
+                accepted = False
                 for rewrite_attempt in range(5):
                     logging.getLogger("pipeline").info(
                         "PACING_NEIGHBOR_REWRITE run_id=%s focus_id=%s neighbor_id=%s attempt=%d",
@@ -3813,12 +3813,12 @@ class StreamingPipelineSession:
                         logging.getLogger("pipeline").info(
                             "PACING_NEIGHBOR_REWRITE_ACCEPTED run_id=%s focus_id=%s neighbor_id=%s attempt=%d",
                             self.task_id, focus.id, item.id, rewrite_attempt + 1)
-                        break
                     except PacingReviewRejected as exc:
                         logging.getLogger("pipeline").info(
                             "PACING_NEIGHBOR_REWRITE_REJECTED run_id=%s focus_id=%s neighbor_id=%s attempt=%d code=%s",
                             self.task_id, focus.id, item.id, rewrite_attempt + 1, exc.code)
                         feedback = accumulate_pacing_rejection(feedback, exc)
+                        continue
                     except asyncio.CancelledError:
                         logging.getLogger("pipeline").info(
                             "PACING_NEIGHBOR_REWRITE_CANCELLED run_id=%s focus_id=%s neighbor_id=%s attempt=%d",
@@ -3829,40 +3829,55 @@ class StreamingPipelineSession:
                             "PACING_NEIGHBOR_REWRITE_FAILED run_id=%s focus_id=%s neighbor_id=%s attempt=%d error_type=%s",
                             self.task_id, focus.id, item.id, rewrite_attempt + 1, type(exc).__name__)
                         raise
-                if proposal is None:
-                    continue
-                proof = proposal.get("pacing_verification")
-                if (not isinstance(proof, dict) or not (proof.get("status") == "verified"
-                        or proof.get("status") == "draft" and proof.get("semantic_verified") is True)
-                        or proof.get("text") != proposal.get("final_vi")):
-                    raise RuntimeError("Thiếu xác minh cho lời đọc liền kề đã rút gọn.")
-                path = self.segments_dir / f"seg_{sid}_{uuid.uuid4().hex}.wav"
-                previous = staged.get(sid)
-                try:
-                    spoken = await self._run_blocking(synthesize_natural_speech,
-                        text=proposal["final_vi"], source=item.text_zh, duration=budget,
-                        output_path=path, engine=self.tts_engine, aligner=self.aligner,
-                        voice=self._segment_voice(item), ref_audio=self.ref_audio, context=context)
-                except SpeechBudgetError:
-                    path.unlink(missing_ok=True)
-                    continue
-                except BaseException:
-                    path.unlink(missing_ok=True)
-                    raise
-                spoken["pacing_verification"] = proposal["pacing_verification"]
-                if proof.get("status") == "draft":
-                    spoken.update(needs_review=True, review_reason=proof.get("review_reason")
-                                  or "Lời rút gọn là bản nháp, cần kiểm tra.")
-                try:
-                    accepted = await stage(item, path, spoken)
-                except BaseException:
-                    path.unlink(missing_ok=True)
-                    raise
-                if not accepted:
-                    continue
-                if previous:
-                    Path(previous["audio_path"]).unlink(missing_ok=True)
-                break
+                    proof = proposal.get("pacing_verification")
+                    if (not isinstance(proof, dict) or not (proof.get("status") == "verified"
+                            or proof.get("status") == "draft" and proof.get("semantic_verified") is True)
+                            or proof.get("text") != proposal.get("final_vi")):
+                        raise RuntimeError("Thiếu xác minh cho lời đọc liền kề đã rút gọn.")
+                    path = self.segments_dir / f"seg_{sid}_{uuid.uuid4().hex}.wav"
+                    previous = staged.get(sid)
+                    try:
+                        spoken = await self._run_blocking(synthesize_natural_speech,
+                            text=proposal["final_vi"], source=item.text_zh, duration=budget,
+                            output_path=path, engine=self.tts_engine, aligner=self.aligner,
+                            voice=self._segment_voice(item), ref_audio=self.ref_audio, context=context)
+                    except SpeechBudgetError as failure:
+                        path.unlink(missing_ok=True)
+                        # Meaning acceptance is not an acoustic fit. Use the
+                        # remaining proposal slots with the actual PCM measurement.
+                        candidate = getattr(failure, "measured_candidate", None)
+                        seconds = (candidate.get("measured_seconds") if isinstance(candidate, dict) else None)
+                        if not isinstance(seconds, (int, float)) or isinstance(seconds, bool) or not math.isfinite(seconds) or seconds <= 0:
+                            required = getattr(failure, "required_dub_duration", None)
+                            seconds = ((required - .012) * self.aligner.max_speed
+                                if isinstance(required, (int, float)) and math.isfinite(required) and required > .012 else None)
+                        feedback = deepcopy(feedback)
+                        feedback["measured_candidates"].append({"text": proposal["final_vi"],
+                            **({"measured_seconds": seconds} if seconds is not None else {})})
+                        feedback["measured_candidates"] = feedback["measured_candidates"][-6:]
+                        logging.getLogger("pipeline").info(
+                            "PACING_NEIGHBOR_TIMING_REJECTED run_id=%s focus_id=%s neighbor_id=%s attempt=%d measured_seconds=%s budget_seconds=%.6f",
+                            self.task_id, focus.id, item.id, rewrite_attempt + 1, seconds, budget)
+                        continue
+                    except BaseException:
+                        path.unlink(missing_ok=True)
+                        raise
+                    spoken["pacing_verification"] = proposal["pacing_verification"]
+                    if proof.get("status") == "draft":
+                        spoken.update(needs_review=True, review_reason=proof.get("review_reason")
+                                      or "Lời rút gọn là bản nháp, cần kiểm tra.")
+                    try:
+                        accepted = await stage(item, path, spoken)
+                    except BaseException:
+                        path.unlink(missing_ok=True)
+                        raise
+                    if not accepted:
+                        continue
+                    if previous:
+                        Path(previous["audio_path"]).unlink(missing_ok=True)
+                    break
+                if accepted:
+                    break
             return shadow, staged
         except BaseException:
             for update in staged.values():

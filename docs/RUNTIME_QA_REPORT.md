@@ -2,6 +2,22 @@
 
 ## Latest retained recovery result — October 15, 2026, 02:19
 
+Follow-up root causes found in that run:
+- Neighbor synthesis occurred after exiting the proposal loop. A semantically
+  accepted but physically overlong waveform discarded remaining attempts. Real
+  examples: focus135/neighbor133 stopped after proposal1; focus145/neighbor144
+  stopped after proposal4. Synthesis now runs inside the same five-proposal
+  budget, supplies actual duration feedback and preserves previous staged audio.
+- Repeated duplicate rejection feedback became byte-identical, allowing cached
+  rejected drafts to consume remaining attempts. Deterministic rejection counts
+  now distinguish new feedback while preserving exact replay cache identities and
+  the original substantive rejection reasons. Semantic checks remain mandatory.
+- Combined timing/rewrite regression: **198 passed in20.44s**, including later
+  proposal success, exhaustion, cancellation, manual preservation and an injected
+  cache-backed provider. These are regression tests, not a real-provider retest.
+- The retained recovery harness additionally checks the actual UI/API missing-
+  audio export gate before starting Retry.
+
 **Full-video acceptance: FAILED / incomplete.** Fresh production Qt UI (offscreen,
 muted) opened History → `76f5aa6b` → Retry using real Muse and Edge-TTS. The run
 ended naturally in FAILED, rather than reaching its 7,200-second observation

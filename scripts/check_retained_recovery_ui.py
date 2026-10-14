@@ -46,6 +46,16 @@ def main():
         until(page, "document.readyState==='complete' && !!window.openTaskInStudio")
         open_history(page, task)
         state = backend(base, f'/api/streaming/{task}')
+        missing_audio = [row['id'] for row in original['segments']
+            if row.get('final_vi', '').strip() and not row.get('confirmed_silence')
+            and not (row.get('audio_path') and _valid_row_audio(row, row['audio_path']))]
+        assert set(state['missing_audio_ids']) == set(missing_audio), state['missing_audio_ids']
+        assert state['final_media_blocked'] is bool(missing_audio), state['final_media_blocked']
+        if missing_audio:
+            until(page, "document.getElementById('btn-export-hq').disabled && "
+                  "document.getElementById('btn-export-hq').title.includes('" + str(len(missing_audio)) + " câu')")
+        event('MISSING_AUDIO_GATE', {'missing_audio_ids':missing_audio,
+            'export_disabled':evaluate(page, "document.getElementById('btn-export-hq').disabled")})
         assert state['progress']['can_retry'], state['progress']
         assert click(page, 'btn-retry-worker')
         until(page, "document.getElementById('task-progress').dataset.status==='RUNNING'")

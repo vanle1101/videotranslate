@@ -902,6 +902,9 @@ def test_pacing_rejection_history_is_bounded_deduplicated_and_immutable():
     assert repeated["rejected_candidates"] == feedback["rejected_candidates"]
     assert repeated["rejected_candidates"][-1]["reason"] == "Missing meaning."
     assert repeated["rejected_candidates"][-1]["code"] == "semantic_mismatch"
+    assert feedback["rejection_count"] == 1
+    assert repeated["rejection_count"] == 2
+    assert repeated["consecutive_duplicate_responses"] == 1
     repeated["measured_candidates"][0]["text"] = "Changed."
     assert original["measured_candidates"][0]["text"] == "Measured."
     for index in range(25):
@@ -909,6 +912,49 @@ def test_pacing_rejection_history_is_bounded_deduplicated_and_immutable():
             "Rejected", candidate=f"Candidate {index}", reason="r" * 1200))
     assert len(feedback["rejected_candidates"]) == 12
     assert all(len(row["reason"]) <= 1000 for row in feedback["rejected_candidates"])
+
+
+def test_repeated_identical_rejections_change_feedback_but_replay_is_deterministic():
+    first = PacingReviewRejected("Rejected", candidate="Lost meaning.",
+        reason="Negation lost.", code="semantic_mismatch")
+    duplicate = PacingReviewRejected("Repeated", candidate="Lost meaning.",
+        reason="Already rejected.", code="duplicate")
+    def round_feedback():
+        feedback, prompts = {}, []
+        for error in [first, duplicate, duplicate, duplicate]:
+            feedback = accumulate_pacing_rejection(feedback, error)
+            prompts.append(json.dumps(feedback, ensure_ascii=False, sort_keys=True))
+        return prompts, feedback
+    prompts, feedback = round_feedback()
+    assert len(set(prompts)) == 4
+    assert round_feedback()[0] == prompts  # Stable cache keys on an exact resume.
+    assert feedback["consecutive_duplicate_responses"] == 3
+    assert feedback["rejected_candidates"] == [{"text": "Lost meaning.",
+        "reason": "Negation lost.", "code": "semantic_mismatch"}]
+
+
+def test_cached_duplicate_draft_does_not_starve_later_distinct_proposal(tmp_path, aligner, monkeypatch):
+    original, rejected, accepted = "Tôi vẫn chưa làm việc đó.", "Đã làm.", "Tôi chưa làm."
+    cache, draft_prompts = {}, []
+    def request(self, system, prompt):
+        if "Bản dịch hiện tại:" in prompt:
+            draft_prompts.append(prompt)
+            if prompt not in cache:
+                cache[prompt] = rewrite_response(accepted if len(cache) == 3 else rejected)
+            return cache[prompt]
+        payload = json.loads(prompt)
+        if "source" in payload:
+            return json.dumps({"equivalent": payload["candidate"] == accepted,
+                "natural": True, "address_preserved": True, "reason": "Check negation."})
+        return json.dumps({"natural": True, "reason": "Natural spoken sentence."})
+    monkeypatch.setattr(SemanticTranslator, "_opencode_request", request)
+    engine = RecordedSynthesizer({original: 2., accepted: .7})
+    result = synthesize_natural_speech(text=original, source="我还没做。", duration=1,
+        output_path=tmp_path / "voice.wav", engine=engine, aligner=aligner,
+        translator=SemanticTranslator("opencode"))
+    assert result["text"] == accepted
+    assert len(draft_prompts) == len(set(draft_prompts)) == 4
+    assert engine.calls == [original, accepted]
 
 
 def test_alternating_rejected_drafts_do_not_repeat_fidelity_or_fluency(tmp_path, aligner, monkeypatch):

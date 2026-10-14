@@ -311,6 +311,72 @@ def test_compacted_neighbor_can_still_be_shortened_without_losing_staged_audio(r
         assert staged[0]["spoken"]["text"] == ("Giữ lời." if outcome == "fits" else "Giữ nguyên lời.")
         if outcome == "too_long":
             assert rescue._dub_audio_duration(staged[0]["audio_path"]) < 1.
-    assert rescue.translator.rewrite_for_pacing.call_count == 1
+    assert rescue.translator.rewrite_for_pacing.call_count == (5 if outcome == "too_long" else 1)
     assert Path(row.audio_path).read_bytes() == originals
     assert row.final_vi == "Giữ nguyên lời."
+
+
+@pytest.mark.parametrize("fits_on", [2, 5, None])
+def test_neighbor_timing_failure_uses_remaining_proposals_and_actual_measurement(rescue, monkeypatch, fits_on):
+    from copy import deepcopy
+    row = rescue.segments[0]
+    row.verification = {"status": "verified"}
+    originals = {sid: (item.to_dict(), Path(item.audio_path).read_bytes())
+                 for sid, item in rescue.segments.items() if item.audio_path}
+    rescue.tts_engine = object()
+    feedbacks, spoken_texts = [], []
+
+    def proposal(*args, **kwargs):
+        feedbacks.append(deepcopy(kwargs["feedback"]))
+        text = f"Lời đã kiểm {len(feedbacks)}."
+        return {"final_vi": text, "pacing_verification": {"status": "draft", "text": text,
+            "semantic_verified": True, "review_required": True, "review_reason": "Cần kiểm tra."}}
+
+    rescue.translator = Mock(rewrite_for_pacing=Mock(side_effect=proposal))
+    monkeypatch.setattr(rescue, "_dialogue_context_before", lambda *args: [])
+
+    def synthesis(**kwargs):
+        spoken_texts.append(kwargs["text"])
+        _fixture_speech(kwargs["output_path"], .4)
+        if len(spoken_texts) != fits_on:
+            error = SpeechBudgetError("Measured candidate exceeds budget")
+            error.measured_candidate = {"text": kwargs["text"], "measured_seconds": .9}
+            error.required_dub_duration = .9 / 1.15 + .012
+            raise error
+        return {"text": kwargs["text"], "tts_duration": .4, "speed_ratio": 1., "boundaries": []}
+
+    monkeypatch.setattr("core.streaming.pipeline.synthesize_natural_speech", synthesis)
+    _, staged = asyncio.run(rescue._prepare_dub_rescue(rescue._dub_rows(), rescue.segments[1], .85))
+    assert len(feedbacks) == len(spoken_texts) == (fits_on or 5)
+    assert feedbacks[1]["measured_candidates"][-1] == {"text": spoken_texts[0], "measured_seconds": .9}
+    assert feedbacks[0]["measured_candidates"] == [{"text": row.final_vi, "measured_seconds": row.tts_duration}]
+    assert len(list(rescue.segments_dir.glob("seg_*.wav"))) == 1
+    if fits_on:
+        assert staged[0]["spoken"]["text"] == spoken_texts[-1]
+        assert staged[0]["spoken"]["needs_review"] is True
+    else:
+        assert staged[0]["spoken"]["text"] == row.final_vi
+    for sid, (state, pcm) in originals.items():
+        assert rescue.segments[sid].to_dict() == state
+        assert Path(rescue.segments[sid].audio_path).read_bytes() == pcm
+
+
+def test_semantic_and_acoustic_failures_share_same_five_proposal_budget(rescue, monkeypatch):
+    from core.engines.translation.semantic_translator import PacingReviewRejected
+    rescue.segments[0].verification = {"status": "verified"}
+    rescue.tts_engine = object()
+    calls = []
+    def proposal(*args, **kwargs):
+        calls.append(1)
+        if len(calls) in (1, 3):
+            raise PacingReviewRejected("Rejected", candidate="Không đúng", reason="Sai nghĩa", code="semantic_mismatch")
+        text = f"Đã rà {len(calls)}."
+        return {"final_vi": text, "pacing_verification": {"status": "verified", "text": text}}
+    rescue.translator = Mock(rewrite_for_pacing=Mock(side_effect=proposal))
+    monkeypatch.setattr(rescue, "_dialogue_context_before", lambda *args: [])
+    synthesis = Mock(side_effect=SpeechBudgetError("Acoustic failure"))
+    monkeypatch.setattr("core.streaming.pipeline.synthesize_natural_speech", synthesis)
+    _, staged = asyncio.run(rescue._prepare_dub_rescue(rescue._dub_rows(), rescue.segments[1], .85))
+    assert len(calls) == 5 and synthesis.call_count == 3
+    assert staged[0]["spoken"]["text"] == "Giữ nguyên lời."
+    assert len(list(rescue.segments_dir.glob("seg_*.wav"))) == 1
