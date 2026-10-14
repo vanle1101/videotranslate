@@ -541,6 +541,19 @@ def test_provider_lifecycle_logs_correlate_safe_ids_without_content(isolated, mo
     assert secret not in caplog.text
 
 
+@pytest.mark.parametrize("kind", ["summary", "semantic_review", "address_review", "fluency_review",
+                                 "private-key-\nPROVIDER_COMPLETED"])
+def test_configured_review_task_names_are_distinct_safe_log_categories(isolated, monkeypatch, caplog, kind):
+    process = make_process(json.dumps({"type": "text", "part": {"text": "fixture"}}))
+    monkeypatch.setattr(oc.subprocess, "Popen", Mock(return_value=process))
+    caplog.set_level(logging.INFO, logger="ai")
+    oc.OpenCodeZenClient(api_key="fixture").translate("fixture", task_kind=kind, use_cache=False)
+    records = [record.getMessage() for record in caplog.records if record.name == "ai"]
+    expected = "other" if kind.startswith("private-") else kind
+    assert len(records) == 2 and all(f"task_kind={expected}" in record for record in records)
+    assert "private-key" not in caplog.text
+
+
 def test_cancellation_polls_and_terminates_only_owned_request_without_retry(isolated, monkeypatch, caplog):
     state = {"cancelled": False}
     process = make_process()

@@ -531,7 +531,8 @@ class OpenCodeZenClient:
                 round(trace["admission_wait"] * 1000), round(trace["backoff"] * 1000), output_chars, code,
                 getattr(error, "failure_kind", "unspecified") if error is not None else "none",
                 getattr(error, "cli_exit", None),
-                task_kind if task_kind in {"request", "translation", "review", "address", "source", "pacing"} else "other",
+                task_kind if task_kind in {"request", "translation", "review", "address", "source", "pacing",
+                    "summary", "semantic_review", "address_review", "fluency_review"} else "other",
             )
 
         def wait_retry(delay):

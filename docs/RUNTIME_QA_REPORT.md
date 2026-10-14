@@ -1,5 +1,31 @@
 # Runtime QA report
 
+## Live adapter retest and downstream bottleneck — October 15, 2026, 06:17
+
+Fresh code made one uncached real Muse call under run ID
+`qa-real-ram-admission`. Physical available RAM measured 5,605,363,712 bytes;
+the gate admitted one 939,524,096-byte startup reservation while retaining
+2,147,483,648 bytes headroom. A Chinese instruction was translated into valid
+Vietnamese JSON in 15.594s; the owned CLI exited, reservations and waiters both
+returned to zero. **Real transport/admission/release PASS**. This does not test
+real RAM exhaustion, multi-process resource coordination, UI or full output.
+
+Read-only long-run inspection found no evidence of replaying identical
+successful requests. It did find 27 speech translation batches plus 37 OCR-only
+batches, each with translation/verification. Ordered publication also waits for
+the bounded downstream review/TTS consumer. Rows8–11 reviewed from05:59:26 to
+06:02:49, then synthesized from06:02:50 to06:03:42; the next review did not start
+until06:03:44. Thus additional translation workers alone cannot remove the
+serial downstream bottleneck. Overlapping review with speech remains an
+unimplemented optimization; it needs detached context and stale-result guards.
+
+Configured task kinds `summary`, `semantic_review`, `address_review` and
+`fluency_review` previously collapsed to `other` in lifecycle logs. These fixed
+categories now retain their names; arbitrary input still logs only `other`.
+**94 adapter tests passed**, including category and log-injection regressions.
+No semantic gates were relaxed. The ongoing long job uses its launch-time code
+and has no verified full MP4 at this checkpoint.
+
 ## CLI RAM admission — October 15, 2026, 06:11
 
 Observed long-run memory pressure is now handled at the real OpenCode process
