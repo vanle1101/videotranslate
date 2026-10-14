@@ -43,6 +43,16 @@ finally cleanup to reap its contender as well as its owner. No production timeou
 was raised. Focused retest: **143 passed in29.03s**. Full fresh traversal pending.
 Production JavaScript interaction regression: **285 passed**, zero failures.
 
+### Existing mixed-language production export verification
+
+The retained QA project `00b293c5` contains the prepared English/Chinese source
+`cleanup/qa/mixed-language-retest.mp4` (24.000 seconds). Its persisted production
+result has four READY rows with four valid WAV files and no unresolved review rows.
+The actual MP4 `workspace/outputs/douyin_translated_00b293c5_hq.mp4` exists, is
+238,136 bytes, and passed full FFmpeg decode. `ffprobe` reports matching 24.000
+second H.264 video and AAC audio streams. This confirms one short mixed-language
+real output; it does not certify the blocked 320-second job or multi-hour scale.
+
 ## Review transport recovery and neighboring speech — October 15, 2026
 
 Acceptance remains **INCOMPLETE**. The ongoing real 320-second recovery still has
