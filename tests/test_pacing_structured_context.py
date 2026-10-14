@@ -122,7 +122,7 @@ def test_each_pacing_reviewer_repairs_its_own_schema_without_regenerating_draft(
     monkeypatch.setattr(translator, "_opencode_request", request)
     result = translator.rewrite_for_pacing("我还没做完", "Con vẫn chưa làm việc đó xong.", 1.25, rows())
     assert result["pacing_verification"]["status"] == "verified" and request.call_count == 4
-    assert "Nguồn Trung" in request.call_args_list[0].args[1]
+    assert "Nguyên văn nguồn: 我还没做完" in request.call_args_list[0].args[1]
     if stage == "fluency":
         blind = request.call_args_list[-1].args[1]
         assert not any("\u3400" <= char <= "\u9fff" for char in blind)

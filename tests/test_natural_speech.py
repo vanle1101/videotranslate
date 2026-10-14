@@ -18,7 +18,9 @@ for _name in ("app", "ai", "pipeline", "errors"):
 from config import settings
 from core.engines.alignment.natural_speech import synthesize_natural_speech
 from core.engines.alignment.timing_aligner import SpeechBudgetError, TimingBudgetAligner
-from core.engines.translation.semantic_translator import SemanticTranslator, PacingReviewRejected
+from core.engines.translation.semantic_translator import (
+    SemanticTranslator, PacingReviewRejected, accumulate_pacing_rejection,
+)
 from core.runtime_context import execution_context
 from core.structured_response import StructuredResponseError
 
@@ -886,6 +888,69 @@ def test_provider_duplicate_is_rejected_before_another_verification_request(monk
     with pytest.raises(PacingReviewRejected) as rejected:
         translator.rewrite_for_pacing("我还没做。", "  TÔI   chưa làm. ", 1)
     assert rejected.value.code == "duplicate" and request.call_count == 1
+
+
+def test_pacing_rejection_history_is_bounded_deduplicated_and_immutable():
+    original = {"raw_budget_seconds": 1.2, "measured_candidates": [{"text": "Measured."}],
+                "rejected_candidate": "Old.", "reason": "Original reason."}
+    saved = json.dumps(original, sort_keys=True)
+    feedback = accumulate_pacing_rejection(original, PacingReviewRejected(
+        "Rejected", candidate="New.", reason="Missing meaning.", code="semantic_mismatch"))
+    repeated = accumulate_pacing_rejection(feedback, PacingReviewRejected(
+        "Repeated", candidate="  NEW. ", reason="Duplicate only.", code="duplicate"))
+    assert json.dumps(original, sort_keys=True) == saved
+    assert repeated["rejected_candidates"] == feedback["rejected_candidates"]
+    assert repeated["rejected_candidates"][-1]["reason"] == "Missing meaning."
+    assert repeated["rejected_candidates"][-1]["code"] == "semantic_mismatch"
+    repeated["measured_candidates"][0]["text"] = "Changed."
+    assert original["measured_candidates"][0]["text"] == "Measured."
+    for index in range(25):
+        feedback = accumulate_pacing_rejection(feedback, PacingReviewRejected(
+            "Rejected", candidate=f"Candidate {index}", reason="r" * 1200))
+    assert len(feedback["rejected_candidates"]) == 12
+    assert all(len(row["reason"]) <= 1000 for row in feedback["rejected_candidates"])
+
+
+def test_alternating_rejected_drafts_do_not_repeat_fidelity_or_fluency(tmp_path, aligner, monkeypatch):
+    original, first, second = "Tôi vẫn chưa làm việc đó.", "Đã làm.", "Làm rồi."
+    request = Mock(side_effect=[
+        rewrite_response(first), json.dumps({"equivalent": False, "natural": True,
+            "address_preserved": True, "reason": "Lost negation A."}),
+        rewrite_response(second), json.dumps({"equivalent": False, "natural": True,
+            "address_preserved": True, "reason": "Lost negation B."}),
+        rewrite_response(first),
+    ])
+    monkeypatch.setattr(SemanticTranslator, "_opencode_request", request)
+    translator = SemanticTranslator(provider="opencode")
+    engine = RecordedSynthesizer({original: 2.0})
+    output = tmp_path / "voice.wav"
+    output.write_bytes(b"retained output")
+    with pytest.raises(PacingReviewRejected) as raised:
+        synthesize_natural_speech(text=original, source="我还没做。", duration=1,
+            output_path=output, engine=engine, aligner=aligner, translator=translator)
+    assert raised.value.code == "duplicate"
+    assert request.call_count == 5  # Three drafts, two fidelity checks, zero fluency checks.
+    last_prompt = request.call_args.args[1]
+    assert "Lost negation A." in last_prompt and "Lost negation B." in last_prompt
+    assert engine.calls == [original]
+    assert output.read_bytes() == b"retained output"
+
+
+def test_rejected_history_survives_next_measured_synthesis_attempt(tmp_path, aligner):
+    original, intermediate, final = "Tôi vẫn chưa làm việc đó.", "Tôi vẫn chưa làm.", "Tôi chưa làm."
+    rejected = PacingReviewRejected("Rejected", candidate="Đã làm.",
+                                   reason="Lost negation.", code="semantic_mismatch")
+    translator = Mock(rewrite_for_pacing=Mock(side_effect=[
+        rejected, verified_candidate(intermediate), verified_candidate(final)]))
+    engine = RecordedSynthesizer({original: 2., intermediate: 1.5, final: .7})
+    result = synthesize_natural_speech(text=original, source="我还没做。", duration=1,
+        output_path=tmp_path / "voice.wav", engine=engine, aligner=aligner, translator=translator)
+    calls = translator.rewrite_for_pacing.call_args_list
+    history = calls[1].kwargs["feedback"]["rejected_candidates"]
+    assert calls[2].kwargs["feedback"]["rejected_candidates"] == history
+    assert history == [{"text": "Đã làm.", "reason": "Lost negation.", "code": "semantic_mismatch"}]
+    assert len(calls[2].kwargs["feedback"]["measured_candidates"]) == 2
+    assert result["text"] == final
 
 
 def test_measured_history_and_rejection_feedback_reach_rewriter_but_do_not_replace_independent_verdict(monkeypatch):

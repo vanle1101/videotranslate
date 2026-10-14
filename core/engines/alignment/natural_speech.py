@@ -11,7 +11,9 @@ from core.engines.alignment.speech_timing import (
     take_tts_word_boundaries, trim_tts_padding,
 )
 from core.engines.alignment.timing_aligner import SpeechBudgetError
-from core.engines.translation.semantic_translator import PacingReviewRejected, pacing_candidate_key
+from core.engines.translation.semantic_translator import (
+    PacingReviewRejected, pacing_candidate_key, accumulate_pacing_rejection,
+)
 from core.engines.alignment.speech_cache import (
     synthesis_cache_identity, load_speech_cache, store_speech_cache,
     raw_synthesis_cache_identity, load_raw_speech_cache, store_raw_speech_cache,
@@ -78,6 +80,7 @@ def synthesize_natural_speech(*, text, source, duration, output_path, engine, al
     measurements = []
     measured_candidates = []
     seen_candidates = set()
+    rejection_feedback = {}
     original_duration = duration
     with tempfile.TemporaryDirectory(prefix="speech-fit-", dir=output_path.parent) as temporary:
         raw, fitted = Path(temporary) / "raw.wav", Path(temporary) / "fitted.wav"
@@ -211,7 +214,7 @@ def synthesize_natural_speech(*, text, source, duration, output_path, engine, al
                     "required_reduction_pct": round(max(0, 1 - request_budget / measured) * 100, 1),
                     "measured_candidates": list(measurements),
                 }
-                review_feedback = dict(timing_feedback)
+                review_feedback = {**rejection_feedback, **timing_feedback}
                 for review_attempt in range(3):
                     if execution.cancel_check and execution.cancel_check():
                         import asyncio
@@ -240,6 +243,7 @@ def synthesize_natural_speech(*, text, source, duration, output_path, engine, al
                         logger.warning("PACING_REJECTED run_id=%s speech_id=%s attempt=%d proposal=%d reason=%s",
                                        execution.run_id, speech_id, attempt + 1, review_attempt + 1, error.code)
                         seen_candidates.add(pacing_candidate_key(error.feedback["rejected_candidate"]))
+                        rejection_feedback = accumulate_pacing_rejection(rejection_feedback, error)
                         if review_attempt == 2:
                             best = min(measured_candidates, key=lambda item: item["measured_seconds"])
                             error.required_dub_duration = best["measured_seconds"] / aligner.max_speed + .012
@@ -247,7 +251,7 @@ def synthesize_natural_speech(*, text, source, duration, output_path, engine, al
                             error.pacing_verification = best["pacing_verification"]
                             error.measured_candidate = dict(best)
                             raise
-                        review_feedback = {**timing_feedback, **error.feedback}
+                        review_feedback = {**rejection_feedback, **timing_feedback}
                 current, verification = candidate.strip(), proof
                 continue
             if not fitted.is_file() or fitted.stat().st_size <= 0:

@@ -166,7 +166,7 @@ class _LocalAudioEvidence:
 class AutomaticTranslationReviewer:
     BATCH_SIZE = 12
     ADDRESS_BATCH_SIZE = 4
-    REVIEW_GATE_REVISION = 2
+    REVIEW_GATE_REVISION = 3
     MISSING_TRANSLATION_RECOVERY_REVISION = 1
 
     @classmethod

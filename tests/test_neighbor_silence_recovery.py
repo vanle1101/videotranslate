@@ -120,6 +120,11 @@ def test_neighbor_rewrite_logs_bounded_rejections_without_dialogue(rescue, monke
         _, staged = asyncio.run(rescue._prepare_dub_rescue(rows, rescue.segments[1], before + .025))
     assert not staged
     assert rescue.translator.rewrite_for_pacing.call_count == 3
+    calls = rescue.translator.rewrite_for_pacing.call_args_list
+    assert not calls[0].kwargs['feedback'].get('rejected_candidates')
+    assert calls[1].kwargs['feedback']['rejected_candidates'] == [{
+        'text': 'PRIVATE-CANDIDATE', 'reason': '', 'code': 'semantic_mismatch'}]
+    assert calls[2].kwargs['feedback']['rejected_candidates'] == calls[1].kwargs['feedback']['rejected_candidates']
     assert caplog.text.count("PACING_NEIGHBOR_REWRITE_REJECTED") == 3
     assert "focus_id=1 neighbor_id=0 attempt=3 code=semantic_mismatch" in caplog.text
     assert "PRIVATE-" not in caplog.text

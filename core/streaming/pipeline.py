@@ -26,7 +26,8 @@ from core.runtime_errors import redacted_detail
 from core.streaming.segmenter import AudioSegmenter
 from core.engines.asr.sensevoice_engine import SenseVoiceEngine
 from core.engines.asr.faster_whisper_engine import FasterWhisperFallbackEngine
-from core.engines.translation.semantic_translator import SemanticTranslator, PacingReviewRejected
+from core.engines.translation.semantic_translator import (SemanticTranslator, PacingReviewRejected,
+    accumulate_pacing_rejection)
 from core.engines.tts.vieneu_engine import VieNeuEngine
 from core.engines.tts.edge_fallback import EdgeTTSFallbackEngine, EdgeTTSRequestError
 from core.voice_catalog import resolve_voice
@@ -3592,7 +3593,7 @@ class StreamingPipelineSession:
                         logging.getLogger("pipeline").info(
                             "PACING_NEIGHBOR_REWRITE_REJECTED run_id=%s focus_id=%s neighbor_id=%s attempt=%d code=%s",
                             self.task_id, focus.id, item.id, rewrite_attempt + 1, exc.code)
-                        feedback.update(exc.feedback)
+                        feedback = accumulate_pacing_rejection(feedback, exc)
                     except asyncio.CancelledError:
                         logging.getLogger("pipeline").info(
                             "PACING_NEIGHBOR_REWRITE_CANCELLED run_id=%s focus_id=%s neighbor_id=%s attempt=%d",

@@ -24,6 +24,29 @@ def test_relation_bearing_candidate_still_requires_address_proof():
     assert AutomaticTranslationReviewer._address_gate(reading, 0, {"address_applicable": False}, "我问你", "Tôi thấy mẹ.") is True
 
 
+def test_educational_level_three_is_not_a_parent_but_other_roles_remain():
+    assert address_expressions('Vừa tốt nghiệp cấp ba.') == []
+    assert address_expressions('Ba ơi, con học cấp ba.') == ['Ba', 'con']
+    assert address_expressions('Tôi vừa tốt nghiệp cấp ba.') == ['Tôi']
+    assert address_expressions('Cấp cho ba một cái.') == ['ba']
+    audit = {'address_applicable': False, 'address_neutral_faithful': True,
+             'semantic_verified': True, 'address_reason': '刚高中毕业 giữ đúng việc vừa tốt nghiệp trung học.'}
+    reading = {42: {'uncertain': True}}
+    assert not AutomaticTranslationReviewer._address_gate(
+        reading, 42, audit, '刚高中毕业', 'Vừa tốt nghiệp cấp ba.')
+    assert AutomaticTranslationReviewer._address_gate(
+        reading, 42, {**audit, 'semantic_verified': False}, '刚高中毕业', 'Vừa tốt nghiệp cấp ba.')
+    assert AutomaticTranslationReviewer._address_gate(
+        reading, 42, audit, '刚高中毕业', 'Con vừa tốt nghiệp cấp ba.')
+
+
+def test_contradictory_education_address_metadata_requires_fresh_verdict():
+    from core.video_intelligence import VideoIntelligenceError
+    with pytest.raises(VideoIntelligenceError, match='mâu thuẫn'):
+        AutomaticTranslationReviewer._require_address_fields({
+            'final_vi': 'Vừa tốt nghiệp cấp ba.', 'address_applicable': True, 'address_uses': []})
+
+
 def test_old_provider_reply_uses_conservative_relation_fallback():
     reading = {0: {"uncertain": True}}
     assert AutomaticTranslationReviewer._address_gate(reading, 0, {}, "啥", "Hả?") is True

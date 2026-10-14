@@ -13,7 +13,7 @@ from copy import deepcopy
 from core.semantic_segments import source_speaker_confirmation
 
 
-ADDRESS_POLICY_REVISION = 9
+ADDRESS_POLICY_REVISION = 10
 
 VIETNAMESE_ADDRESS_POLICY = """
 QUY TẮC XƯNG HÔ THEO NGỮ CẢNH (áp dụng cả dịch, kiểm định và rút gọn lời đọc):
@@ -217,6 +217,9 @@ def address_expressions(candidate, *, grounded_terms=()):
     # the rest of the sentence: 'Ba chờ ba phút' still contains the parent.
     text = re.sub(r"\bba\s+(?:phút|giây|giờ|ngày|tuần|tháng|năm|lần|chiếc|cái)\b", "", text, flags=re.I)
     text = re.sub(r"\bthứ\s+ba\b", "", text, flags=re.I)
+    # The educational level 'cấp ba' uses the numeral three, not a parent.
+    # Mask only that noun phrase: 'Ba ơi, con học cấp ba' retains both roles.
+    text = re.sub(r"\bcấp\s+ba\b", "", text, flags=re.I)
     # Extract multiword role terms first and mask their spans so the token
     # pass cannot split them into unrelated address uses.  Return everything
     # in source order; the provider's address_uses is ordered the same way.

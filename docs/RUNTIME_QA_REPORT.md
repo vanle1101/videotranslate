@@ -1,5 +1,16 @@
 # Runtime QA report
 
+## Rejected rewrite loops and a numeric address false positive — October 14, 2026, 23:01
+
+Two additional root causes were reproduced from retained data:
+
+- Pacing kept only the most recent rejected candidate. Real Muse sequences for IDs119 and146 proposed A, rejected A, proposed B, rejected B, then proposed A again. Each fitting invocation now keeps a bounded deduplicated history of rejected wording/reasons across synthesis attempts. Draft generation receives that history; repeated wording is rejected before fidelity/fluency calls. Neighbor rescue uses the same helper. No retry allowance, speed cap or semantic approval was loosened. Regression A→B→A uses three drafts and only two fidelity calls, preserves prior output, and never speaks rejected wording. This is a fault-injection test, not proof the six long-project timing conflicts fit.
+- Real read-only source review of ID42 (`刚高中毕业` → `Vừa tốt nghiệp cấp ba.`) remained unresolved despite neutral wording. The lexical selector interpreted `ba` in the educational level `cấp ba` as a parent, so contradictory applicability metadata evaded validation. It now excludes only that educational noun phrase while retaining actual `Ba`/`con` elsewhere. A fresh real OCR+Muse review after the fix returned the same translation, source_supported=true, semantic_verified=true and needs_review=false. The retained project manifest stayed byte-identical; this independent recheck has not yet been published into the production job. Gate revision3 causes obsolete unresolved reviews to receive a genuine new audit on Resume, rather than flipping saved flags.
+
+Validation:82 focused natural-speech/neighbor tests PASS;259 context/address/structured-review/recovery tests PASS (overlap, not summed). Four stale test assertions expecting a Chinese-only prompt label were corrected to check the actual supplied source text under the existing multilingual prompt. The new lexical regressions still require independent semantics and still reject ungrounded personal address.
+
+Remaining production counts are unchanged by the read-only review:187 playable rows,6 unfinished speech rows,38 saved content reviews. Another architectural limitation is confirmed: the all-rows-ready review guard hides semantic Review when unrelated timing rows fail. A safe partial review flow is still pending; simply removing the guard would give incorrect running/completion states.
+
 ## Retained-project recovery and manual timing protection — October 14, 2026, 22:51
 
 **Full 320-second output: NOT COMPLETE.** Real offscreen History → Retry on retained project `76f5aa6b` ran for a bounded 30 minutes, then normal Stop saved its checkpoint and the owned backend exited. It increased playable speech from 186 to 187 of 193 rows (96.9%). ID39 now has complete speech with its original `Anh Dã!` wording. IDs87,119,143,145,146 failed semantic/pacing checks; ID135 was interrupted at the deadline. After fresh restoration there are 38 PLAYED,149 READY,6 FAILED,187 valid WAVs and38 rows requiring content review. Content-review counts overlap ready speech. No full MP4 was produced by this long-project run. The ETA correctly remained unavailable while recovery had no defensible throughput estimate.
