@@ -1,8 +1,18 @@
 # Runtime QA report
 
+## Mixed-language review/export retest finished — October 14, 2026, 22:14
+
+**PASS for the24s fixture's complete production UI flow.** Fresh offscreen Studio restored `00b293c5`, clicked Review, used real local recognition and Muse, regenerated only changed speech and automatically exported a new MP4. Four source rows remain: twoEnglish and twoChinese; review-required fell from3 to0 without changing approval flags manually. The source crop fix restored `Good morning`; Muse selected contextually elliptical Vietnamese for the two ambiguous `we/我们` sentences, avoiding an unsupported inclusive/exclusive pronoun choice. Those two rows have revision1 and fresh audio. Semantic judgments remain model assessments, not absolute proof of language quality.
+
+Final output: `workspace/outputs/douyin_translated_00b293c5_hq.mp4`,238,136bytes,24.000s, audio/video streams present and complete FFmpeg decode PASS. Production result player advanced to0.328774s, readyState4,640x360, unpaused, no media error. Reload retained task and four rows; review-required0. Owned backend54755 and QA process exited successfully. This supersedes the older three-unresolved fixture result below, not the193-row production project's remaining failures.
+
+Next actual acceptance run resumes retained320s project `76f5aa6b` through its real History/Resume controls, using a new owned offscreen backend. Entry state:193rows,186READY/PLAYED,7FAILED and38review-required. No claim of long-video completion yet.
+
 ## Short-source evidence and retained timing conflicts — October 14, 2026, 22:07
 
 The real0–0.6s English evidence crop returned `Good morn-` from Whisper despite containing the word. Adding0.4s of digital silence still sometimes returned `Good morni-`;0.8s returned `Good morning` on two real native-worker runs. SenseVoice also returned the whole phrase. The worker now keeps exactly the original source start/end and appends only zero samples, with the padding included in the evidence cache key. A real FFmpeg regression checks byte-equivalent owned PCM and zero-only padding, with no neighboring audio imported. All four fixture rows now agree between the two local recognizers under existing text normalization. This is source corroboration, not automatic semantic approval. A fresh production UI review of `00b293c5` is running to test downstream behavior; result pending.
+
+Integrated affected regression:200 PASS in7.96s (`test_auto_review`, `test_review_checkpoint`, `test_source_language`, `test_address_applicability`). A second fresh offscreen process restored and played the existing24s MP4 at0.493063s without media errors, then reloaded the page with all four rows. No provider regeneration was needed for that restart/playback check; review-required remained3. All of that harness's services exited normally.
 
 Separately, seven fresh real Edge requests used the unchanged stored texts/voice for the seven retained failures of320s project `76f5aa6b`. All succeeded as provider requests, but **all seven still exceed the independently audited available timeline** after silence compaction and the1.15speed ceiling. The narrowest misses are16ms(ID39) and9ms(ID119), before fit safety margin; other rows require substantially more time. No words were cut and the project manifest stayed byte-identical. Measurements: `docs/reports/timing-recheck-2026-10-14.json`. This rules out the obsolete Edge protocol as the remaining timing root cause. The project remains186READY/PLAYED,7FAILED,38review-required; these counts overlap and do not certify final completion.
 
