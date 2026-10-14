@@ -53,6 +53,24 @@ The actual MP4 `workspace/outputs/douyin_translated_00b293c5_hq.mp4` exists, is
 second H.264 video and AAC audio streams. This confirms one short mixed-language
 real output; it does not certify the blocked 320-second job or multi-hour scale.
 
+Fresh production Qt UI at02:32 also opened that exact project through History and
+played the persisted result: readyState4, clock advanced to0.474108s,640x360,
+duration24.008s, no playback or page errors. Qt used its compatible preview because
+its installed codec path did not directly play the H.264 MP4; the downloadable MP4
+was unchanged. The offscreen muted backend exited cleanly. No fresh Muse or TTS
+generation was needed for this history/playback check.
+
+Saved-task polling now also compares media/output gates and review-owner IDs when
+the visible phase is unchanged, so a missing WAV or a transferred review lock
+cannot leave Export or an edited row stale. **287 UI interaction tests passed**
+after this change. The latest complete Python traversal passed **3,649 tests,
+127 subtests**, with2skips and3warnings in532.78s. This verifies the final pacing
+changes offline, not recovery of the five remaining real rows.
+
+A new real production recovery began at02:34 with the latest pacing code. Its
+History screen/API correctly listed missing audio87,119,135,145,146 and disabled
+full Export. The run is pending and its final result will be recorded separately.
+
 ## Review transport recovery and neighboring speech — October 15, 2026
 
 Acceptance remains **INCOMPLETE**. The ongoing real 320-second recovery still has

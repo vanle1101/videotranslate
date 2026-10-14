@@ -73,6 +73,43 @@ test('retry-only polling changes and recovery clearing reach visible compact sta
   assert.equal(ui.el('task-retry-notice').textContent,'');
 });
 
+test('saved-task polling refreshes media-only export gates and draft labels without a stage change', async () => {
+  const ui=studio();await ui.start();const socket=ui.sockets.at(-1);
+  const task={task_id:'fixture',status:'PREPARED',phase:'prepared',translation_mode:'full',
+    final_output_blocked:false,final_media_blocked:false,missing_audio_ids:[],missing_speech_ids:[],
+    output_is_draft:false,review_summary:{status:'completed'}};
+  socket.receive({type:'progress',...task});
+  assert.equal(ui.el('btn-export-hq').disabled,false);
+  ui.replies.set('/api/tasks',{tasks:[{...task,final_media_blocked:true,missing_audio_ids:[0]}]});
+  await ui.el('btn-refresh-tasks').click();
+  assert.equal(ui.el('btn-export-hq').disabled,true,'Missing WAV metadata must invalidate an otherwise unchanged saved status');
+  assert.match(ui.el('btn-export-hq').title,/1 câu đã dịch nhưng chưa có giọng/);
+  ui.replies.set('/api/tasks',{tasks:[task]});
+  await ui.el('btn-refresh-tasks').click();
+  assert.equal(ui.el('btn-export-hq').disabled,false);
+  ui.replies.set('/api/tasks',{tasks:[{...task,final_output_blocked:true,missing_speech_ids:[0]}]});
+  await ui.el('btn-refresh-tasks').click();
+  assert.equal(ui.el('btn-export-hq').disabled,true);
+  ui.replies.set('/api/tasks',{tasks:[{...task,output_is_draft:true}]});
+  await ui.el('btn-refresh-tasks').click();
+  assert.equal(ui.el('btn-export-hq').disabled,false);
+  assert.match(ui.el('btn-export-hq').title,/Bản nháp/);
+});
+
+test('review-owner-only polling transfers row locks without requiring a phase or count change', async () => {
+  const ui=studio();await ui.start();const socket=ui.sockets.at(-1);
+  socket.receive({type:'segment_update',id:1,start:10,end:20,status:'READY',audio_url:'/second.wav',final_vi:'Câu sau'});
+  const task={task_id:'fixture',status:'RUNNING',phase:'review',review_scope:'chunk',
+    reviewing_segment_ids:[0],review_summary:{status:'running'}};
+  socket.receive({type:'progress',...task});
+  assert.equal(ui.el('seg-vi-0').disabled,true);
+  assert.equal(ui.el('seg-vi-1').disabled,false);
+  ui.replies.set('/api/tasks',{tasks:[{...task,reviewing_segment_ids:[1]}]});
+  await ui.el('btn-refresh-tasks').click();
+  assert.equal(ui.el('seg-vi-0').disabled,false);
+  assert.equal(ui.el('seg-vi-1').disabled,true);
+});
+
 test('AI admission counts remain visible without segment-state metadata', async () => {
   const ui=studio();await ui.start();const socket=ui.sockets.at(-1);
   socket.receive({type:'progress',status:'RUNNING',phase:'visual',progress_pct:null,

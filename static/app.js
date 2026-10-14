@@ -4808,8 +4808,8 @@ document.addEventListener("DOMContentLoaded", () => {
         const statusChanged = activeTask.status !== currentProgress?.status;
         const progressChanged = ["phase", "stage", "error", "message", "progress_pct", "stage_progress_pct", "processing_progress_pct", "processing_completed_segments", "processing_total_segments", "processing_scope", "processing_total_known", "downloaded_bytes", "total_bytes", "speed", "eta", "eta_seconds", "eta_scope", "eta_reason", "eta_missing_stages", "can_retry", "can_repair_failed", "can_pause", "can_resume", "can_stop", "can_review", "review_count", "output_video_url", "output_filename", "translation_mode", "can_translate_full", "preview_seconds", "processed_seconds", "source_prepared_seconds", "total_seconds", "review_scope", "chunk_workers", "configured_chunk_workers"]
           .some(key => activeTask[key] !== undefined && activeTask[key] !== currentProgress?.[key]) ||
-          ["retry_pending_count", "retry_next_attempt_at", "completed_chunks", "total_chunks"].some(key => activeTask[key] !== undefined && activeTask[key] !== currentProgress?.[key]) ||
-          ["review_summary", "ai_queue", "retry_error_codes", "segment_states"].some(key => activeTask[key] !== undefined &&
+          ["retry_pending_count", "retry_next_attempt_at", "completed_chunks", "total_chunks", "final_output_blocked", "final_media_blocked", "output_is_draft"].some(key => activeTask[key] !== undefined && activeTask[key] !== currentProgress?.[key]) ||
+          ["review_summary", "ai_queue", "retry_error_codes", "segment_states", "missing_audio_ids", "missing_speech_ids", "reviewing_segment_ids"].some(key => activeTask[key] !== undefined &&
             JSON.stringify(activeTask[key]) !== JSON.stringify(currentProgress?.[key]));
         if (taskPollWarning || streamDisconnected || statusChanged || progressChanged) {
           showTaskProgress(activeTask);
