@@ -215,6 +215,8 @@ def main():
         last=None
         promoted=False
         while time.monotonic()<deadline:
+            alerts = evaluate(page, 'window.__qaAlerts || []')
+            assert not alerts, {'ui_alerts':alerts, 'task_id':task_id}
             snapshot=backend(base,f'/api/streaming/{task_id}')
             progress=snapshot['progress']
             state=(progress.get('status'),progress.get('phase'),progress.get('stage'))
