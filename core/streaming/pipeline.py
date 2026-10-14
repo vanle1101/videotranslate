@@ -1711,6 +1711,9 @@ class StreamingPipelineSession:
         reset_eta(self, now=self._run_started_at)
         self.is_running = True
         self.review_summary = {"status": "running"}
+        # Explicit Review owns a new run even when the saved job was completed.
+        # A completed intent must not suppress newly scheduled transport retries.
+        mark_intent(self, "active")
         self._invalidate_output()
         self.progress = {"phase": "review", "stage": "AI đang kiểm tra lại từng câu…", "progress_pct": 0, "status": "RUNNING"}
         target_revisions = {row.id: row.revision for row in targets}
@@ -1767,9 +1770,30 @@ class StreamingPipelineSession:
                 if warning not in self.warnings:
                     self.warnings.append(warning)
             finally:
-                self.is_running = False
                 self.review_task = None
                 self._exclusive_review = False
+                from core.review_retry import prune_review_retries
+                prune_review_retries(self)
+                retry_owner_needed = (not self.is_stopped
+                    and not getattr(self, "_persistence_capacity_failed", False)
+                    and any(record["stage"] in {"review", "speech"}
+                            and record["state"] == "RETRY_PENDING"
+                            for record in getattr(self, "_retry_schedule", [])))
+                if retry_owner_needed:
+                    # Hand off without yielding: the new worker cannot execute
+                    # until this exclusive reviewer has completely returned.
+                    # Never emit finished (which can trigger export) in between.
+                    self.is_running = True
+                    if not self.is_paused:
+                        mark_intent(self, "retry_pending")
+                    self.review_summary = {**self.review_summary, "status": "incomplete"}
+                    self.progress.update(phase="retry", progress_pct=None,
+                        stage="Dịch vụ tạm lỗi; giữ tiến độ và chờ đợt thử lại.",
+                        status="PAUSED" if self.is_paused else "RUNNING")
+                    self._persist_if_enabled()
+                    self.worker_task = asyncio.create_task(self._worker_loop(recover_pacing=False))
+                    return
+                self.is_running = False
                 if recovery_review and self.is_stopped:
                     self.error = previous_error
                     self._persist_if_enabled()
@@ -4533,7 +4557,7 @@ class StreamingPipelineSession:
                 return True
         return False
 
-    async def _worker_loop(self):
+    async def _worker_loop(self, *, recover_pacing=True):
         try:
             # Videos with no speech must still become playable.
             await self._update_ready()
@@ -4594,7 +4618,7 @@ class StreamingPipelineSession:
                     break
                 finally:
                     self.queue.task_done()
-            if self.is_running and not self.is_stopped and self.queue.empty():
+            if recover_pacing and self.is_running and not self.is_stopped and self.queue.empty():
                 await self._recover_pacing_after_source()
         except asyncio.CancelledError:
             self.is_stopped = True

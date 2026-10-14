@@ -77,6 +77,13 @@ and **153 transcript/output-gate tests passed** (overlap); **284 existing UI tes
 plus the new missing-audio regression passed. This is contract regression evidence,
 not a full-video export result.
 
+Explicit Review previously created retry records but then exited with no worker,
+and a saved completed intent suppressed dispatch. Review now reserves active
+intent and hands pending review/speech work to one queue owner without an interim
+finished/export event. That continuation does not retry unrelated timing failures.
+Pause/Stop and persistence failure remain authoritative. **70 focused tests passed**
+for ownership, cooldown, manual invalidation, cancellation and partial review.
+
 ## Recovery retest and cross-process ownership — October 15, 2026
 
 **Acceptance remains INCOMPLETE.** The real 320.040635-second project `76f5aa6b` has 187 valid speech files out of 193; IDs 87,119,135,143,145,146 still lack a usable fitted voice. No new complete MP4 is claimed for this run.
