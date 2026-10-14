@@ -15,6 +15,23 @@ Regression: **133 preview/progress Python tests passed in 60.48 seconds**,
 including production worker finalization for each failed stage. The currently
 running QA process predates this label correction.
 
+At 03:49:59 the real UI reached PREVIEW_READY with eight actual Vietnamese
+speech files and three explicit unresolved content reviews. The harness clicked
+Translate Full; ASR continued at 30.83–32.60s, preserving the existing source.
+Full translation then failed with four untranslated rows and eight ready WAVs;
+unknown CLI failures remained nonretryable. No new full MP4 was produced.
+
+Further fixes: pending retry counts/events now require a real durable retry
+scope; terminal translation failures no longer masquerade as an automatic timer.
+Source failures without a recognized transient category remain FAILED and keep
+the explicit Retry action. Per-row serialization examines only that row, avoiding
+an all-segments scan for each caption. CLI errors now log a fixed failure subtype
+(nonzero exit/error event/missing JSON/missing text/tool attempt), numeric exit
+status and bounded task kind without source content, headers or secrets. Unknown
+errors are still not automatically retried. Combined adapter/telemetry regression:
+**96 passed in 13.86s**; broader agent retry suites: **139 passed**. A fresh real
+UI retry is running to recover only the last four rows and exercise these changes.
+
 ## Inference recovery and provider cooldown audit — October 15, 2026
 
 **Overall acceptance remains incomplete.** Real Chinese-source UI task `fdc6ca35`

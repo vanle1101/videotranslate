@@ -1080,6 +1080,28 @@ def test_stage_deadline_can_be_shorter_but_never_silently_longer(isolated, monke
         oc.OpenCodeZenClient(api_key="test", timeout=60, task_timeouts={"address": 120})
 
 
+@pytest.mark.parametrize("stdout,exit_code,kind", [
+    ("private-output", 9, "nonzero_exit"),
+    (json.dumps({"type": "error", "error": "private-output"}), 0, "error_event"),
+    (json.dumps({"type": "step_finish", "part": {"reason": "private-output"}}), 0, "missing_text_event"),
+    ("private-output", 0, "missing_json_events"),
+])
+def test_unknown_cli_failure_has_safe_diagnostic_without_automatic_retry(
+        isolated, monkeypatch, caplog, stdout, exit_code, kind):
+    start = Mock(return_value=make_process(stdout, "private-key private-prompt", exit_code))
+    monkeypatch.setattr(oc.subprocess, "Popen", start)
+    with caplog.at_level(logging.INFO, logger="ai"):
+        with pytest.raises(oc.OpenCodeRequestError) as caught:
+            oc.OpenCodeZenClient(api_key="private-key", max_retries=5).translate(
+                "private-prompt", task_kind="translation")
+    assert caught.value.failure_kind == kind
+    assert caught.value.cli_exit == exit_code
+    assert not caught.value.retryable and start.call_count == 1
+    assert f"failure_kind={kind}" in caplog.text
+    assert f"cli_exit={exit_code}" in caplog.text and "task_kind=translation" in caplog.text
+    assert "private-" not in caplog.text
+
+
 def test_circuit_breaker_is_shared_across_reconstructed_clients(isolated, monkeypatch):
     layer = AIExecutionLayer(AIExecutionPolicy(circuit_failures=1), cache_root=isolated / "cache")
     monkeypatch.setattr(oc, "_shared_execution_layer", lambda: layer)

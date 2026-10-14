@@ -1848,6 +1848,12 @@ class StreamingPipelineSession:
 
     def caption_metadata(self, data):
         """Preview and export consume the same measured caption layout."""
+        from core.streaming.recovery import scheduled_segment_ids, segment_state
+        row = self.segments.get(data.get("id"))
+        if row is not None:
+            pending = scheduled_segment_ids((row,),
+                getattr(self, "_retry_schedule", []), self._chunk_jobs)
+            data = {**data, "processing_state": segment_state(row, retry_pending=row.id in pending)}
         from core.subtitle_cues import build_caption_layout
         size = getattr(self, "video_size", (1080, 1920))
         style = getattr(self, "caption_style", None)
@@ -1958,14 +1964,16 @@ class StreamingPipelineSession:
         output_gate.update(self.final_media_metadata())
         snapshot.update(output_gate)
         snapshot.update(self._processing_progress_metadata())
-        from core.streaming.recovery import segment_state
+        from core.streaming.recovery import segment_state, scheduled_segment_ids
+        retry_records = getattr(self, "_retry_schedule", [])
+        pending_ids = scheduled_segment_ids(self.segments.values(), retry_records, self._chunk_jobs)
         counts = {state: 0 for state in ("PENDING", "RUNNING", "COMPLETED", "RETRY_PENDING", "REVIEW_REQUIRED", "FAILED")}
         for row in self.segments.values():
-            counts[segment_state(row)] += 1
+            counts[segment_state(row, retry_pending=row.id in pending_ids)] += 1
         snapshot.update(segment_states=counts, completed_chunks=sum(row["state"] == "COMPLETED" for row in self._chunk_jobs),
                         total_chunks=len(self._chunk_jobs), scanned_seconds=self._visual_scanned_seconds,
-                        retry_chunks=sum(row["state"] == "RETRY_PENDING" for row in self._chunk_jobs))
-        retry_records = getattr(self, "_retry_schedule", [])
+                        retry_chunks=sum(record["stage"] == "source" and record["state"] == "RETRY_PENDING"
+                            for record in retry_records))
         snapshot.update(retry_pending_count=sum(r["state"] == "RETRY_PENDING" for r in retry_records),
                         retry_error_codes=sorted({r["error_code"] for r in retry_records
                             if r["state"] == "RETRY_PENDING"}),
@@ -2931,8 +2939,8 @@ class StreamingPipelineSession:
             except Exception as error:
                 if getattr(self, "_persistence_capacity_failed", False):
                     raise
-                transition(interval, "RETRY_PENDING", type(error).__name__)
                 scheduled = schedule_retry(self, "source", interval["id"], error, interval["input_hash"])
+                transition(interval, "RETRY_PENDING" if scheduled else "FAILED", type(error).__name__)
                 if scheduled and (cursor, end) not in retry_intervals:
                     retry_intervals.append((cursor, end))
                 elif not scheduled:
@@ -2945,8 +2953,8 @@ class StreamingPipelineSession:
                     row.error = "AI chưa trả bản dịch hợp lệ; đoạn này được lưu để thử lại, các đoạn khác tiếp tục."
                     await self.emit("segment_update", row.to_dict())
                 logging.getLogger("errors").warning(
-                    "[%s] CHUNK_RETRY_PENDING chunk_id=%s attempts=%s error_type=%s",
-                    self.task_id, interval["id"], interval["attempts"], type(error).__name__)
+                    "[%s] CHUNK_%s chunk_id=%s attempts=%s error_type=%s",
+                    self.task_id, interval["state"], interval["id"], interval["attempts"], type(error).__name__)
             finally:
                 active = False
                 # This source OCR owner is idle after prepass returns. Keeping
@@ -3150,8 +3158,8 @@ class StreamingPipelineSession:
                             transition(record, "COMPLETED")
                             finish_retry(self, "source", record["id"], record["input_hash"])
                         else:
-                            transition(record, "RETRY_PENDING", type(error).__name__)
                             scheduled = schedule_retry(self, "source", record["id"], error, record["input_hash"])
+                            transition(record, "RETRY_PENDING" if scheduled else "FAILED", type(error).__name__)
                             if scheduled:
                                 retry.append((record["start"], record["end"]))
                             else:
@@ -3164,8 +3172,8 @@ class StreamingPipelineSession:
                                 row.error = "Đoạn này chưa dịch xong; đã lưu để thử lại độc lập."
                                 await self.emit("segment_update", row.to_dict())
                             logging.getLogger("errors").warning(
-                                "CHUNK_RETRY_PENDING run_id=%s chunk_id=%s error_type=%s detail=%s traceback=%s",
-                                self.task_id, record["id"], type(error).__name__, redacted_detail(error),
+                                "CHUNK_%s run_id=%s chunk_id=%s error_type=%s detail=%s traceback=%s",
+                                record["state"], self.task_id, record["id"], type(error).__name__, redacted_detail(error),
                                 redacted_detail("".join(traceback.format_tb(error.__traceback__))))
                         self._visual_scanned_seconds = max(self._visual_scanned_seconds, record["end"])
                         self._visual_completed_seconds = contiguous_coverage(self._chunk_jobs, self._legacy_visual_prefix)

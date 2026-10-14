@@ -12,7 +12,8 @@ from core.streaming.pipeline import SegmentItem
 def test_late_tts_retry_telemetry_requires_exact_waiting_failure_ownership():
     row = SegmentItem(1, 0, 1, 1)
     row.failed_stage, row.error, row._retry_synthesis = "TTS", "Safe transient request failure", True
-    assert segment_state(row) == "RETRY_PENDING"
+    assert segment_state(row) == "PENDING"
+    assert segment_state(row, retry_pending=True) == "RETRY_PENDING"
     row.failed_stage = "ALIGNING"
     assert segment_state(row) == "PENDING"
     row.failed_stage, row.error = "TTS", None

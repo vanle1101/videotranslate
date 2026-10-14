@@ -86,17 +86,45 @@ def recover_interrupted(records):
             transition(record, "RETRY_PENDING", "interrupted")
 
 
-def segment_state(row):
+def scheduled_segment_ids(rows, retry_records, chunks=()):
+    """Map pending ledger scopes to rows; a failed stage is not a timer."""
+    if not retry_records:
+        return set()
+    rows = list(rows)
+    ids = {row.id for row in rows}
+    intervals = {chunk["id"]: chunk for chunk in chunks}
+    scheduled = set()
+    for record in retry_records:
+        if record["state"] != "RETRY_PENDING":
+            continue
+        if record["stage"] in {"speech", "review"}:
+            try:
+                sid = int(record["scope_id"])
+            except (ValueError, TypeError):
+                continue
+            if sid in ids:
+                scheduled.add(sid)
+        elif record["stage"] == "source":
+            chunk = intervals.get(record["scope_id"])
+            if (chunk is None or chunk["input_hash"] != record["input_hash"]
+                    or chunk["state"] == "COMPLETED"):
+                continue
+            scheduled.update(row.id for row in rows
+                if row.status not in {"READY", "PLAYED"}
+                and not getattr(row, "translation_provider", None)
+                and chunk["start"] <= row.start and row.end <= chunk["end"] + .001)
+    return scheduled
+
+
+def segment_state(row, *, retry_pending=False):
     """Content uncertainty is separate from validated media readiness."""
+    if retry_pending:
+        return "RETRY_PENDING"
     if row.status in {"READY", "PLAYED"}:
         from core.streaming.output_gate import missing_spoken_output_ids
         return "REVIEW_REQUIRED" if row.needs_review or missing_spoken_output_ids([row]) else "COMPLETED"
     if row.status == "FAILED":
-        if row.failed_stage == "TRANSLATING":
-            return "RETRY_PENDING"
         return "FAILED"
     if row.status == "NEEDS_REVIEW":
         return "REVIEW_REQUIRED"
-    if row.status == "WAITING" and row.failed_stage == "TTS" and row.error and row._retry_synthesis:
-        return "RETRY_PENDING"
     return "PENDING" if row.status == "WAITING" else "RUNNING"

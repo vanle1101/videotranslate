@@ -504,7 +504,7 @@ def test_provider_result_without_published_output_is_not_completed(preview, monk
         await session.worker_task
         assert session._visual_completed_seconds == 0
         assert session.get_progress()["status"] == "FAILED"
-        assert session._chunk_jobs[0]["state"] == "RETRY_PENDING"
+        assert session._chunk_jobs[0]["state"] == "FAILED"
         assert session._chunk_jobs[0]["attempts"] == 1
         assert not session._retry_schedule, "Invalid content must require repair, not transport retry"
     asyncio.run(run())
@@ -2020,7 +2020,7 @@ def test_repeated_transient_tts_failure_schedules_unlimited_rounds_until_stopped
     monkeypatch.setattr(session, "_synthesize_segment", synthesize)
     async def run():
         deferred = await session._resume_speech_rows(session.segments.values(), defer_pacing=True)
-        assert session.segments[1].to_dict()["processing_state"] == "RETRY_PENDING"
+        assert session.segment_snapshot(session.segments[1])["processing_state"] == "RETRY_PENDING"
         await session._resume_deferred_speech_rows(deferred + deferred)
         assert calls == [(1, False), (2, False), (3, False)], "Cooling failures are not pacing work"
         with pytest.raises(asyncio.CancelledError):
@@ -2268,7 +2268,7 @@ def test_parallel_invalid_callback_coverage_keeps_owner_pending_and_healthy_peer
 
     asyncio.run(run())
     failed, healthy = session._chunk_jobs
-    assert failed["state"] == "RETRY_PENDING" and failed["attempts"] == 1
+    assert failed["state"] == "FAILED" and failed["attempts"] == 1
     assert healthy["state"] == "COMPLETED" and healthy["attempts"] == 1
     assert attempts == {0.: 1, 60.: 1}
     assert all(row.status == "READY" for row in session.segments.values() if row.start >= 60)

@@ -522,10 +522,14 @@ class OpenCodeZenClient:
                 (trace["finished"] if trace["finished"] is not None else now) - trace["started"])
             logging.getLogger("ai").info(
                 "%s run_id=%s request_id=%s model=%s attempt=%s elapsed_ms=%s "
-                "total_elapsed_ms=%s admission_wait_ms=%s backoff_elapsed_ms=%s output_chars=%s code=%s",
+                "total_elapsed_ms=%s admission_wait_ms=%s backoff_elapsed_ms=%s output_chars=%s code=%s "
+                "failure_kind=%s cli_exit=%s task_kind=%s",
                 event, context.run_id, request_id, selected, trace["attempt"],
                 round(attempt_elapsed * 1000), round((now - request_started) * 1000),
                 round(trace["admission_wait"] * 1000), round(trace["backoff"] * 1000), output_chars, code,
+                getattr(error, "failure_kind", "unspecified") if error is not None else "none",
+                getattr(error, "cli_exit", None),
+                task_kind if task_kind in {"request", "translation", "review", "address", "source", "pacing"} else "other",
             )
 
         def wait_retry(delay):
@@ -689,13 +693,21 @@ class OpenCodeZenClient:
                 if any(event.get("type") == "tool_use" for event in events):
                     # A failed CLI may still have attempted a tool. Reject that
                     # attempt before considering a nonzero-exit retry.
-                    raise OpenCodeRequestError("OpenCode đã gọi công cụ ngoài tác vụ dịch; Studio không chấp nhận kết quả lượt này.")
+                    error = OpenCodeRequestError("OpenCode đã gọi công cụ ngoài tác vụ dịch; Studio không chấp nhận kết quả lượt này.")
+                    error.failure_kind = "tool_attempt"
+                    error.cli_exit = process.returncode if type(process.returncode) is int else None
+                    raise error
+                def cli_failure(text, kind):
+                    error = _provider_failure(text)
+                    error.failure_kind = kind
+                    error.cli_exit = process.returncode if type(process.returncode) is int else None
+                    return error
                 if process.returncode:
-                    raise _provider_failure(stdout + "\n" + stderr)
+                    raise cli_failure(stdout + "\n" + stderr, "nonzero_exit")
                 parts: list[str] = []
                 for event in events:
                     if event.get("type") == "error":
-                        raise _provider_failure(json.dumps(event))
+                        raise cli_failure(json.dumps(event), "error_event")
                     part = event.get("part", {})
                     if event.get("type") == "text" and isinstance(part, dict):
                         content = part.get("text")
@@ -703,6 +715,6 @@ class OpenCodeZenClient:
                             parts.append(content)
                 answer = "".join(parts).strip()
                 if not answer:
-                    raise _provider_failure(stderr)
+                    raise cli_failure(stderr, "missing_text_event" if events else "missing_json_events")
                 return answer
         raise OpenCodeRequestError("OpenCode chưa trả được bản dịch.")
