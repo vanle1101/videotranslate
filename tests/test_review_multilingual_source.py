@@ -156,3 +156,13 @@ def test_checkpoint_namespaces_separate_language_configurations(tmp_path):
     a.store({"stage": "fixture"}, {"result": "one"})
     assert a.load({"stage": "fixture"}) == {"result": "one"}
     assert b.load({"stage": "fixture"}) is None
+
+
+@pytest.mark.parametrize("language", ["ko", "en", "auto"])
+@pytest.mark.parametrize("measured,candidate", [("100m", "100m"), ("100m", "100米"), ("你好", "你好")])
+def test_unchanged_source_or_exact_unit_spelling_never_enters_recovery_loop(language, measured, candidate):
+    row = source(measured)
+    row["text_zh"] = candidate
+    row["verification"] = {"status": "unresolved"}
+    assert not source_ocr_script_conflict(measured, candidate, language)
+    assert not AutomaticTranslationReviewer.needs_measured_source_recovery(row, language)

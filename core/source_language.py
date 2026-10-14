@@ -28,7 +28,7 @@ def source_ocr_script_conflict(measured, candidate, source_language="auto"):
     source, target = source_scripts(comparable_chinese(measured)), source_scripts(comparable_chinese(candidate))
     if source and target and source != target:
         return True
-    return source_language in {"ko", "en"} and target == {"han"}
+    return not source and source_language in {"ko", "en"} and target == {"han"}
 
 
 def validate_source_language(value):

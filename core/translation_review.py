@@ -889,6 +889,7 @@ class AutomaticTranslationReviewer:
                 for engine in ("sensevoice", "faster-whisper-small")))
         return bool(audit.get("status") != "manual" and not audio_owned
             and isinstance(measured, str) and measured.strip() and isinstance(source, str)
+            and VideoIntelligence._compact_text(measured) != VideoIntelligence._compact_text(source)
             and source_ocr_script_conflict(measured, source, source_language))
 
     def _restore_measured_source(self, segment):

@@ -1,5 +1,38 @@
 # Runtime QA report
 
+## Korean-source recovery retest — October 15, 2026, 05:11
+
+**Runtime recovery/export: PASS, one content review remains.** A fresh
+offscreen production UI restored the same task `34e42f42` and clicked Review.
+Real Muse calls finished between 05:08:39 and 05:11:18. Rows 2/3 now retain
+measured Korean source; all four rows have Vietnamese text and playable audio.
+The automatic export generated a new
+`workspace/outputs/douyin_translated_34e42f42_hq.mp4`: **296,675 bytes,
+24.000000s**. FFprobe found audio/video, full FFmpeg decode succeeded, and the
+result player reached readyState 4, time 0.425768s with no media error. Page
+reload restored all four rows. The backend shut down and the harness exited 0.
+
+Result: **3 COMPLETED, 1 REVIEW_REQUIRED, 0 FAILED**. No ASR-from-zero restart
+was requested. This is actual recovery of the failed case recorded below, not
+a change to its failed verdict. Its synthetic Korean-voice/Chinese-caption
+provenance remains unchanged; natural Douyin Korean and long-video acceptance
+are still outstanding. Semantic approval of the remaining row is not claimed.
+
+Combined focused validation after source recovery/pacing changes:
+**517 passed in 88.48s**. Separate primary-source and Chinese-evidence suites:
+**195 passed in 5.74s**. These are regression checks, not a substitute for the
+real UI run. Git increments `e4e0467` and `5db7ed9` were pushed successfully.
+
+Follow-up cross-review found a recovery-loop edge case: an unchanged Han
+quotation or `100m` source under English/Korean configuration could be selected
+repeatedly. Recovery now requires an actual source difference; the script
+guard respects measured source over a configuration hint. **249 tests passed
+in 12.19s**. A fresh final-code UI reopened `34e42f42` at 05:12:56 without a
+new review/ASR request; the player advanced to 0.491093s, readyState 4, and
+the unchanged output decoded and survived reload. Harness exit 0; owned
+backend stopped. Six task-owned fixture MP3/PNG components were removed;
+the source fixture MP4, checkpoint and final MP4 remain for review/resume.
+
 ## Korean speech / Chinese-caption source ownership — October 15, 2026
 
 **Real-provider runtime test: FAIL.** The offscreen production UI created QA
