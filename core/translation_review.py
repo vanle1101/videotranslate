@@ -20,6 +20,7 @@ from core.screen_ocr import ScreenOCR
 from core.video_intelligence import VideoIntelligence, VideoIntelligenceError
 from core.runtime_context import current_execution_context
 from core.review_checkpoint import ReviewCheckpoint
+from core.review_retry import retain_failure, annotate_failure
 from core.chinese_text import comparable_chinese, comparable_audio_chinese
 from core.semantic_segments import SEMANTIC_TRANSLATION_POLICY
 from core.structured_response import (
@@ -327,6 +328,7 @@ class AutomaticTranslationReviewer:
                     raise
             except Exception as error:
                 check()
+                annotate_failure(error, batch)
                 AutomaticTranslationReviewer._diagnostic(error, "semantic_request", batch)
                 raise
 
@@ -801,6 +803,7 @@ class AutomaticTranslationReviewer:
                 data, validated, audits = checked, checked_validated, checked_audits
             except Exception as error:
                 check()
+                retain_failure(result, error, sources)
                 diagnostic = self._diagnostic(error, "audio_semantic_review", sources)
                 for source in sources:
                     reason = self._diagnostic_message(diagnostic)
@@ -1258,8 +1261,13 @@ class AutomaticTranslationReviewer:
             terminology = VideoIntelligence._versioned_terminology_context(
                 semantic_source, getattr(self, "glossary", None))
             readonly_neighbors = VideoIntelligence._batch_readonly_context(semantic_source, batch)
-            address_reading = self._address_reading(client, batch, context, check, checkpoint,
-                semantic_source=semantic_source)
+            try:
+                address_reading = self._address_reading(client, batch, context, check, checkpoint,
+                    semantic_source=semantic_source)
+            except Exception as error:
+                check()
+                annotate_failure(error, batch)
+                raise
             prompt_evidence = []
             for item in relevant:
                 scopes = []
@@ -1321,6 +1329,7 @@ class AutomaticTranslationReviewer:
                     raise VideoIntelligenceError("Lượt kiểm định thứ hai thiếu kết luận ngữ nghĩa hợp lệ.")
             except Exception as error:
                 check()
+                retain_failure(result, error, batch)
                 second_failure = self._diagnostic(error, "semantic_second_pass", batch)
             # Validate the complete batch before publishing any row. A later
             # row can be the source evidence used by an earlier address audit.
@@ -1444,4 +1453,15 @@ class AutomaticTranslationReviewer:
                     # Changed source dialogue can authorize a genuinely new attempt.
                     audit["missing_translation_recovery"] = self.missing_translation_recovery_identity(
                         row, {**wider_rows, **result["segments"]}.values())
+        # An independent audio pass may have resolved an earlier OCR transport
+        # failure. Retry only rows still explicitly incomplete, never a valid
+        # unresolved semantic judgement or a subsequently completed audit.
+        if result.get("retry_failures"):
+            failures = []
+            for failure in result["retry_failures"]:
+                pending = [sid for sid in failure["segment_ids"]
+                    if (result["segments"].get(sid, {}).get("verification") or {}).get("status") == "incomplete"]
+                if pending:
+                    failures.append({**failure, "segment_ids": pending})
+            result["retry_failures"] = failures
         return result

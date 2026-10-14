@@ -1,5 +1,37 @@
 # Runtime QA report
 
+## Review transport recovery and neighboring speech — October 15, 2026
+
+Acceptance remains **INCOMPLETE**. The ongoing real 320-second recovery still has
+missing fitted speech; it must not be called a successful full export.
+
+- Complete offline regression on the preceding revision: **3,603 passed, 2 skipped,
+  127 subtests passed**, 674.06 seconds. The two skips are not production passes.
+- Some caught second-pass/audio review transport failures were only recorded as
+  incomplete editorial verdicts, so no later retry owner existed. Typed failures
+  now carry affected IDs into a durable review ledger with at least 300 seconds
+  between rounds. Authentication/schema/semantic failures do not enter that loop.
+- Review input hashes cover target revision, source context, glossary and model;
+  manual edits and changed context invalidate old ownership. Due speech takes
+  priority over review groups, reviewed text needing new speech returns to the
+  normal queue, and cancellation retains the claim for restart recovery.
+- Real recovery logs repeatedly rejected neighboring pacing proposals solely for
+  draft uncertainty before their independent meaning/fluency checks ran. This
+  path now uses the same explicit draft policy as focus pacing: both independent
+  checks must pass, duration must fit, speed stays at or below 1.15, and published
+  draft wording remains unresolved. Manual neighboring rows remain fixed.
+- Targeted regression: **28 passed** for review retry, scheduler and neighboring
+  speech, then **10 passed** including actual publication/error-ownership methods;
+  **361 passed** across transcript transactions, review/source scope, timing and
+  retry rounds. Injected failures and synthetic PCM are offline tests, not real
+  provider acceptance. The live recovery process predates these latest edits;
+  loading and retesting the new runtime remains required.
+
+Files: `core/review_retry.py`, `core/translation_review.py`,
+`core/streaming/pipeline.py`, `tests/conftest.py`,
+`tests/test_review_retry.py`, `tests/test_review_retry_scheduler.py`,
+`tests/test_neighbor_silence_recovery.py`.
+
 ## Recovery retest and cross-process ownership — October 15, 2026
 
 **Acceptance remains INCOMPLETE.** The real 320.040635-second project `76f5aa6b` has 187 valid speech files out of 193; IDs 87,119,135,143,145,146 still lack a usable fitted voice. No new complete MP4 is claimed for this run.

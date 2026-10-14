@@ -137,6 +137,45 @@ def _fixture_speech(path, seconds):
         audio.writeframes(np.full(round(seconds * 24000), 1000, dtype="<i2").tobytes())
 
 
+@pytest.mark.parametrize("semantic_verified", [True, False])
+def test_neighbor_draft_requires_meaning_gate_and_preserves_review_flag(rescue, monkeypatch, semantic_verified):
+    row = rescue.segments[0]
+    row.verification = {"status": "verified"}
+    proof = {"status": "draft", "semantic_verified": semantic_verified,
+             "text": "Giữ lời.", "review_reason": "Cần kiểm tra ngữ cảnh."}
+    rescue.translator = Mock()
+    rescue.translator.rewrite_for_pacing.return_value = {"final_vi": "Giữ lời.", "pacing_verification": proof}
+    monkeypatch.setattr("core.streaming.pipeline.compact_tts_edge_padding", lambda *a: [])
+    monkeypatch.setattr(rescue, "_dialogue_context_before", lambda *a: [])
+    rescue.tts_engine = object()
+
+    def speech(**kwargs):
+        _fixture_speech(kwargs["output_path"], .7)
+        return {"text": kwargs["text"], "tts_duration": .7, "speed_ratio": 1., "boundaries": []}
+
+    monkeypatch.setattr("core.streaming.pipeline.synthesize_natural_speech", speech)
+    rows = rescue._dub_rows()
+    before = available_reflow_duration(rows, 1, total_duration=2.5)
+    if not semantic_verified:
+        with pytest.raises(RuntimeError, match="Thiếu xác minh"):
+            asyncio.run(rescue._prepare_dub_rescue(rows, rescue.segments[1], before + .025))
+        assert row.verification == {"status": "verified"}
+        assert not list(rescue.segments_dir.glob("seg_*.wav"))
+        return
+    _, staged = asyncio.run(rescue._prepare_dub_rescue(rows, rescue.segments[1], before + .025))
+    assert rescue.translator.rewrite_for_pacing.call_args.kwargs["allow_review_draft"] is True
+    assert staged[0]["spoken"]["needs_review"] is True
+    assert row.final_vi == "Giữ nguyên lời."  # Preparation never publishes.
+    from core.engines.alignment.speech_timing import build_speech_timing
+    staged[0]["timing"] = build_speech_timing("Giữ lời.", 0., 1., staged[0]["audio_path"], 1., [])
+    rescue._publish_dub_plan({0: {"dub_start": 0., "dub_end": 1., "_audio_update": staged[0]}}, 1)
+    assert row.final_vi == "Giữ lời."
+    assert row.needs_review is True
+    assert row.verification["status"] == "unresolved"
+    assert row.verification["pacing"] == proof
+    assert row.review_reason == "Cần kiểm tra ngữ cảnh."
+
+
 @pytest.mark.parametrize("fitted_seconds,expected_status", [(.5, "READY"), (.6, None)])
 def test_ordinary_synthesis_preserves_manual_neighbor_times_and_audio(
         rescue, monkeypatch, fitted_seconds, expected_status):

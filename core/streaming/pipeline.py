@@ -39,6 +39,7 @@ from core.engines.alignment.speech_timing import (build_speech_timing, take_tts_
 from core.streaming.audio_cache import resolve_dub_timing
 from core.streaming.retry_schedule import (schedule_retry, finish_retry, begin_retry,
     mark_intent, due_entries)
+from core.review_retry import review_input_hashes, schedule_review_failures, prune_review_retries, failure_descriptor
 from core.streaming.glossary import glossary_snapshot
 from core.streaming.output_gate import final_output_metadata, preview_output_metadata, missing_spoken_output_ids, missing_speech_message
 from core.engines.alignment.dub_timing import available_reflow_duration, plan_reflow, MAX_TAIL_LIMIT_EXTENSION
@@ -548,6 +549,10 @@ class StreamingPipelineSession:
             return False
         if getattr(self, "_restored_source_missing", False):
             return False
+        if (self.initialized and not self.is_stopped and not self.is_running and not self.is_editing
+                and any(record["stage"] == "review" for record in getattr(self, "_retry_schedule", []))
+                and self.video_path and self.video_path.is_file()):
+            return True
         if (self._startup_failed and not self.is_running
                 and not self.is_stopped and not self.is_editing and self.error):
             return bool((self.video_path and self.video_path.is_file())
@@ -631,7 +636,7 @@ class StreamingPipelineSession:
                 self.queue.put_nowait((segment.start, segment.id))
         ready = sum(segment.status in ("READY", "PLAYED") for segment in self.segments.values())
         self.progress = {"phase": "tts", "stage": "Đang thử lại tạo giọng, giữ nguyên các câu đã xong…",
-                         "progress_pct": round(ready * 100 / len(self.segments), 1), "status": "RUNNING",
+                         "progress_pct": round(ready * 100 / len(self.segments), 1) if self.segments else None, "status": "RUNNING",
                          "completed_segments": ready, "total_segments": len(self.segments)}
 
         async def resumed_worker():
@@ -1216,16 +1221,38 @@ class StreamingPipelineSession:
         from core.streaming.progress_eta import stage_measurement_start, record_processing_stage
         from core.runtime_context import observe_cache_usage
         eta_review_started = stage_measurement_start(self)
+        review_input_scopes = review_input_hashes(self)
         try:
             with observe_cache_usage() as review_cache_usage:
                 reviewer = AutomaticTranslationReviewer(source_language=self.source_language)
                 reviewer.glossary = glossary_snapshot(self)
                 result = await self._run_blocking(
                     reviewer.review, self.video_path, deepcopy(targets), deepcopy(self.screen_texts), **options)
+            # Typed transport failures collected inside review stay independent
+            # from semantic verdicts. Schedule them before any row publication,
+            # while the captured source/context revision still owns the scope.
+            scheduled_review = schedule_review_failures(
+                self, result.get("retry_failures", []), review_input_scopes)
+            if scheduled_review:
+                self._persist_if_enabled()
             successful_rows = sum((row.get("verification") or {}).get("status") in
                                   {"verified", "corrected", "unresolved", "manual"}
                                   for row in result.get("segments", {}).values())
             record_processing_stage(self, "review", successful_rows, eta_review_started, cache_usage=review_cache_usage)
+        except asyncio.CancelledError:
+            raise
+        except Exception as error:
+            descriptor = getattr(error, "review_retry_failure", None)
+            if descriptor is None:
+                # Executor boundaries may reconstruct exceptions without custom
+                # attributes. Rebuild scope only from the typed transport class;
+                # unknown/semantic failures remain terminal and visible.
+                descriptor = failure_descriptor(error, [{"id": row.id} for row in targets])
+            if descriptor:
+                scheduled_review = schedule_review_failures(self, [descriptor], review_input_scopes)
+                if scheduled_review:
+                    self._persist_if_enabled()
+            raise
         finally:
             semantic_active = False
             self._review_scope = None
@@ -1337,6 +1364,15 @@ class StreamingPipelineSession:
         # Report the committed text/audio state, not the earlier review draft.
         self._refresh_review_counts()
         await self._invalidate_reviewed_screen_texts()
+        failed_review_ids = {sid for entry in result.get("retry_failures", [])
+                             for sid in entry["segment_ids"]}
+        for sid in published_revisions:
+            if sid not in failed_review_ids:
+                finish_retry(self, "review", str(sid), review_input_scopes.get(sid))
+        # Accepted source corrections or user edits can invalidate old review
+        # context. Never let that detached response own a newer revision.
+        prune_review_retries(self)
+        self._persist_if_enabled()
         if self.review_summary.get("status") == "completed":
             self.warnings[:] = [warning for warning in self.warnings if warning not in REVIEW_FAILURE_WARNINGS]
         await self.emit("review_complete", {"review_summary": self.review_summary,
@@ -1527,6 +1563,9 @@ class StreamingPipelineSession:
                     AutomaticTranslationReviewer.missing_translation_recovery_identity(
                         row, self.segments.values()))
         def include(row):
+            if any(record["stage"] == "review" and record["scope_id"] == str(row.id)
+                   for record in getattr(self, "_retry_schedule", [])):
+                return False
             if stale_address_only:
                 return needs_address_source_recheck(row)
             return ((row.verification or {}).get("status") in (None, "pending", "incomplete")
@@ -1534,7 +1573,9 @@ class StreamingPipelineSession:
                     or needs_obsolete_gate_recheck(row) or needs_numeric_audio_recheck(row)
                     or needs_missing_translation_recovery(row))
         pending = sorted((row for row in self.segments.values()
-            if (row.speaker_review_pending or
+            if not any(record["stage"] == "review" and record["scope_id"] == str(row.id)
+                       for record in getattr(self, "_retry_schedule", []))
+            and (row.speaker_review_pending or
                  (self._chunked_source_started and self.visual_translation and self._published_row(row)
                   and row.source_method == "text-ai" and row.translation_provider == "opencode"
                   and include(row)))),
@@ -3739,7 +3780,7 @@ class StreamingPipelineSession:
                         proposal = await self._run_blocking(self.translator.rewrite_for_pacing,
                             item.text_zh, item.final_vi, budget * self.aligner.max_speed * .98,
                             context, measured_duration=item.tts_duration, feedback=feedback,
-                            source_language=self.source_language)
+                            source_language=self.source_language, allow_review_draft=True)
                         logging.getLogger("pipeline").info(
                             "PACING_NEIGHBOR_REWRITE_ACCEPTED run_id=%s focus_id=%s neighbor_id=%s attempt=%d",
                             self.task_id, focus.id, item.id, rewrite_attempt + 1)
@@ -3762,7 +3803,8 @@ class StreamingPipelineSession:
                 if proposal is None:
                     continue
                 proof = proposal.get("pacing_verification")
-                if (not isinstance(proof, dict) or proof.get("status") != "verified"
+                if (not isinstance(proof, dict) or not (proof.get("status") == "verified"
+                        or proof.get("status") == "draft" and proof.get("semantic_verified") is True)
                         or proof.get("text") != proposal.get("final_vi")):
                     raise RuntimeError("Thiếu xác minh cho lời đọc liền kề đã rút gọn.")
                 path = self.segments_dir / f"seg_{sid}_{uuid.uuid4().hex}.wav"
@@ -3777,6 +3819,9 @@ class StreamingPipelineSession:
                     staged.pop(sid, None)
                     continue
                 spoken["pacing_verification"] = proposal["pacing_verification"]
+                if proof.get("status") == "draft":
+                    spoken.update(needs_review=True, review_reason=proof.get("review_reason")
+                                  or "Lời rút gọn là bản nháp, cần kiểm tra.")
                 if not await stage(item, path, spoken):
                     staged.pop(sid, None)
                 break
@@ -3963,6 +4008,10 @@ class StreamingPipelineSession:
                         "before_pacing": old_text, "translation_changed": True}
                     if item.verification.get("status") == "verified":
                         item.verification["status"] = "corrected"
+                if spoken.get("needs_review"):
+                    item.needs_review = True
+                    item.review_reason = spoken.get("review_reason") or "Lời rút gọn là bản nháp, cần kiểm tra."
+                    item.verification = {**(item.verification or {}), "status": "unresolved"}
                 item.revision += 1
                 item.audio_url = f"/api/streaming/audio/{self.task_id}/{item.id}?rev={item.revision}"
                 self._retire_speech_failure(item)
@@ -4371,10 +4420,16 @@ class StreamingPipelineSession:
         return intervals.pop(0)
 
     async def _queue_due_speech_retries(self):
-        """One durable owner runs later waves; successes and manual edits stay intact."""
+        """Schedule speech first, then bounded review scopes, under one owner."""
+        from core.review_retry import prune_review_retries, review_input_hashes
         while self.is_running and not self.is_stopped:
+            prune_review_retries(self)
             pending = []
             for record in list(getattr(self, "_retry_schedule", [])):
+                if record["stage"] == "review":
+                    if record["state"] == "RETRY_PENDING":
+                        pending.append(record)
+                    continue
                 if record["stage"] != "speech":
                     continue
                 row = self.segments.get(int(record["scope_id"]))
@@ -4406,6 +4461,53 @@ class StreamingPipelineSession:
                     row.status, row.error = "WAITING", None
                     self.queue.put_nowait((row.start, row.id))
             self._persist_if_enabled()
+            if not self.queue.empty():
+                return True
+            # No speech is ready now. Retry at most four unchanged review rows;
+            # defer changed speech to the normal queue before another review.
+            review_hashes = review_input_hashes(self)
+            claimed = []
+            for ready in due_entries(self):
+                if ready["stage"] != "review":
+                    continue
+                sid = int(ready["scope_id"])
+                if review_hashes.get(sid) != ready["input_hash"]:
+                    finish_retry(self, "review", ready["scope_id"], ready["input_hash"])
+                    continue
+                if begin_retry(self, "review", ready["scope_id"], ready["input_hash"]):
+                    claimed.append(ready)
+                if len(claimed) == 4:
+                    break
+            if not claimed:
+                continue
+            self._persist_if_enabled()
+            review_cancelled = False
+            try:
+                await self._review_translations(regenerate_audio=True, defer_audio=True,
+                    segment_ids={int(item["scope_id"]) for item in claimed})
+            except asyncio.CancelledError:
+                review_cancelled = True
+                raise
+            except Exception as error:
+                if getattr(self, "_persistence_capacity_failed", False):
+                    raise
+                # _review_translations schedules only typed transient failures.
+                # A terminal/schema/semantic verdict remains visible for review.
+                logging.getLogger("errors").warning(
+                    "REVIEW_RETRY_FAILED run_id=%s error_type=%s", self.task_id, type(error).__name__)
+            finally:
+                if not self.is_stopped and not review_cancelled:
+                    for item in claimed:
+                        if any(r["stage"] == "review" and r["scope_id"] == item["scope_id"]
+                               and r["input_hash"] == item["input_hash"] and r["state"] == "RUNNING"
+                               for r in getattr(self, "_retry_schedule", [])):
+                            finish_retry(self, "review", item["scope_id"], item["input_hash"])
+                    prune_review_retries(self)
+                    self._persist_if_enabled()
+            for item in claimed:
+                row = self.segments.get(int(item["scope_id"]))
+                if row is not None and row.status == "WAITING" and row._retry_synthesis:
+                    self.queue.put_nowait((row.start, row.id))
             if not self.queue.empty():
                 return True
         return False

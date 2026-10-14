@@ -11,7 +11,7 @@ _TEST_LOG_HANDLERS = []
 
 
 @pytest.fixture(autouse=True)
-def isolate_startup_recovery(monkeypatch, request):
+def isolate_startup_recovery(monkeypatch, request, tmp_path):
     # Offline suites may launch the actual HTTP server. Never let that startup
     # discover and mutate a user's active projects. Dedicated coordinator tests
     # override this with their own explicitly controlled candidate manifests.
@@ -21,6 +21,16 @@ def isolate_startup_recovery(monkeypatch, request):
     # ASGITransport-only tests intentionally omit lifespan. A previous test's
     # shutdown fence must not masquerade as their application's running state.
     monkeypatch.setattr("main._backend_shutting_down", False)
+    if request.node.path.name in {
+            "test_backend_loop.py", "test_desktop_e2e.py", "test_desktop_app.py",
+            "test_douyin_cookie_api.py", "test_history_thumbnail.py", "test_local_runtime.py",
+            "test_media_preview.py", "test_muse_api.py", "test_opencode_api.py",
+            "test_openrouter_api.py", "test_random_ports.py", "test_static_asset_versions.py",
+            "test_streaming_audio_api.py", "test_translation_worker_settings.py",
+            "test_url_progress.py", "test_voice_api.py", "test_workspace_lease_lifecycle.py"}:
+        # Lifespan tests exercise the real lock, but never acquire ownership of
+        # the user's live workspace. More specific fixtures may replace this.
+        monkeypatch.setattr("config.settings.WORKSPACE_DIR", tmp_path / "workspace")
 
 
 def pytest_sessionstart(session):
