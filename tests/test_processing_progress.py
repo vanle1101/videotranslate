@@ -138,6 +138,27 @@ def test_untranslated_source_never_counts_as_silence(session):
     assert session.get_progress()["processing_progress_pct"] == 100
 
 
+def test_stage_message_counts_valid_media_not_ready_labels(session, monkeypatch):
+    from unittest.mock import AsyncMock
+    from pathlib import Path
+    session._source_prepared_seconds = 24
+    row(session, 0, 0, 2, ready=True)
+    missing = row(session, 1, 4, 6, ready=True)
+    Path(missing.audio_path).unlink()
+    uncertain = row(session, 2, 8, 10)
+    uncertain.status, uncertain.needs_review = "READY", True
+    publish = AsyncMock()
+    monkeypatch.setattr(session, "report_progress", publish)
+    asyncio.run(session._segment_progress("tts", "Đang tạo giọng"))
+    call = publish.await_args
+    assert "1/3" in call.args[1] and "Đã hoàn tất" not in call.args[1]
+    assert call.args[2] == 33.3 and call.kwargs["completed_segments"] == 1
+    session._source_prepared_seconds = 2
+    asyncio.run(session._segment_progress("tts", "Đang tạo giọng"))
+    assert publish.await_args.args[2] is None
+    assert "đang xác định tổng số câu" in publish.await_args.args[1]
+
+
 def test_actual_asr_silence_counts_only_after_processing(session):
     item = row(session, 0, 0, 2, ready=True, speech=False)
     session._source_prepared_seconds = 24

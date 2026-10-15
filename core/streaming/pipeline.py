@@ -2185,11 +2185,14 @@ class StreamingPipelineSession:
         await self.emit("progress", self.get_progress())
 
     async def _segment_progress(self, phase: str, stage: str):
-        count = sum(s.status in ("READY", "PLAYED") for s in self.segments.values())
-        total = len(self.segments)
+        measured = self._processing_progress_metadata()
+        count = measured["processing_completed_segments"]
+        total = measured["processing_total_segments"]
+        label = (f"{count}/{total} câu đủ lời và giọng" if measured["processing_total_known"]
+                 else f"{count} câu đủ lời và giọng; đang xác định tổng số câu")
         await self.report_progress(
-            phase, f"{stage} · Đã hoàn tất {count}/{total} câu",
-            round(count * 100 / total, 1) if total else None,
+            phase, f"{stage} · {label}",
+            measured["processing_progress_pct"],
             completed_segments=count, total_segments=total,
         )
 
