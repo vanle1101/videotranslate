@@ -1,6 +1,6 @@
 {
   "task_id": "76f5aa6b",
-  "observed_at_local": "2026-10-15T08:45:10",
+  "observed_at_local": "2026-10-15T10:06:26",
   "state": "STOPPED",
   "source_seconds": 320.040635,
   "segments": 193,
@@ -14,11 +14,12 @@
   "retry_claims": 2,
   "output_filename": "",
   "full_mp4_acceptance": "NOT_ACHIEVED",
-  "stop_reason": "900s observation deadline, normal Stop API, backend drained",
+  "stop_reason": "Normal Stop during real RAM admission cooldown; backend drained and15 manual rows preserved",
   "real_provider_observations": [
-    "Muse timeout retried",
-    "RAM admission timeout saved for later retry",
-    "Cooldown expired and same row resumed",
-    "Existing TTS and semantic cache reused"
+    "Fresh latest-code production UI resumed retained job",
+    "Existing raw speech cache reused for row119",
+    "Measured1.4326s speech exceeds maximum0.8503s slot",
+    "RAM admission timed out before Muse was contacted; available2.34GB vs configured headroom plus child estimate",
+    "Two retry claims retained after Stop; no new provider response or MP4 in this run"
   ]
 }
