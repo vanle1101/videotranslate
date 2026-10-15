@@ -35,7 +35,8 @@ def _incomplete(row):
 
 def failure_descriptor(error, rows):
     code = transient_failure(error)
-    if code is None or not code.startswith("provider_"):
+    if code is None or not (code.startswith("provider_") or code in {
+            "local_memory_pressure", "local_memory_unknown", "local_resource_queue"}):
         return None
     ids = sorted({row["id"] for row in rows if type(row.get("id")) is int})
     if not ids:

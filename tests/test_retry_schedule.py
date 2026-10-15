@@ -15,7 +15,8 @@ from core.engines.translation.opencode_client import OpenCodeRequestError, OpenC
 HASH = "a" * 64
 
 
-@pytest.mark.parametrize("code", ["asr_timeout", "asr_failed"])
+@pytest.mark.parametrize("code", ["asr_timeout", "asr_failed", "local_memory_pressure",
+    "local_memory_unknown", "local_resource_queue"])
 def test_local_evidence_waves_survive_restart_and_keep_full_cooldown(code):
     owner = session()
     error = RuntimeError("private native stderr")

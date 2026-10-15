@@ -58,8 +58,17 @@ def process_rss(process):
         return 0
 
 
+RESOURCE_WAIT_CODES = {
+    "ram_headroom": "local_memory_pressure",
+    "memory_unknown": "local_memory_unknown",
+    "resource_fifo": "local_resource_queue",
+}
+
+
 class ResourceWaitTimeout(RuntimeError):
-    pass
+    def __init__(self, message, *, reason="ram_headroom"):
+        self.code = RESOURCE_WAIT_CODES[reason]
+        super().__init__(message)
 
 
 class _Lease:
@@ -172,7 +181,8 @@ class CLIResourceAdmission:
                         raise ResourceWaitTimeout(
                             "Chưa đo được RAM khả dụng để mở thêm Muse; giữ tiến độ và chờ thử lại."
                             if available is None else "Đang chờ lượt mở Muse; giữ tiến độ và chờ thử lại."
-                            if reason == "resource_fifo" else "Đang thiếu RAM để mở thêm Muse; giữ tiến độ và chờ thử lại.")
+                            if reason == "resource_fifo" else "Đang thiếu RAM để mở thêm Muse; giữ tiến độ và chờ thử lại.",
+                            reason=reason)
                     if not logged_wait:
                         logger.info("CLI_RESOURCE_WAIT run_id=%s reason=%s available_bytes=%s reserved_growth_bytes=%d child_budget_bytes=%d headroom_bytes=%d active_children=%d",
                             run_id, reason,

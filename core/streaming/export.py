@@ -103,15 +103,16 @@ class HQExporter:
         publish_callback: Optional[Any] = None,
         caption_style: Optional[Dict[str, Any]] = None,
         source_screen_texts: Optional[List[Dict[str, Any]]] = None,
+        prefix_only: bool = False,
     ) -> Dict[str, Any]:
         with tempfile.TemporaryDirectory(prefix=f"hq_export_{task_id}_", dir=settings.TEMP_DIR) as temp_dir:
             return self._export(
                 task_id, Path(video_path), segments, total_duration, Path(temp_dir),
-                mask_chinese, progress_callback, cancel_check, screen_texts, publish_callback, caption_style, source_screen_texts,
+                mask_chinese, progress_callback, cancel_check, screen_texts, publish_callback, caption_style, source_screen_texts, prefix_only,
             )
 
     def _export(self, task_id, video_path, segments, total_duration, task_dir,
-                mask_chinese, progress_callback, cancel_check, screen_texts=None, publish_callback=None, caption_style=None, source_screen_texts=None):
+                mask_chinese, progress_callback, cancel_check, screen_texts=None, publish_callback=None, caption_style=None, source_screen_texts=None, prefix_only=False):
         caption_style = normalize_caption_style(caption_style)
         if not math.isfinite(total_duration) or total_duration <= 0:
             raise ValueError("Thời lượng video phải lớn hơn 0.")
@@ -138,7 +139,8 @@ class HQExporter:
             _report(None, "Đã dùng lại bản âm thanh đã kiểm tra; chỉ xuất lại hình và phụ đề...")
         else:
             master_audio, audio_metadata = self._mix_audio(
-                video_path, segments, total_duration, task_dir, _report, _check_cancel, cancel_check)
+                video_path, segments, total_duration, task_dir, _report, _check_cancel, cancel_check,
+                **({"prefix_only": True} if prefix_only else {}))
             pending_audio = prepare_audio_cache(audio_identity, master_audio, audio_metadata, task_dir, cancel_check)
         separation_engine, warnings = audio_metadata["separation_engine"], audio_metadata["warnings"]
 
@@ -184,6 +186,7 @@ class HQExporter:
             mask_chinese_sub=False,
             cancel_check=cancel_check,
             source_masks=caption_plan.get("source_masks"),
+            **({"duration_limit": total_duration} if prefix_only else {}),
         )
         _check_cancel()
         _report(None, "Đang kiểm tra hình ảnh, âm thanh và thời lượng video kết quả...")
@@ -212,11 +215,12 @@ class HQExporter:
             "warnings": warnings
         }
 
-    def _mix_audio(self, video_path, segments, total_duration, task_dir, report, check_cancel, cancel_check):
+    def _mix_audio(self, video_path, segments, total_duration, task_dir, report, check_cancel, cancel_check, prefix_only=False):
         report(None, "1/6 Trích xuất âm thanh gốc...")
         check_cancel()
         raw_audio = task_dir / "raw_audio.wav"
-        run_media(["ffmpeg", "-v", "error", "-nostdin", "-y", "-i", str(video_path), "-vn",
+        run_media(["ffmpeg", "-v", "error", "-nostdin", "-y", "-i", str(video_path),
+                   *(["-t", str(total_duration)] if prefix_only else []), "-vn",
                    "-acodec", "pcm_s16le", "-ar", "44100", "-ac", "2", "-rf64", "auto", str(raw_audio)], cancel_check)
 
         report(None, "2/6 Xử lý giọng gốc và âm thanh nền...")

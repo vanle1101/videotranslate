@@ -281,6 +281,7 @@ class SeekRequest(BaseModel):
 
 class ExportHQRequest(BaseModel):
     task_id: str
+    scope: Literal["full", "ready_prefix"] = "full"
     mask_chinese: Optional[bool] = True
     translate_screen_text: bool = True
 
@@ -670,6 +671,7 @@ def review_sidecar_payload(session):
 
 
 def session_output_details(session):
+    from core.streaming.partial_export import prefix_metadata
     gate = final_output_metadata(session.segments.values(), getattr(session, "review_summary", {}))
     if hasattr(session, "final_media_metadata"):
         gate.update(session.final_media_metadata())
@@ -678,11 +680,23 @@ def session_output_details(session):
             "review_url": "" if gate["final_output_blocked"] else getattr(session, "output_review_url", ""),
             "output_outdated": getattr(session, "caption_output_outdated", False),
             **gate,
+            **prefix_metadata(session),
             **review_result_details(session)}
 
 
 async def validate_live_output(session):
     """A still-open project must not keep a deleted/corrupt download link."""
+    partial = getattr(session, "partial_output", None)
+    if isinstance(partial, dict):
+        from core.streaming.session_store import _valid_output
+        from core.streaming.partial_export import ready_prefix
+        try:
+            name = partial["output_filename"]
+            matching = Path(name).name == name and partial["input_hash"] == ready_prefix(session, end_limit=partial["duration"])["input_hash"]
+            valid_partial = matching and await asyncio.to_thread(_valid_output, settings.OUTPUT_DIR / name, partial["duration"])
+            session._partial_validated_name = name if valid_partial else None
+        except (OSError, ValueError, KeyError, TypeError):
+            session._partial_validated_name = None
     name = getattr(session, "output_filename", "")
     if not name:
         return
@@ -723,7 +737,7 @@ async def validate_live_output(session):
     if message not in session.warnings:
         session.warnings.append(message)
     task = active_export_tasks.get(f"export_{session.task_id}")
-    if task and task.get("status") == "COMPLETED":
+    if task and task.get("status") == "COMPLETED" and task.get("scope") != "ready_prefix":
         task.update(status="FAILED", stage=message, progress=None, video_url="", output_filename="")
     persist_session(session)
     if task and task.get("status") == "FAILED" and task.get("stage") == message:
@@ -908,6 +922,8 @@ async def _list_tasks(request=None):
             **(source_metadata(owner) if owner is not None else {}),
             "parent_session_id": owner_id,
             "is_export": True,
+            "scope": exp.get("scope", "full"), "is_partial": exp.get("is_partial", False),
+            "partial_output": exp.get("partial_output"),
             "updated_at": exp.get("updated_at", exp.get("start_time", 0)),
             "status": exp.get("status", "RUNNING"),
             "progress_pct": exp.get("progress"),
@@ -1603,7 +1619,7 @@ async def update_caption_style(task_id: str, req: CaptionStyleRequest):
     session = get_streaming_session(task_id)
     if session is None:
         raise HTTPException(status_code=404, detail="Phiên dịch không còn tồn tại.")
-    if (session.is_running or getattr(session, "is_editing", False)
+    if (session.is_running or getattr(session, "is_editing", False) or getattr(session, "_stop_draining", False)
             or active_export_tasks.get(f"export_{task_id}", {}).get("status") in {"RUNNING", "CANCELLING"}):
         raise HTTPException(status_code=409, detail="Hãy chờ xử lý hoặc xuất video xong trước khi chỉnh phụ đề.")
     progress = session.get_progress()
@@ -1821,8 +1837,111 @@ async def start_export_hq(req: ExportHQRequest):
             "status_url": f"/api/streaming/export-hq/status/{req.task_id}"}
 
 
+async def _export_ready_prefix(req):
+    from copy import deepcopy
+    from core.streaming.partial_export import ready_prefix
+    session = get_streaming_session(req.task_id)
+    if session is None:
+        raise HTTPException(status_code=404, detail="Session not found")
+    export_id = f"export_{req.task_id}"
+    accepted = _accepted_export_owners.get(export_id)
+    if accepted is not None and not accepted.done() and accepted is not asyncio.current_task():
+        raise HTTPException(status_code=409, detail="Video này đang được xuất.")
+    owners = (getattr(session, "review_task", None), getattr(session, "export_task", None),
+              getattr(session, "auto_export_task", None), getattr(session, "start_task", None),
+              getattr(session, "worker_task", None), getattr(session, "_chunk_followup_task", None))
+    if (session.is_running or getattr(session, "is_editing", False)
+            or any(owner is not None and not owner.done() for owner in owners)
+            or active_export_tasks.get(export_id, {}).get("status") in {"RUNNING", "CANCELLING"}):
+        raise HTTPException(status_code=409, detail="Dừng tác vụ và chờ lưu xong trước khi xuất phần đã dịch.")
+    try:
+        if getattr(session, "_chunked_source_started", False):
+            from core.streaming.chunked_source import ensure_source_identity
+            ensure_source_identity(session)
+        prefix = ready_prefix(session)
+    except (OSError, ValueError, TypeError, KeyError) as error:
+        raise HTTPException(status_code=409, detail=str(error)) from None
+    style = deepcopy(getattr(session, "caption_style", {}))
+    token = uuid.uuid4().hex[:12]
+    output_task_id = f"{req.task_id}_partial_{token}"
+    record = {"task_id": export_id, "parent_session_id": req.task_id, "scope": "ready_prefix",
+        "is_partial": True, "start": 0., "end": prefix["end"], "duration": prefix["duration"],
+        "status": "RUNNING", "progress": None, "stage": "Đang xuất phần đầu đã dịch…",
+        "start_time": time.time(), "cancelled": False, "video_url": "", "output_filename": ""}
+    active_export_tasks[export_id] = record
+    session.export_task = asyncio.current_task()
+    loop = asyncio.get_running_loop()
+    worker = None
+    def cancelled():
+        return record["cancelled"]
+    def progress(percent, label):
+        # Validation/publication owns 100%, including for partial outputs.
+        record.update(progress=None if percent == 100 else percent, stage=label)
+    async def publish(rendered, final):
+        if cancelled() or ready_prefix(session)["input_hash"] != prefix["input_hash"]:
+            raise RuntimeError("Nguồn, lời thoại hoặc cấu hình đã đổi; chưa công bố bản xuất từng phần.")
+        old = getattr(session, "partial_output", None)
+        rendered.replace(final)
+        session.partial_output = {"output_filename": final.name, "input_hash": prefix["input_hash"],
+            "start": 0., "end": prefix["end"], "duration": prefix["duration"]}
+        try:
+            session.persist()
+        except BaseException:
+            session.partial_output = old
+            final.unlink(missing_ok=True)  # New unique file, never an older publication.
+            raise
+        session._partial_validated_name = final.name
+        record["published"] = True
+    def commit(rendered, final):
+        asyncio.run_coroutine_threadsafe(publish(rendered, final), loop).result()
+    try:
+        worker = asyncio.create_task(asyncio.to_thread(HQExporter().export,
+            task_id=output_task_id, video_path=session.video_path, segments=prefix["segments"],
+            total_duration=prefix["duration"], prefix_only=True, mask_chinese=False,
+            screen_texts=prefix["screen_texts"] if req.translate_screen_text else [],
+            source_screen_texts=prefix["screen_texts"], caption_style=style,
+            progress_callback=progress, cancel_check=cancelled, publish_callback=commit))
+        try:
+            result = await asyncio.shield(worker)
+        except asyncio.CancelledError:
+            if not record.get("published"):
+                raise
+            while not worker.done():
+                try:
+                    await asyncio.shield(worker)
+                except asyncio.CancelledError:
+                    continue
+            result = worker.result()
+        from core.streaming.partial_export import prefix_metadata
+        partial = prefix_metadata(session)["partial_output"]
+        record.update(status="COMPLETED", progress=100, partial_output=partial,
+            video_url=partial["output_video_url"], output_filename=result["output_filename"],
+            updated_at=time.time(), stage="Đã xuất phần đầu đã dịch; toàn video chưa được xác nhận hoàn tất.")
+        await broadcast_session_event(req.task_id, "partial_result_ready", {"partial_output": partial,
+            "scope": "ready_prefix", "is_partial": True})
+        return {"status": "ok", "export_id": export_id, "scope": "ready_prefix", "partial_output": partial}
+    except asyncio.CancelledError:
+        record.update(cancelled=True, status="CANCELLING")
+        while worker is not None and not worker.done():
+            try:
+                await asyncio.shield(worker)
+            except asyncio.CancelledError:
+                continue
+            except Exception:
+                break
+        record.update(status="CANCELLED", stage="Đã hủy xuất từng phần", updated_at=time.time())
+        raise
+    except Exception as error:
+        record.update(status="CANCELLED" if cancelled() else "FAILED", stage=str(error), updated_at=time.time())
+        raise HTTPException(status_code=409 if cancelled() else 500, detail=str(error)) from None
+    finally:
+        session.export_task = None
+
+
 @app.post("/api/streaming/export-hq")
 async def export_hq(req: ExportHQRequest):
+    if req.scope == "ready_prefix":
+        return await _export_ready_prefix(req)
     session = get_streaming_session(req.task_id)
     lease = None
     if session is not None and session.is_running:
@@ -2093,6 +2212,12 @@ async def get_export_hq_status(task_id: str):
     if export_id in active_export_tasks:
         from core.streaming.progress_eta import export_eta
         task = active_export_tasks[export_id]
+        if task.get("scope") == "ready_prefix" and task.get("status") == "COMPLETED" and session is not None:
+            from core.streaming.partial_export import prefix_metadata
+            current_partial = prefix_metadata(session)["partial_output"]
+            if current_partial is None:
+                return {**task, "partial_output": None, "video_url": "", "output_filename": "",
+                        "output_outdated": True}
         task.update(export_eta(task.get("_eta_expected_seconds"),
             time.monotonic() - task.get("_eta_started_at", time.monotonic()), task.get("status")))
         return task

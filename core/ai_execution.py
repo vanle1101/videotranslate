@@ -336,7 +336,7 @@ class AIExecutionLayer:
         base = min(self.policy.retry_cap, self.policy.retry_base * 2 ** retry_index)
         return min(self.policy.retry_cap, max(0, base * (1 + self.policy.retry_jitter * (2 * random.random() - 1))))
 
-    def execute(self, operation: Callable[[int], str], *, identity: Mapping[str, Any],
+    def execute(self, operation: Optional[Callable[[int], str]], *, identity: Mapping[str, Any],
                 max_retries: int = 0, cancel_check=None, run_id: str = "unscoped",
                 retryable: Callable[[Exception], bool] = lambda error: False,
                 wait_retry: Optional[Callable[[float], None]] = None,
@@ -344,7 +344,17 @@ class AIExecutionLayer:
                 validate: Optional[Callable[[str], Any]] = None,
                 use_cache: bool = True,
                 on_cache_hit: Optional[Callable[[], None]] = None,
-                cache_allowed: Optional[Callable[[str], bool]] = None) -> str:
+                cache_allowed: Optional[Callable[[str], bool]] = None,
+                operation_with_request_start: Optional[Callable[[int, Callable[[], None]], str]] = None) -> str:
+        """Execute admitted work, counting transports rather than local waits.
+
+        Legacy operations begin their transport on entry. Adapters with further
+        local admission use operation_with_request_start and call its idempotent
+        marker only when the actual transport starts. An unstarted failure must
+        not consume transport retries or alter the provider's failure circuit.
+        """
+        if not callable(operation_with_request_start) and not callable(operation):
+            raise ValueError("An AI operation is required")
         self._cancel(cancel_check)
         max_retries = max(0, min(int(max_retries), 5))
         key = response_cache_key(identity)
@@ -379,18 +389,36 @@ class AIExecutionLayer:
             for attempt in range(max_retries + 1):
                 self._cancel(cancel_check)
                 self._check_circuit()
-                with self._condition:
-                    self._requests += 1
-                    self._count(run_id, "requests")
+                attempt_state = {"started": False, "closed": False}
+                def mark_started(state=attempt_state, attempt_number=attempt + 1):
+                    with self._condition:
+                        if state["started"] or state["closed"]:
+                            return
+                        state["started"] = True
+                        self._requests += 1
+                        self._count(run_id, "requests")
+                        if attempt_number > 1:
+                            self._retries += 1
+                            self._count(run_id, "retry_requests")
                 try:
-                    result = operation(attempt + 1)
+                    try:
+                        if operation_with_request_start is None:
+                            mark_started()
+                            result = operation(attempt + 1)
+                        else:
+                            result = operation_with_request_start(attempt + 1, mark_started)
+                    finally:
+                        with self._condition:
+                            attempt_state["closed"] = True
                     self._cancel(cancel_check)
+                    if not attempt_state["started"]:
+                        raise AIExecutionError("AI transport returned without a request-start acknowledgement")
                     if not isinstance(result, str) or not result.strip():
                         raise ValueError("AI response is empty")
                     if validate is not None and validate(result) is False:
                         raise ValueError("AI response did not pass validation")
                 except Exception as error:
-                    if not retryable(error):
+                    if not attempt_state["started"] or not retryable(error):
                         raise
                     if (getattr(error, "defer_retry", False) is True
                             and getattr(error, "code", None) == "provider_rate_limited"):
@@ -406,9 +434,6 @@ class AIExecutionLayer:
                     # A breaker opened on this failure: do not spin through
                     # retries or sleep for the whole cooldown in this caller.
                     self._check_circuit()
-                    with self._condition:
-                        self._retries += 1
-                        self._count(run_id, "retry_requests")
                     delay = self.retry_delay(attempt)
                     retry_after = getattr(error, "retry_after", None)
                     if isinstance(retry_after, (int, float)) and math.isfinite(retry_after):

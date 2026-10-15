@@ -39,13 +39,14 @@ test('durable retry exposes actual cause and countdown separately from measured 
   const ui = studio(); await ui.start(); const socket = ui.sockets.at(-1);
   socket.receive({type:'progress',status:'RUNNING',phase:'retry',progress_pct:null,
     retry_pending_count:2,retry_next_attempt_at:Date.now()/1000+300,
-    retry_error_codes:['provider_timeout','tts_empty_audio','asr_timeout','asr_failed'],eta_scope:'final',eta_seconds:30});
+    retry_error_codes:['provider_timeout','tts_empty_audio','asr_timeout','asr_failed','local_memory_pressure'],eta_scope:'final',eta_seconds:30});
   assert.equal(ui.el('task-status-label').textContent,'Chờ thử lại');
   assert.equal(ui.el('task-phase-label').textContent,'Phục hồi lỗi dịch vụ');
   assert.match(ui.el('task-error-summary').textContent,/AI phản hồi quá thời gian \(provider_timeout\)/);
   assert.match(ui.el('task-error-summary').textContent,/tts_empty_audio/);
   assert.match(ui.el('task-error-summary').textContent,/Đối chiếu âm thanh quá thời gian \(asr_timeout\)/);
   assert.match(ui.el('task-error-summary').textContent,/Bộ nhận giọng tại máy đã dừng do lỗi \(asr_failed\)/);
+  assert.match(ui.el('task-error-summary').textContent,/Máy đang thiếu RAM để mở Muse \(local_memory_pressure\)/);
   assert.equal(ui.el('task-error-summary').classList.contains('hidden'),false);
   assert.match(ui.el('task-retry-notice').textContent,/2 phần chờ thử lại.*sau khoảng.*chưa phải thời gian có MP4/);
   assert.equal(ui.el('task-progress-track').dataset.indeterminate,'true');
@@ -2304,6 +2305,51 @@ test('reopening export cannot create a duplicate export', async () => {
   ui.replies.set('/api/streaming/export-hq/status/fixture',{status:'COMPLETED',video_url:'/api/outputs/out.mp4',output_filename:'out.mp4'});
   await ui.tickIntervals(1000);
   await exporting;
+});
+
+test('partial export is explicit, keeps full gates and downloads only the labelled prefix', async () => {
+  const ui = studio(); await ui.start();
+  ui.sockets.at(-1).receive({type:'progress',status:'STOPPED',phase:'stopped',translation_mode:'full',
+    final_output_blocked:true,final_media_blocked:true,total_seconds:300,
+    partial_export_available:true,partial_available_seconds:20,partial_output:null});
+  assert.equal(ui.el('btn-export-hq').disabled,true);
+  assert.equal(ui.el('btn-export-partial').disabled,false);
+  await ui.el('btn-export-partial').click();
+  assert.match(ui.el('export-scope-summary').textContent,/0:00–0:20 \/ 5:00/);
+  const exporting = ui.el('btn-confirm-export').click(); await ui.flush();
+  const request = ui.requests.find(req=>req.url==='/api/streaming/export-hq/start');
+  assert.equal(JSON.parse(request.options.body).scope,'ready_prefix');
+  assert.equal(ui.el('btn-export-partial').disabled,true);
+  const partial = {scope:'ready_prefix',start:0,end:20,source_duration:300,
+    output_filename:'partial.mp4',output_video_url:'/api/outputs/partial.mp4'};
+  ui.replies.set('/api/streaming/export-hq/status/fixture',{status:'COMPLETED',scope:'ready_prefix',
+    video_url:partial.output_video_url,output_filename:partial.output_filename,partial_output:partial});
+  await ui.tickIntervals(1000); await exporting;
+  assert.equal(ui.el('btn-export-hq').disabled,true);
+  assert.equal(ui.el('btn-save-result').disabled,true);
+  assert.equal(ui.el('partial-result').classList.contains('hidden'),false);
+  assert.match(ui.el('partial-result-status').textContent,/Chưa phải video đầy đủ/);
+  await ui.el('btn-preview-partial').click();
+  assert.match(ui.el('result-preview-title').textContent,/Bản một phần/);
+  assert.equal(ui.el('btn-save-preview-result').textContent,'Tải bản một phần');
+  assert.match(ui.el('result-preview-video').src,/partial.mp4$/);
+  ui.replies.set('/api/tasks',{tasks:[{task_id:'fixture',status:'STOPPED',partial_output:null,partial_export_available:false}]});
+  await ui.el('btn-refresh-tasks').click();
+  assert.equal(ui.el('partial-result').classList.contains('hidden'),true);
+});
+
+test('partial-result event never marks the full job complete and survives history restoration', async () => {
+  const ui = studio(); await ui.start();
+  const partial = {scope:'ready_prefix',end:12,source_duration:300,output_video_url:'/api/outputs/partial.mp4'};
+  ui.sockets.at(-1).receive({type:'progress',status:'STOPPED',final_output_blocked:true});
+  ui.sockets.at(-1).receive({type:'partial_result_ready',partial_output:partial});
+  assert.equal(ui.el('task-progress').dataset.status,'STOPPED');
+  assert.equal(ui.el('btn-save-result').disabled,true);
+  ui.replies.set('/api/streaming/old',{...recoverySnapshot(),partial_output:partial,
+    progress:{...recoverySnapshot().progress,status:'STOPPED',final_output_blocked:true,partial_output:partial}});
+  await ui.window.studioAttachTask('old');
+  assert.equal(ui.el('partial-result').classList.contains('hidden'),false);
+  assert.match(ui.el('partial-result-status').textContent,/0:00–0:12 \/ 5:00/);
 });
 
 test('stop releases decoded media but saved speech and transcript remain playable', async () => {

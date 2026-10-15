@@ -108,6 +108,7 @@ class VideoComposer:
         mask_chinese_sub: bool = False,
         cancel_check=None,
         source_masks=None,
+        duration_limit=None,
     ) -> Path:
         """
         Merges video, ducked Vietnamese audio, and burns ASS subtitles.
@@ -142,6 +143,11 @@ class VideoComposer:
             "-movflags", "+faststart",
             str(output_path)
         ]
+        if duration_limit is not None:
+            import math
+            if not math.isfinite(duration_limit) or duration_limit <= 0:
+                raise ValueError("Invalid explicit video range")
+            cmd[-1:-1] = ["-t", str(duration_limit)]
 
         print(f"[*] Running FFmpeg render...")
         try:

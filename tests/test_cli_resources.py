@@ -218,7 +218,9 @@ def test_transport_wait_preserves_provider_timeout_and_timeout_is_queue_error(mo
     operation.assert_not_called()
 
 
-def test_local_pressure_does_not_open_provider_circuit_or_spin_retries(monkeypatch, tmp_path):
+@pytest.mark.parametrize("reason,code", [("ram_headroom", "local_memory_pressure"),
+    ("memory_unknown", "local_memory_unknown"), ("resource_fifo", "local_resource_queue")])
+def test_local_pressure_does_not_open_provider_circuit_or_spin_retries(monkeypatch, tmp_path, caplog, reason, code):
     from core.engines.translation import opencode_client as oc
     from core.ai_execution import AIExecutionLayer, AIExecutionPolicy
     layer = AIExecutionLayer(AIExecutionPolicy(retry_jitter=0), cache_root=tmp_path)
@@ -228,14 +230,20 @@ def test_local_pressure_does_not_open_provider_circuit_or_spin_retries(monkeypat
     class Exhausted:
         @contextmanager
         def admit(self, **kwargs):
-            raise ResourceWaitTimeout("RAM admission timed out")
+            raise ResourceWaitTimeout("RAM admission timed out", reason=reason)
             yield
     monkeypatch.setattr(oc, "opencode_resources", Exhausted())
     spawn = Mock(side_effect=AssertionError("Must not spawn under resource pressure"))
     monkeypatch.setattr(oc.subprocess, "Popen", spawn)
-    with pytest.raises(oc.OpenCodeRequestError) as caught:
+    with caplog.at_level("INFO", logger="ai"), pytest.raises(oc.OpenCodeRequestError) as caught:
         client.translate("offline-resource-test", use_cache=False)
-    assert caught.value.code == "provider_queue_timeout" and caught.value.retryable
+    assert caught.value.code == code and caught.value.retryable
+    from core.review_retry import failure_descriptor
+    assert failure_descriptor(caught.value, [{"id": 0}])["code"] == code
+    assert "PROVIDER_FAILED" not in caplog.text
+    assert "PROVIDER_REQUEST" not in caplog.text
+    assert "AI_ADMISSION_FAILED" in caplog.text
+    assert layer.snapshot()["requests"] == 0
     assert layer.snapshot()["consecutive_failures"] == 0
     assert layer.snapshot()["retry_requests"] == 0
     assert layer.snapshot()["active_requests"] == 0

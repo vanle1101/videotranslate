@@ -19,7 +19,8 @@ AUTO_INTENTS = frozenset({"active", "retry_pending", "shutdown"})
 _TRANSIENT = frozenset({"provider_timeout", "provider_transport", "provider_rate_limited", "provider_server",
                         "provider_queue_full", "provider_queue_timeout", "provider_circuit_open",
                         "tts_timeout", "tts_transport", "tts_rate_limited", "tts_empty_audio", "tts_http_error",
-                        "asr_timeout", "asr_failed"})
+                        "asr_timeout", "asr_failed",
+                        "local_memory_pressure", "local_memory_unknown", "local_resource_queue"})
 _TERMINAL = frozenset({"provider_authentication", "provider_model", "provider_rejected", "provider_configuration",
                        "provider_cancelled", "invalid_response", "invalid_content", "invalid_type", "missing_field",
                        "TIMING_CONFLICT"})

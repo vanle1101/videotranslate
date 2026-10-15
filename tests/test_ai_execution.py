@@ -8,7 +8,7 @@ from pathlib import Path
 import pytest
 
 from core.ai_execution import (
-    AICircuitOpenError, AIExecutionCancelledError, AIExecutionLayer,
+    AICircuitOpenError, AIExecutionCancelledError, AIExecutionError, AIExecutionLayer,
     AIExecutionPolicy, AIQueueFullError, AIQueueTimeoutError,
     ValidatedResponseCache, response_cache_key,
 )
@@ -282,3 +282,73 @@ def test_cancel_backoff_does_not_retry():
                       max_retries=2, retryable=lambda error: isinstance(error, TimeoutError),
                       wait_retry=lambda _: cancelled.set(), cancel_check=cancelled.is_set)
     assert layer.snapshot()["requests"] == 1 and layer.snapshot()["active_requests"] == 0
+    assert layer.snapshot()["retry_requests"] == 0
+
+
+def test_local_admission_failure_never_counts_transport_or_uses_its_retries():
+    layer = AIExecutionLayer(AIExecutionPolicy(circuit_failures=1))
+    markers = []
+    def denied(attempt, started):
+        markers.append(started)
+        assert layer.snapshot("video")["requests"] == 0
+        raise TimeoutError("local memory wait")
+    with pytest.raises(TimeoutError):
+        layer.execute(None, operation_with_request_start=denied, identity=IDENTITY, run_id="video",
+                      max_retries=3, retryable=lambda error: True)
+    markers[0]()  # An abandoned callback cannot manufacture a later request.
+    assert len(markers) == 1
+    for scope in [None, "video"]:
+        snapshot = layer.snapshot(scope)
+        assert snapshot["requests"] == snapshot["retry_requests"] == snapshot["consecutive_failures"] == 0
+        assert snapshot["active_requests"] == snapshot["queued_requests"] == 0
+
+
+def test_started_transport_counts_once_and_local_denial_of_retry_is_not_a_request():
+    layer = AIExecutionLayer()
+    calls, markers = [], []
+    def transport(attempt, started):
+        calls.append(attempt)
+        markers.append(started)
+        if attempt == 1:
+            started(); started()
+            raise TimeoutError("provider timeout")
+        assert layer.snapshot()["retry_requests"] == 0
+        raise AIQueueTimeoutError("local admission")
+    with pytest.raises(AIQueueTimeoutError):
+        layer.execute(None, operation_with_request_start=transport, identity=IDENTITY, run_id="video",
+                      max_retries=3, retryable=lambda error: True, wait_retry=lambda seconds: None)
+    for marker in markers:
+        marker()
+    assert calls == [1, 2]
+    assert layer.snapshot()["requests"] == layer.snapshot("video")["requests"] == 1
+    assert layer.snapshot()["retry_requests"] == layer.snapshot("video")["retry_requests"] == 0
+    assert layer.snapshot()["consecutive_failures"] == 1
+
+
+def test_started_retry_counts_and_successful_cache_reuse_skips_local_admission(tmp_path):
+    layer = AIExecutionLayer(cache_root=tmp_path)
+    markers = []
+    def transport(attempt, started):
+        # A previous attempt's callback is scoped to its closed attempt.
+        for old in markers:
+            old()
+        assert layer.snapshot()["requests"] == attempt - 1
+        started(); started(); markers.append(started)
+        if attempt == 1:
+            raise TimeoutError("provider")
+        return '{"text":"actual"}'
+    assert layer.execute(None, operation_with_request_start=transport, identity=IDENTITY, validate=valid,
+        max_retries=1, retryable=lambda error: True, wait_retry=lambda seconds: None) == '{"text":"actual"}'
+    assert layer.snapshot()["requests"] == 2 and layer.snapshot()["retry_requests"] == 1
+    assert layer.execute(None, operation_with_request_start=lambda *args: pytest.fail("cache hit"),
+                         identity=IDENTITY, validate=valid) == '{"text":"actual"}'
+    assert layer.snapshot()["requests"] == 2 and layer.snapshot()["cache_hits"] == 1
+
+
+def test_unacknowledged_transport_cannot_publish_or_cache_a_success(tmp_path):
+    layer = AIExecutionLayer(cache_root=tmp_path)
+    with pytest.raises(AIExecutionError, match="request-start"):
+        layer.execute(None, operation_with_request_start=lambda attempt, started: '{"text":"unstarted"}',
+                      identity=IDENTITY, validate=valid, retryable=lambda error: True, max_retries=3)
+    assert not list(tmp_path.iterdir())
+    assert layer.snapshot()["requests"] == layer.snapshot()["consecutive_failures"] == 0

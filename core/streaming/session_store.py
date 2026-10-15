@@ -84,7 +84,7 @@ SESSION_FIELDS = frozenset((
     " _chunked_source_identity _visual_context_summary"
     " _chunk_jobs _visual_scanned_seconds _legacy_visual_prefix _parallel_chunk_planning"
     " _source_file_signature _processing_signature"
-    " _retry_schedule _restart_intent shared_glossary"
+    " _retry_schedule _restart_intent shared_glossary partial_output"
 ).split())
 PATH_FIELDS = ("video_path", "ref_audio", "raw_audio_16k", "bgm_audio_path")
 META_FIELDS = frozenset((
@@ -103,7 +103,7 @@ META_FIELDS = frozenset((
     "mode input_duration output_duration sample_rate channels elapsed_seconds rtf "
     "diagnostic audio_evidence audio_consensus audio_audit_status review_gate_revision missing_translation_recovery target_orthography"
     " state attempts input_hash error_code updated_at focus_ids"
-    " scope_id confirmation_id code required_seconds available_seconds max_speed remedy"
+    " scope_id confirmation_id code required_seconds available_seconds max_speed remedy output_filename"
     " speaker_evidence speaker_confirmation utterance_id utterance_evidence source_asr_row_id source_asr_start source_asr_end source_piece_index source_piece_count"
 ).split())
 DIAGNOSTIC_STAGES = frozenset((
@@ -658,6 +658,15 @@ def _validate_project(data, task_id):
     fields, rows = data["session"], data["segments"]
     if not isinstance(fields, dict) or set(fields) - (SESSION_FIELDS | set(PATH_FIELDS) | {"source_url", "output_filename", "review_filename", "last_runtime_error"}):
         raise ValueError("Cấu hình dự án không hợp lệ.")
+    partial = fields.get("partial_output")
+    if partial is not None:
+        if (not isinstance(partial, dict) or set(partial) != {"output_filename", "input_hash", "start", "end", "duration"}
+                or not isinstance(partial.get("output_filename"), str)
+                or not re.fullmatch(rf"douyin_translated_{re.escape(task_id)}_partial_[a-f0-9]{{12}}_hq\.mp4", partial["output_filename"])
+                or not isinstance(partial.get("input_hash"), str) or not re.fullmatch(r"[a-f0-9]{64}", partial["input_hash"])
+                or partial.get("start") != 0 or not _finite(partial.get("duration"), .000001)
+                or partial.get("end") != partial["duration"]):
+            raise ValueError("Thông tin bản xuất từng phần không hợp lệ.")
     from core.streaming.retry_schedule import validate_schedule, restart_intent
     validate_schedule(fields.get("_retry_schedule", []))
     restart_intent(fields, data["state"])

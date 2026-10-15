@@ -1,0 +1,44 @@
+{
+  "export": {
+    "task_id": "5bea8fe5",
+    "file": "D:\\New folder\\ALL IN ONE\\MMO\\Dịch Video\\workspace\\outputs\\douyin_translated_5bea8fe5_partial_c24219fe8252_hq.mp4",
+    "bytes": 22236410,
+    "seconds": 116.9,
+    "elapsed_seconds": 75.453,
+    "full_decode": true,
+    "production_player": {
+      "duration": 116.917,
+      "time": 0.350644,
+      "ready": 4,
+      "width": 360,
+      "error": null
+    },
+    "reopen": true,
+    "full_gates_retained": true,
+    "dialogue_unchanged": true,
+    "alerts": [],
+    "backend_stopped": true
+  },
+  "fresh_backend_restart": {
+    "task_id": "5bea8fe5",
+    "file": "D:\\New folder\\ALL IN ONE\\MMO\\Dịch Video\\workspace\\outputs\\douyin_translated_5bea8fe5_partial_c24219fe8252_hq.mp4",
+    "bytes": 22236410,
+    "seconds": 116.9,
+    "elapsed_seconds": 25.375,
+    "full_decode": true,
+    "production_player": {
+      "duration": 116.917,
+      "time": 0.400994,
+      "ready": 4,
+      "width": 360,
+      "error": null
+    },
+    "reopen": true,
+    "full_gates_retained": true,
+    "dialogue_unchanged": true,
+    "alerts": [],
+    "backend_stopped": true
+  },
+  "provider_requests_in_this_acceptance": 0,
+  "scope": "Retained real Muse/Edge speech, explicit partial MP4 only; not full long-job completion."
+}

@@ -845,6 +845,62 @@ def lifecycle_fields(caplog):
             for record in caplog.records if record.name == "ai"]
 
 
+def test_real_transport_marker_excludes_resource_wait_from_provider_time(isolated, monkeypatch, caplog):
+    from contextlib import contextmanager
+    clock = [0.0]
+    monkeypatch.setattr(oc.time, "monotonic", lambda: clock[0])
+    client = oc.OpenCodeZenClient(api_key="private-key")
+    class Admission:
+        @contextmanager
+        def admit(self, **kwargs):
+            assert client.execution_layer.snapshot()["requests"] == 0
+            assert not lifecycle_fields(caplog)
+            clock[0] += 30
+            yield Mock()
+    monkeypatch.setattr(oc, "opencode_resources", Admission())
+    monkeypatch.setattr(oc.subprocess, "Popen", Mock(return_value=make_process()))
+    def communicate(*args):
+        assert client.execution_layer.snapshot()["requests"] == 1
+        assert [event["event"] for event in lifecycle_fields(caplog)] == ["PROVIDER_REQUEST"]
+        clock[0] += 2
+        return json.dumps({"type":"text", "part":{"text":"result"}}), ""
+    monkeypatch.setattr(oc, "_communicate", communicate)
+    with caplog.at_level(logging.INFO, logger="ai"):
+        assert client.translate("private-prompt") == "result"
+    request, completed = lifecycle_fields(caplog)
+    assert request["attempt"] == "1" and request["admission_wait_ms"] == "30000"
+    assert completed["elapsed_ms"] == "2000" and completed["total_elapsed_ms"] == "32000"
+    assert "private-" not in caplog.text
+
+
+def test_resource_denial_of_retry_never_logs_or_counts_a_second_provider_request(isolated, monkeypatch, caplog):
+    from contextlib import contextmanager
+    client = oc.OpenCodeZenClient(api_key="private-key", max_retries=2)
+    admissions = []
+    class Admission:
+        @contextmanager
+        def admit(self, **kwargs):
+            admissions.append(1)
+            if len(admissions) > 1:
+                raise oc.ResourceWaitTimeout("private-local", reason="ram_headroom")
+            yield Mock()
+    monkeypatch.setattr(oc, "opencode_resources", Admission())
+    spawn = Mock(return_value=make_process())
+    monkeypatch.setattr(oc.subprocess, "Popen", spawn)
+    monkeypatch.setattr(oc, "_communicate", Mock(side_effect=oc.OpenCodeTimeoutError("private-timeout")))
+    monkeypatch.setattr(oc, "_retry_delay", lambda *args: None)
+    with caplog.at_level(logging.INFO, logger="ai"), pytest.raises(oc.OpenCodeRequestError) as caught:
+        client.translate("private-prompt")
+    assert caught.value.code == "local_memory_pressure"
+    assert [event["event"] for event in lifecycle_fields(caplog)] == [
+        "PROVIDER_REQUEST", "PROVIDER_FAILED", "AI_ADMISSION_FAILED"]
+    snapshot = client.execution_layer.snapshot()
+    assert snapshot["requests"] == 1 and snapshot["retry_requests"] == 0
+    assert snapshot["consecutive_failures"] == 1 and snapshot["active_requests"] == 0
+    assert len(admissions) == 2 and spawn.call_count == 1
+    assert "private-" not in caplog.text
+
+
 def test_provider_attempt_timing_excludes_admission_wait(isolated, monkeypatch, caplog):
     clock = [0.0]
     monkeypatch.setattr(oc.time, "monotonic", lambda: clock[0])
