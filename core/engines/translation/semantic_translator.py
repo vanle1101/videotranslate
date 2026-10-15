@@ -13,6 +13,7 @@ from core.translation_context import (
     focus_identity,
 )
 from core.semantic_segments import SEMANTIC_TRANSLATION_POLICY, semantic_context
+from core.vietnamese_output import has_foreign_letters
 from core.structured_response import (
     StructuredResponseError, parse_object, validate_schema, schema_attempts, retain_diagnostic,
 )
@@ -122,7 +123,7 @@ class PacingReviewRejected(RuntimeError):
     def __init__(self, message, *, candidate="", reason="", code="review_rejected"):
         super().__init__(message)
         self.feedback = {"rejected_candidate": str(candidate)[:2000], "reason": str(reason)[:1000]}
-        self.code = code if code in {"review_rejected", "uncertain", "semantic_mismatch", "unnatural", "invalid_review", "duplicate"} else "review_rejected"
+        self.code = code if code in {"review_rejected", "uncertain", "semantic_mismatch", "unnatural", "invalid_review", "invalid_translation", "duplicate"} else "review_rejected"
 
 
 def pacing_candidate_key(text):
@@ -231,7 +232,7 @@ def _fluency_evidence_context(rows, *, target, draft, candidate):
             if line is None:
                 entry["status"] = ("missing_translation" if all(value is None or isinstance(value, str)
                                                               for value in values) else "invalid_translation")
-            elif not re.search(r"[\u3400-\u9fff\U00020000-\U0002fa1f]", line):
+            elif not has_foreign_letters(line):
                 line = " ".join(line.split())
                 if not positioned and line in {" ".join(str(draft).split()), " ".join(str(candidate).split())}:
                     entry["status"] = "focus_text_excluded"
@@ -273,7 +274,7 @@ def fluency_dialogue_context(rows, *, target, draft, candidate, positioned=False
         if not isinstance(line, str):
             continue
         line = " ".join(line.split())
-        if (not line or re.search(r"[\u3400-\u9fff]", line)
+        if (not line or has_foreign_letters(line)
                 or not focus and line in {" ".join(str(draft).split()), " ".join(str(candidate).split())}):
             continue
         candidates.append((index, line[:500]))
@@ -464,8 +465,8 @@ class SemanticTranslator(TranslationEngine):
             values = {field: item.get(field) for field in fields}
             if not all(self._nonempty_string(v) for v in values.values()):
                 raise self._translation_error("trả về bản dịch thiếu nội dung.")
-            if any(re.search(r"[\u3400-\u9fff]", value) for value in values.values()):
-                raise self._translation_error("trả về bản dịch còn chữ Trung chưa chuyển ngữ.")
+            if any(has_foreign_letters(value) for value in values.values()):
+                raise self._translation_error("trả về bản dịch còn chữ nước ngoài chưa chuyển sang lời Việt.")
             result[item_id] = {field: values[field].strip() for field in fields}
             if "needs_review" in item:
                 if not isinstance(item["needs_review"], bool):
@@ -678,7 +679,7 @@ class SemanticTranslator(TranslationEngine):
             with urllib.request.urlopen(req, timeout=5) as resp:
                 data = json.loads(resp.read().decode("utf-8"))
                 res = "".join([part[0] for part in data[0] if part and part[0]])
-                if res.strip() and not re.search(r"[\u3400-\u9fff]", res):
+                if res.strip() and not has_foreign_letters(res):
                     return res
         except Exception:
             pass
@@ -692,7 +693,7 @@ class SemanticTranslator(TranslationEngine):
             with urllib.request.urlopen(req, timeout=5) as resp:
                 data = json.loads(resp.read().decode("utf-8"))
                 trans = data.get("responseData", {}).get("translatedText", "")
-                if isinstance(trans, str) and trans.strip() and "MYMEMORY WARNING" not in trans and not re.search(r"[\u3400-\u9fff]", trans):
+                if isinstance(trans, str) and trans.strip() and "MYMEMORY WARNING" not in trans and not has_foreign_letters(trans):
                     return trans
         except Exception as e:
             print(f"[!] MyMemory fallback error: {e}")
@@ -925,6 +926,9 @@ Trả duy nhất JSON: {{"literal_vi":"...","natural_vi":"...","final_vi":"...",
             raise ValueError("Lời đọc cần kiểm định không hợp lệ.")
         candidate = {"final_vi": candidate_text.strip(), "needs_review": bool(needs_review),
                      "review_reason": str(review_reason or "")}
+        if has_foreign_letters(candidate["final_vi"]):
+            raise PacingReviewRejected("Lời đọc lịch sử còn chữ nước ngoài chưa chuyển sang lời Việt.",
+                candidate=candidate["final_vi"], code="invalid_translation")
         return self._verify_pacing_candidate(text_zh, current_vi, candidate, rolling_context,
             source_language=source_language, allow_review_draft=allow_review_draft)
 

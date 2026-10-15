@@ -1,0 +1,66 @@
+{
+  "observed_at": "2026-10-15T11:37:47",
+  "scope": "Actual parser reproduction and read-only retained manifests, not provider invocation",
+  "probes": [
+    {
+      "language": "ko",
+      "source": "안녕하세요",
+      "after_fix": "StructuredResponseError",
+      "before_fix": "accepted_as_vi (reproduced before editing)"
+    },
+    {
+      "language": "ja",
+      "source": "こんにちは",
+      "after_fix": "StructuredResponseError",
+      "before_fix": "accepted_as_vi (reproduced before editing)"
+    },
+    {
+      "language": "th",
+      "source": "สวัสดี",
+      "after_fix": "StructuredResponseError",
+      "before_fix": "accepted_as_vi (reproduced before editing)"
+    }
+  ],
+  "projects": [
+    {
+      "task_id": "5bea8fe5",
+      "rows": 75,
+      "foreign_script_rows": [],
+      "manifest_unchanged": true
+    },
+    {
+      "task_id": "76f5aa6b",
+      "rows": 193,
+      "foreign_script_rows": [],
+      "manifest_unchanged": true
+    },
+    {
+      "task_id": "38680e43",
+      "rows": 14,
+      "foreign_script_rows": [],
+      "manifest_unchanged": true
+    },
+    {
+      "task_id": "00b293c5",
+      "rows": 4,
+      "foreign_script_rows": [],
+      "manifest_unchanged": true
+    },
+    {
+      "task_id": "fdc6ca35",
+      "rows": 12,
+      "foreign_script_rows": [],
+      "manifest_unchanged": true
+    }
+  ],
+  "memory_bytes_total_available": [
+    16869351424,
+    1464197120
+  ],
+  "real_provider_requests": 0,
+  "new_mp4": false,
+  "limitations": [
+    "Latin-script foreign language requires semantic review; script guard is not language detection.",
+    "No fresh provider or UI export acceptance under current RAM pressure."
+  ]
+}

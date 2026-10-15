@@ -28,6 +28,7 @@ from core.engines.translation.gemini_client import GeminiClient, GeminiError, Ge
 from core.engines.translation.openrouter_client import OpenRouterFreeClient, OpenRouterClientError
 from core.engines.translation.opencode_client import OpenCodeZenClient, OpenCodeClientError
 from core.chinese_text import comparable_chinese
+from core.vietnamese_output import has_foreign_letters
 from core.media_process import run_media
 from core.screen_ocr import ScreenOCR
 from core.translation_context import VIETNAMESE_ADDRESS_POLICY, dialogue_context
@@ -106,7 +107,7 @@ def _capture_visual_revision():
     try:
         return [hashlib.sha256(Path(__file__).with_name(name).read_bytes()).hexdigest()
                 for name in ("video_intelligence.py", "screen_ocr.py", "chinese_text.py", "translation_context.py",
-                             "structured_response.py", "semantic_segments.py", "source_language.py")]
+                             "structured_response.py", "semantic_segments.py", "source_language.py", "vietnamese_output.py")]
     except OSError:
         return None
 
@@ -554,9 +555,13 @@ class VideoIntelligence:
             if confidence is not None and confidence < 0.60:
                 review = True
                 reason = reason or "Bộ dịch chưa chắc chắn nội dung nguồn."
-            # All-empty rows explicitly represent silence. Partial or Chinese
-            # translations must be reviewed and may never reach TTS.
-            if any(values.values()) and (not all(values.values()) or re.search(r"[\u3400-\u9fff]", final)):
+            # Editorial uncertainty may be exported as a draft; untranslated
+            # foreign-script speech is instead an invalid provider response.
+            if any(has_foreign_letters(values[field]) for field in ("literal_vi", "natural_vi", "final_vi")):
+                raise VideoIntelligenceError("Bản dịch còn chữ nước ngoài chưa chuyển sang lời Việt.")
+            # Partial translations require review; an empty row still needs
+            # the independent speech/silence checks below.
+            if any(values.values()) and not all(values.values()):
                 review = True
                 reason = reason or "Không đọc chắc chắn được lời thoại hoặc bản dịch tiếng Việt."
             original_text = cls._get(seg, "asr_text", "") or cls._get(seg, "text_zh", "")
@@ -594,7 +599,7 @@ class VideoIntelligence:
                 # The language model may classify/translate them, never place them.
                 if row["kind"] == "ignore":
                     continue
-                review = bool(source_screen.get("needs_review")) or row["needs_review"] or not text.strip() or bool(re.search(r"[\u3400-\u9fff]", text))
+                review = bool(source_screen.get("needs_review")) or row["needs_review"] or not text.strip() or has_foreign_letters(text)
                 reasons = [str(source_screen.get("review_reason") or "").strip(), reason.strip()]
                 source_text = cls._compact_text(source_screen.get("text_zh", ""))
                 spoken_candidates = []
@@ -652,7 +657,7 @@ class VideoIntelligence:
                 if any(not isinstance(row.get(k), str) or len(row[k]) > 2000 for k in ("text_zh", "text_vi")):
                     raise VideoIntelligenceError("Bộ dịch trả nội dung vùng chữ không hợp lệ.")
                 review = row["needs_review"] or vals[2]*vals[3] > .30 or vals[3] > .35
-                review = review or not row["text_zh"].strip() or not row["text_vi"].strip() or bool(re.search(r"[\u3400-\u9fff]", row["text_vi"]))
+                review = review or not row["text_zh"].strip() or not row["text_vi"].strip() or has_foreign_letters(row["text_vi"])
                 screens.append({"start":max(chunk_start,start),"end":min(chunk_end or end,end),
                                 "text_zh":row["text_zh"].strip(),"text_vi":row["text_vi"].strip(),"bbox":vals,
                                 "kind":row["kind"],"needs_review":bool(review),"review_reason":str(row.get("review_reason", ""))[:500] if review else ""})

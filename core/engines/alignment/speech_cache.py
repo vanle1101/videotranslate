@@ -78,6 +78,7 @@ def _code_revision():
              directory.parent / "translation" / "semantic_translator.py",
              directory.parent.parent / "translation_context.py",
              directory.parent.parent / "semantic_segments.py",
+             directory.parent.parent / "vietnamese_output.py",
              directory.parent / "translation" / "opencode_client.py",
              directory.parent / "translation" / "gemini_client.py",
              directory.parent / "translation" / "openrouter_client.py",

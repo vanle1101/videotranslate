@@ -335,10 +335,13 @@ def test_validation_preserves_fixed_segments_and_marks_uncertain_text():
     raw = response(seg)
     result = VideoIntelligence.validate_result(raw, [seg], 0, 10)
     assert result["segments"][4]["start"] == 3
-    for changes in ({"confidence": 0.4}, {"final_vi": "你来了"}, {"literal_vi": ""}, {"needs_review": True}):
+    for changes in ({"confidence": 0.4}, {"literal_vi": ""}, {"needs_review": True}):
         raw["segments"] = [row(seg, **changes)]
         checked = VideoIntelligence.validate_result(raw, [seg], 0, 10)["segments"][4]
         assert checked["needs_review"] and checked["review_reason"]
+    raw["segments"] = [row(seg, final_vi="你来了")]
+    with pytest.raises(VideoIntelligenceError, match="chữ nước ngoài"):
+        VideoIntelligence.validate_result(raw, [seg], 0, 10)
     raw["segments"] = [row(seg, text_zh="", literal_vi="", natural_vi="", final_vi="")]
     assert not VideoIntelligence.validate_result(raw, [seg], 0, 10)["segments"][4]["needs_review"]
 
