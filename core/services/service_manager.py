@@ -268,6 +268,8 @@ class ServiceManager:
         # Export workers run in threads. Signal cancellation before stopping the
         # event loop so their media subprocesses can exit and remove partial files.
         api = sys.modules.get("main")
+        from core.history_work import cancel_history_reads
+        cancel_history_reads()
         for task in list(getattr(api, "active_export_tasks", {}).values()):
             if task.get("status") in {"RUNNING", "CANCELLING"}:
                 task["cancelled"] = True

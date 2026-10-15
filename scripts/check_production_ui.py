@@ -424,7 +424,9 @@ def main():
             window = None
         service_manager.shutdown_all()
         gc.collect()
-        event("BACKEND_STOPPED", True)
+        stopped = service_manager.server_thread is None
+        event("BACKEND_STOPPED", stopped)
+        assert stopped, "Owned backend did not drain before shutdown returned"
 
 
 if __name__ == "__main__":

@@ -150,6 +150,8 @@ async def _start_restart_discovery():
     lease = acquire(settings.WORKSPACE_DIR)
     _workspace_lease = lease
     _backend_shutting_down = False
+    from core.history_work import reset_history_reads
+    reset_history_reads()
     try:
         _restart_discovery_task = _background_task(resume_interrupted_projects())
     except BaseException:
@@ -176,6 +178,8 @@ async def _stop_restart_discovery():
 
 
 async def _drain_workspace_runtime():
+    from core.history_work import cancel_history_reads
+    cancel_history_reads()
     sessions = list(active_streaming_sessions.values())
     for export in active_export_tasks.values():
         if export.get("status") in {"RUNNING", "CANCELLING"}:
@@ -851,7 +855,16 @@ def schedule_reviewed_export(task_id):
         session._review_export_owner = session.auto_export_task
 
 @app.get("/api/tasks")
-async def list_tasks():
+async def list_tasks(request: Request = None):
+    from core.history_work import HistoryReadCancelled
+    try:
+        return await _list_tasks(request)
+    except HistoryReadCancelled as error:
+        raise HTTPException(status_code=503, detail=str(error)) from None
+
+
+async def _list_tasks(request=None):
+    from core.history_work import read_history
     tasks = []
 
     # 1. Streaming Realtime Sessions
@@ -920,14 +933,14 @@ async def list_tasks():
             tasks.append(hist)
 
     existing = frozenset(task["task_id"] for task in tasks)
-    saved_sessions = await asyncio.to_thread(list_saved_sessions, excluded_task_ids=existing)
+    saved_sessions = await read_history(list_saved_sessions, excluded_task_ids=existing, request=request)
     for saved in saved_sessions:
         if saved["task_id"] not in existing:
             tasks.append({**saved, "saved": True, "task_type": "Phiên đã lưu",
                           "video_url": saved.get("output_video_url", ""),
                           "stage": saved.get("stage") or saved.get("missing_media", ""),
                           "can_pause": False, "can_resume": False, "can_stop": False})
-    videos = await asyncio.to_thread(attach_history_thumbnails, group_video_history(tasks), tasks)
+    videos = await read_history(attach_history_thumbnails, group_video_history(tasks), tasks, request=request)
     return {"tasks": tasks, "videos": videos}
 
 

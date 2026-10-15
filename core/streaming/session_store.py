@@ -22,6 +22,7 @@ from urllib.parse import quote, urlsplit, urlunsplit, parse_qsl, urlencode
 
 from config import settings
 from core.streaming.audio_cache import resolve_dub_timing
+from core.history_work import check_history_read, history_read_active
 from core.streaming.output_gate import final_output_metadata, final_media_metadata, preview_output_metadata, missing_speech_message
 
 VERSION = 1
@@ -406,6 +407,7 @@ def _validate_source_metadata(row):
 
 
 def _clean(value, *, depth=0):
+    check_history_read()
     if depth > 12:
         raise ValueError("Dữ liệu dự án lồng quá sâu.")
     if value is None or isinstance(value, bool):
@@ -840,6 +842,7 @@ def _validate_project(data, task_id):
 
 
 def _read(task_id):
+    check_history_read()
     path = _project_path(task_id)
     # Keep internal history reads from overlapping the atomic replace.  The
     # lock only covers the short open/read window; validation runs afterwards
@@ -854,6 +857,7 @@ def _read(task_id):
 
 
 def _exists(value):
+    check_history_read()
     try:
         return bool(value and Path(value).is_file() and Path(value).stat().st_size > 0)
     except OSError:
@@ -951,13 +955,14 @@ def _complete_mp4_container(path):
 
 
 def _probe_saved_output(path, expected_duration):
+    check_history_read()
     if not _complete_mp4_container(path):
         return False
     command = ["ffprobe", "-v", "error", "-protocol_whitelist", "file,pipe",
                "-probesize", "4194304", "-analyzeduration", "2000000", "-show_entries",
                "format=duration,format_name:stream=codec_type,width,height", "-of", "json", str(path)]
     flags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
-    result = subprocess.run(command, capture_output=True, timeout=4, creationflags=flags)
+    result = _run_output_probe(command, capture_output=True, timeout=4, creationflags=flags)
     if result.returncode or result.stderr.strip():
         return False
     data = json.loads(result.stdout)
@@ -976,14 +981,44 @@ def _probe_saved_output(path, expected_duration):
         command = ["ffmpeg", "-v", "error", "-xerror", "-nostdin", "-threads", "1",
                    "-protocol_whitelist", "file,pipe", "-ss", str(start), "-i", str(path),
                    "-t", "0.25", "-map", "0:v:0", "-map", "0:a:0", "-f", "null", "-"]
-        result = subprocess.run(command, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
+        result = _run_output_probe(command, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
                                 timeout=3, creationflags=flags)
         if result.returncode or result.stderr.strip():
             return False
     return True
 
 
+def _run_output_probe(command, *, timeout, **kwargs):
+    if not history_read_active():
+        return subprocess.run(command, timeout=timeout, **kwargs)
+    check_history_read()
+    if kwargs.pop("capture_output", False):
+        kwargs.update(stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    process = subprocess.Popen(command, **kwargs)
+    deadline = time.monotonic() + timeout
+    try:
+        while True:
+            check_history_read()
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise subprocess.TimeoutExpired(command, timeout)
+            try:
+                stdout, stderr = process.communicate(timeout=min(.1, remaining))
+                check_history_read()
+                return subprocess.CompletedProcess(command, process.returncode, stdout, stderr)
+            except subprocess.TimeoutExpired:
+                continue
+    finally:
+        if process.poll() is None:
+            process.kill()
+        process.communicate(timeout=2)
+        close_handle = getattr(getattr(process, "_handle", None), "Close", None)
+        if callable(close_handle):
+            close_handle()
+
+
 def _valid_output(path, expected_duration):
+    check_history_read()
     try:
         if not _finite(expected_duration) or expected_duration <= 0:
             return False
@@ -1162,6 +1197,7 @@ def list_restart_candidates(*, excluded_task_ids=()):
     if not root.exists():
         return candidates
     for path in root.glob("*.json"):
+        check_history_read()
         if path.stem in excluded or not ID_PATTERN.fullmatch(path.stem):
             continue
         try:
@@ -1188,6 +1224,7 @@ def list_saved_sessions(*, excluded_task_ids=()):
     if not root.exists():
         return result
     for path in root.glob("*.json"):
+        check_history_read()
         if path.stem in excluded or not ID_PATTERN.fullmatch(path.stem):
             continue
         try:
