@@ -274,6 +274,92 @@ def test_empty_supported_draft_recovery_is_bounded_across_resume(reviewed_sessio
         pipeline.active_streaming_sessions.pop(session.task_id, None)
 
 
+@pytest.mark.parametrize("code", ["asr_timeout", "asr_unavailable", "asr_failed"])
+@pytest.mark.parametrize("historical_stamp", [False, True])
+def test_restored_audio_evidence_failure_is_selected_for_resume_despite_old_stamp(
+        reviewed_session, monkeypatch, code, historical_stamp):
+    from core.streaming.session_store import restore_saved_session
+    session = reviewed_session
+    monkeypatch.setattr(settings, "LLM_PROVIDER", "opencode")
+    focus = source_scope_recovery_row(session)
+    focus.status, focus.failed_stage, focus.final_vi, focus.audio_path = "READY", None, "", None
+    focus.asr_text = focus.text_zh = "你好"
+    focus.needs_review = True
+    audit = {"status": "unresolved", "source_supported": False, "semantic_verified": False,
+             "review_gate_revision": AutomaticTranslationReviewer.REVIEW_GATE_REVISION,
+             "audio_consensus": False}
+    diagnostic = {"stage": "audio_evidence", "code": code,
+                  "run_id": session.task_id, "segment_ids": [focus.id]}
+    # The manifest contract retains diagnostic; audio_evidence_failures is
+    # request-local supplemental metadata and is intentionally not restored.
+    audit["diagnostic"] = diagnostic
+    audit["audio_evidence_failures"] = [diagnostic]
+    focus.verification = audit
+    if historical_stamp:
+        audit["missing_translation_recovery"] = AutomaticTranslationReviewer.missing_translation_recovery_identity(
+            focus, session.segments.values())
+    session.persist()
+    restored = restore_saved_session(session.task_id)
+    calls = []
+
+    def review(_reviewer, path, rows, screens, **options):
+        calls.append([row.id for row in rows])
+        assert [row.id for row in rows] == [focus.id]
+        row = rows[0]
+        # Successfully collected but disagreeing evidence must end this
+        # technical recovery, without fake translation or semantic approval.
+        completed = {"status": "unresolved", "source_supported": False, "semantic_verified": False,
+            "review_gate_revision": AutomaticTranslationReviewer.REVIEW_GATE_REVISION,
+            "audio_consensus": False, "audio_evidence": [
+                {"engine": "sensevoice", "text_zh": "你好", "start": row.start, "end": row.end},
+                {"engine": "faster-whisper-small", "text_zh": "再见", "start": row.start, "end": row.end}]}
+        completed["missing_translation_recovery"] = AutomaticTranslationReviewer.missing_translation_recovery_identity(
+            row, options["context_segments"])
+        return {"segments": {row.id: {**row.to_dict(), "verification": completed, "needs_review": True}},
+                "summary": {"checked": 1, "unresolved": 1}}
+
+    monkeypatch.setattr(AutomaticTranslationReviewer, "review", review)
+    try:
+        asyncio.run(restored._resume_pending_chunk_reviews())
+        assert calls == [[focus.id]]
+        recovered = restored.segments[focus.id]
+        assert recovered.final_vi == "" and recovered.needs_review
+        assert recovered.verification["status"] == "unresolved"
+        assert not recovered.verification["semantic_verified"]
+        asyncio.run(restored._resume_pending_chunk_reviews())
+        assert calls == [[focus.id]], "Completed ASR disagreement must not rerun on every Resume"
+    finally:
+        pipeline.active_streaming_sessions.pop(session.task_id, None)
+
+
+@pytest.mark.parametrize("kind", ["manual", "disagreement", "other_diagnostic", "source_supported"])
+def test_audio_recovery_selection_preserves_manual_and_completed_content_verdicts(
+        reviewed_session, monkeypatch, kind):
+    session = reviewed_session
+    monkeypatch.setattr(settings, "LLM_PROVIDER", "opencode")
+    focus = source_scope_recovery_row(session)
+    focus.status, focus.failed_stage = "READY", None
+    focus.asr_text = focus.text_zh = "你好"
+    focus.verification = {"status": "manual" if kind == "manual" else "unresolved",
+        "source_supported": kind == "source_supported", "semantic_verified": False,
+        "review_gate_revision": AutomaticTranslationReviewer.REVIEW_GATE_REVISION}
+    if kind == "disagreement":
+        focus.verification.update(audio_consensus=False, audio_evidence=[
+            {"engine": "sensevoice", "text_zh": "你好", "start": focus.start, "end": focus.end},
+            {"engine": "faster-whisper-small", "text_zh": "再见", "start": focus.start, "end": focus.end}])
+    if kind != "disagreement":
+        focus.verification["diagnostic"] = {"stage": "semantic_request" if kind == "other_diagnostic" else "audio_evidence",
+            "code": "asr_failed", "run_id": session.task_id, "segment_ids": [focus.id]}
+    before = deepcopy(focus.to_dict())
+
+    async def forbidden(**options):
+        raise AssertionError("Existing manual/content verdict cannot be treated as failed audio collection")
+
+    monkeypatch.setattr(session, "_review_translations", forbidden)
+    asyncio.run(session._resume_pending_chunk_reviews())
+    assert focus.to_dict() == before
+
+
 @pytest.mark.parametrize("failure", ["incomplete", "provider", "source_changed_during_review",
                                      "video_changed_during_review", "cancelled", "forged_stamp"])
 def test_interrupted_or_changed_review_cannot_publish_source_scope_stamp(reviewed_session, monkeypatch, failure):

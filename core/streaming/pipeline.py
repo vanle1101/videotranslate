@@ -1670,6 +1670,20 @@ class StreamingPipelineSession:
                 and audit.get("missing_translation_recovery") !=
                     AutomaticTranslationReviewer.missing_translation_recovery_identity(
                         row, self.segments.values()))
+        def needs_audio_evidence_recovery(row):
+            # Historical reviews could stamp a negative missing-translation
+            # result even though a local decoder failed. That stamp must not
+            # suppress a new Resume attempt to collect the missing evidence.
+            # Actual dual-ASR disagreement is a content verdict, not a retry.
+            audit = row.verification or {}
+            if audit.get("status") != "unresolved" or audit.get("source_supported") is True:
+                return False
+            failures = audit.get("audio_evidence_failures", [])
+            diagnostics = list(failures) if isinstance(failures, list) else []
+            diagnostics.append(audit.get("diagnostic"))
+            return any(isinstance(item, dict) and item.get("stage") == "audio_evidence"
+                       and item.get("code") in {"asr_timeout", "asr_unavailable", "asr_failed"}
+                       for item in diagnostics)
         def include(row):
             if any(record["stage"] == "review" and record["scope_id"] == str(row.id)
                    for record in getattr(self, "_retry_schedule", [])):
@@ -1679,7 +1693,7 @@ class StreamingPipelineSession:
             return ((row.verification or {}).get("status") in (None, "pending", "incomplete")
                     or needs_source_scope_recheck(row) or needs_address_source_recheck(row)
                     or needs_obsolete_gate_recheck(row) or needs_numeric_audio_recheck(row)
-                    or needs_missing_translation_recovery(row))
+                    or needs_missing_translation_recovery(row) or needs_audio_evidence_recovery(row))
         pending = sorted((row for row in self.segments.values()
             if not any(record["stage"] == "review" and record["scope_id"] == str(row.id)
                        for record in getattr(self, "_retry_schedule", []))

@@ -11,8 +11,9 @@ import urllib.request
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from scripts.check_production_ui import (QApplication, StudioMainWindow, service_manager,
     open_history, until, click, backend, evaluate, wait, event, QUrl, QCoreApplication,
-    QEvent, export_through_ui)
+    QEvent, export_through_ui, check_playback, ROOT)
 from core.streaming.session_store import _read, _valid_row_audio
+from core.media_process import run_media
 
 
 def fingerprint(row):
@@ -66,6 +67,7 @@ def main():
         until(page, "document.getElementById('task-progress').dataset.status==='RUNNING'")
         started = time.monotonic()
         deadline, last = started + args.timeout, None
+        retained_output_ready = False
         while time.monotonic() < deadline:
             state = backend(base, f'/api/streaming/{task}')
             progress = state['progress']
@@ -74,6 +76,17 @@ def main():
             if current != last:
                 event('RECOVERY_PROGRESS', current)
                 last = current
+            # Valid draft media is independently usable while semantic review
+            # keeps retrying. Do not wait for a false COMPLETED/100% state.
+            if (progress.get('translation_mode') == 'full'
+                    and state.get('final_output_blocked') is False
+                    and state.get('final_media_blocked') is False):
+                retained_output_ready = bool(state.get('output_video_url') and not state.get('output_outdated'))
+                if retained_output_ready or progress.get('can_export_review_draft'):
+                    event('RECOVERY_MEDIA_READY', {'task_id': task,
+                        'existing_output': retained_output_ready,
+                        'review_required': state.get('content_review_state')})
+                    break
             if progress['status'] in {'FAILED','STOPPED','CANCELLED','COMPLETED','PREPARED'}:
                 break
             wait(1000)
@@ -81,14 +94,36 @@ def main():
             event('RECOVERY_OBSERVATION_DEADLINE', args.timeout)
             return 2
         saved = _read(task)
-        valid = sum(bool(r.get('audio_path')) and _valid_row_audio(r,r['audio_path']) for r in saved['segments'])
+        speech_rows = [r for r in saved['segments'] if not r.get('confirmed_silence')]
+        valid = sum(bool(r.get('audio_path')) and _valid_row_audio(r,r['audio_path']) for r in speech_rows)
         event('RECOVERY_RESULT', {'valid_audio':valid,'total':len(ids),
             'failed':[r['id'] for r in saved['segments'] if r['status']=='FAILED'],
             'review_required':sum(bool(r.get('needs_review')) for r in saved['segments']),
             'manual_preserved':len(manual)})
-        if valid != len(ids):
+        if (valid != len(speech_rows)
+                or state.get('final_output_blocked') is not False
+                or state.get('final_media_blocked') is not False):
             return 1
-        export_through_ui(page,base,task)
+        if retained_output_ready:
+            until(page, "!document.getElementById('task-result-link').classList.contains('hidden')")
+            check_playback(page)
+        else:
+            export_through_ui(page,base,task)
+        snapshot = backend(base, f'/api/streaming/{task}')
+        assert snapshot.get('output_filename') and not snapshot.get('output_outdated')
+        output = (ROOT / 'workspace/outputs' / snapshot['output_filename']).resolve()
+        assert output.parent == (ROOT / 'workspace/outputs').resolve() and output.is_file()
+        media = json.loads(run_media(['ffprobe', '-v', 'error', '-show_format', '-show_streams',
+            '-of', 'json', str(output)], capture_output=True))
+        duration = float(original['session']['total_duration'])
+        assert {stream['codec_type'] for stream in media['streams']} >= {'audio', 'video'}
+        assert abs(float(media['format']['duration']) - duration) < .5
+        run_media(['ffmpeg', '-v', 'error', '-xerror', '-err_detect', 'explode', '-i', str(output),
+            '-f', 'null', '-'], capture_output=True, timeout=max(120, min(7200, int(duration * 2))))
+        event('RECOVERY_MP4_VALIDATED', {'task_id': task, 'output': str(output),
+            'duration': media['format']['duration'], 'bytes': output.stat().st_size,
+            'review_required': snapshot.get('content_review_state'),
+            'scope': 'media decode and production playback, not semantic certification'})
         return 0
     finally:
         try:

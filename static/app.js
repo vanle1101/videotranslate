@@ -1554,6 +1554,13 @@ document.addEventListener("DOMContentLoaded", () => {
     const status = currentProgress.status || "RUNNING";
     if (currentProgress.phase === "export") automaticExportActive = ["RUNNING", "CANCELLING"].includes(status);
     else if (["FAILED", "STOPPED", "CANCELLED"].includes(status)) automaticExportActive = false;
+    // An explicit empty URL revokes the old revision even if its websocket
+    // invalidation was missed. Partial progress without this field preserves it.
+    if (Object.hasOwn(progress, "output_video_url") && progress.output_video_url === "") {
+      const exportActive = automaticExportActive;
+      resetTaskResult();
+      automaticExportActive = exportActive;
+    }
     if (progress.output_video_url) { automaticExportActive = false; showTaskResult(progress); }
     else if (automaticExportActive) taskResult?.classList.add("hidden");
     if (pendingTaskAction?.kind === "retry" && status !== "FAILED") pendingTaskAction.progressSeen = true;

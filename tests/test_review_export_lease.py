@@ -2,6 +2,7 @@
 import asyncio
 import copy
 import threading
+import wave
 
 import pytest
 from fastapi import HTTPException
@@ -24,7 +25,42 @@ def ready_boundary(item):
     item._restart_intent = "retry_pending"
     item.review_summary = {"status": "incomplete", "incomplete": 1}
     item.final_media_metadata = lambda: {"final_media_blocked": False}
+    item._cached_dub_audio_duration = lambda path: 2.
     item.get_progress.return_value = {"status": "RUNNING", "phase": "retry", "retry_pending_count": 1}
+
+
+@pytest.mark.parametrize("first_duration,allowed", [(1., True), (1.75, False), (2.1, False)])
+def test_measured_wav_occupancy_matches_actual_renderer_despite_overlapping_slots(session, tmp_path, first_duration, allowed):
+    from core.streaming.pipeline import SegmentItem, StreamingPipelineSession
+    from core.streaming.export import HQExporter
+    from core.streaming.export_lease import review_export_ready
+    item, _ = session
+    ready_boundary(item)
+    item.total_duration = item._source_prepared_seconds = item._visual_completed_seconds = 3.
+    rows = []
+    for sid, (start, end, duration) in enumerate([(0., 2., first_duration), (1.5, 3., 1.)]):
+        path = tmp_path / f"voice_{sid}.wav"
+        with wave.open(str(path), "wb") as audio:
+            audio.setnchannels(1)
+            audio.setsampwidth(2)
+            audio.setframerate(44100)
+            audio.writeframes(b"\x01\x00" * round(duration * 44100))
+        row = SegmentItem(sid, start, end, end-start)
+        row.status, row.text_zh, row.final_vi = "READY", "fixture", "Lời kiểm thử"
+        row.audio_path, row.audio_url = str(path), f"/fixture/{sid}"
+        rows.append(row)
+    item.segments = {row.id: row for row in rows}
+    item._cached_dub_audio_duration = StreamingPipelineSession._dub_audio_duration
+    assert review_export_ready(item) is allowed
+    data = [dict(row.to_dict(), audio_path=row.audio_path) for row in rows]
+    if allowed:
+        output = tmp_path / "timeline.wav"
+        HQExporter._assemble_voice_timeline(data, 3., output)
+        with wave.open(str(output), "rb") as audio:
+            assert audio.getnframes() / audio.getframerate() == 3.
+    else:
+        with pytest.raises(ValueError):
+            HQExporter._assemble_voice_timeline(data, 3., tmp_path / "rejected.wav")
 
 
 def test_complete_draft_exports_at_review_boundary_without_finishing_review(session):

@@ -5001,6 +5001,21 @@ test('poll never resurrects a completed export rejected by the parent output rev
   assert.notEqual(ui.el('task-result-link').href,'http://localhost/api/outputs/stale.mp4');
 });
 
+test('authoritative empty output polling revokes displayed result while absent fields preserve it', async () => {
+  const ui=studio(); await ui.start(); const socket=ui.sockets.at(-1);
+  socket.receive({type:'result_ready',output_video_url:'/api/outputs/old.mp4',output_filename:'old.mp4'});
+  ui.replies.set('/api/tasks',{tasks:[{task_id:'fixture',status:'RUNNING',phase:'review',can_stop:true}]});
+  await ui.tickIntervals(2000);
+  assert.equal(ui.el('btn-save-result').disabled,false);
+  assert.equal(ui.el('task-result-link').href,'http://localhost/api/outputs/old.mp4');
+  ui.replies.set('/api/tasks',{tasks:[{task_id:'fixture',status:'RUNNING',phase:'review',can_stop:true,
+    output_video_url:'',output_filename:''}]});
+  await ui.tickIntervals(2000);
+  assert.equal(ui.el('btn-save-result').disabled,true);
+  assert.equal(ui.el('task-result-link').classList.contains('hidden'),true);
+  assert.equal(ui.el('task-result-link').href,undefined);
+});
+
 test('attached result restores the output link and selecting a different source removes the old result', async () => {
   const ui=studio(); await ui.flush();
   ui.replies.set('/api/streaming/recovered',{video_url:'/kept.mp4',output_video_url:'/api/outputs/final.mp4',output_filename:'final.mp4',progress:{status:'COMPLETED'}});

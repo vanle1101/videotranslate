@@ -5,6 +5,7 @@ The pipeline owns the boundary; the exporter owns and releases the lease.
 """
 import asyncio
 import math
+import wave
 
 from core.streaming.output_gate import missing_spoken_output_ids
 from core.streaming.audio_cache import resolve_dub_timing
@@ -33,19 +34,38 @@ def review_export_ready(session):
         return False
     if missing_spoken_output_ids(session.segments.values()):
         return False
-    try:
-        timeline = sorted(resolve_dub_timing({key: getattr(row, key, None) for key in
-            ("start", "end", "dub_start", "dub_end", "dub_tail_limit")})
-            for row in session.segments.values() if not getattr(row, "confirmed_silence", False))
-        previous_end = 0.
-        for start, end in timeline:
-            if not all(math.isfinite(value) for value in (start, end)) or start < previous_end or end <= start or end > session.total_duration + .000125:
-                return False
-            previous_end = end
-    except (ValueError, TypeError, KeyError):
-        return False
     media_gate = getattr(session, "final_media_metadata", None)
-    return callable(media_gate) and media_gate().get("final_media_blocked") is False
+    if not callable(media_gate) or media_gate().get("final_media_blocked") is not False:
+        return False
+    audio_duration = getattr(session, "_cached_dub_audio_duration", None)
+    if not callable(audio_duration):
+        return False
+    try:
+        timeline = sorted(((*resolve_dub_timing({key: getattr(row, key, None) for key in
+            ("start", "end", "dub_start", "dub_end", "dub_tail_limit")}), row)
+            for row in session.segments.values() if not getattr(row, "confirmed_silence", False)), key=lambda item: item[0])
+        # Match the renderer's 44.1 kHz sample timeline. Slot ends are capacity,
+        # not occupied speech: a short WAV may safely end before the next slot
+        # starts even when the allocated intervals overlap.
+        rate, position = 44100, 0
+        total_frames = round(session.total_duration * rate)
+        for start, end, row in timeline:
+            if not all(math.isfinite(value) for value in (start, end)):
+                return False
+            first, last = round(start * rate), round(end * rate)
+            if last > total_frames + 1:
+                return False
+            last = min(last, total_frames)
+            duration = audio_duration(row.audio_path)
+            if not math.isfinite(duration) or duration <= 0 or first < position or last <= first:
+                return False
+            frames = round(duration * rate)
+            if frames > last - first + 1:
+                return False
+            position = first + min(frames, last - first)
+    except (OSError, EOFError, wave.Error, ValueError, TypeError, KeyError, ZeroDivisionError):
+        return False
+    return True
 
 
 def acquire_review_export(session):

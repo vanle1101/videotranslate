@@ -723,6 +723,11 @@ class AutomaticTranslationReviewer:
                 row.update(needs_review=True, review_reason=reason)
                 audit.update(status="unresolved", reason=reason)
                 if row_failure:
+                    # A decoder failure is not a completed negative content
+                    # verdict. Retaining an earlier recovery stamp here would
+                    # make Resume suppress another attempt even after the
+                    # local recognizer/runtime becomes available again.
+                    audit.pop("missing_translation_recovery", None)
                     audit["diagnostic"] = row_failure
                     audit["audio_evidence_failures"] = row_failures or [row_failure]
         batches = math.ceil(len(agreed) / self.BATCH_SIZE)
@@ -1659,7 +1664,10 @@ class AutomaticTranslationReviewer:
                 original = next((value for value in rows if value["id"] == row["id"]), {})
                 if (original.get("text_zh", "").strip() and not original.get("final_vi", "").strip()
                         and audit.get("second_pass_status") == "completed"
-                        and audit.get("audio_audit_status") != "failed"):
+                        and audit.get("audio_audit_status") != "failed"
+                        and not audit.get("audio_evidence_failures")
+                        and not (isinstance(audit.get("diagnostic"), dict)
+                                 and audit["diagnostic"].get("stage") == "audio_evidence")):
                     # A durable negative result bounds automatic recovery too.
                     # Changed source dialogue can authorize a genuinely new attempt.
                     audit["missing_translation_recovery"] = self.missing_translation_recovery_identity(

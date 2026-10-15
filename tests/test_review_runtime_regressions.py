@@ -100,6 +100,65 @@ def test_missing_translation_recovery_identity_ignores_speech_and_tracks_source_
     assert key != identity(original, [original, source(1)])
 
 
+@pytest.mark.parametrize("failure_mode", ["raised", "row_failure", "unavailable"])
+def test_missing_translation_does_not_negative_cache_failed_local_evidence(failure_mode):
+    client, scanner, _ = components()
+    scanner.extract.return_value = []
+    scanner.extract.side_effect = None
+    original = {**source(), "final_vi": "", "natural_vi": "", "literal_vi": "",
+                "needs_review": True}
+    respond = client.translate.side_effect
+
+    def uncertain(prompt, **kwargs):
+        value = respond(prompt, **kwargs)
+        for row in value["segments"]:
+            row.update(final_vi="", natural_vi="", literal_vi="", needs_review=True,
+                semantic_verified=False, source_evidence_ids=[], review_reason="Chưa rõ lời nguồn.")
+        return value
+
+    client.translate.side_effect = uncertain
+    audio = Mock()
+    failure = FileNotFoundError("isolated model unavailable") if failure_mode == "unavailable" else TimeoutError("isolated decoder timeout")
+    if failure_mode == "raised":
+        audio.collect.side_effect = failure
+    else:
+        audio.collect.return_value = {0: {"faster-whisper-small": "你好"}}
+        audio.last_errors = {0: {"sensevoice": failure}}
+        audio.last_error = failure
+    reviewer = AutomaticTranslationReviewer(client, scanner, audio)
+    failed = reviewer.review("unused", [original], [])["segments"][0]
+    assert failed["verification"]["second_pass_status"] == "completed"
+    assert failed["verification"]["diagnostic"]["stage"] == "audio_evidence"
+    assert "missing_translation_recovery" not in failed["verification"]
+    assert failed["needs_review"] and failed["final_vi"] == ""
+
+    # A completed pair of genuinely disagreeing readings is a bounded content
+    # outcome, unlike a failed worker. It may record a negative recovery stamp.
+    audio.collect.side_effect = None
+    audio.collect.return_value = {0: {"sensevoice": "你好", "faster-whisper-small": "再见"}}
+    audio.last_error, audio.last_errors = None, {}
+    recovered = reviewer.review("unused", [failed], [])["segments"][0]
+    assert recovered["verification"]["audio_consensus"] is False
+    assert "audio_evidence_failures" not in recovered["verification"]
+    assert "missing_translation_recovery" in recovered["verification"]
+    assert recovered["verification"]["status"] == "unresolved"
+    assert not recovered["verification"]["semantic_verified"]
+    assert audio.collect.call_count == 2
+
+
+def test_direct_audio_failure_removes_inherited_negative_recovery_stamp():
+    client, scanner, _ = components()
+    audio = Mock()
+    audio.collect.side_effect = TimeoutError("isolated decoder timeout")
+    reviewer = AutomaticTranslationReviewer(client, scanner, audio)
+    source_row = {**source(), "needs_review": True, "final_vi": "", "verification": {
+        "status": "unresolved", "source_supported": False, "missing_translation_recovery": "old-stamp"}}
+    result = reviewer.resolve_audio_uncertainty("unused", {"segments": {0: source_row},
+        "screen_texts": [], "translation_sources": []})
+    assert "missing_translation_recovery" not in result["segments"][0]["verification"]
+    assert source_row["verification"]["missing_translation_recovery"] == "old-stamp"
+
+
 @pytest.fixture(autouse=True)
 def provider(monkeypatch):
     monkeypatch.setattr(settings, "LLM_PROVIDER", "opencode")
