@@ -1,23 +1,21 @@
 {
   "task_id": "5bea8fe5",
   "state": "STOPPED",
-  "observed_at_local": "2026-10-15 08:02",
+  "observed_at_local": "2026-10-15T09:56:56",
   "source_seconds": 453.508934,
   "segments": 75,
-  "decoded_audio": 71,
+  "decoded_audio": 72,
   "decode_failures": [],
   "missing_text_ids": [
     27,
     43,
     57
   ],
-  "missing_audio_ids": [
-    47
-  ],
-  "review_required": 46,
-  "retry_pending": 19,
+  "missing_audio_ids": [],
+  "review_required": 42,
+  "retry_pending": 8,
   "output_filename": "",
   "new_full_mp4_acceptance": "BLOCKED",
-  "stopped_by": "QA observation deadline 900 seconds; normal Stop API drained native work and saved checkpoint",
+  "stopped_by": "QA 900-second observation deadline; Stop checkpoint retained. Backend thread did not drain within graceful deadline; process subsequently exited.",
   "max_speed_ratio": 1.15
 }
