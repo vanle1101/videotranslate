@@ -1,0 +1,237 @@
+{
+  "observed_at": "2026-10-15T11:28:38",
+  "scope": "Read-only retained production context; no provider verdict or new synthesis",
+  "manifest_unchanged": true,
+  "provider_requests": 0,
+  "records": [
+    {
+      "task_id": "76f5aa6b",
+      "segment_id": 87,
+      "actual_production_context": {
+        "before": [
+          {
+            "status": "available",
+            "id": 84,
+            "start": 129.03,
+            "end": 129.63,
+            "translation_is_draft": true,
+            "text": "Về sau.",
+            "adjacent_in_supplied_context": false,
+            "gap_seconds_to_target": 3.59
+          },
+          {
+            "status": "available",
+            "id": 85,
+            "start": 130.62,
+            "end": 131.84,
+            "translation_is_draft": true,
+            "text": "Thuốc dạ dày vẫn ở ngăn ba.",
+            "adjacent_in_supplied_context": false,
+            "gap_seconds_to_target": 1.38
+          },
+          {
+            "status": "available",
+            "id": 86,
+            "start": 131.84,
+            "end": 133.22,
+            "translation_is_draft": true,
+            "text": "Viên gạch lỏng thứ hai ở tường sau.",
+            "adjacent_in_supplied_context": true,
+            "gap_seconds_to_target": 0.0
+          }
+        ],
+        "after": [
+          {
+            "status": "available",
+            "id": 88,
+            "start": 134.34,
+            "end": 135.62,
+            "translation_is_draft": true,
+            "text": "Hồi bé từng đập vỡ…",
+            "adjacent_in_supplied_context": true,
+            "gap_seconds_to_target": 0.0
+          },
+          {
+            "status": "available",
+            "id": 89,
+            "start": 135.62,
+            "end": 136.28,
+            "translation_is_draft": true,
+            "text": "Cửa sổ phía đông ấy.",
+            "adjacent_in_supplied_context": false,
+            "gap_seconds_to_target": 1.28
+          },
+          {
+            "status": "available",
+            "id": 90,
+            "start": 137.26,
+            "end": 137.58,
+            "translation_is_draft": true,
+            "text": "Ra đây.",
+            "adjacent_in_supplied_context": false,
+            "gap_seconds_to_target": 2.92
+          }
+        ],
+        "order": "timestamp",
+        "scope": "bounded_supplied_context",
+        "target_interval": {
+          "start": 133.22,
+          "end": 134.34
+        }
+      }
+    },
+    {
+      "task_id": "76f5aa6b",
+      "segment_id": 119,
+      "actual_production_context": {
+        "before": [
+          {
+            "status": "available",
+            "id": 116,
+            "start": 174.56,
+            "end": 175.94,
+            "translation_is_draft": true,
+            "text": "Mẹ chỉ bảo con một câu.",
+            "adjacent_in_supplied_context": false,
+            "gap_seconds_to_target": 2.92
+          },
+          {
+            "status": "available",
+            "id": 117,
+            "start": 176.34,
+            "end": 177.78,
+            "translation_is_draft": true,
+            "text": "Nếu năm đó hai người không quen nhau,",
+            "adjacent_in_supplied_context": false,
+            "gap_seconds_to_target": 1.08
+          },
+          {
+            "status": "available",
+            "id": 118,
+            "start": 177.78,
+            "end": 178.86,
+            "translation_is_draft": true,
+            "text": "Hai người sau này…",
+            "adjacent_in_supplied_context": true,
+            "gap_seconds_to_target": 0.0
+          }
+        ],
+        "after": [
+          {
+            "status": "available",
+            "id": 120,
+            "start": 179.7,
+            "end": 180.66,
+            "translation_is_draft": true,
+            "text": "Còn con?",
+            "adjacent_in_supplied_context": true,
+            "gap_seconds_to_target": 0.0
+          },
+          {
+            "status": "available",
+            "id": 121,
+            "start": 180.66,
+            "end": 181.24,
+            "translation_is_draft": true,
+            "text": "Con…",
+            "adjacent_in_supplied_context": false,
+            "gap_seconds_to_target": 0.96
+          },
+          {
+            "status": "available",
+            "id": 122,
+            "start": 181.62,
+            "end": 182.54,
+            "translation_is_draft": true,
+            "text": "Bố mẹ không quen nhau…",
+            "adjacent_in_supplied_context": false,
+            "gap_seconds_to_target": 1.92
+          }
+        ],
+        "order": "timestamp",
+        "scope": "bounded_supplied_context",
+        "target_interval": {
+          "start": 178.86,
+          "end": 179.7
+        }
+      }
+    },
+    {
+      "task_id": "38680e43",
+      "segment_id": 5,
+      "actual_production_context": {
+        "before": [
+          {
+            "status": "available",
+            "id": 2,
+            "start": 3.66,
+            "end": 4.54,
+            "translation_is_draft": true,
+            "text": "Mấy tuổi rồi?",
+            "adjacent_in_supplied_context": false,
+            "gap_seconds_to_target": 2.3
+          },
+          {
+            "status": "available",
+            "id": 3,
+            "start": 4.54,
+            "end": 4.98,
+            "translation_is_draft": true,
+            "text": "Hả?",
+            "adjacent_in_supplied_context": false,
+            "gap_seconds_to_target": 1.86
+          },
+          {
+            "status": "available",
+            "id": 4,
+            "start": 4.98,
+            "end": 6.44,
+            "translation_is_draft": true,
+            "text": "Hỏi mấy tuổi rồi, nói mau!",
+            "adjacent_in_supplied_context": true,
+            "gap_seconds_to_target": 0.4
+          }
+        ],
+        "after": [
+          {
+            "status": "available",
+            "id": 6,
+            "start": 7.72,
+            "end": 8.34,
+            "translation_is_draft": true,
+            "text": "Mười chín.",
+            "adjacent_in_supplied_context": true,
+            "gap_seconds_to_target": 0.0
+          },
+          {
+            "status": "available",
+            "id": 7,
+            "start": 8.34,
+            "end": 9.0,
+            "translation_is_draft": true,
+            "text": "Hơi nhỏ.",
+            "adjacent_in_supplied_context": false,
+            "gap_seconds_to_target": 0.62
+          },
+          {
+            "status": "available",
+            "id": 8,
+            "start": 9.0,
+            "end": 9.84,
+            "translation_is_draft": true,
+            "text": "Nhưng đủ rồi.",
+            "adjacent_in_supplied_context": false,
+            "gap_seconds_to_target": 1.28
+          }
+        ],
+        "order": "timestamp",
+        "scope": "bounded_supplied_context",
+        "target_interval": {
+          "start": 6.84,
+          "end": 7.72
+        }
+      }
+    }
+  ],
+  "full_mp4_acceptance": "NOT_ACHIEVED"
+}

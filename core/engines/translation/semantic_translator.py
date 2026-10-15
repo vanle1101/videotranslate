@@ -176,7 +176,71 @@ def accumulate_pacing_rejection(feedback, error):
     return result
 
 
-def fluency_dialogue_context(rows, *, target, draft, candidate, positioned=False):
+def _fluency_evidence_context(rows, *, target, draft, candidate):
+    """Bounded Vietnamese-only timeline; missing turns cannot create adjacency."""
+    rows = list(rows or [])
+    def interval(row):
+        if not isinstance(row, dict):
+            return None
+        start, end = row.get("start"), row.get("end")
+        if (type(start) in (int, float) and type(end) in (int, float)
+                and math.isfinite(start) and math.isfinite(end) and 0 <= start < end):
+            return start, end
+        return None
+    chronological = bool(rows) and all(interval(row) for row in rows)
+    if chronological:
+        rows.sort(key=lambda row: interval(row))
+    target_id = target.get("id") if isinstance(target, dict) else None
+    focus = [index for index, row in enumerate(rows) if isinstance(row, dict)
+             and (row.get("is_focus") is True or target_id is not None and row.get("id") == target_id)]
+    positioned = len(focus) == 1
+    anchor = focus[0] if positioned else len(rows)
+    selected = sorted((index for index in range(len(rows)) if index not in focus),
+                      key=lambda index: (abs(index - anchor), index))[:6]
+    result = {"before": [], "after": [], "order": "timestamp" if chronological else "supplied_unverified",
+              "scope": "bounded_supplied_context"}
+    if not positioned:
+        result["unpositioned"] = []
+    target_interval = interval(rows[anchor]) if positioned else None
+    if target_interval:
+        result["target_interval"] = {"start": target_interval[0], "end": target_interval[1]}
+    for index in sorted(selected):
+        row = rows[index]
+        entry = {"status": "invalid_translation"}
+        if isinstance(row, dict):
+            identity = row.get("id")
+            if (type(identity) is int or isinstance(identity, str)
+                    and re.fullmatch(r"[A-Za-z0-9_-]{1,80}", identity)):
+                entry["id"] = identity
+            times = interval(row)
+            if times:
+                entry.update(start=times[0], end=times[1])
+            values = [row.get("final_vi"), row.get("vi")]
+            for flag in ("translation_is_draft", "needs_review"):
+                if type(row.get(flag)) is bool:
+                    entry[flag] = row[flag]
+            line = next((value for value in values if isinstance(value, str) and value.strip()), None)
+            if line is None:
+                entry["status"] = ("missing_translation" if all(value is None or isinstance(value, str)
+                                                              for value in values) else "invalid_translation")
+            elif not re.search(r"[\u3400-\u9fff\U00020000-\U0002fa1f]", line):
+                line = " ".join(line.split())
+                if not positioned and line in {" ".join(str(draft).split()), " ".join(str(candidate).split())}:
+                    entry["status"] = "focus_text_excluded"
+                else:
+                    entry.update(status="available", text=line[:500])
+                    if len(line) > 500:
+                        entry["truncated"] = True
+            if positioned:
+                entry["adjacent_in_supplied_context"] = abs(index - anchor) == 1
+                if times and target_interval:
+                    entry["gap_seconds_to_target"] = round(
+                        target_interval[0] - times[1] if index < anchor else times[0] - target_interval[1], 6)
+        result["unpositioned" if not positioned else "before" if index < anchor else "after"].append(entry)
+    return result
+
+
+def fluency_dialogue_context(rows, *, target, draft, candidate, positioned=False, enriched=False):
     """Select nearby Vietnamese turns without leaking the focus's old draft.
 
     Source context may retain distant kinship evidence. Its last six entries
@@ -184,6 +248,8 @@ def fluency_dialogue_context(rows, *, target, draft, candidate, positioned=False
     This independent language check must see the closest spoken turns, never
     the Chinese fields or a previous version of the focused sentence.
     """
+    if enriched:
+        return _fluency_evidence_context(rows, target=target, draft=draft, candidate=candidate)
     rows = [row for row in (rows or []) if isinstance(row, dict)]
     target_id = target.get("id") if isinstance(target, dict) else None
     focus = [index for index, row in enumerate(rows)
@@ -194,7 +260,8 @@ def fluency_dialogue_context(rows, *, target, draft, candidate, positioned=False
     for index, row in enumerate(rows):
         if index in focus:
             continue
-        line = row.get("vi", row.get("final_vi", ""))
+        line = next((value for value in (row.get("final_vi"), row.get("vi"))
+                     if isinstance(value, str) and value.strip()), "")
         if not isinstance(line, str):
             continue
         line = " ".join(line.split())
@@ -952,14 +1019,24 @@ Trả duy nhất JSON: {{"literal_vi":"...","natural_vi":"...","final_vi":"...",
         # only the exact candidate and bounded Vietnamese neighbors, never the
         # source, old draft, timing budget, or first verdict.
         nearby_vi = fluency_dialogue_context(rolling_context, target=target,
-                                             draft=draft, candidate=candidate["final_vi"], positioned=True)
+                                             draft=draft, candidate=candidate["final_vi"], positioned=True, enriched=True)
         fluency_system = (
             "Bạn là biên tập viên tiếng Việt bản ngữ. Không biết và không được suy đoán "
             "nguồn ngoại ngữ, người nói, quan hệ nhân vật, hay lý do câu được viết. "
             "Chỉ đánh giá câu ứng viên tiếng Việt như lời thoại nói tự nhiên: ngữ pháp, "
             "cụm từ kết hợp, nghĩa rõ ràng và nhịp khẩu ngữ. Mốc thoại có thể là một "
-            "mảnh lời nói: before là lời ngay trước, after là lời ngay sau "
-            "ứng viên. Đánh giá ứng viên ở đúng vị trí đó; một từ nối, lời gọi hay thán từ "
+            "mảnh lời nói. before/after là các hàng trong ngữ cảnh được cấp trước/sau "
+            "ứng viên, KHÔNG mặc nhiên là lời liền kề. order=timestamp nghĩa là đã sắp theo "
+            "mốc nguồn; supplied_unverified chỉ là thứ tự đầu vào chưa xác minh. "
+            "adjacent_in_supplied_context chỉ liền hàng trong tập ngữ cảnh đã giới hạn, "
+            "không chứng minh cùng câu, cùng người hay không có lời bị thiếu. "
+            "Đọc start/end và gap_seconds_to_target; khoảng cách lớn, mốc chồng nhau hoặc "
+            "thiếu mốc không cho phép tự nối lời. status=missing_translation/invalid_translation "
+            "là một hàng còn thiếu lời Việt, không phải im lặng; không bỏ qua nó để ghép "
+            "hai hàng xa thành liền kề. truncated=true là lời đã cắt, không tự điền phần thiếu. "
+            "translation_is_draft/needs_review=true báo lời lân cận chưa được xác nhận; "
+            "không coi bản nháp ấy là sự thật hoặc tự đoán cách sửa để duyệt ứng viên. "
+            "Đánh giá ứng viên ở đúng vị trí đã biết; một từ nối, lời gọi hay thán từ "
             "không phải từ khóa rời nếu lời Việt thực có tạo thành mạch nói tự nhiên. "
             "Danh từ, đối tượng hoặc mốc không gian/thời gian đã được nêu rõ ở lời trước "
             "có thể làm tham chiếu cho câu tiếp theo; không bắt buộc nhắc lại đầy đủ "
@@ -979,7 +1056,7 @@ Trả duy nhất JSON: {{"literal_vi":"...","natural_vi":"...","final_vi":"...",
                                     "nearby_vietnamese_dialogue": nearby_vi}, ensure_ascii=False)
         fluency = self._validated_request(fluency_system, fluency_input,
             lambda raw: self._review_response(raw, _FLUENCY_SCHEMA),
-            schema_id="semantic-pacing-blind-fluency-v3", task_kind="fluency_review", max_tokens=1024)
+            schema_id="semantic-pacing-blind-fluency-v4", task_kind="fluency_review", max_tokens=1024)
         if (not isinstance(fluency, dict) or fluency.get("natural") is not True
                 or not self._nonempty_string(fluency.get("reason"))):
             raise PacingReviewRejected(

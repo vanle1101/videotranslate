@@ -49,8 +49,11 @@ def test_actual_blind_request_contains_no_focus_draft_or_chinese(monkeypatch):
         {"id": 3, "vi": "Câu sau.", "text_zh": "之后"},
     ])
     blind = json.loads(requests[-1][1])
-    assert blind == {"candidate": "Lời mới.",
-                     "nearby_vietnamese_dialogue": {"before": ["Câu trước."], "after": ["Câu sau."]}}
+    assert blind["candidate"] == "Lời mới."
+    context = blind["nearby_vietnamese_dialogue"]
+    assert context["before"] == [{"id": 1, "status": "available", "text": "Câu trước.", "adjacent_in_supplied_context": True}]
+    assert context["after"] == [{"id": 3, "status": "available", "text": "Câu sau.", "adjacent_in_supplied_context": True}]
+    assert context["order"] == "supplied_unverified"
     assert result["pacing_verification"]["fluency"]["natural"] is True
 
 
@@ -87,7 +90,80 @@ def test_connector_review_receives_exact_position_and_still_requires_all_three_r
     ])
     assert requests.call_count == 3
     blind = json.loads(requests.call_args_list[-1].args[1])
-    assert blind["nearby_vietnamese_dialogue"] == {"before": ["Mười chín tuổi."], "after": ["Bố mười tám tuổi."]}
+    assert [entry["text"] for entry in blind["nearby_vietnamese_dialogue"]["before"]] == ["Mười chín tuổi."]
+    assert [entry["text"] for entry in blind["nearby_vietnamese_dialogue"]["after"]] == ["Bố mười tám tuổi."]
     assert '每' not in json.dumps(blind) and 'Nên...' not in json.dumps(blind, ensure_ascii=False)
     assert 'không tự thêm/bỏ ý hay nối hai người nói' in requests.call_args_list[1].args[0]
     assert 'unpositioned không chứng minh' in requests.call_args_list[-1].args[0]
+
+
+def enriched(rows, target=3):
+    return fluency_dialogue_context(rows, target={"id": target}, draft="Bản cũ.",
+                                    candidate="Ở sau.", enriched=True)
+
+
+def test_missing_neighbors_remain_between_distant_available_translations():
+    result = enriched([
+        {"id": 1, "start": 0., "end": 1., "final_vi": "Cái chìa khóa ấy."},
+        {"id": 2, "start": 80., "end": 81., "final_vi": ""},
+        {"id": 3, "start": 82., "end": 83., "final_vi": "Bản cũ.", "is_focus": True},
+        {"id": 4, "start": 84., "end": 85., "final_vi": "汉字"},
+        {"id": 5, "start": 200., "end": 201., "final_vi": "Mình đi nhé."},
+    ])
+    assert result["order"] == "timestamp"
+    assert result["before"][0]["gap_seconds_to_target"] == 81.
+    assert result["before"][0]["adjacent_in_supplied_context"] is False
+    assert result["before"][1]["status"] == "missing_translation"
+    assert result["after"][0]["status"] == "invalid_translation"
+    assert result["after"][1]["gap_seconds_to_target"] == 117.
+    assert "汉字" not in json.dumps(result, ensure_ascii=False)
+    assert "Bản cũ." not in json.dumps(result, ensure_ascii=False)
+
+
+def test_timestamp_order_is_normalized_and_empty_alias_uses_translation():
+    result = enriched([
+        {"id": 4, "start": 4., "end": 5., "vi": "Sau."},
+        {"id": 3, "start": 2., "end": 3., "vi": "Bản cũ."},
+        {"id": 2, "start": 0., "end": 1., "vi": "  ", "final_vi": "Chìa khóa đâu?"},
+    ])
+    assert result["before"][0]["id"] == 2
+    assert result["before"][0]["text"] == "Chìa khóa đâu?"
+    assert result["after"][0]["id"] == 4
+    assert result["target_interval"] == {"start": 2., "end": 3.}
+
+
+def test_invalid_rows_and_unknown_focus_do_not_gain_fake_order_or_text():
+    result = enriched([None, {"id": "秘密", "vi": "Bản cũ."}, {"id": 8, "vi": 42}], target=99)
+    assert result["order"] == "supplied_unverified"
+    assert [entry["status"] for entry in result["unpositioned"]] == [
+        "invalid_translation", "focus_text_excluded", "invalid_translation"]
+    assert result["before"] == result["after"] == []
+    assert "秘密" not in json.dumps(result, ensure_ascii=False)
+
+
+def test_canonical_translation_and_boolean_uncertainty_survive_without_reasons():
+    result = enriched([
+        {"id": 2, "vi": "Lời cũ.", "final_vi": "Lời hiện tại.", "translation_is_draft": True,
+         "needs_review": True, "review_reason": "秘密", "verification": {"reason": "秘密"}},
+        {"id": 3, "is_focus": True, "final_vi": "Bản cũ."},
+        {"id": 4, "vi": "Lời sau.", "translation_is_draft": "false", "needs_review": False},
+    ])
+    before = result["before"][0]
+    assert before["text"] == "Lời hiện tại."
+    assert before["translation_is_draft"] is True and before["needs_review"] is True
+    assert result["after"][0]["needs_review"] is False
+    assert "translation_is_draft" not in result["after"][0]
+    assert "秘密" not in json.dumps(result, ensure_ascii=False)
+    assert fluency_dialogue_context([
+        {"vi": "Lời cũ.", "final_vi": "Lời hiện tại."}], target={}, draft="", candidate="") == ["Lời hiện tại."]
+
+
+def test_enriched_payload_is_bounded_and_does_not_leak_focus_or_source_metadata():
+    rows = [{"id": i, "vi": "A" * 600, "text_zh": "秘密", "verification": {"reason": "秘密"}}
+            for i in range(100)]
+    rows[50].update(is_focus=True, vi="Bản cũ.")
+    result = enriched(rows, target=50)
+    entries = result["before"] + result["after"]
+    assert len(entries) == 6 and all(len(entry["text"]) == 500 and entry["truncated"] for entry in entries)
+    assert "秘密" not in json.dumps(result, ensure_ascii=False)
+    assert "Bản cũ." not in json.dumps(result, ensure_ascii=False)
