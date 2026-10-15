@@ -50,6 +50,9 @@ def main():
         page.setAudioMuted(True)
         window.show()
         until(page, "document.readyState==='complete' && !!window.openTaskInStudio")
+        # Surface actual UI errors instead of blocking forever in an offscreen
+        # native alert. No confirmation is accepted or provider result mocked.
+        evaluate(page, "(() => {window.__qaAlerts=[];window.alert=m=>{window.__qaAlerts.push(String(m));console.error('QA_ALERT',m);};return true;})()")
         open_history(page, task)
         state = backend(base, f'/api/streaming/{task}')
         missing_audio = [row['id'] for row in original['segments']

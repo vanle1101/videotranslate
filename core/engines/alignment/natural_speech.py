@@ -99,6 +99,10 @@ def synthesize_natural_speech(*, text, source, duration, output_path, engine, al
     except (OSError, ValueError, TypeError, KeyError):
         logger.warning("PACING_HISTORY_IDENTITY_UNAVAILABLE run_id=%s", execution.run_id)
     history = pacing_checkpoint.load(history_key, cancel_check=execution.cancel_check)
+    logger.info("PACING_HISTORY run_id=%s speech_id=%s scope=%s measured=%d rejected=%d slot_seconds=%.4f capacity_seconds=%.4f proposal_limit=%d",
+                execution.run_id, speech_id, history_key or "unavailable",
+                len(history["measured"]), len(history["feedback"].get("rejected_candidates", [])),
+                duration, max_duration, max_pacing_proposals)
     # Historical proof is diagnostic only. An explicitly capable adapter may
     # revalidate one exact alternative, but only fresh gates permit synthesis.
     historical_measured = history["measured"]
@@ -280,7 +284,7 @@ def synthesize_natural_speech(*, text, source, duration, output_path, engine, al
                     try:
                         proposals_used += 1
                         logger.info("PACING_REWRITE run_id=%s speech_id=%s attempt=%d proposal=%d request_budget_seconds=%.4f reduction_pct=%.1f",
-                                    execution.run_id, speech_id, attempt + 1, review_attempt + 1,
+                                    execution.run_id, speech_id, attempt + 1, proposals_used,
                                     request_budget, timing_feedback["required_reduction_pct"])
                         proposal_options = {}
                         if source_language is not None:
@@ -320,7 +324,7 @@ def synthesize_natural_speech(*, text, source, duration, output_path, engine, al
                         # Give the provider bounded fresh attempts; transport,
                         # credentials and unknown errors still fail immediately.
                         logger.warning("PACING_REJECTED run_id=%s speech_id=%s attempt=%d proposal=%d reason=%s",
-                                       execution.run_id, speech_id, attempt + 1, review_attempt + 1, error.code)
+                                       execution.run_id, speech_id, attempt + 1, proposals_used, error.code)
                         seen_candidates.add(pacing_candidate_key(error.feedback["rejected_candidate"]))
                         rejection_feedback = accumulate_pacing_rejection(rejection_feedback, error)
                         checkpoint_failure()

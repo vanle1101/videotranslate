@@ -35,8 +35,14 @@ def identity(*, translator, max_duration, max_duration_limit, allow_bidirectiona
     return hashlib.sha256(json.dumps(policy, allow_nan=False).encode()).hexdigest()
 
 
-def _root():
+def _root(*, legacy=False):
     from config import settings
+    from core.runtime_context import current_execution_context
+    run_id = current_execution_context().run_id
+    if not legacy and run_id != "unscoped":
+        # Failed wording is a recovery checkpoint, not an expendable global
+        # LRU entry. The existing project cache lifecycle owns its deletion.
+        return Path(settings.WORKSPACE_DIR) / "cache" / run_id / "pacing_history"
     return Path(settings.WORKSPACE_DIR) / "cache" / "pacing_history"
 
 
@@ -90,6 +96,8 @@ def load(key, *, cancel_check=None):
         return {"measured": [], "feedback": {}}
     try:
         path = _root() / (key + ".json")
+        if not path.exists() and _root() != _root(legacy=True):
+            path = _root(legacy=True) / (key + ".json")
         if path.is_symlink() or path.stat().st_size > 256 * 1024:
             raise ValueError("Invalid history file")
         record = json.loads(path.read_text(encoding="utf-8"))
@@ -126,10 +134,12 @@ def store(key, measured, feedback, *, cancel_check=None):
                 os.fsync(handle.fileno())
             _cancel(cancel_check)
             os.replace(temporary, root / (key + ".json"))
-            owned = sorted((p for p in root.iterdir() if _NAME.fullmatch(p.name) and not p.is_symlink()),
-                           key=lambda p: p.stat().st_mtime_ns, reverse=True)
-            for path in owned[64:]:
-                path.unlink(missing_ok=True)
+            if root == _root(legacy=True):
+                # Only unscoped utility calls use the disposable bounded cache.
+                owned = sorted((p for p in root.iterdir() if _NAME.fullmatch(p.name) and not p.is_symlink()),
+                               key=lambda p: p.stat().st_mtime_ns, reverse=True)
+                for path in owned[64:]:
+                    path.unlink(missing_ok=True)
     except (OSError, ValueError, TypeError, KeyError):
         logging.getLogger("pipeline").warning("PACING_HISTORY_UNAVAILABLE")
     finally:

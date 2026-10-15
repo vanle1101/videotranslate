@@ -95,7 +95,9 @@ def open_history(page, task_id):
     selector = "#tasks-table-body button[onclick=\"window.openTaskInStudio('" + task_id + "')\"]"
     until(page, "!!document.querySelector(" + json.dumps(selector) + ")")
     assert evaluate(page, "(() => {document.querySelector(" + json.dumps(selector) + ").click(); return true;})()")
-    until(page, "!document.getElementById('view-studio').classList.contains('hidden') && document.querySelectorAll('[id^=seg-vi-]').length > 0")
+    until(page, "window.__qaAlerts?.length || (!document.getElementById('view-studio').classList.contains('hidden') && document.querySelectorAll('[id^=seg-vi-]').length > 0)")
+    alerts = evaluate(page, "window.__qaAlerts || []")
+    assert not alerts, {'history_task': task_id, 'ui_alerts': alerts}
     wait(300)
 
 

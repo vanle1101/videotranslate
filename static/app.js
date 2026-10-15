@@ -4445,14 +4445,17 @@ document.addEventListener("DOMContentLoaded", () => {
   btnPauseWorker.addEventListener("click", window.studioPause);
   btnResumeWorker.addEventListener("click", window.studioResume);
   btnStopWorker.addEventListener("click", window.studioStop);
-  window.studioAttachTask = async taskId => {
-    if (!/^[a-zA-Z0-9_-]{1,80}$/.test(taskId) || pendingStart || pendingTaskAction || exportingTaskId || captionStyleDirty || captionStyleRequest || transcriptDrafts.size || pendingTranscriptSaves) return false;
-    pendingTaskAction = {kind: "attach"};
+  window.studioAttachTask = async (taskId, {background = false} = {}) => {
+    const canSupersedeRestore = !background && pendingTaskAction?.kind === "attach" && pendingTaskAction.background;
+    if (!/^[a-zA-Z0-9_-]{1,80}$/.test(taskId) || pendingStart || (pendingTaskAction && !canSupersedeRestore) || exportingTaskId || captionStyleDirty || captionStyleRequest || transcriptDrafts.size || pendingTranscriptSaves) return false;
+    const request = {kind: "attach", background};
+    pendingTaskAction = request;
     stopVoicePreview();
     setWorkerSourceBusy(true);
     try {
       const response = await fetch(`/api/streaming/${encodeURIComponent(taskId)}`);
       const data = await response.json();
+      if (pendingTaskAction !== request) return false;
       if (!response.ok) throw new Error(data.detail || "Phiên dịch không còn tồn tại.");
       stopPreviewAudio();
       if (currentWs) currentWs.close();
@@ -4482,10 +4485,12 @@ document.addEventListener("DOMContentLoaded", () => {
       updateTasksTable();
       return true;
     } finally {
-      pendingTaskAction = null;
-      setWorkerSourceBusy(!!currentTaskId && !["COMPLETED", "PREVIEW_READY", "PREPARED", "FAILED", "STOPPED", "CANCELLED"].includes(currentProgress?.status));
-      updateExportAvailability();
-      updateTranscriptReviewAvailability();
+      if (pendingTaskAction === request) {
+        pendingTaskAction = null;
+        setWorkerSourceBusy(!!currentTaskId && !["COMPLETED", "PREVIEW_READY", "PREPARED", "FAILED", "STOPPED", "CANCELLED"].includes(currentProgress?.status));
+        updateExportAvailability();
+        updateTranscriptReviewAvailability();
+      }
     }
   };
   window.openTaskInStudio = async taskId => {
@@ -4529,7 +4534,7 @@ document.addEventListener("DOMContentLoaded", () => {
       if (!response.ok || !stillIdle()) return false;
       // Attach only reads the durable snapshot and opens the live stream. It
       // never starts generation, retries, or plays media automatically.
-      return await window.studioAttachTask(taskId);
+      return await window.studioAttachTask(taskId, {background: true});
     } catch (_) {
       // Keep the id so a transient backend startup/port race can recover on
       // the next poll or application launch.

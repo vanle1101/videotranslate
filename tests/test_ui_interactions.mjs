@@ -4708,6 +4708,32 @@ test('failed attach restores idle source controls', async () => {
   assert.equal(ui.sockets.length,0);
 });
 
+for (const restoreFirst of [false, true]) test(`explicit history selection supersedes slow startup restore (${restoreFirst})`, async () => {
+  const ui = studio(); await ui.flush();
+  let restored, selected;
+  ui.replies.set('/api/streaming/startup-old',()=>new Promise(resolve=>{restored=resolve;}));
+  ui.replies.set('/api/streaming/chosen',()=>new Promise(resolve=>{selected=resolve;}));
+  const old = ui.window.studioAttachTask('startup-old',{background:true});
+  const choice = ui.window.studioAttachTask('chosen');
+  const reply = id => ({ok:true,json:async()=>({video_url:`/${id}.mp4`,progress:{status:'STOPPED'}})});
+  if (restoreFirst) {
+    restored(reply('old'));
+    assert.equal(await old,false);
+    assertWorkerSourceBusy(ui,true);
+    selected(reply('chosen'));
+  } else {
+    selected(reply('chosen'));
+    assert.equal(await choice,true);
+    restored(reply('old'));
+  }
+  assert.equal(await choice,true);
+  assert.equal(await old,false);
+  assert.equal(ui.saved.get('studio.last-task-id'),'chosen');
+  assertWorkerSourceBusy(ui,false);
+  assert.equal(ui.sockets.length,1,'stale restore must not open a socket or replace selected media');
+  assert.equal(ui.requests.filter(r=>r.url.includes('/retry')||r.url.includes('/start-')).length,0);
+});
+
 for (const priorStatus of ['FAILED', 'STOPPED']) test(`partial review remains available for ${priorStatus} speech recovery without enabling export`, async () => {
   const ui = studio(); await ui.start();
   const socket = ui.sockets.at(-1);

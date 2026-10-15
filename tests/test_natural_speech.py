@@ -982,7 +982,8 @@ def test_alternating_rejected_drafts_do_not_repeat_fidelity_or_fluency(tmp_path,
     assert output.read_bytes() == b"retained output"
 
 
-def test_rejected_history_survives_next_measured_synthesis_attempt(tmp_path, aligner):
+def test_rejected_history_survives_next_measured_synthesis_attempt(tmp_path, aligner, caplog):
+    caplog.set_level("INFO", logger="pipeline")
     original, intermediate, final = "Tôi vẫn chưa làm việc đó.", "Tôi vẫn chưa làm.", "Tôi chưa làm."
     rejected = PacingReviewRejected("Rejected", candidate="Đã làm.",
                                    reason="Lost negation.", code="semantic_mismatch")
@@ -997,6 +998,9 @@ def test_rejected_history_survives_next_measured_synthesis_attempt(tmp_path, ali
     assert history == [{"text": "Đã làm.", "reason": "Lost negation.", "code": "semantic_mismatch"}]
     assert len(calls[2].kwargs["feedback"]["measured_candidates"]) == 2
     assert result["text"] == final
+    rewrite_logs = [record.getMessage() for record in caplog.records
+                    if record.getMessage().startswith("PACING_REWRITE ")]
+    assert [message.split("proposal=")[1].split()[0] for message in rewrite_logs] == ["1", "2", "3"]
 
 
 def test_measured_history_and_rejection_feedback_reach_rewriter_but_do_not_replace_independent_verdict(monkeypatch):

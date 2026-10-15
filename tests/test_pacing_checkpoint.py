@@ -155,6 +155,32 @@ def test_cancelled_round_preserves_prior_rejections(durable, aligner):
     translator = Mock(rewrite_for_pacing=Mock(side_effect=proposal))
     with execution_context("cancel-history", lambda: stopped[0]), pytest.raises(asyncio.CancelledError):
         synthesize_natural_speech(**options(durable, aligner, translator, RecordedSynthesizer(2.)))
-    record = json.loads(next((durable / "cache/pacing_history").glob("*.json")).read_text(encoding="utf-8"))
+    record = json.loads(next((durable / "cache/cancel-history/pacing_history").glob("*.json")).read_text(encoding="utf-8"))
     assert record["data"]["feedback"] == {}  # Cancel cannot publish its late response.
     assert not (durable / "result.wav").exists()
+
+
+def test_long_project_rejections_survive_other_rows_projects_and_restart(durable):
+    first_key = f"{0:064x}"
+    with execution_context("long-project"):
+        for index in range(70):
+            cache.store(f"{index:064x}", [], {"rejected_candidates": [
+                {"text": f"Draft {index}", "reason": "Lost meaning", "code": "semantic_mismatch"}]})
+    with execution_context("other-project"):
+        cache.store(first_key, [], {"rejected_candidates": []})
+    # Restore the first job's execution identity after the other job finishes.
+    with execution_context("long-project"):
+        assert cache.load(first_key)["feedback"]["rejected_candidates"][0]["text"] == "Draft 0"
+    assert len(list((durable / "cache/long-project/pacing_history").glob("*.json"))) == 70
+
+
+def test_scoped_history_reads_legacy_without_overwriting_shared_record(durable):
+    key = "e" * 64
+    cache.store(key, [], {"rejected_candidates": []})
+    legacy = (durable / "cache/pacing_history" / (key + ".json")).read_bytes()
+    with execution_context("restored-job"):
+        assert cache.load(key)["feedback"] == {"rejected_candidates": []}
+        cache.store(key, [], {"rejected_candidates": [
+            {"text": "Rejected", "reason": "Mismatch", "code": "semantic_mismatch"}]})
+        assert cache.load(key)["feedback"]["rejected_candidates"]
+    assert (durable / "cache/pacing_history" / (key + ".json")).read_bytes() == legacy
