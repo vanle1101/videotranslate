@@ -107,6 +107,7 @@ def ui_state(page):
         transcriptCount:document.querySelectorAll('[id^=seg-vi-]').length,
         captionEnabled:!document.getElementById('caption-style-controls').disabled,
         resultVisible:!document.getElementById('task-result-link').classList.contains('hidden'),
+        resultLabel:document.getElementById('task-result-status').textContent,
         resultUrl:document.getElementById('task-result-link').getAttribute('href'),
         voice:document.getElementById('voice-select').value,
         rowStates:Array.from(document.querySelectorAll('.transcript-state'),e=>e.textContent),
