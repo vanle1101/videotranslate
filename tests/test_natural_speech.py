@@ -914,6 +914,19 @@ def test_pacing_rejection_history_is_bounded_deduplicated_and_immutable():
     assert all(len(row["reason"]) <= 1000 for row in feedback["rejected_candidates"])
 
 
+def test_substantive_rejection_replaces_prior_duplicate_without_mutating_history():
+    duplicate = PacingReviewRejected("Repeated", candidate="Câu đã thử.", code="duplicate")
+    prior = accumulate_pacing_rejection({}, duplicate)
+    snapshot = json.dumps(prior, sort_keys=True)
+    actual = accumulate_pacing_rejection(prior, PacingReviewRejected(
+        "Wrong meaning", candidate="  CÂU ĐÃ THỬ. ", reason="Lost negation.", code="semantic_mismatch"))
+    assert json.dumps(prior, sort_keys=True) == snapshot
+    assert len(actual["rejected_candidates"]) == 1
+    assert actual["rejected_candidates"][0]["code"] == "semantic_mismatch"
+    assert actual["rejected_candidates"][0]["reason"] == "Lost negation."
+    assert accumulate_pacing_rejection(actual, duplicate)["rejected_candidates"] == actual["rejected_candidates"]
+
+
 def test_repeated_identical_rejections_change_feedback_but_replay_is_deterministic():
     first = PacingReviewRejected("Rejected", candidate="Lost meaning.",
         reason="Negation lost.", code="semantic_mismatch")

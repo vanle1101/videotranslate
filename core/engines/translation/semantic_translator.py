@@ -139,7 +139,7 @@ def accumulate_pacing_rejection(feedback, error):
     proposals in a fitting invocation without growing a provider prompt forever.
     """
     result = deepcopy(feedback) if isinstance(feedback, dict) else {}
-    history, seen = [], set()
+    history, seen = [], {}
     prior = result.get("rejected_candidates", [])
     entries = list(prior) if isinstance(prior, list) else []
     if isinstance(result.get("rejected_candidate"), str):
@@ -152,11 +152,19 @@ def accumulate_pacing_rejection(feedback, error):
             continue
         text = entry["text"].strip()[:2000]
         key = pacing_candidate_key(text)
-        if not key or key in seen:
+        if not key:
             continue
-        seen.add(key)
-        history.append({"text": text, "reason": str(entry.get("reason", ""))[:1000],
-                        "code": str(entry.get("code", "review_rejected"))[:64]})
+        record = {"text": text, "reason": str(entry.get("reason", ""))[:1000],
+                  "code": str(entry.get("code", "review_rejected"))[:64]}
+        if key in seen:
+            previous = history[seen[key]]
+            if previous["code"] == "duplicate" and record["code"] != "duplicate":
+                # A repetition observation must not hide a later actual review
+                # failure, including after exact-candidate revalidation.
+                history[seen[key]] = record
+            continue
+        seen[key] = len(history)
+        history.append(record)
     result.update(error.feedback)
     result["code"] = error.code
     result["rejected_candidates"] = history[-12:]
