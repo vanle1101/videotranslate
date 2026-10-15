@@ -5682,6 +5682,21 @@ test('an intentionally empty reviewed translation does not revive a discarded dr
   assert.equal(ui.el('btn-review-worker').disabled, false);
 });
 
+test('a missing-speech review gap stays inspectable without claiming ready or enabling full export', async () => {
+  const ui = studio(); await ui.start();
+  ui.sockets.at(-1).receive({type:'segment_update',id:0,start:0,end:3,duration:3,status:'NEEDS_REVIEW',
+    final_vi:'',text_vi:'',natural_vi:'discarded',text_zh:'原文',needs_review:true,
+    verification:{status:'unresolved'},audio_url:null,revision:1});
+  assert.equal(ui.el('seg-vi-0').textContent,'Chưa đủ căn cứ để dịch câu này.');
+  assert.equal(ui.el('btn-export-hq').disabled,true);
+  const video=ui.el('video-player');
+  video.currentTime=1;
+  await video.play(); await video.emit('timeupdate');
+  assert.equal(video.paused,false,'A clearly labelled review gap must not permanently block inspection of later speech');
+  assert.equal(ui.el('subtitle-text').textContent,'');
+  assert.equal(ui.el('btn-export-hq').disabled,true);
+});
+
 test('the durable missing-speech gate disables full export until explicitly cleared', async () => {
   const ui = studio(); await ui.start();
   const socket = ui.sockets.at(-1);

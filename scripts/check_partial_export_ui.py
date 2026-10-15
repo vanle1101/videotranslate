@@ -36,6 +36,16 @@ def main():
         evaluate(page, "(() => {window.__qaAlerts=[];window.alert=m=>window.__qaAlerts.push(String(m));return true;})()")
         open_history(page, args.task_id)
         before = backend(base, f"/api/streaming/{args.task_id}")
+        review_gaps = [row for row in before['segments'] if row.get('needs_review')
+            and not (row.get('final_vi') or '').strip() and not row.get('confirmed_silence')]
+        assert all(row['status'] == 'NEEDS_REVIEW' for row in review_gaps), review_gaps
+        if review_gaps:
+            event('REVIEW_GAPS', {'ids':[row['id'] for row in review_gaps],
+                'processing_completed':before['progress'].get('processing_completed_segments'),
+                'processing_total':before['progress'].get('processing_total_segments')})
+            for row in review_gaps:
+                until(page, "document.getElementById('seg-vi-" + str(row['id'])
+                    + "')?.textContent.includes('Chưa đủ căn cứ')")
         def dialogue(snapshot):
             return hashlib.sha256(json.dumps(snapshot['segments'],sort_keys=True).encode()).hexdigest()
         digest = dialogue(before)

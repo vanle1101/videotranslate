@@ -23,7 +23,7 @@ from urllib.parse import quote, urlsplit, urlunsplit, parse_qsl, urlencode
 from config import settings
 from core.streaming.audio_cache import resolve_dub_timing
 from core.history_work import check_history_read, history_read_active
-from core.streaming.output_gate import final_output_metadata, final_media_metadata, preview_output_metadata, missing_speech_message
+from core.streaming.output_gate import final_output_metadata, final_media_metadata, preview_output_metadata, missing_speech_message, missing_spoken_output_ids
 
 VERSION = 1
 MAX_BYTES = 16 * 1024 * 1024
@@ -1101,13 +1101,13 @@ def _availability(data):
     preview_output["preview_output_ready"] = bool(preview_covered and preview_output["preview_output_ready"])
     preview_speech_unresolved = bool(fields.get("translation_mode") == "preview" and preview_covered
         and not preview_output["preview_output_ready"] and preview_output["preview_untranslated_ids"]
-        and all(row["status"] in {"READY", "PLAYED"} for row in preview_rows)
+        and all(row["status"] in {"READY", "PLAYED", "NEEDS_REVIEW"} for row in preview_rows)
         and data["state"] == "READY")
     preview_ready = bool(fields.get("translation_mode") == "preview" and fields.get("_preview_ready")
                          and fields.get("initialized") and not missing and not absent_audio
                          and preview_output["preview_output_ready"]
                          and data["state"] == "READY"
-                         and all(row["status"] in {"READY", "PLAYED"} for row in rows
+                         and all(row["status"] in {"READY", "PLAYED", "NEEDS_REVIEW"} for row in rows
                                  if row["start"] < fields.get("_visual_completed_seconds", 0) - .001))
     preview_can_continue = bool(fields.get("translation_mode") == "preview" and fields.get("_preview_ready")
         and fields.get("initialized") and not missing and not absent_audio
@@ -1116,7 +1116,9 @@ def _availability(data):
                                  if row["end"] <= fields.get("_visual_completed_seconds", 0) + .001)))
     if fields.get("review_summary", {}).get("status") in {"failed", "incomplete", "running"}:
         ready = False
-    unresolved_speech = bool(ready and output_gate["final_output_blocked"])
+    unresolved_speech = bool(fields.get("initialized") and not visual_incomplete
+        and not absent_audio and not missing and output_gate["final_output_blocked"]
+        and all(row["status"] in {"READY", "PLAYED", "NEEDS_REVIEW"} for row in rows))
     if output_gate["final_output_blocked"]:
         ready = False
     output = fields.get("output_filename", "")
@@ -1338,6 +1340,11 @@ def _restore_saved_session_owned(task_id, event_callback=None):
         segment = SegmentItem(row["id"], row["start"], row["end"], row["duration"])
         for key, value in row.items():
             setattr(segment, key, value)
+        # Historical READY/PLAYED represented a skippable draft gap. Restore
+        # its real state without editing the saved manifest during a read.
+        if segment.status in {"READY", "PLAYED"} and missing_spoken_output_ids([segment]):
+            segment.status = "NEEDS_REVIEW"
+            segment.needs_review = True
         untouched_preview_row = bool((available["preview_can_continue"] or available["preview_speech_unresolved"])
                                      and row["status"] == "WAITING"
                                      and row["start"] >= session._visual_completed_seconds - .001)

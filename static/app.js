@@ -3746,7 +3746,7 @@ document.addEventListener("DOMContentLoaded", () => {
 
     if (matchedSeg) {
       const dubBounds = resolveDubTiming(matchedSeg);
-      if (!["READY", "PLAYED"].includes(matchedSeg.status) && !videoPlayer.paused) {
+      if (!["READY", "PLAYED"].includes(matchedSeg.status) && !inspectableReviewGap(matchedSeg) && !videoPlayer.paused) {
         isBufferingUnderrun = true;
         videoPlayer.pause();
         bufferingText.textContent = matchedSeg.status === "FAILED"
@@ -3851,6 +3851,11 @@ document.addEventListener("DOMContentLoaded", () => {
   // Transcript rows retain their editors while background segment updates arrive.
   function segmentTranslation(segment) {
     return typeof segment.final_vi === "string" ? segment.final_vi : segment.natural_vi || segment.literal_vi || "";
+  }
+
+  function inspectableReviewGap(segment) {
+    return segment?.status === "NEEDS_REVIEW" && segment.needs_review === true &&
+      !segmentTranslation(segment) && !segment.audio_url && segment.confirmed_silence !== true;
   }
 
   function segmentStatusLabel(status) {
@@ -4353,7 +4358,7 @@ document.addEventListener("DOMContentLoaded", () => {
     item.speakerButton.title = speakerConfirmationBusy() ? "Chờ tác vụ dừng trước khi xác nhận vai thoại" : "Xác nhận người nói và cách xưng hô";
     item.original.textContent = segment.text_zh || (segment.confirmed_silence ? "Không có lời thoại" : "Đang nhận dạng lời thoại…");
     item.translation.textContent = segment.confirmed_silence ? "Đã xác nhận không có lời thoại" : segmentTranslation(segment)
-      || (ready && segment.needs_review ? "Chưa đủ căn cứ để dịch câu này." : "Bản dịch sẽ xuất hiện sau khi xử lý.");
+      || ((ready || inspectableReviewGap(segment)) && segment.needs_review ? "Chưa đủ căn cứ để dịch câu này." : "Bản dịch sẽ xuất hiện sau khi xử lý.");
     item.translation.disabled = !transcriptEditable(segment) || item.saving;
     const timing = segment.timing_issue;
     const validTiming = timing && !Array.isArray(timing) && timing.code === "TIMING_CONFLICT" &&
@@ -4374,7 +4379,7 @@ document.addEventListener("DOMContentLoaded", () => {
     const reviewHint = reviewInProgress() && transcriptReviewLocked(segment.id) ? "AI đang đối chiếu lại câu này." : segment.verification?.status === "unresolved"
       ? "AI chưa đủ bằng chứng. Có thể nghe gốc, sửa lời hoặc xác nhận Vai thoại rồi tiếp tục rà lại."
       : "AI sẽ đối chiếu lại lời gốc và bản dịch. Có thể bấm AI kiểm tra lại sau khi xử lý xong.";
-    const emptyHint = ready && !segment.audio_url && !segmentTranslation(segment) ? " Chưa có giọng Việt cho câu này; video vẫn phát tiếp." : "";
+    const emptyHint = (ready || inspectableReviewGap(segment)) && !segment.audio_url && !segmentTranslation(segment) ? " Chưa có giọng Việt cho câu này; video vẫn phát tiếp để kiểm tra, chưa thể xuất đầy đủ." : "";
     item.review.textContent = segment.needs_review ? `${reviewReason} ${reviewHint}${emptyHint}` : "";
     // Never replace text in an open editor: another worker update must not erase a draft.
     if (item.editor.hidden) item.input.value = segmentTranslation(segment);

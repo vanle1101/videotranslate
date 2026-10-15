@@ -136,12 +136,43 @@ def test_durable_history_and_reload_preserve_uncertain_rows_without_false_full_r
     restored = store.restore_saved_session(sess.task_id)
     assert restored.get_progress()["status"] == "PREPARED"
     assert restored.get_progress()["content_review_state"] == "REVIEW_REQUIRED"
-    assert all(row.status == "READY" and row.needs_review and row.audio_path is None
+    assert all(row.status == "NEEDS_REVIEW" and row.needs_review and row.audio_path is None
                and row.confirmed_silence is False for row in restored.segments.values())
     assert [row.text_zh for row in restored.segments.values()] == ["那你呢", "我"]
     assert all(row.verification == {"status": "unresolved", "semantic_verified": False}
                for row in restored.segments.values())
     assert store._project_path(sess.task_id).read_bytes() == before
+
+
+def test_review_gap_roundtrip_stays_inspectable_without_ready_credit_or_speech_retry(omitted_speech):
+    sess = omitted_speech
+    # A current checkpoint uses the truthful status, unlike legacy READY gaps.
+    for row in sess.segments.values():
+        row.status = "NEEDS_REVIEW"
+    sess.persist()
+    before = store._project_path(sess.task_id).read_bytes()
+    available = store._availability(store._read(sess.task_id))
+    assert available["status"] == "PREPARED" and not available["ready"]
+    main.active_streaming_sessions.clear()
+    restored = store.restore_saved_session(sess.task_id)
+    assert restored.total_processed_duration == 0
+    assert restored.playable_until == restored.total_duration
+    assert restored.get_progress()["can_review"]
+    assert restored.get_progress()["missing_speech_ids"] == [0, 1]
+    assert restored.queue.empty() and not restored.can_retry
+    assert all(row.status == "NEEDS_REVIEW" and row.failed_stage is None
+               for row in restored.segments.values())
+    assert store._project_path(sess.task_id).read_bytes() == before
+
+
+def test_review_gap_does_not_block_independent_failed_speech_retry(omitted_speech):
+    sess = omitted_speech
+    sess.segments[0].status = "NEEDS_REVIEW"
+    failed = sess.segments[1]
+    failed.final_vi = "Lời đã dịch, chưa có giọng."
+    failed.status, failed.failed_stage = "FAILED", "TTS"
+    sess.error = "Chưa tạo được giọng."
+    assert sess.can_retry
 
 
 def test_saved_preview_with_only_empty_unresolved_source_speech_is_review_required_not_ready(omitted_speech):
@@ -206,8 +237,10 @@ def test_unresolved_preview_restore_keeps_future_lookahead_and_review_scopes_to_
     assert restored.get_progress()["status"] == "PREPARED" and not restored.can_translate_full
 
 
-def test_real_translated_speech_sample_can_continue_while_another_unresolved_row_blocks_export(omitted_speech):
+@pytest.mark.parametrize("gap_status", ["READY", "NEEDS_REVIEW"])
+def test_real_translated_speech_sample_can_continue_while_another_unresolved_row_blocks_export(omitted_speech, gap_status):
     sess = omitted_speech
+    sess.segments[1].status = gap_status
     row = sess.segments[0]
     row.final_vi = "Còn bạn thì sao?"
     path = sess.segments_dir / "seg_0.wav"

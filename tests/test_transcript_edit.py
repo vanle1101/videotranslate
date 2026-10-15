@@ -330,17 +330,30 @@ def test_empty_uncertain_draft_keeps_review_without_freezing_playback_or_inventi
         session.is_running = True
         await session.queue.put((0, 0))
         await session._worker_loop()
-        assert segment.status == "READY" and segment.needs_review
+        assert segment.status == "NEEDS_REVIEW" and segment.needs_review
         assert segment.audio_url is None and not segment.confirmed_silence
         assert session.error is None and session.first_play_emitted
         assert session.playable_until == session.total_duration
         assert session.get_progress()["review_count"] == 1
-        # READY authorizes continuous draft playback, not a full result with a
-        # known source utterance silently omitted. Manual editing still works.
+        # A visible review gap allows later draft playback, but is never counted
+        # as synthesized speech or permission to omit a source utterance.
+        assert session.total_processed_duration == 0
+        assert segment.to_dict()["processing_state"] == "REVIEW_REQUIRED"
+        assert segment.to_dict()["preview_is_draft"] is False
+        assert session._restart_intent == "halted"
         assert session.get_progress()["status"] == "PREPARED"
         assert session.get_progress()["progress_pct"] is None
         assert session.get_progress()["missing_speech_ids"] == [0]
         assert session.get_telemetry()["status"] == "prepared"
+        published_progress = [data for kind, data in session.events if kind == "progress"]
+        assert published_progress and all(data["status"] != "COMPLETED" for data in published_progress)
+        assert all(data.get("progress_pct") != 100 for data in published_progress)
+        # A stale queue entry must not keep submitting this unchanged gap.
+        session.is_running = True
+        await session.queue.put((0, 0))
+        await session._worker_loop()
+        assert segment.status == "NEEDS_REVIEW"
+        session.tts_engine.synthesize.assert_not_called()
         await session.edit_segment(0, "Bổ sung câu nghe được")
         assert not segment.needs_review and segment.audio_url
         assert session.total_processed_duration == segment.duration
@@ -1232,6 +1245,7 @@ def test_automatic_review_only_regenerates_changed_audio_and_preserves_uncertain
     monkeypatch.setattr(settings, "LLM_PROVIDER", "opencode")
     segment = session.segments[0]
     segment.needs_review = True
+    original_text = segment.final_vi
     row = dict(segment.to_dict(), final_vi="Lời đã kiểm tra" if changed else segment.final_vi,
                needs_review=unresolved, review_reason="Nguồn bị cắt" if unresolved else None,
                verification={"status": "unresolved" if unresolved else "corrected" if changed else "verified"})
@@ -1249,11 +1263,20 @@ def test_automatic_review_only_regenerates_changed_audio_and_preserves_uncertain
             assert not session.get_progress()["can_stop"]
             assert not session.output_filename and session.get_progress()["progress_pct"] is None
     asyncio.run(run())
-    assert segment.final_vi == row["final_vi"]
+    # An unverified alternative cannot discard the existing measured voice.
+    # Keep that candidate for review while retaining the spoken wording.
+    retained = changed and unresolved
+    assert segment.final_vi == (original_text if retained else row["final_vi"])
     assert segment.needs_review == unresolved
-    assert segment.verification == row["verification"]
-    assert session.tts_engine.synthesize.call_count == int(changed)
-    assert segment.revision == int(changed)
+    if retained:
+        assert segment.verification["status"] == "unresolved"
+        assert segment.verification["semantic_verified"] is False
+        assert segment.verification["candidate"] == row["final_vi"]
+        assert segment.verification["text_preserved"] is True
+    else:
+        assert segment.verification == row["verification"]
+    assert session.tts_engine.synthesize.call_count == int(changed and not retained)
+    assert segment.revision == int(changed and not retained)
     assert not session.is_running and not session.is_editing
 
 

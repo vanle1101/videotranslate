@@ -411,6 +411,7 @@ def test_empty_supported_draft_recovery_is_bounded_across_resume(reviewed_sessio
         assert calls == [[112]]
         assert restored.segments[112].verification["status"] == "unresolved"
         assert restored.segments[112].final_vi == ""
+        assert restored.segments[112].status == "NEEDS_REVIEW"
         # Fresh source evidence may justify another bounded attempt.
         restored.segments[113].text_zh = "爸爸"
         asyncio.run(restored._resume_pending_chunk_reviews())

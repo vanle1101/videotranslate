@@ -100,7 +100,7 @@ class SegmentItem:
         self.dub_start = None
         self.dub_end = None
         self.dub_tail_limit = None
-        self.status = "WAITING" # WAITING, ASR, TRANSLATING, TTS, ALIGNING, READY, PLAYED, FAILED
+        self.status = "WAITING" # WAITING, ASR, TRANSLATING, TTS, ALIGNING, READY, PLAYED, FAILED, NEEDS_REVIEW
         self.text_zh = ""
         self.emotion = ""
         self.literal_vi = ""
@@ -574,7 +574,7 @@ class StreamingPipelineSession:
         return bool(self.initialized and (not self.is_stopped or voice_retry) and not self.is_running
                     and not self.is_editing and self.error and failed
                     and all(segment.failed_stage in restored_stages for segment in failed)
-                    and all(segment.status in ("READY", "PLAYED", "FAILED", "WAITING")
+                    and all(segment.status in ("READY", "PLAYED", "FAILED", "WAITING", "NEEDS_REVIEW")
                             for segment in self.segments.values()))
 
     async def retry_failed_synthesis(self):
@@ -868,7 +868,7 @@ class StreamingPipelineSession:
                     seg.needs_review = False
                     seg.review_reason = None
                     seg.error = None
-                    seg.status = "READY"
+                    seg.status = "NEEDS_REVIEW" if missing_spoken_output_ids([seg]) else "READY"
                     self._refresh_processed_duration()
                     if was_review_error:
                         self.error = None
@@ -1032,6 +1032,9 @@ class StreamingPipelineSession:
         audit = row.get("verification") or {}
         if isinstance(audit, dict) and audit.get("status") in {"verified", "corrected", "unresolved"}:
             segment.speaker_review_pending = False
+        if segment.status in {"READY", "PLAYED"} and missing_spoken_output_ids([segment]):
+            segment.status = "NEEDS_REVIEW"
+            segment.needs_review = True
 
     def _source_scope_review_rows(self):
         return [{"id": row.id, "start": row.start, "end": row.end,
@@ -1867,15 +1870,15 @@ class StreamingPipelineSession:
         recovery = bool(failed)
         if recovery:
             if (getattr(self, "_startup_failed", False) or not self.video_path or not self.video_path.is_file()
-                    or any(row.status not in {"READY", "PLAYED", "FAILED"} for row in scope)
+                    or any(row.status not in {"READY", "PLAYED", "FAILED", "NEEDS_REVIEW"} for row in scope)
                     or any(row.failed_stage not in {"TTS", "ALIGNING"} for row in failed)):
                 return [], scope, True
-            targets = [row for row in scope if row.status in {"READY", "PLAYED"}
+            targets = [row for row in scope if row.status in {"READY", "PLAYED", "NEEDS_REVIEW"}
                        and (row.needs_review or row.speaker_review_pending
                             or (row.verification or {}).get("status") in {"pending", "incomplete", "unresolved"})
                        and (row.verification or {}).get("status") != "manual"]
             return targets, scope, True
-        if self.is_stopped or self.error or any(row.status not in {"READY", "PLAYED"} for row in scope):
+        if self.is_stopped or self.error or any(row.status not in {"READY", "PLAYED", "NEEDS_REVIEW"} for row in scope):
             return [], scope, False
         return scope, scope, False
 
@@ -2414,7 +2417,7 @@ class StreamingPipelineSession:
                 continue
             # A restored chunk must never replace an already committed review
             # or user edit with its earlier prepass draft.
-            if item.status in ("READY", "PLAYED"):
+            if item.status in ("READY", "PLAYED", "NEEDS_REVIEW"):
                 self._visual_published_ids.add(sid)
                 continue
             draft_identity = VideoIntelligence._checkpoint_digest({
@@ -3093,7 +3096,7 @@ class StreamingPipelineSession:
                     await self._emit_initialization()
                 for source in source_rows:
                     row = self.segments[source.id]
-                    if row.status in ("READY", "PLAYED"):
+                    if row.status in ("READY", "PLAYED", "NEEDS_REVIEW"):
                         continue
                     await self.pause_event.wait()
                     try:
@@ -3725,8 +3728,12 @@ class StreamingPipelineSession:
         for s in sorted_segs:
             if s.end <= now:
                 continue
-            if s.status in ["READY", "PLAYED"]:
-                # Silence between speech segments needs no synthesis.
+            if s.status in ["READY", "PLAYED"] or (
+                    s.status == "NEEDS_REVIEW" and s.needs_review
+                    and not s.final_vi.strip() and not s.audio_path and not s.audio_url):
+                # Draft playback may pass a visibly unresolved source row to
+                # inspect later speech. It is not synthesized/completed work;
+                # processing progress and full export keep the gap blocked.
                 playable = max(playable, s.end)
             else:
                 playable = max(playable, s.start)
@@ -4640,7 +4647,9 @@ class StreamingPipelineSession:
                     seg.tts_duration, seg.speed_ratio = 0.0, 1.0
                     seg.subtitle_cues = []
                     seg.subtitle_timing_source = "empty"
-                    seg.status = "READY"
+                    seg.status = "NEEDS_REVIEW" if missing_spoken_output_ids([seg]) else "READY"
+                    if seg.status == "NEEDS_REVIEW":
+                        seg.needs_review = True
                     seg.timing_issue = None
                     seg.failed_stage = None
                     seg._retry_synthesis = False
@@ -4986,7 +4995,7 @@ class StreamingPipelineSession:
                     if any(r["stage"] == "speech" and r["scope_id"] == str(seg_id)
                            and r["state"] == "RETRY_PENDING" for r in getattr(self, "_retry_schedule", [])):
                         continue
-                    if seg and seg.status not in ("READY", "PLAYED"):
+                    if seg and seg.status not in ("READY", "PLAYED", "NEEDS_REVIEW"):
                         if seg._retry_synthesis:
                             await self._synthesize_segment(seg)
                         else:
@@ -5085,7 +5094,7 @@ class StreamingPipelineSession:
                         self.error = "Đoạn xem trước chưa có giọng Việt hợp lệ; bấm Tiếp tục để tạo lại phần thiếu."
                         await self.emit("error", {"message": self.error})
                         await self.emit("progress", self.get_progress())
-                elif any(s.status not in ("READY", "PLAYED") for s in owned):
+                elif any(s.status not in ("READY", "PLAYED", "NEEDS_REVIEW") for s in owned):
                     self.error = "Bản xem trước còn câu chưa xử lý xong; phần đã lưu được giữ."
                     await self.emit("progress", self.get_progress())
                 else:
@@ -5109,7 +5118,8 @@ class StreamingPipelineSession:
                 await self.emit("progress", self.get_progress())
             if not self.is_stopped and not self.is_paused:
                 mark_intent(self, "halted" if self.error else
-                            "retry_pending" if getattr(self, "_retry_schedule", []) else "completed")
+                            "retry_pending" if getattr(self, "_retry_schedule", []) else
+                            "halted" if missing_spoken_output_ids(owned) else "completed")
                 self._persist_if_enabled()
             await self.emit("finished", self.get_telemetry())
 

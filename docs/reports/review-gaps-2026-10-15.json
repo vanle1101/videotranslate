@@ -1,0 +1,105 @@
+{
+  "task_id": "5bea8fe5",
+  "original_parent_bounds": [
+    115.86,
+    118.76
+  ],
+  "target_bounds": [
+    116.9,
+    118.76
+  ],
+  "actual_parent_readings": {
+    "27": {
+      "sensevoice": "分别总是在9月。",
+      "faster-whisper-small": "分別終是在9月"
+    }
+  },
+  "actual_whisper_word_records": [
+    {
+      "event": "runtime",
+      "device": "cpu",
+      "compute_type": "int8_float32"
+    },
+    {
+      "event": "segment",
+      "segment": {
+        "start": 0.0,
+        "end": 2.86,
+        "text": "分別終是在9月",
+        "words": [
+          {
+            "word": "分",
+            "start": 0.0,
+            "end": 0.32
+          },
+          {
+            "word": "別",
+            "start": 0.32,
+            "end": 0.66
+          },
+          {
+            "word": "終",
+            "start": 0.66,
+            "end": 1.46
+          },
+          {
+            "word": "是",
+            "start": 1.46,
+            "end": 1.96
+          },
+          {
+            "word": "在",
+            "start": 1.96,
+            "end": 2.3
+          },
+          {
+            "word": "9",
+            "start": 2.3,
+            "end": 2.54
+          },
+          {
+            "word": "月",
+            "start": 2.54,
+            "end": 2.86
+          }
+        ]
+      }
+    },
+    {
+      "event": "completed",
+      "segments": 1
+    }
+  ],
+  "conclusion": "Parent reading still disagrees (总 vs 終); word at116.52–117.32 crosses target boundary. No automatic source replacement or VERIFIED permitted.",
+  "manifest_changed_by_source_probe": false,
+  "provider_requests": 0,
+  "production_ui": {
+    "task_id": "5bea8fe5",
+    "file": "D:\\New folder\\ALL IN ONE\\MMO\\Dịch Video\\workspace\\outputs\\douyin_translated_5bea8fe5_partial_c24219fe8252_hq.mp4",
+    "bytes": 22236410,
+    "seconds": 116.9,
+    "elapsed_seconds": 31.031,
+    "full_decode": true,
+    "production_player": {
+      "duration": 116.917,
+      "time": 0.300699,
+      "ready": 4,
+      "width": 360,
+      "error": null
+    },
+    "reopen": true,
+    "full_gates_retained": true,
+    "dialogue_unchanged": true,
+    "alerts": []
+  },
+  "review_gaps": {
+    "ids": [
+      27,
+      43,
+      57
+    ],
+    "processing_completed": 72,
+    "processing_total": 75
+  },
+  "backend_stopped": true
+}
