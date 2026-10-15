@@ -1427,6 +1427,8 @@ document.addEventListener("DOMContentLoaded", () => {
       tts_timeout: "Tạo giọng quá thời gian", tts_transport: "Mất kết nối dịch vụ giọng đọc",
       tts_rate_limited: "Dịch vụ giọng đọc giới hạn yêu cầu", tts_empty_audio: "Dịch vụ giọng đọc chưa trả âm thanh",
       tts_http_error: "Dịch vụ giọng đọc tạm lỗi HTTP",
+      asr_timeout: "Đối chiếu âm thanh quá thời gian",
+      asr_failed: "Bộ nhận giọng tại máy đã dừng do lỗi",
     };
     const codes = Array.isArray(progress?.retry_error_codes) ? progress.retry_error_codes : [];
     return [...new Set(codes.filter(code => typeof code === "string" && /^[A-Za-z0-9_.:-]{1,160}$/.test(code)))]

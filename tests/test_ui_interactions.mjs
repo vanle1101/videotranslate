@@ -39,11 +39,13 @@ test('durable retry exposes actual cause and countdown separately from measured 
   const ui = studio(); await ui.start(); const socket = ui.sockets.at(-1);
   socket.receive({type:'progress',status:'RUNNING',phase:'retry',progress_pct:null,
     retry_pending_count:2,retry_next_attempt_at:Date.now()/1000+300,
-    retry_error_codes:['provider_timeout','tts_empty_audio'],eta_scope:'final',eta_seconds:30});
+    retry_error_codes:['provider_timeout','tts_empty_audio','asr_timeout','asr_failed'],eta_scope:'final',eta_seconds:30});
   assert.equal(ui.el('task-status-label').textContent,'Chờ thử lại');
   assert.equal(ui.el('task-phase-label').textContent,'Phục hồi lỗi dịch vụ');
   assert.match(ui.el('task-error-summary').textContent,/AI phản hồi quá thời gian \(provider_timeout\)/);
   assert.match(ui.el('task-error-summary').textContent,/tts_empty_audio/);
+  assert.match(ui.el('task-error-summary').textContent,/Đối chiếu âm thanh quá thời gian \(asr_timeout\)/);
+  assert.match(ui.el('task-error-summary').textContent,/Bộ nhận giọng tại máy đã dừng do lỗi \(asr_failed\)/);
   assert.equal(ui.el('task-error-summary').classList.contains('hidden'),false);
   assert.match(ui.el('task-retry-notice').textContent,/2 phần chờ thử lại.*sau khoảng.*chưa phải thời gian có MP4/);
   assert.equal(ui.el('task-progress-track').dataset.indeterminate,'true');
