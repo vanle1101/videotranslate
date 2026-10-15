@@ -1,24 +1,23 @@
 {
   "task_id": "5bea8fe5",
   "state": "STOPPED",
+  "observed_at_local": "2026-10-15 08:02",
   "source_seconds": 453.508934,
   "segments": 75,
-  "decoded_audio": 69,
+  "decoded_audio": 71,
   "decode_failures": [],
   "missing_text_ids": [
     27,
     43,
-    57,
-    64
+    57
   ],
   "missing_audio_ids": [
-    39,
     47
   ],
-  "review_required": 48,
-  "retry_pending": 23,
+  "review_required": 46,
+  "retry_pending": 19,
   "output_filename": "",
   "new_full_mp4_acceptance": "BLOCKED",
-  "stopped_by": "agent production UI Stop for reload after measured recovery; not provider crash",
+  "stopped_by": "QA observation deadline 900 seconds; normal Stop API drained native work and saved checkpoint",
   "max_speed_ratio": 1.15
 }
