@@ -62,8 +62,14 @@ def main():
                   "document.getElementById('btn-export-hq').title.includes('" + str(len(missing_audio)) + " câu')")
         event('MISSING_AUDIO_GATE', {'missing_audio_ids':missing_audio,
             'export_disabled':evaluate(page, "document.getElementById('btn-export-hq').disabled")})
-        assert state['progress']['can_retry'], state['progress']
-        assert click(page, 'btn-retry-worker')
+        if state['progress']['status'] == 'RUNNING':
+            # Startup may already resume a persisted active retry intent. Do
+            # not stop it or submit a second worker merely to exercise a click.
+            event('RECOVERY_ALREADY_RUNNING', {'task_id': task,
+                'stage': state['progress'].get('stage')})
+        else:
+            assert state['progress']['can_retry'], state['progress']
+            assert click(page, 'btn-retry-worker')
         until(page, "document.getElementById('task-progress').dataset.status==='RUNNING'")
         started = time.monotonic()
         deadline, last = started + args.timeout, None

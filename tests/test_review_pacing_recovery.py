@@ -78,6 +78,7 @@ def review_response():
 def test_runtime_rewrite_callback_reports_alignment_in_progress_and_segment_state(reviewed_session, monkeypatch):
     session = reviewed_session
     focus = session.segments[112]
+    focus.audio_url = "/isolated/seg_112.wav"
     events = []
     async def progress(phase, label):
         events.append((phase, label, focus.status))
@@ -91,6 +92,116 @@ def test_runtime_rewrite_callback_reports_alignment_in_progress_and_segment_stat
     assert events[-1][0] == "align"
     assert events[-1][2] == "ALIGNING"
     assert "rút gọn" in events[-1][1]
+
+
+@pytest.mark.parametrize("defer_audio", [False, True])
+def test_uncertain_review_rewrite_keeps_existing_valid_speech(reviewed_session, monkeypatch, defer_audio):
+    session = reviewed_session
+    focus = session.segments[112]
+    focus.audio_url = "/isolated/seg_112.wav"
+    original_text, original_audio = focus.final_vi, focus.audio_path
+    proposed_text = "Cậu cũng hôi lắm rồi, lão biểu."
+    review = {**focus.to_dict(), "final_vi": proposed_text,
+        "literal_vi": "Cậu cũng hôi lắm rồi, lão biểu.",
+        "natural_vi": "Cậu cũng hôi lắm rồi, lão biểu.", "needs_review": True,
+        "review_reason": "Chưa đủ bằng chứng về vai.",
+        "verification": {"status": "unresolved", "source_supported": True,
+            "semantic_verified": False, "second_pass_status": "completed",
+            "review_gate_revision": AutomaticTranslationReviewer.REVIEW_GATE_REVISION,
+            "evidence": [{"id": "review0", "text_zh": focus.text_zh}],
+            "address_applicable": True, "address_verified": True,
+            "address_uses": [{"term": "lão biểu", "role": "listener"}],
+            "pacing": {"status": "approved"}}}
+    monkeypatch.setattr(AutomaticTranslationReviewer, "review", lambda *args, **kwargs:
+        {"segments": {focus.id: review}, "translation_sources": [],
+         "summary": {"checked": 1, "unresolved": 1}})
+    async def forbidden(*args, **kwargs):
+        raise AssertionError("An uncertain rewrite must not synthesize over valid speech")
+    monkeypatch.setattr(session, "edit_segment", forbidden)
+    monkeypatch.setattr(session, "_synthesize_segment", forbidden)
+    options = {"regenerate_audio": True, "segment_ids": {focus.id}}
+    if defer_audio:
+        options["defer_audio"] = True
+    asyncio.run(session._review_translations(**options))
+    assert focus.final_vi == original_text and focus.audio_path == original_audio
+    assert focus.status == "READY" and focus.needs_review
+    assert focus.verification["status"] == "unresolved"
+    assert focus.verification["semantic_verified"] is False
+    assert focus.verification["text_preserved"] is True
+    assert focus.verification["candidate"] == proposed_text
+    assert "address_uses" not in focus.verification and "pacing" not in focus.verification
+    assert "address_applicable" not in focus.verification
+    assert focus.verification["address_verified"] is False
+
+
+@pytest.mark.parametrize("exception", ["source", "empty_old", "empty_new", "missing_wav", "broken_wav",
+                                       "manual", "voice", "verified", "pending", "failed"])
+def test_uncertain_review_stability_does_not_bypass_correction_or_media_gates(reviewed_session, exception):
+    session = reviewed_session
+    row = session.segments[112]
+    row.audio_url = "/isolated/seg_112.wav"
+    candidate = {**row.to_dict(), "final_vi": "Một cách diễn đạt khác.",
+                 "verification": {"status": "unresolved", "semantic_verified": False}}
+    if exception == "source": candidate["text_zh"] += "新"
+    elif exception == "empty_old": row.final_vi = ""
+    elif exception == "empty_new": candidate["final_vi"] = ""
+    elif exception == "missing_wav": Path(row.audio_path).unlink()
+    elif exception == "broken_wav": Path(row.audio_path).write_bytes(b"not a WAV")
+    elif exception == "manual": row.verification = {"status": "manual"}
+    elif exception == "voice": row.tts_voice_outdated = True
+    elif exception == "verified": candidate["verification"]["semantic_verified"] = True
+    elif exception == "pending": candidate["verification"]["status"] = "pending"
+    else: row.status = "FAILED"
+    before = deepcopy(candidate)
+    assert session._retain_stable_review_audio(row, candidate) is False
+    assert candidate == before
+
+
+def test_verified_review_rewrite_still_replaces_existing_speech(reviewed_session, monkeypatch):
+    session = reviewed_session
+    focus = session.segments[112]
+    replacement = "Bản đã được xác minh."
+    review = {**focus.to_dict(), "final_vi": replacement, "needs_review": False,
+        "verification": {"status": "verified", "source_supported": True,
+            "semantic_verified": True, "second_pass_status": "completed",
+            "review_gate_revision": AutomaticTranslationReviewer.REVIEW_GATE_REVISION,
+            "evidence": [{"id": "review0", "text_zh": focus.text_zh}]}}
+    monkeypatch.setattr(AutomaticTranslationReviewer, "review", lambda *args, **kwargs:
+        {"segments": {focus.id: review}, "translation_sources": [],
+         "summary": {"checked": 1, "verified": 1}})
+    edited = []
+    async def edit(*args, **kwargs):
+        edited.append(args[1])
+        focus.final_vi = args[1]
+    monkeypatch.setattr(session, "edit_segment", edit)
+    asyncio.run(session._review_translations(regenerate_audio=True, segment_ids={focus.id}))
+    assert edited == [replacement]
+
+
+def test_retained_uncertain_wording_and_candidate_survive_restart(reviewed_session, monkeypatch):
+    from core.streaming.session_store import restore_saved_session
+    session = reviewed_session
+    focus = session.segments[112]
+    focus.audio_url = "/isolated/seg_112.wav"
+    proposed = "Cậu cũng hôi lắm rồi, lão biểu."
+    response = {**focus.to_dict(), "final_vi": proposed, "needs_review": True,
+        "verification": {"status": "unresolved", "source_supported": True,
+            "semantic_verified": False, "second_pass_status": "completed"}}
+    monkeypatch.setattr(AutomaticTranslationReviewer, "review", lambda *args, **kwargs:
+        {"segments": {focus.id: response}, "translation_sources": [],
+         "summary": {"checked": 1, "unresolved": 1}})
+    asyncio.run(session._review_translations(regenerate_audio=True, segment_ids={focus.id}))
+    old_audio = focus.audio_path
+    session.persist()
+    restored = restore_saved_session(session.task_id)
+    try:
+        row = restored.segments[focus.id]
+        assert row.final_vi == "Lời cũ." and row.audio_path == old_audio
+        assert row.verification["status"] == "unresolved"
+        assert row.verification["semantic_verified"] is False
+        assert row.verification["candidate"] == proposed
+    finally:
+        pipeline.active_streaming_sessions.pop(session.task_id, None)
 
 
 @pytest.mark.parametrize("semantic_verified", [True, False])

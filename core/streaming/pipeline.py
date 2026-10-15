@@ -1054,6 +1054,54 @@ class StreamingPipelineSession:
         except (OSError, TypeError, ValueError):
             return None
 
+    def _retain_stable_review_audio(self, segment, candidate):
+        """Keep playable speech when review only offers an unproven rewrite.
+
+        A semantic review is allowed to report uncertainty. It must not replace
+        a valid, unchanged-source draft and destroy its WAV merely because the
+        proposed wording differs. The candidate's uncertainty remains visible;
+        its wording/address/pacing approvals are deliberately discarded.
+        """
+        audit = candidate.get("verification") or {}
+        if (segment.status not in {"READY", "PLAYED"}
+                or not self._has_valid_dub_audio(segment)
+                or not str(segment.final_vi or "").strip()
+                or not str(candidate.get("final_vi", "")).strip()
+                or candidate.get("final_vi") == segment.final_vi
+                or candidate.get("text_zh") != segment.text_zh
+                or (segment.verification or {}).get("status") == "manual"
+                or segment.tts_voice_outdated
+                or audit.get("status") not in {"unresolved", "incomplete"}
+                or audit.get("semantic_verified") is True):
+            return False
+        proposed = str(candidate["final_vi"]).strip()[:2000]
+        reason = str(candidate.get("review_reason") or audit.get("reason") or
+                      "Bản sửa mới chưa đủ bằng chứng ngữ nghĩa; giữ lời đọc đã có để kiểm tra lại.")[:500]
+        candidate["literal_vi"] = segment.literal_vi
+        candidate["natural_vi"] = segment.natural_vi
+        candidate["final_vi"] = segment.final_vi
+        candidate["needs_review"] = True
+        candidate["review_reason"] = reason
+        retained = deepcopy(audit)
+        # Preserve source evidence, but never let candidate-only semantic,
+        # address or pacing metadata certify the retained wording.
+        for key in ("address_context", "address_context_sources", "address_uses",
+                    "address_verified", "address_reason", "pacing", "before_pacing",
+                    "pacing_verification", "source", "address_applicable",
+                    "address_neutral_faithful", "address_preserved", "target_orthography",
+                    "meaning_preserved", "natural", "accepted", "verified", "equivalent",
+                    "same_meaning", "semantic_status"):
+            retained.pop(key, None)
+        retained.update(status="unresolved", semantic_verified=False,
+                        needs_review=True, translation_changed=False,
+                        text_preserved=True, candidate=proposed, reason=reason)
+        retained["address_verified"] = False
+        candidate["verification"] = retained
+        logging.getLogger("pipeline").info(
+            "REVIEW_WORDING_RETAINED run_id=%s segment_id=%s reason=uncertain_rewrite",
+            self.task_id, segment.id)
+        return True
+
     def _source_scope_review_identity(self, segment, *, source_rows=None, focus_ids=None):
         """Exact owned source/context identity, independent of speech retries.
 
@@ -1346,6 +1394,16 @@ class StreamingPipelineSession:
         # while each row's visible text/audio still commits transactionally.
         if glossary_snapshot(self)["version"] != reviewer.glossary["version"]:
             raise SegmentEditConflict("Bảng thuật ngữ đã đổi; không áp dụng kết quả rà cũ.")
+        # Normalize an uncertain rewrite before building the frozen context.
+        # Downstream pacing and source-scope publication must see the wording
+        # that remains paired with the retained WAV, never the rejected draft.
+        result = deepcopy(result)
+        for sid, candidate in list(result.get("segments", {}).items()):
+            segment = self.segments.get(sid)
+            if (segment is not None and sid in target_revisions
+                    and segment.revision == target_revisions[sid]
+                    and (segment.verification or {}).get("status") != "manual"):
+                self._retain_stable_review_audio(segment, candidate)
         review_context = deepcopy(result["segments"])
         for sid, row in sorted(result["segments"].items(), key=lambda item: (self.segments[item[0]].start, item[0])):
             await self._wait_for_edit_publication()
