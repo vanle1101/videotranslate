@@ -130,8 +130,17 @@ def schedule_retry(session, stage, scope_id, error, input_hash, *, now=None, coo
     timestamp = time.time() if now is None else now
     if not _number(timestamp) or not _number(cooldown):
         raise ValueError("Invalid retry clock/cooldown")
-    retry_after = getattr(error, "retry_after", None)
-    delay = max(MIN_COOLDOWN, cooldown, retry_after if _number(retry_after) else 0)
+    delay = max(MIN_COOLDOWN, cooldown)
+    # Semantic/pacing layers keep typed transport failures as explicit causes.
+    # Preserve their provider cooldown instead of losing it at the wrapper.
+    seen = set()
+    cause = error
+    while isinstance(cause, BaseException) and id(cause) not in seen and len(seen) < 12:
+        seen.add(id(cause))
+        retry_after = getattr(cause, "retry_after", None)
+        if _number(retry_after):
+            delay = max(delay, retry_after)
+        cause = cause.__cause__
     records = deepcopy(getattr(session, "_retry_schedule", []))
     validate_schedule(records)
     previous = next((row for row in records if row["stage"] == stage and row["scope_id"] == scope_id), None)

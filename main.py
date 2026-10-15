@@ -43,6 +43,7 @@ from core.streaming.pipeline import (
     ProjectEditSaveError,
 )
 from core.streaming.export import HQExporter
+from core.streaming.export_lease import review_export_ready, review_export_leased, acquire_review_export, release_review_export
 from core.streaming.session_store import list_saved_sessions, restore_saved_session, _read as read_saved_project
 from core.streaming.video_history import group_video_history, source_metadata
 from core.streaming.source_identity import processing_signature, local_file_signature
@@ -777,7 +778,7 @@ def schedule_reviewed_export(task_id):
     session = get_streaming_session(task_id)
     if (session is None or getattr(session, "auto_export_result", False) is not True
             or getattr(session, "review_summary", {}).get("status") == "running"
-            or session.is_running or session.error or getattr(session, "is_stopped", False)
+            or (session.is_running and not review_export_ready(session)) or session.error or getattr(session, "is_stopped", False)
             or getattr(session, "_stop_draining", False)
             or getattr(session, "is_editing", False) or not session.segments
             or (getattr(session, "translation_mode", "full") == "preview"
@@ -792,9 +793,12 @@ def schedule_reviewed_export(task_id):
     signature = export_revision_signature(session)
     if getattr(session, "auto_export_signature", None) == signature:
         return
+    lease = acquire_review_export(session) if session.is_running else None
+    if session.is_running and lease is None:
+        return
     session.auto_export_signature = signature
-    session.output_video_url = ""
-    session.output_filename = ""
+    session.output_video_url = getattr(session, "output_video_url", "")
+    session.output_filename = getattr(session, "output_filename", "")
 
     async def generate_result():
         failed = False
@@ -823,6 +827,7 @@ def schedule_reviewed_export(task_id):
                 **review_result_details(session),
             })
         finally:
+            release_review_export(session, lease)
             export = active_export_tasks.get(f"export_{task_id}", {})
             # A preflight rejection creates no runtime record; an older valid
             # or cancelled export must not hold this new failed reservation.
@@ -841,6 +846,8 @@ def schedule_reviewed_export(task_id):
                 session.auto_export_signature = None
 
     session.auto_export_task = asyncio.create_task(generate_result())
+    if lease is not None:
+        session._review_export_owner = session.auto_export_task
 
 @app.get("/api/tasks")
 async def list_tasks():
@@ -1003,6 +1010,9 @@ async def stop_task(task_id: str):
                    if worker is not None and not worker.done()]
         workers.extend(task for task in getattr(sess, "edit_tasks", ()) if not task.done())
         progress = sess.get_progress() if hasattr(sess, "get_progress") else {}
+        # Close review admission before draining a borrowed media export. Its
+        # lease can wake the coordinator as soon as the native renderer exits.
+        sess._stop_draining = True
         if active_export_tasks.get(f"export_{task_id}", {}).get("status") in {"RUNNING", "CANCELLING"}:
             await cancel_export_hq(task_id)
             # Export threads may still hold the session's WAVs. Drain them before
@@ -1103,7 +1113,7 @@ async def broadcast_session_event(task_id: str, event_type: str, data: Dict[str,
     # Each connection owns a FIFO lock. Different connections send in parallel,
     # so an unresponsive UI cannot prevent healthy clients receiving this event.
     await asyncio.gather(*(deliver(ws) for ws in list(stream_sockets.get(task_id, ()))))
-    if event_type == "finished":
+    if event_type in {"finished", "media_ready_review_pending"}:
         schedule_reviewed_export(task_id)
 
 async def run_session(session):
@@ -1702,7 +1712,7 @@ async def edit_streaming_segment(task_id: str, segment_id: int, req: SegmentEdit
     session = get_streaming_session(task_id)
     if not session:
         raise HTTPException(status_code=404, detail="Phiên dịch không còn tồn tại.")
-    if active_export_tasks.get(f"export_{task_id}", {}).get("status") in {"RUNNING", "CANCELLING"}:
+    if review_export_leased(session) or active_export_tasks.get(f"export_{task_id}", {}).get("status") in {"RUNNING", "CANCELLING"}:
         raise HTTPException(status_code=409, detail="Video đang được xuất. Hãy chờ xuất xong trước khi sửa lời thoại.")
     try:
         segment = await session.edit_segment(segment_id, req.final_vi, confirm_silence=req.confirm_silence)
@@ -1799,6 +1809,23 @@ async def start_export_hq(req: ExportHQRequest):
 
 @app.post("/api/streaming/export-hq")
 async def export_hq(req: ExportHQRequest):
+    session = get_streaming_session(req.task_id)
+    lease = None
+    if session is not None and session.is_running:
+        if getattr(session, "_review_export_owner", None) is asyncio.current_task():
+            lease = getattr(session, "_review_export_lease", None)
+        else:
+            lease = acquire_review_export(session)
+            if lease is not None:
+                session._review_export_owner = asyncio.current_task()
+    try:
+        return await _export_hq_owned(req, lease)
+    finally:
+        if session is not None:
+            release_review_export(session, lease)
+
+
+async def _export_hq_owned(req: ExportHQRequest, review_lease=None):
     accepted_owner = _accepted_export_owners.get(f"export_{req.task_id}")
     if accepted_owner is not None and not accepted_owner.done() and accepted_owner is not asyncio.current_task():
         raise HTTPException(status_code=409, detail="Video này đang được xuất. Hãy chờ tác vụ hiện tại kết thúc.")
@@ -1830,7 +1857,11 @@ async def export_hq(req: ExportHQRequest):
         if not getattr(session, "_visual_prepass_complete", False) or not preview_source_covered(completed_seconds=session.total_duration,
                 source_prepared_seconds=getattr(session, "_source_prepared_seconds", 0), chunked_source_started=True):
             raise HTTPException(status_code=409, detail="Chưa xử lý đủ nguồn của toàn video; không thể xuất đầy đủ.")
-    if session.is_running or session.error or any(
+    borrowed = (review_lease is not None and not review_lease.done()
+        and getattr(session, "_review_export_lease", None) is review_lease
+        and getattr(session, "_review_export_owner", None) is asyncio.current_task()
+        and review_export_ready(session))
+    if (session.is_running and not borrowed) or session.error or any(
         s.status not in ("READY", "PLAYED") for s in session.segments.values()
     ):
         raise HTTPException(status_code=409, detail="Hãy chờ dịch xong toàn bộ video trước khi xuất.")
@@ -1976,7 +2007,8 @@ async def export_hq(req: ExportHQRequest):
         session.caption_output_outdated = False
         from core.subtitle_cues import CAPTION_RENDERER_VERSION
         session.caption_renderer_version = CAPTION_RENDERER_VERSION
-        await session.report_progress("complete", "MP4 đã xuất và giải mã kiểm tra thành công.", 100)
+        if not borrowed:
+            await session.report_progress("complete", "MP4 đã xuất và giải mã kiểm tra thành công.", 100)
         warnings_before_save = list(session.warnings)
         persist_session(session)
         save_warnings = [warning for warning in session.warnings if warning not in warnings_before_save]
@@ -1989,7 +2021,8 @@ async def export_hq(req: ExportHQRequest):
             video_url=session.output_video_url, output_filename=session.output_filename,
             review_url=review_url, warnings=list(session.warnings), metadata_warning=metadata_warning)
         output_details = {**session_output_details(session), "warnings": list(session.warnings),
-                          "metadata_warning": metadata_warning}
+                          "metadata_warning": metadata_warning,
+                          **({"review_pending": True, "progress": session.get_progress()} if borrowed else {})}
         await broadcast_session_event(req.task_id, "result_ready", output_details)
 
         return {

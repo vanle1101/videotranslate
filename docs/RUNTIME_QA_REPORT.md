@@ -2429,3 +2429,27 @@ Root causes fixed:
 Current task is safely STOPPED and resumable. QA windows/workers and provider requests were drained; only normal Studio remains in tray(port64841). Final code loaded without visible windows or desktop input. Disposable calibration/logs are grouped under `cleanup/eta-worker-tests/`. Performance samples remain in the8KB cache database because the ETA feature consumes them. No user project/source was deleted or falsely marked complete.
 
 Remaining limits: no honest full-pipeline ETA before recognition/translation has sufficient measurements; first profile needs an actual render sample. Numeric ETA accuracy on a completed full production job remains unverified. Unknown source roles and tight timing require further real recovery/content resolution; increasing timeout or hiding review warnings would not establish correctness.
+
+
+## Review-only draft export and first-pass speech recovery — October 15, 2026
+
+**Acceptance remains IN PROGRESS / BLOCKED for the long-video full MP4.** Passing regression tests are not proof of that output.
+
+Root causes and fixes:
+- The worker waited for every semantic review retry before reaching its export callback, even when all source, speech and timing could already be valid. A review-only boundary now offers an exclusive export lease; it retains durable review claims, blocks edits/review publication during native rendering, and resumes review afterward. Stop closes admission before draining the exporter. A cancelled coordinator drains the lease even after repeated cancellation. Pending review never becomes `completed`.
+- The initial chunk speech callback logged transient pacing/TTS failures and continued siblings without scheduling the failed sentence. Both initial speech paths now use the existing durable speech retry ledger, retaining ALIGNING versus TTS failure identity. Deterministic errors remain actionable failures.
+- Wrapped typed provider failures retained their category but lost nested Retry-After values. The bounded explicit-cause walk now preserves the longest valid cooldown, including circular-chain protection.
+
+Changed files: `core/streaming/pipeline.py`, `core/streaming/retry_schedule.py`, `core/streaming/export_lease.py`, `main.py`, `scripts/check_mixed_language_ui.py`, `tests/test_review_export_lease.py`, `tests/test_review_export_scheduler.py`, `tests/test_retry_schedule.py`, `tests/test_review_tts_lookahead.py`.
+
+| Test / exact steps | Expected | Actual / retest |
+| --- | --- | --- |
+| Production offscreen UI: attach existing 5bea8fe5; click Stop; inspect response/checkpoint; allow owning QA runtime to exit | Same task/rows/audio retained; no late work | PASS: STOPPED, 75 rows, 54 audio references at 07:23; old QA Python processes exited. Native page muted; no desktop mouse/keyboard interaction. |
+| Fresh production Qt/backend: restore 5bea8fe5; compare stable IDs, source timestamps, manual rows and saved WAV hashes; click actual Retry/Resume | No new task and no ASR from zero | PASS at 07:24: same task, 75 retained rows, 54 unchanged audio files, 453.508934 seconds source recognition coverage. Then real processing resumed. Recognition coverage is not translated-source completion. |
+| Coordinator/export/Stop fault tests | Review resumes after export; edits rejected during ownership; cancelled render drained; existing MP4 preserved on failure | PASS in focused 207-test suite. These inject media/provider operations and are not real-video output acceptance. |
+| Typed initial pacing rate limit; two healthy siblings | Failed row saved as RETRY_PENDING with provider cooldown; siblings run once | PASS regression for transient and deterministic failures; 900-second nested Retry-After retained. |
+| Runtime/adapters/recovery/export integration | Existing contracts and error handling preserved | 322 PASS, 1 SKIP in 29.92 seconds; Windows symlink privilege skip; three existing websocket deprecation warnings. |
+| Production JavaScript contracts | UI interactions remain valid | All 343 tests PASS. No TypeScript/npm build applies to this Python/Qt application. |
+| Full long-video MP4, decode/playback/seek, review-only export boundary | Actual validated playable output with honest draft label | IN PROGRESS; not yet achieved by this run. |
+
+Real provider tests: resumed retained Douyin source `7693853424030699451`, duration 453.508934 seconds, using configured Muse/OpenCode and Edge-TTS. Earlier actual provider rate limits and source retry remain relevant. Fresh run is logged locally under `cleanup/qa/current-real-recovery.log`. No provider switching, fabricated speech, force-verified semantic metadata or bypassed media gate.

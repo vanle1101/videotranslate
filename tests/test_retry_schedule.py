@@ -58,6 +58,17 @@ def test_typed_nested_timeout_and_retry_after():
     assert transient_failure(wrapper) == "provider_timeout"
 
 
+def test_nested_provider_retry_after_survives_semantic_wrapper():
+    cause = OpenCodeRequestError("limited", code="provider_rate_limited", retryable=True)
+    cause.retry_after = 900
+    wrapper = RuntimeError("pacing request failed")
+    wrapper.__cause__ = cause
+    cause.__cause__ = wrapper
+    record = schedule_retry(session(), "speech", "47", wrapper, HASH, now=100)
+    assert record["next_attempt_at"] == 1000
+    assert record["error_code"] == "provider_rate_limited"
+
+
 @pytest.mark.parametrize("intent", ["user_stopped", "paused", "completed"])
 def test_late_failure_cannot_restart_explicit_stop_pause_or_completion(intent):
     owner = session()

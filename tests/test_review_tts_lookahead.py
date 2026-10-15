@@ -41,6 +41,38 @@ def result(rows):
         "summary": {"checked": len(rows), "verified": len(rows)}, "translation_sources": []}
 
 
+@pytest.mark.parametrize("transient", [True, False])
+def test_initial_speech_failure_records_retry_and_continues_siblings(lookahead, monkeypatch, transient):
+    from core.engines.translation.opencode_client import OpenCodeRequestError
+    session = lookahead
+    session._restart_intent = "active"
+    calls = []
+    async def process(row):
+        calls.append(row.id)
+        if row.id == 0:
+            row.status = "ALIGNING"
+            if transient:
+                cause = OpenCodeRequestError("rate limited", code="provider_rate_limited", retryable=True)
+                cause.retry_after = 900
+                raise RuntimeError("pacing unavailable") from cause
+            raise ValueError("invalid timeline")
+        row.status = "READY"
+    monkeypatch.setattr(session, "_process_segment", process)
+    asyncio.run(session._finish_visual_speech_group([0, 1, 2]))
+    assert calls == [0, 1, 2]
+    assert session._visual_published_ids == {1, 2}
+    assert session.segments[0].failed_stage == "ALIGNING"
+    if transient:
+        record, = session._retry_schedule
+        assert record["stage"] == "speech" and record["scope_id"] == "0"
+        assert record["error_code"] == "provider_rate_limited"
+        assert record["next_attempt_at"] - record["updated_at"] == 900
+        assert session.segments[0].status == "WAITING"
+        assert session.segments[0]._retry_synthesis
+    else:
+        assert session.segments[0].status == "FAILED" and not session._retry_schedule
+
+
 async def event_set(event):
     async def poll():
         while not event.is_set():

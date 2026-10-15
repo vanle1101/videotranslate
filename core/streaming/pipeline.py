@@ -2503,8 +2503,10 @@ class StreamingPipelineSession:
             except Exception as error:
                 if getattr(self, "_persistence_capacity_failed", False):
                     raise
-                segment.failed_stage, segment.status = segment.status, "FAILED"
+                segment.failed_stage = self._speech_failure_stage(error, segment.status)
+                segment.status = "FAILED"
                 segment.error = str(error)
+                self._schedule_speech_retry(segment, error)
                 await self.emit("segment_update", segment.to_dict())
                 # A single unfit sentence or transient speech request must
                 # not hide all following chunks of a long video. Keep the
@@ -3012,7 +3014,9 @@ class StreamingPipelineSession:
                     except Exception as error:
                         if getattr(self, "_persistence_capacity_failed", False):
                             raise
-                        row.failed_stage, row.status, row.error = row.status, "FAILED", str(error)
+                        row.failed_stage = self._speech_failure_stage(error, row.status)
+                        row.status, row.error = "FAILED", str(error)
+                        self._schedule_speech_retry(row, error)
                         await self.emit("segment_update", row.to_dict())
                         logging.getLogger("errors").error(
                             "[%s] SEGMENT_FAILED_CONTINUING segment_id=%s stage=%s error_type=%s",
@@ -4778,14 +4782,43 @@ class StreamingPipelineSession:
                 pending.append(record)
             if not pending:
                 return False
+            from core.streaming.export_lease import review_export_ready, wait_review_export
             record = min(pending, key=lambda r: r["next_attempt_at"])
             await self.pause_event.wait()
-            if self.is_stopped:
+            if self.is_stopped or getattr(self, "_stop_draining", False):
                 raise asyncio.CancelledError
             mark_intent(self, "retry_pending")
             self._persist_if_enabled()
-            await self.report_progress("retry", "Dịch vụ tạm lỗi; giữ tiến độ và chờ đợt thử lại.", None)
-            await self._retry_delay(record)
+            # Only a stable review-only revision may be lent to export. Keep
+            # this boundary open through cooldown for an explicit export too.
+            # No retry claim or text/audio mutation occurs until its lease drains.
+            review_records = list(getattr(self, "_retry_schedule", []))
+            self._review_export_boundary = bool(review_records) and all(
+                item.get("stage") == "review" and item.get("state") == "RETRY_PENDING"
+                for item in review_records)
+            try:
+                if review_export_ready(self):
+                    await self.emit("media_ready_review_pending", {
+                        "review_pending": True, "progress": self.get_progress()})
+                await wait_review_export(self)
+                if self.is_stopped or getattr(self, "_stop_draining", False):
+                    raise asyncio.CancelledError
+                await self.report_progress("retry", "Dịch vụ tạm lỗi; giữ tiến độ và chờ đợt thử lại.", None)
+                await self._retry_delay(record)
+                # A manual export may have acquired the revision during delay
+                # or Pause. Recheck after each yield before admitting review.
+                while True:
+                    await self.pause_event.wait()
+                    await wait_review_export(self)
+                    if self.is_stopped or getattr(self, "_stop_draining", False):
+                        raise asyncio.CancelledError
+                    if not self.is_paused:
+                        break
+            finally:
+                try:
+                    await wait_review_export(self)
+                finally:
+                    self._review_export_boundary = False
             for ready in due_entries(self):
                 if ready["stage"] != "speech":
                     continue
@@ -4978,12 +5011,18 @@ class StreamingPipelineSession:
                     self._startup_failed = True
                     await self.emit("progress", self.get_progress())
                 else:
-                    stage = self._review_message() if self.review_summary or any(s.needs_review for s in self.segments.values()) else "Dịch và lồng tiếng hoàn tất"
-                    await self.report_progress("complete", stage, 100)
+                    if getattr(self, "_retry_schedule", []):
+                        # Worker exit is not evidence that pending retries or
+                        # review claims completed; preserve their durable intent.
+                        await self.emit("progress", self.get_progress())
+                    else:
+                        stage = self._review_message() if self.review_summary or any(s.needs_review for s in self.segments.values()) else "Dịch và lồng tiếng hoàn tất"
+                        await self.report_progress("complete", stage, 100)
             else:
                 await self.emit("progress", self.get_progress())
             if not self.is_stopped and not self.is_paused:
-                mark_intent(self, "halted" if self.error else "completed")
+                mark_intent(self, "halted" if self.error else
+                            "retry_pending" if getattr(self, "_retry_schedule", []) else "completed")
                 self._persist_if_enabled()
             await self.emit("finished", self.get_telemetry())
 

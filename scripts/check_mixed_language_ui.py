@@ -278,6 +278,15 @@ def main():
                 event('FULL_TRANSLATION_REQUESTED', {'task_id':task_id})
             elif state[0] in {'PREPARED','COMPLETED'} and progress.get('translation_mode')=='full':
                 break
+            elif (not args.review and progress.get('translation_mode') == 'full'
+                    and snapshot.get('output_video_url') and not snapshot.get('output_outdated')
+                    and snapshot.get('final_media_blocked') is False):
+                # A validated draft is usable while semantic retries remain.
+                # This is media acceptance, never a semantic approval claim.
+                event('DRAFT_READY_REVIEW_PENDING', {'task_id':task_id,
+                    'retry_pending_count':progress.get('retry_pending_count'),
+                    'content_review_state':snapshot.get('content_review_state')})
+                break
             wait(500)
         else:
             raise AssertionError({'timeout':args.timeout, **failure_snapshot(snapshot)})
