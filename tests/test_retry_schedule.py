@@ -15,6 +15,22 @@ from core.engines.translation.opencode_client import OpenCodeRequestError, OpenC
 HASH = "a" * 64
 
 
+@pytest.mark.parametrize("code", ["asr_timeout", "asr_failed"])
+def test_local_evidence_waves_survive_restart_and_keep_full_cooldown(code):
+    owner = session()
+    error = RuntimeError("private native stderr")
+    error.code = code
+    for wave in range(1, 11):
+        record = schedule_retry(owner, "review", "0", error, HASH, now=wave * 400)
+        assert record["rounds"] == wave
+        assert begin_retry(owner, "review", "0", HASH, now=wave * 400 + 300)
+        owner._retry_schedule = recover_schedule(owner._retry_schedule, now=wave * 400 + 301)
+        assert owner._retry_schedule[0]["rounds"] == wave
+        assert owner._retry_schedule[0]["state"] == "RETRY_PENDING"
+    mark_intent(owner, "user_stopped")
+    assert not due_entries(owner, now=10000)
+
+
 def session():
     return SimpleNamespace(_restart_intent="active", _retry_schedule=[], is_stopped=False)
 

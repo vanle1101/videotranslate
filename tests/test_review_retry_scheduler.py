@@ -137,7 +137,8 @@ def test_transient_review_reschedules_full_cooldown_before_next_attempt(session,
     assert session._retry_schedule[0]["state"] == "RETRY_PENDING"
 
 
-def test_real_review_publication_persists_transient_then_retires_exact_success(session, monkeypatch):
+@pytest.mark.parametrize("failure_code", ["provider_timeout", "asr_timeout", "asr_failed"])
+def test_real_review_publication_persists_transient_then_retires_exact_success(session, monkeypatch, failure_code):
     from core.translation_review import AutomaticTranslationReviewer
     row = session.segments[0]
     original_text = row.final_vi
@@ -147,7 +148,7 @@ def test_real_review_publication_persists_transient_then_retires_exact_success(s
     result = {"segments": {0: {**row.to_dict(), "needs_review": True,
               "verification": {"status": "incomplete", "semantic_verified": False}}},
               "summary": {"checked": 1, "incomplete": 1},
-              "retry_failures": [{"segment_ids": [0], "code": "provider_timeout"}]}
+              "retry_failures": [{"segment_ids": [0], "code": failure_code}]}
     monkeypatch.setattr(AutomaticTranslationReviewer, "review", lambda *a, **kw: result)
     asyncio.run(session._review_translations(segment_ids={0}))
     record = session._retry_schedule[0]

@@ -126,18 +126,26 @@ def test_missing_translation_does_not_negative_cache_failed_local_evidence(failu
         audio.last_errors = {0: {"sensevoice": failure}}
         audio.last_error = failure
     reviewer = AutomaticTranslationReviewer(client, scanner, audio)
-    failed = reviewer.review("unused", [original], [])["segments"][0]
+    failed_result = reviewer.review("unused", [original], [])
+    failed = failed_result["segments"][0]
     assert failed["verification"]["second_pass_status"] == "completed"
     assert failed["verification"]["diagnostic"]["stage"] == "audio_evidence"
     assert "missing_translation_recovery" not in failed["verification"]
     assert failed["needs_review"] and failed["final_vi"] == ""
+    if failure_mode == "unavailable":
+        assert not failed_result.get("retry_failures")
+    else:
+        assert failed["verification"]["status"] == "incomplete"
+        assert failed_result["retry_failures"] == [{"segment_ids": [0], "code": "asr_timeout"}]
 
     # A completed pair of genuinely disagreeing readings is a bounded content
     # outcome, unlike a failed worker. It may record a negative recovery stamp.
     audio.collect.side_effect = None
     audio.collect.return_value = {0: {"sensevoice": "你好", "faster-whisper-small": "再见"}}
     audio.last_error, audio.last_errors = None, {}
-    recovered = reviewer.review("unused", [failed], [])["segments"][0]
+    recovered_result = reviewer.review("unused", [failed], [])
+    recovered = recovered_result["segments"][0]
+    assert not recovered_result.get("retry_failures")
     assert recovered["verification"]["audio_consensus"] is False
     assert "audio_evidence_failures" not in recovered["verification"]
     assert "missing_translation_recovery" in recovered["verification"]

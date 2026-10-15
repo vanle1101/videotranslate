@@ -6,8 +6,83 @@ import pytest
 
 from core.engines.translation.opencode_client import OpenCodeRequestError, OpenCodeTimeoutError
 from core.review_retry import failure_descriptor, review_input_hashes, schedule_review_failures, prune_review_retries
+from core.review_retry import retain_audio_failure
+from core.engines.asr.native_process import ASRProcessError, ASRWorkerExitError
 from core.streaming.retry_schedule import due_entries, begin_retry, mark_intent
 from test_auto_review import review, run, answer
+
+
+@pytest.mark.parametrize("error,code", [(TimeoutError("private"), "asr_timeout"),
+                                       (ASRWorkerExitError("private"), "asr_failed")])
+def test_local_evidence_failure_is_typed_and_scheduled_without_source_approval(error, code):
+    result = {}
+    descriptor = retain_audio_failure(result, error, [{"id": 0}])
+    assert descriptor == {"segment_ids": [0], "code": code}
+    session = owner()
+    before = deepcopy(vars(session.segments[0]))
+    records = schedule_review_failures(session, result["retry_failures"], review_input_hashes(session), now=0)
+    assert records[0]["error_code"] == code
+    assert records[0]["next_attempt_at"] == 300
+    assert vars(session.segments[0]) == before
+    assert "private" not in str(records)
+
+
+@pytest.mark.parametrize("error", [FileNotFoundError(), ImportError(), ValueError(),
+                                  RuntimeError("timeout"), OSError("disk"),
+                                  ASRProcessError("invalid protocol or isolation"), None])
+def test_local_setup_unknown_and_semantic_results_do_not_authorize_retry(error):
+    result = {}
+    assert retain_audio_failure(result, error, [{"id": 0}]) is None
+    assert result == {}
+
+
+@pytest.mark.parametrize("failure", [TimeoutError("private"), ASRWorkerExitError("private")])
+def test_local_collector_failure_preserves_text_and_returns_durable_scope(review, failure):
+    from unittest.mock import Mock
+    from test_auto_review import audio_result
+    review.audio_evidence = Mock()
+    review.audio_evidence.collect.side_effect = failure
+    original = audio_result()
+    original["segments"][0]["verification"]["missing_translation_recovery"] = "old"
+    result = review.resolve_audio_uncertainty("isolated.mp4", original)
+    row = result["segments"][0]
+    assert row["final_vi"] == original["segments"][0]["final_vi"]
+    assert row["verification"]["status"] == "incomplete"
+    assert row["verification"]["semantic_verified"] is False
+    assert "missing_translation_recovery" not in row["verification"]
+    assert result["retry_failures"][0]["segment_ids"] == [0]
+    review.client.translate.assert_not_called()
+
+
+def test_missing_model_takes_precedence_over_sibling_timeout(review):
+    from unittest.mock import Mock
+    from test_auto_review import audio_result
+    review.audio_evidence = Mock()
+    review.audio_evidence.collect.return_value = {}
+    review.audio_evidence.last_errors = {0: {"sensevoice": TimeoutError(), "whisper": FileNotFoundError()}}
+    result = review.resolve_audio_uncertainty("isolated.mp4", audio_result())
+    assert not result.get("retry_failures")
+
+
+def test_conflicting_successful_recognition_never_schedules_retry(review):
+    from unittest.mock import Mock
+    from test_auto_review import audio_result
+    review.audio_evidence = Mock()
+    review.audio_evidence.collect.return_value = {0: {"sensevoice": "总是在9月。", "faster-whisper-small": "总是在纠约"}}
+    result = review.resolve_audio_uncertainty("isolated.mp4", audio_result())
+    assert not result.get("retry_failures")
+    assert result["segments"][0]["verification"]["status"] == "unresolved"
+    review.client.translate.assert_not_called()
+
+
+def test_target_spelling_repair_cannot_complete_failed_local_evidence():
+    from test_target_orthography_review import row, repair
+    original = row(verification={"status": "incomplete", "source_supported": False,
+        "semantic_verified": False, "diagnostic": {"stage": "audio_evidence", "code": "asr_timeout"}})
+    result, _ = repair(original)
+    assert result["final_vi"] != original["final_vi"]
+    assert result["verification"]["status"] == "incomplete"
+    assert result["verification"]["diagnostic"] == original["verification"]["diagnostic"]
 
 
 def owner():

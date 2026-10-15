@@ -54,6 +54,27 @@ def retain_failure(result, error, rows):
     return descriptor
 
 
+def retain_audio_failure(result, error, rows):
+    """Schedule only typed transient failures from the local evidence boundary.
+
+    Recognition disagreement is data, never an exception. Missing models,
+    invalid inputs and arbitrary RuntimeErrors must not become retry requests.
+    """
+    from core.engines.asr.native_process import ASRWorkerExitError
+    if isinstance(error, TimeoutError):
+        code = "asr_timeout"
+    elif isinstance(error, ASRWorkerExitError):
+        code = "asr_failed"
+    else:
+        return None
+    ids = sorted({row["id"] for row in rows if type(row.get("id")) is int})
+    if not ids:
+        return None
+    descriptor = {"segment_ids": ids, "code": code}
+    result.setdefault("retry_failures", []).append(descriptor)
+    return descriptor
+
+
 def annotate_failure(error, rows):
     descriptor = failure_descriptor(error, rows)
     if descriptor is not None:

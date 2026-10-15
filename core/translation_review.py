@@ -22,7 +22,7 @@ from core.screen_ocr import ScreenOCR
 from core.video_intelligence import VideoIntelligence, VideoIntelligenceError
 from core.runtime_context import current_execution_context
 from core.review_checkpoint import ReviewCheckpoint
-from core.review_retry import retain_failure, annotate_failure
+from core.review_retry import retain_failure, retain_audio_failure, annotate_failure
 from core.chinese_text import comparable_chinese, comparable_audio_chinese
 from core.source_language import source_ocr_script_conflict
 from core.semantic_segments import SEMANTIC_TRANSLATION_POLICY
@@ -678,6 +678,8 @@ class AutomaticTranslationReviewer:
         checkpoint = checkpoint or self._checkpoint(video_path, model, check, force_review)
         failure = None
         failures = {}
+        failure_errors = {}
+        general_failure_error = None
         try:
             options = {"checkpoint": checkpoint, "source_language": self.source_language} if isinstance(self.audio_evidence, _LocalAudioEvidence) else {}
             evidence = self.audio_evidence.collect(video_path, targets, cancel_check,
@@ -692,12 +694,16 @@ class AutomaticTranslationReviewer:
                             for error in errors.values() if isinstance(error, BaseException)]
                         if diagnostics:
                             failures[row["id"]] = diagnostics
+                            failure_errors[row["id"]] = [error for error in errors.values()
+                                                          if isinstance(error, BaseException)]
             hidden_error = getattr(self.audio_evidence, "last_error", None)
             if isinstance(hidden_error, BaseException) and not failures:
                 failure = self._diagnostic(hidden_error, "audio_evidence", targets)
+                general_failure_error = hidden_error
         except Exception as error:
             check()
             failure = self._diagnostic(error, "audio_evidence", targets)
+            general_failure_error = error
             evidence = {}
         agreed = []
         for row in targets:
@@ -730,6 +736,15 @@ class AutomaticTranslationReviewer:
                     audit.pop("missing_translation_recovery", None)
                     audit["diagnostic"] = row_failure
                     audit["audio_evidence_failures"] = row_failures or [row_failure]
+                    errors = failure_errors.get(row["id"], [general_failure_error])
+                    # Preserve the original typed failure at this boundary;
+                    # persisted diagnostics/provider JSON cannot authorize work.
+                    # Any missing setup takes precedence over a transient sibling.
+                    if not any(isinstance(error, (FileNotFoundError, ImportError)) for error in errors):
+                        for error in errors:
+                            if retain_audio_failure(result, error, [row]):
+                                audit.update(status="incomplete", semantic_verified=False)
+                                break
         batches = math.ceil(len(agreed) / self.BATCH_SIZE)
         provenance = {"provider": "opencode", "model": model[:200], "evidence_mode": "dual-local-asr-text-review"}
         completed_audits = 0
@@ -1029,7 +1044,9 @@ class AutomaticTranslationReviewer:
                     # semantic/address approval belongs to the old text pair.
                     row["needs_review"] = True
                     audit = row["verification"]
-                    audit.update(status="unresolved", semantic_verified=False,
+                    # A spelling decision cannot complete a failed source or
+                    # semantic audit, nor retire its durable retry descriptor.
+                    audit.update(status="incomplete" if audit.get("status") == "incomplete" else "unresolved", semantic_verified=False,
                                  address_verified=False)
                     if accepted:
                         audit["translation_changed"] = True

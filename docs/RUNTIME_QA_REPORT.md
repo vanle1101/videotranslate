@@ -2539,3 +2539,11 @@ Observed cause: retained recovery revalidated and synthesized a historical alter
 Fix: historical revalidation now excludes those over-budget alternatives, while retaining their measurements as feedback for fresh proposals. Feasible alternatives still need fresh review and waveform checks. No speed ceiling, manual neighboring timestamp or semantic gate changed.
 
 Validation: 112 pacing/revalidation/checkpoint/natural-speech tests PASS in11.37s. Regression proves the old over-budget alternative causes no review/TTS call and its measured length still reaches the new-proposal request. This is controlled regression evidence; full recovery of the remaining long-video timing conflicts is not yet proven.
+
+### Durable recovery for local audio-evidence failures — October 15, 2026
+
+Root cause: local ASR timeout/process errors were retained as unresolved diagnostics but did not enter the durable review retry scheduler. Explicit Resume could recover them; the active run could stop short of trying again automatically.
+
+Fix: typed local timeouts and unsuccessful native-worker exits now retain an incomplete audit and schedule only the affected rows through the existing persisted review queue. Cooldown remains at least300 seconds; Stop/Pause, input ownership, preserved artifacts and restart behavior remain enforced. Missing models/imports, malformed worker protocols, isolation failures, invalid inputs and actual recognizer disagreement do not authorize automatic retries. A distinct ASRWorkerExitError separates unsuccessful process exits from generic protocol/isolation errors. Accepted spelling corrections preserve an incomplete source audit instead of retiring its outstanding retry.
+
+Validation:177 focused retry/review/native-worker tests PASS in13.89s after integration. Native fault-injection uses real disposable child processes to distinguish nonzero exit from malformed output; service responses in these regression tests are controlled, not real provider acceptance. Earlier agent suites passed273 tests before the native-exit refinement; counts overlap and are not additive. The currently running retained production recovery started before this patch and therefore is not evidence of loading it.

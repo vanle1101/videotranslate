@@ -30,6 +30,10 @@ class ASRProcessError(RuntimeError):
     pass
 
 
+class ASRWorkerExitError(ASRProcessError):
+    """A launched native worker exited unsuccessfully; not a protocol failure."""
+
+
 def positive_deadline(name, default):
     value = float(getattr(settings, name, default))
     if not math.isfinite(value) or not 0 < value <= 21600:
@@ -332,7 +336,8 @@ def iter_native_records(module_name, request, *, timeout, cancel_check=None,
                             size = diagnostics.seek(0, 2)
                             diagnostics.seek(max(0, size - 1800))
                             detail = diagnostics.read(1800).decode("utf-8", errors="replace").strip()
-                            raise ASRProcessError(f"Bộ nhận giọng không hoàn tất (exit={returncode}): {detail}")
+                            error_type = ASRWorkerExitError if returncode else ASRProcessError
+                            raise error_type(f"Bộ nhận giọng không hoàn tất (exit={returncode}): {detail}")
                         return
                     time.sleep(.05)
             finally:

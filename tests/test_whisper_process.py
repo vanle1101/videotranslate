@@ -10,6 +10,7 @@ import pytest
 
 from config import settings
 from core.engines.asr import whisper_process as module
+from core.engines.asr.native_process import ASRWorkerExitError
 from core.runtime_context import execution_context
 
 
@@ -62,8 +63,9 @@ def test_invalid_or_partial_native_output_never_becomes_completed(fake_worker, o
     audio, install = fake_worker
     calls = install("import sys; open(sys.argv[1], 'w').write(" + repr(output.replace("\\n", "\n")) + ")")
     rows, _ = module.SubprocessWhisperModel("small").transcribe(audio)
-    with pytest.raises(module.ASRProcessError):
+    with pytest.raises(module.ASRProcessError) as failure:
         list(rows)
+    assert not isinstance(failure.value, ASRWorkerExitError)
     assert calls[0]["process"].poll() is not None
     assert not list(settings.TEMP_DIR.glob("whisper-worker-*"))
 
@@ -72,7 +74,7 @@ def test_native_crash_does_not_publish_partial_transcription(fake_worker):
     audio, install = fake_worker
     calls = install("import sys; print('mkl_malloc: failed to allocate memory', file=sys.stderr); sys.exit(7)")
     rows, _ = module.SubprocessWhisperModel("small").transcribe(audio)
-    with pytest.raises(module.ASRProcessError, match="mkl_malloc"):
+    with pytest.raises(ASRWorkerExitError, match="mkl_malloc"):
         list(rows)
     assert calls[0]["process"].poll() == 7
 
