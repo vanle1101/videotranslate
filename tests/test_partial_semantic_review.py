@@ -48,13 +48,69 @@ def reviewer_result(targets, *, changed=False):
         for row in targets}, 'summary':{'checked':len(targets),'verified':len(targets)}}
 
 
+@pytest.mark.parametrize('gap', [False, True])
+def test_stopped_review_without_failed_speech_can_restart_explicitly(partial, monkeypatch, gap):
+    sess = partial
+    del sess.segments[1]
+    sess.error = None
+    row = sess.segments[0]
+    if gap:
+        row.status, row.final_vi = 'NEEDS_REVIEW', ''
+        row.audio_path = row.audio_url = None
+    before = deepcopy(vars(sess.segments[2]))
+    calls = []
+    async def review(**options):
+        assert not sess.is_stopped and sess.pause_event.is_set()
+        assert sess._restart_intent == 'active'
+        calls.append(options)
+    monkeypatch.setattr(sess, '_review_translations', review)
+    async def run():
+        assert sess.get_progress()['can_review'], 'Stop must not strand an otherwise eligible explicit review'
+        await sess.start_automatic_review()
+        await sess.review_task
+        assert not sess.is_running
+        assert calls[0]['segment_ids'] == {0}, 'Preserve manual rows as context only'
+        assert vars(sess.segments[2]) == before
+        if gap:
+            assert sess.get_progress()['final_output_blocked']
+            assert sess.get_progress()['status'] == 'PREPARED'
+    asyncio.run(run())
+    sess.tts_engine.synthesize.assert_not_called()
+
+
+def test_persistent_stop_keeps_same_owner_for_polling_and_explicit_review(partial, monkeypatch):
+    import main
+    sess = partial
+    del sess.segments[1]
+    sess.error, sess.is_stopped = None, False
+    sess.persist()
+    entered = asyncio.Event()
+    async def review(**options):
+        entered.set()
+        await asyncio.Event().wait()
+    monkeypatch.setattr(sess, '_review_translations', review)
+    async def run():
+        await sess.start_automatic_review()
+        await asyncio.wait_for(entered.wait(), 2)
+        await main.stop_task(sess.task_id)
+        assert main.active_streaming_sessions.get(sess.task_id) is sess
+        assert sess.get_progress()['status'] == 'STOPPED'
+        assert sess.get_progress()['can_review']
+        # An immediate second Stop or a History read must not replace this
+        # cancelled owner with a restored FAILED/READY projection.
+        await main.stop_task(sess.task_id)
+        assert await main.editable_session(sess.task_id) is sess
+        assert sess.get_progress()['status'] == 'STOPPED'
+    asyncio.run(run())
+
+
 def test_partial_review_uses_only_uncertain_playable_rows_and_keeps_failed_manual_context(partial, monkeypatch):
     sess = partial
     before = {sid:deepcopy(vars(row)) for sid,row in sess.segments.items() if sid != 0}
     audio = Path(sess.segments[0].audio_path).read_bytes()
     calls=[]
     def review(_, source, targets, screens, **options):
-        calls.append(([row.id for row in targets], [row.id for row in options['context_segments']]))
+        calls.append(([row.id for row in targets], [row['id'] for row in options['context_segments']]))
         return reviewer_result(targets)
     monkeypatch.setattr(AutomaticTranslationReviewer, 'review', review)
     async def run():
@@ -227,7 +283,7 @@ def test_partial_review_checkpoints_groups_and_attempts_next_group_after_provide
     def review(_,source,targets,screens,**options):
         ids=[row.id for row in targets]
         calls.append(ids)
-        assert [row.id for row in options['context_segments']]==[0,1,2,3,4,5,6]
+        assert [row['id'] for row in options['context_segments']]==[0,1,2,3,4,5,6]
         assert partial.get_progress()['review_scope']=='all'
         assert partial.get_progress()['review_summary']['status']=='running'
         if len(calls)==1 and first_group_fails:

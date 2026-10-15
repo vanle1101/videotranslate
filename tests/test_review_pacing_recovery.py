@@ -17,6 +17,19 @@ from core.streaming.session_store import _read
 from core.translation_review import AutomaticTranslationReviewer
 
 
+def completed_contextual_negative(row, source, language, evidence):
+    from core.contextual_audio import identity, window, REVISION
+    value = row.to_dict()
+    decode = window(value)
+    readings = {item["engine"]: item["text_zh"] for item in evidence}
+    return {"revision": REVISION, "input_hash": identity(value, source, language, readings),
+        "target_start": row.start, "target_end": row.end,
+        "requested_start": decode["start"], "requested_end": decode["end"],
+        "decode_start": decode["start"], "decode_end": decode["end"], "full_text": "",
+        "sensevoice_text": readings["sensevoice"], "exact_whisper_text": readings["faster-whisper-small"],
+        "words": [], "words_complete": False, "target_text": "", "reason": "missing_word_timing"}
+
+
 @pytest.fixture
 def reviewed_session(tmp_path, monkeypatch):
     for name, value in {
@@ -459,6 +472,8 @@ def test_restored_audio_evidence_failure_is_selected_for_resume_despite_old_stam
             "audio_consensus": False, "audio_evidence": [
                 {"engine": "sensevoice", "text_zh": "你好", "start": row.start, "end": row.end},
                 {"engine": "faster-whisper-small", "text_zh": "再见", "start": row.start, "end": row.end}]}
+        completed["contextual_audio"] = completed_contextual_negative(row, session.video_path, session.source_language,
+                                                                     completed["audio_evidence"])
         completed["missing_translation_recovery"] = AutomaticTranslationReviewer.missing_translation_recovery_identity(
             row, options["context_segments"])
         return {"segments": {row.id: {**row.to_dict(), "verification": completed, "needs_review": True}},
@@ -478,6 +493,40 @@ def test_restored_audio_evidence_failure_is_selected_for_resume_despite_old_stam
         pipeline.active_streaming_sessions.pop(session.task_id, None)
 
 
+def test_new_contextual_strategy_revisits_disagreement_once_and_preserves_gap(reviewed_session, monkeypatch):
+    session = reviewed_session
+    monkeypatch.setattr(settings, "LLM_PROVIDER", "opencode")
+    focus = source_scope_recovery_row(session)
+    focus.status, focus.failed_stage, focus.final_vi, focus.audio_path = "READY", None, "", None
+    focus.asr_text = focus.text_zh = "你好"
+    focus.needs_review = True
+    focus.verification = {"status": "unresolved", "source_supported": False, "semantic_verified": False,
+        "review_gate_revision": AutomaticTranslationReviewer.REVIEW_GATE_REVISION,
+        "audio_consensus": False, "audio_evidence": [
+            {"engine": "sensevoice", "text_zh": "你好", "start": focus.start, "end": focus.end},
+            {"engine": "faster-whisper-small", "text_zh": "再见", "start": focus.start, "end": focus.end}]}
+    calls = []
+    def review(_reviewer, path, rows, screens, **options):
+        calls.append([row.id for row in rows])
+        assert calls == [[focus.id]]
+        result = rows[0].to_dict()
+        result["verification"]["contextual_audio"] = completed_contextual_negative(
+            rows[0], path, session.source_language, result["verification"]["audio_evidence"])
+        return {"segments": {focus.id: result}, "summary": {"checked": 1, "unresolved": 1}}
+    monkeypatch.setattr(AutomaticTranslationReviewer, "review", review)
+    asyncio.run(session._resume_pending_chunk_reviews())
+    session.persist()
+    from core.streaming.session_store import restore_saved_session
+    restored = restore_saved_session(session.task_id)
+    try:
+        asyncio.run(restored._resume_pending_chunk_reviews())
+        assert calls == [[focus.id]]
+        assert restored.segments[focus.id].final_vi == ""
+        assert restored.segments[focus.id].verification["source_supported"] is False
+    finally:
+        pipeline.active_streaming_sessions.pop(session.task_id, None)
+
+
 @pytest.mark.parametrize("kind", ["manual", "disagreement", "other_diagnostic", "source_supported"])
 def test_audio_recovery_selection_preserves_manual_and_completed_content_verdicts(
         reviewed_session, monkeypatch, kind):
@@ -493,6 +542,8 @@ def test_audio_recovery_selection_preserves_manual_and_completed_content_verdict
         focus.verification.update(audio_consensus=False, audio_evidence=[
             {"engine": "sensevoice", "text_zh": "你好", "start": focus.start, "end": focus.end},
             {"engine": "faster-whisper-small", "text_zh": "再见", "start": focus.start, "end": focus.end}])
+        focus.verification["contextual_audio"] = completed_contextual_negative(
+            focus, session.video_path, session.source_language, focus.verification["audio_evidence"])
     if kind != "disagreement":
         focus.verification["diagnostic"] = {"stage": "semantic_request" if kind == "other_diagnostic" else "audio_evidence",
             "code": "asr_failed", "run_id": session.task_id, "segment_ids": [focus.id]}

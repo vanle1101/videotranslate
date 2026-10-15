@@ -1748,6 +1748,9 @@ class StreamingPipelineSession:
             audit = row.verification or {}
             if audit.get("status") != "unresolved" or audit.get("source_supported") is True:
                 return False
+            from core.contextual_audio import pending
+            if pending(row.to_dict(), self.video_path, self.source_language):
+                return True
             failures = audit.get("audio_evidence_failures", [])
             diagnostics = list(failures) if isinstance(failures, list) else []
             diagnostics.append(audit.get("diagnostic"))
@@ -1867,7 +1870,10 @@ class StreamingPipelineSession:
                 or any(owner is not None and not owner.done() for owner in owners)):
             return [], scope, False
         failed = [row for row in scope if row.status == "FAILED"]
-        recovery = bool(failed)
+        # Stop closes the old cancellation scope, not the explicit Review
+        # action forever. Fully prepared rows can be reviewed again even when
+        # no FAILED speech row happens to unlock the recovery branch.
+        recovery = bool(failed) or self.is_stopped
         if recovery:
             if (getattr(self, "_startup_failed", False) or not self.video_path or not self.video_path.is_file()
                     or any(row.status not in {"READY", "PLAYED", "FAILED", "NEEDS_REVIEW"} for row in scope)
@@ -3897,7 +3903,8 @@ class StreamingPipelineSession:
                     owned_path = Path(value).resolve()
                     if owned_path.parent == prefix_path.parent and owned_path.name.startswith(prefix_path.name + "."):
                         remove_generated(owned_path)
-        if self.is_stopped and not preserve_media and active_streaming_sessions.get(self.task_id) is self:
+        if (self.is_stopped and not preserve_media and active_streaming_sessions.get(self.task_id) is self
+                and not (self._persistence_enabled and getattr(self, "_stop_draining", False))):
             # A History read must not restore a second writer while cancelled
             # native/provider work still owns this project's checkpoint.
             active_streaming_sessions.pop(self.task_id, None)
@@ -5194,8 +5201,9 @@ class StreamingPipelineSession:
                 task.cancel()
         if not self.start_task and (not self.worker_task or self.worker_task.done()):
             self._release_runtime()
-        if not any(task is not None and not task.done() for task in
-                   (self.start_task, self.worker_task, self.review_task, self._chunk_followup_task, *self.edit_tasks)):
+        if (not (self._persistence_enabled and getattr(self, "_stop_draining", False))
+                and not any(task is not None and not task.done() for task in
+                   (self.start_task, self.worker_task, self.review_task, self._chunk_followup_task, *self.edit_tasks))):
             if active_streaming_sessions.get(self.task_id) is self:
                 active_streaming_sessions.pop(self.task_id, None)
 

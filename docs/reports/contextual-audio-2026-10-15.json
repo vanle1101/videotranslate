@@ -1,0 +1,132 @@
+{
+  "task_id": "5bea8fe5",
+  "actual_local_inference": true,
+  "provider_calls": 0,
+  "manifest_unchanged": true,
+  "rows": {
+    "27": {
+      "proof": {
+        "revision": 1,
+        "input_hash": "473914fa2f7d6eccd5240f4d36428bf655a2eee92545a2520244ce1d2110ca4c",
+        "target_start": 116.9,
+        "target_end": 118.76,
+        "decode_start": 115.86,
+        "decode_end": 118.76,
+        "requested_start": 115.86,
+        "requested_end": 118.76,
+        "full_text": "分別終是在9月",
+        "sensevoice_text": "总是在9月。",
+        "exact_whisper_text": "总是在纠约",
+        "target_text": "",
+        "reason": "boundary_straddle",
+        "words_complete": true,
+        "words": [
+          {
+            "word": "分",
+            "start": 115.86,
+            "end": 116.17999999999999
+          },
+          {
+            "word": "別",
+            "start": 116.17999999999999,
+            "end": 116.54
+          },
+          {
+            "word": "終",
+            "start": 116.54,
+            "end": 117.32
+          },
+          {
+            "word": "是",
+            "start": 117.32,
+            "end": 117.8
+          },
+          {
+            "word": "在",
+            "start": 117.8,
+            "end": 118.14
+          },
+          {
+            "word": "9",
+            "start": 118.14,
+            "end": 118.4
+          },
+          {
+            "word": "月",
+            "start": 118.4,
+            "end": 118.67999999999999
+          }
+        ]
+      },
+      "eligible": true,
+      "elapsed_seconds": 7.61
+    },
+    "43": {
+      "proof": {
+        "revision": 1,
+        "input_hash": "83c12df16c091b0caebd8ce742e4053361918adc79980bdc531edc78d5f2b2d0",
+        "target_start": 263.74,
+        "target_end": 265.34,
+        "decode_start": 262.74,
+        "decode_end": 266.34000000000003,
+        "requested_start": 262.74,
+        "requested_end": 266.34,
+        "full_text": "真的很臭了,我開了一局",
+        "sensevoice_text": "名古屋一個。",
+        "exact_whisper_text": "ほら1個",
+        "target_text": "我開了一局",
+        "reason": "independent_disagreement",
+        "words_complete": true,
+        "words": [
+          {
+            "word": "真的很",
+            "start": 262.74,
+            "end": 263.12
+          },
+          {
+            "word": "臭",
+            "start": 263.12,
+            "end": 263.62
+          },
+          {
+            "word": "了,",
+            "start": 263.62,
+            "end": 263.74
+          },
+          {
+            "word": "我",
+            "start": 263.84000000000003,
+            "end": 263.98
+          },
+          {
+            "word": "開",
+            "start": 263.98,
+            "end": 264.08
+          },
+          {
+            "word": "了",
+            "start": 264.08,
+            "end": 264.14
+          },
+          {
+            "word": "一",
+            "start": 264.14,
+            "end": 264.24
+          },
+          {
+            "word": "局",
+            "start": 264.24,
+            "end": 264.38
+          }
+        ]
+      },
+      "eligible": true,
+      "elapsed_seconds": 7.078
+    },
+    "57": {
+      "proof": null,
+      "eligible": false,
+      "elapsed_seconds": 0.0
+    }
+  }
+}

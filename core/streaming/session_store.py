@@ -101,7 +101,7 @@ META_FIELDS = frozenset((
     "tts_seconds slot_seconds fit_ratio semantic_status acoustic_status source_region_verified "
     "reference_zh reference_vi equivalent different_source same_meaning text_preserved "
     "mode input_duration output_duration sample_rate channels elapsed_seconds rtf "
-    "diagnostic audio_evidence audio_consensus audio_audit_status review_gate_revision missing_translation_recovery target_orthography"
+    "diagnostic audio_evidence audio_consensus audio_audit_status review_gate_revision missing_translation_recovery target_orthography contextual_audio"
     " state attempts input_hash error_code updated_at focus_ids"
     " scope_id confirmation_id code required_seconds available_seconds max_speed remedy output_filename"
     " speaker_evidence speaker_confirmation utterance_id utterance_evidence source_asr_row_id source_asr_start source_asr_end source_piece_index source_piece_count"
@@ -453,6 +453,9 @@ def _clean(value, *, depth=0):
                 result[key] = cleaned
             elif key == "audio_evidence":
                 result[key] = _clean_audio_evidence(item, depth=depth + 1)
+            elif key == "contextual_audio":
+                from core.contextual_audio import clean_proof
+                result[key] = clean_proof(item)
             elif key == "address_context_sources":
                 result[key] = _clean_address_context_sources(item, depth=depth + 1)
             elif key == "address_uses":

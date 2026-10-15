@@ -59,6 +59,7 @@ class _LocalAudioEvidence:
         language_options = whisper_language_options(source_language)
         self.last_error = None
         self.last_errors = {}
+        self.last_contextual = {}
         from core.engines.asr.native_process import (
             ASRProcessError, check_cancelled, positive_deadline, native_worker_slot, iter_native_records,
         )
@@ -164,6 +165,27 @@ class _LocalAudioEvidence:
                 processed_readings += len(batch)
                 if progress_callback:
                     progress_callback(100 * processed_readings / (2 * len(source_rows)))
+        # A second strategy may improve a short crop, but only independently
+        # corroborated target words may replace its exact Whisper reading.
+        # Keep the full decoded window as provenance, never as the row text.
+        from core.contextual_audio import disagreement, recover
+        for row in rows:
+            check_cancelled(check)
+            sid = row["id"]
+            if ((row.get("verification") or {}).get("status") == "manual"
+                    or self.last_errors.get(sid) or not disagreement(result[sid])):
+                continue
+            try:
+                proof = recover(source, row, source_language, result[sid],
+                                checkpoint=checkpoint, cancel_check=check)
+                if proof is not None:
+                    self.last_contextual[sid] = proof
+                    if proof["reason"] == "corroborated":
+                        result[sid]["faster-whisper-small"] = proof["target_text"]
+            except Exception as error:
+                check_cancelled(check)
+                self.last_error = error
+                self.last_errors.setdefault(sid, {})["contextual-whisper"] = error
         check_cancelled(check)
         return result
 
@@ -637,7 +659,7 @@ class AutomaticTranslationReviewer:
         for sid, row in reviewed["segments"].items():
             previous = next(item for item in saved["segments"].values() if item["id"] == sid)
             audit = previous.get("verification") or {}
-            for field in ("audio_evidence", "audio_consensus"):
+            for field in ("audio_evidence", "audio_consensus", "contextual_audio"):
                 if field in audit:
                     row["verification"][field] = audit[field]
             if audit.get("status") == "corrected" and row["verification"].get("status") == "verified":
@@ -658,6 +680,7 @@ class AutomaticTranslationReviewer:
         check = lambda: VideoIntelligence._check_cancelled(cancel_check)
         check()
         targets = [row for row in result["segments"].values() if row.get("needs_review")
+                   and (row.get("verification") or {}).get("status") != "manual"
                    and not (row.get("verification") or {}).get("source_supported")]
         for row in targets:
             start, end = VideoIntelligence._number(row.get("start")), VideoIntelligence._number(row.get("end"))
@@ -713,6 +736,9 @@ class AutomaticTranslationReviewer:
             a, b = (readings.get(name, "") for name in ("sensevoice", "faster-whisper-small"))
             consensus = bool(self._audio_text(a) and self._audio_text(a) == self._audio_text(b))
             audit = row.setdefault("verification", {})
+            contextual = getattr(self.audio_evidence, "last_contextual", None)
+            if isinstance(contextual, dict) and row["id"] in contextual:
+                audit["contextual_audio"] = deepcopy(contextual[row["id"]])
             audit["audio_evidence"] = [{"engine": name, "text_zh": readings.get(name, ""),
                                         "start": row["start"], "end": row["end"]}
                                        for name in ("sensevoice", "faster-whisper-small")]
@@ -1645,6 +1671,9 @@ class AutomaticTranslationReviewer:
                     "reason": reason or "AI đã đối chiếu nghĩa và chữ OCR mới cùng thời điểm.",
                     "translation_changed": changed_translation,
                 }
+                previous_contextual = (source.get("verification") or {}).get("contextual_audio")
+                if isinstance(previous_contextual, dict):
+                    target["verification"]["contextual_audio"] = deepcopy(previous_contextual)
                 if sid in address_reading:
                     target["verification"]["address_context"] = address_reading[sid]
                     target["verification"]["address_context_sources"] = self._address_source_snapshot(address_reading, sid, context)

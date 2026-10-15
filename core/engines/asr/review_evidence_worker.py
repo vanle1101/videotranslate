@@ -15,6 +15,9 @@ def collect_engine(request, emit):
     from core.source_language import whisper_language_options
     engine = request["engine"]
     rows = request["rows"]
+    contextual = request.get("contextual") is True
+    if contextual and engine != "faster-whisper-small":
+        raise ValueError("Contextual evidence requires measured Whisper words")
     wav = Path(request["work_directory"]) / "speech.wav"
     recognizer, model = None, None
     try:
@@ -36,7 +39,14 @@ def collect_engine(request, emit):
                        # Borrowing real audio could import another speaker's
                        # words. Digital silence lets short final phonemes be
                        # decoded without extending the evidence's source span.
-                       "-af", f"apad=pad_dur={EVIDENCE_TAIL_SILENCE_SECONDS}", str(wav)])
+                       *([] if contextual else ["-af", f"apad=pad_dur={EVIDENCE_TAIL_SILENCE_SECONDS}"]), str(wav)])
+            extra = {}
+            if contextual:
+                import wave
+                with wave.open(str(wav), "rb") as audio:
+                    actual_duration = audio.getnframes() / audio.getframerate()
+                extra = {"decode_start": row["start"], "decode_end": row["start"] + actual_duration,
+                         "words": [], "words_complete": True}
             if recognizer is not None:
                 import soundfile as sf
                 samples, rate = sf.read(str(wav), dtype="float32")
@@ -48,15 +58,27 @@ def collect_engine(request, emit):
             else:
                 options = {**whisper_language_options(request.get("source_language", "zh")),
                            "condition_on_previous_text": False}
+                if contextual:
+                    options["word_timestamps"] = True
                 decoded, _ = model.transcribe(str(wav), **options, task="transcribe",
                     beam_size=5, vad_filter=False)
                 try:
-                    text = " ".join(part.text.strip() for part in decoded).strip()
+                    parts = []
+                    for part in decoded:
+                        parts.append(part.text.strip())
+                        if contextual:
+                            words = getattr(part, "words", None)
+                            if part.text.strip() and not words:
+                                extra["words_complete"] = False
+                            for word in words or []:
+                                extra["words"].append({"word": word.word,
+                                    "start": row["start"] + word.start, "end": row["start"] + word.end})
+                    text = " ".join(parts).strip()
                 finally:
                     close = getattr(decoded, "close", None)
                     if callable(close):
                         close()
-            emit({"event": "evidence", "id": row["id"], "engine": engine, "text": text})
+            emit({"event": "evidence", "id": row["id"], "engine": engine, "text": text, **extra})
             wav.unlink(missing_ok=True)
         emit({"event": "completed", "rows": len(rows), "engine": engine})
     finally:
