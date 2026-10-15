@@ -825,6 +825,7 @@ def schedule_reviewed_export(task_id):
             await broadcast_session_event(task_id, "result_error", {
                 "message": message,
                 **review_result_details(session),
+                **({"review_pending": True, "progress": session.get_progress()} if lease is not None else {}),
             })
         finally:
             release_review_export(session, lease)
@@ -2057,7 +2058,10 @@ async def _export_hq_owned(req: ExportHQRequest, review_lease=None):
         if export_id in active_export_tasks:
             active_export_tasks[export_id]["status"] = status_name
             active_export_tasks[export_id]["stage"] = message
-        await broadcast_session_event(req.task_id, "result_error", {"message": message, **session_output_details(session)})
+        await broadcast_session_event(req.task_id, "result_error", {
+            "message": message, **session_output_details(session),
+            **({"review_pending": True, "progress": session.get_progress()} if borrowed else {}),
+        })
         persist_session(session)
         if export_id in active_export_tasks:
             active_export_tasks[export_id]["updated_at"] = max(time.time(), getattr(session, "_history_updated_at", 0) or 0)

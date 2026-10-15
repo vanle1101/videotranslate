@@ -4955,6 +4955,52 @@ test('failed backend export releases controls and preserves playable reviewed tr
   assert.equal(ui.requests.filter(item=>item.url==='/api/streaming/export-hq').length,0);
 });
 
+test('borrowed export exposes a downloadable draft without completing its review coordinator', async () => {
+  const ui=studio(); await ui.start();
+  const socket=ui.sockets.at(-1);
+  socket.receive({type:'export_progress',progress:75});
+  const progress={status:'RUNNING',phase:'retry',stage:'Chờ Muse thử lại',progress_pct:93,
+    can_stop:true,can_pause:true,retry_pending_count:2,retry_next_attempt_at:Date.now()/1000+300,
+    retry_error_codes:['provider_timeout'],review_summary:{status:'incomplete',incomplete:2}};
+  socket.receive({type:'result_ready',review_pending:true,progress,
+    output_video_url:'/api/outputs/draft.mp4',output_filename:'draft.mp4'});
+  assert.equal(ui.el('task-progress').dataset.status,'RUNNING');
+  assert.equal(ui.el('task-progress-value').textContent,'93%');
+  assert.match(ui.el('task-retry-notice').textContent,/2 phần chờ thử lại/);
+  assert.match(ui.el('task-result-status').textContent,/Bản nháp/);
+  assert.equal(ui.el('btn-save-result').disabled,false);
+  assert.equal(ui.el('task-result-link').href,'http://localhost/api/outputs/draft.mp4');
+  assertWorkerSourceBusy(ui,true);
+  assert.equal(ui.el('btn-export-hq').disabled,true);
+});
+
+test('borrowed export failure preserves running review progress and prior valid output', async () => {
+  const ui=studio(); await ui.start(); const socket=ui.sockets.at(-1);
+  socket.receive({type:'export_progress',progress:42});
+  socket.receive({type:'result_error',message:'Không đủ dung lượng',progress:{status:'RUNNING',phase:'retry',
+    stage:'Chờ kiểm tra tiếp',progress_pct:91,can_stop:true,retry_pending_count:1,
+    retry_next_attempt_at:Date.now()/1000+300,retry_error_codes:['provider_timeout'],
+    output_video_url:'/api/outputs/retained.mp4',output_filename:'retained.mp4',output_is_draft:true}});
+  assert.equal(ui.el('task-progress').dataset.status,'RUNNING');
+  assert.equal(ui.el('task-progress-value').textContent,'91%');
+  assert.match(ui.el('task-retry-notice').textContent,/1 phần chờ thử lại/);
+  assert.equal(ui.el('btn-save-result').disabled,false);
+  assert.equal(ui.el('task-result-link').href,'http://localhost/api/outputs/retained.mp4');
+  assert.match(ui.el('task-result-status').textContent,/Không đủ dung lượng/);
+  assertWorkerSourceBusy(ui,true);
+});
+
+test('poll never resurrects a completed export rejected by the parent output revision', async () => {
+  const ui=studio(); await ui.start(); const socket=ui.sockets.at(-1);
+  socket.receive({type:'export_progress',progress:65});
+  ui.replies.set('/api/tasks',{tasks:[{task_id:'fixture',status:'RUNNING',phase:'review',progress_pct:90,
+    output_video_url:'',output_filename:'',can_stop:true},
+    {task_id:'export_fixture',status:'COMPLETED',output_video_url:'/api/outputs/stale.mp4',output_filename:'stale.mp4'}]});
+  await ui.tickIntervals(2000);
+  assert.equal(ui.el('task-progress').dataset.status,'RUNNING');
+  assert.notEqual(ui.el('task-result-link').href,'http://localhost/api/outputs/stale.mp4');
+});
+
 test('attached result restores the output link and selecting a different source removes the old result', async () => {
   const ui=studio(); await ui.flush();
   ui.replies.set('/api/streaming/recovered',{video_url:'/kept.mp4',output_video_url:'/api/outputs/final.mp4',output_filename:'final.mp4',progress:{status:'COMPLETED'}});
@@ -5392,6 +5438,23 @@ test('incomplete review permits an explicitly gated spoken draft while runtime f
   assert.equal(ui.el('btn-export-hq').disabled, true);
   assertWorkerSourceBusy(ui, false);
   assert.equal(ui.el('video-player').paused, true);
+});
+
+test('manual draft export requires an explicit backend boundary and closes when review owns the session', async () => {
+  const ui=studio();await ui.start();const socket=ui.sockets.at(-1);
+  const progress={type:'progress',status:'RUNNING',phase:'retry',translation_mode:'full',
+    final_output_blocked:false,final_media_blocked:false,output_is_draft:true,
+    review_summary:{status:'incomplete',incomplete:1}};
+  socket.receive(progress);
+  assert.equal(ui.el('btn-export-hq').disabled,true);
+  socket.receive({...progress,can_export_review_draft:true});
+  assert.equal(ui.el('btn-export-hq').disabled,false);
+  socket.receive({...progress,can_export_review_draft:false});
+  assert.equal(ui.el('btn-export-hq').disabled,true);
+  socket.receive({...progress,can_export_review_draft:true,final_media_blocked:true});
+  assert.equal(ui.el('btn-export-hq').disabled,true);
+  socket.receive({...progress,can_export_review_draft:true,status:'PAUSED'});
+  assert.equal(ui.el('btn-export-hq').disabled,true);
 });
 
 test('durable review recovery remains visible and blocks draft export until workers release the session', async () => {

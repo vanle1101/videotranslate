@@ -784,7 +784,8 @@ document.addEventListener("DOMContentLoaded", () => {
     btnExportHQ.disabled = !currentTaskId || !items.length ||
       missingSpeech ||
       currentProgress?.final_media_blocked === true ||
-      ["RUNNING", "PAUSED", "CANCELLING"].includes(currentProgress?.status) ||
+      (["RUNNING", "PAUSED", "CANCELLING"].includes(currentProgress?.status) &&
+        !(currentProgress?.status === "RUNNING" && currentProgress?.can_export_review_draft === true)) ||
       (currentProgress?.translation_mode === "preview" && currentProgress?.status !== "COMPLETED") || isPreviewReady(currentProgress?.status) ||
       captionStyleDirty || !!captionStyleRequest ||
       reviewInProgress() || pendingTaskAction?.kind === "review" || automaticExportActive ||
@@ -1317,7 +1318,7 @@ document.addEventListener("DOMContentLoaded", () => {
 
   function outputIsDraft(data) {
     const summary = data?.review_summary || currentProgress?.review_summary;
-    return data?.output_is_draft === true || (summary && summary.status !== "completed") ||
+    return data?.review_pending === true || data?.output_is_draft === true || (summary && summary.status !== "completed") ||
       Number(summary?.unresolved) > 0 || Object.values(segments).some(segment => segment.needs_review ||
         ["unresolved", "incomplete", "failed", "pending"].includes(segment.verification?.status));
   }
@@ -3368,7 +3369,13 @@ document.addEventListener("DOMContentLoaded", () => {
         showEta(exportProgressEta, {status: "COMPLETED"});
         if (!captionStyleDirty && !captionStyleRequest) captionOutputOutdated = false;
         showTaskResult(msg);
-        showTaskProgress({status: "COMPLETED", phase: "complete", stage: "Video kết quả đã sẵn sàng", progress_pct: 100,
+        const runtime = msg.progress && typeof msg.progress === "object" ? msg.progress : null;
+        showTaskProgress({...(runtime || (msg.review_pending
+          ? {status: currentProgress?.status || "RUNNING", phase: "retry", progress_pct: null,
+              stage: "Bản nháp đã xuất; AI tiếp tục kiểm tra bản dịch."}
+          : {status: "COMPLETED", phase: "complete", stage: "Video kết quả đã sẵn sàng", progress_pct: 100})),
+          output_video_url: msg.output_video_url, output_filename: msg.output_filename,
+          ...(msg.review_pending ? {output_is_draft: true} : {}),
           ...(msg.review_summary ? {review_summary: msg.review_summary} : {})});
       }
       else if (msg.type === "result_invalidated") {
@@ -3379,7 +3386,11 @@ document.addEventListener("DOMContentLoaded", () => {
       else if (msg.type === "result_error") {
         showEta(exportProgressEta, {status: "FAILED"});
         showExportFailure(msg.message);
-        showTaskProgress({status: "FAILED", phase: "export_error", stage: msg.message || "Chưa xuất được video kết quả", progress_pct: null});
+        showTaskProgress(msg.progress && typeof msg.progress === "object" ? msg.progress :
+          {status: "FAILED", phase: "export_error", stage: msg.message || "Chưa xuất được video kết quả", progress_pct: null});
+        if (msg.progress?.output_video_url && msg.message && taskResultStatus) {
+          taskResultStatus.textContent += ` · Lượt xuất mới gặp lỗi: ${msg.message}`;
+        }
       }
       else if (msg.type === "error") {
         const message = msg.message || msg.error || "Xử lý thất bại. Xem Diagnostics rồi thử lại.";
@@ -4797,20 +4808,23 @@ document.addEventListener("DOMContentLoaded", () => {
           progress_pct: automaticExport.progress_pct, stage: automaticExport.stage,
           eta_seconds: automaticExport.eta_seconds ?? null, eta_scope: automaticExport.eta_scope || "export",
           eta_reason: automaticExport.eta_reason ?? null, eta_missing_stages: [],
-          output_video_url: "", output_filename: "", can_pause: false, can_resume: false, can_review: false, can_stop: false};
+          output_video_url: "", output_filename: "", can_pause: false, can_resume: false, can_review: false,
+          can_stop: activeTask.can_stop === true};
       } else if (automaticExportActive && automaticExport && ["COMPLETED", "FAILED", "CANCELLED"].includes(automaticExport.status)) {
         automaticExportActive = false;
-        if (activeTask && automaticExport.status === "COMPLETED") activeTask = {...activeTask,
+        // The parent snapshot owns output revision. An empty URL explicitly
+        // invalidates an older render; never resurrect it from export history.
+        if (activeTask && automaticExport.status === "COMPLETED" && !Object.hasOwn(activeTask, "output_video_url")) activeTask = {...activeTask,
           output_video_url: automaticExport.output_video_url || automaticExport.video_url, output_filename: automaticExport.output_filename};
       }
       if (automaticExportActive && !automaticExport && activeTask && ["COMPLETED", "PREVIEW_READY", "PREPARED", "FAILED", "STOPPED", "CANCELLED"].includes(activeTask.status)) automaticExportActive = false;
-      if (activeTask?.status === "COMPLETED" && automaticExport && ["FAILED", "CANCELLED"].includes(automaticExport.status)) {
+      if (activeTask?.status === "COMPLETED" && !activeTask.output_video_url && automaticExport && ["FAILED", "CANCELLED"].includes(automaticExport.status)) {
         showExportFailure(automaticExport.stage, automaticExport.status);
         activeTask = {...activeTask, status: "FAILED", phase: "export_error", stage: automaticExport.stage || "Chưa xuất được video kết quả", progress_pct: null};
       }
       if (activeTask) {
         const statusChanged = activeTask.status !== currentProgress?.status;
-        const progressChanged = ["phase", "stage", "error", "message", "progress_pct", "stage_progress_pct", "processing_progress_pct", "processing_completed_segments", "processing_total_segments", "processing_scope", "processing_total_known", "downloaded_bytes", "total_bytes", "speed", "eta", "eta_seconds", "eta_scope", "eta_reason", "eta_missing_stages", "can_retry", "can_repair_failed", "can_pause", "can_resume", "can_stop", "can_review", "review_count", "output_video_url", "output_filename", "translation_mode", "can_translate_full", "preview_seconds", "processed_seconds", "source_prepared_seconds", "total_seconds", "review_scope", "chunk_workers", "configured_chunk_workers"]
+        const progressChanged = ["phase", "stage", "error", "message", "progress_pct", "stage_progress_pct", "processing_progress_pct", "processing_completed_segments", "processing_total_segments", "processing_scope", "processing_total_known", "downloaded_bytes", "total_bytes", "speed", "eta", "eta_seconds", "eta_scope", "eta_reason", "eta_missing_stages", "can_retry", "can_repair_failed", "can_pause", "can_resume", "can_stop", "can_review", "can_export_review_draft", "review_count", "output_video_url", "output_filename", "translation_mode", "can_translate_full", "preview_seconds", "processed_seconds", "source_prepared_seconds", "total_seconds", "review_scope", "chunk_workers", "configured_chunk_workers"]
           .some(key => activeTask[key] !== undefined && activeTask[key] !== currentProgress?.[key]) ||
           ["retry_pending_count", "retry_next_attempt_at", "completed_chunks", "total_chunks", "final_output_blocked", "final_media_blocked", "output_is_draft"].some(key => activeTask[key] !== undefined && activeTask[key] !== currentProgress?.[key]) ||
           ["review_summary", "ai_queue", "retry_error_codes", "segment_states", "missing_audio_ids", "missing_speech_ids", "reviewing_segment_ids"].some(key => activeTask[key] !== undefined &&

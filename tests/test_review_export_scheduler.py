@@ -119,3 +119,19 @@ def test_worker_exit_with_pending_review_never_marks_complete(session, monkeypat
     assert session._restart_intent == "retry_pending"
     assert session._retry_schedule[0]["state"] == "RETRY_PENDING"
     assert not any(call.args[0] == "complete" for call in session.report_progress.await_args_list)
+
+
+def test_progress_exposes_export_only_at_unleased_review_boundary(session, monkeypatch):
+    complete_media(session, monkeypatch)
+    assert session.get_progress()["can_export_review_draft"] is False
+    session._review_export_boundary = True
+    assert session.get_progress()["can_export_review_draft"] is True
+    async def run():
+        lease = acquire_review_export(session)
+        assert lease is not None
+        assert session.get_progress()["can_export_review_draft"] is False
+        release_review_export(session, lease)
+        assert session.get_progress()["can_export_review_draft"] is True
+        session._stop_draining = True
+        assert session.get_progress()["can_export_review_draft"] is False
+    asyncio.run(run())

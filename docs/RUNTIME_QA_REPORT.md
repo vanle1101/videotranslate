@@ -2453,3 +2453,9 @@ Changed files: `core/streaming/pipeline.py`, `core/streaming/retry_schedule.py`,
 | Full long-video MP4, decode/playback/seek, review-only export boundary | Actual validated playable output with honest draft label | IN PROGRESS; not yet achieved by this run. |
 
 Real provider tests: resumed retained Douyin source `7693853424030699451`, duration 453.508934 seconds, using configured Muse/OpenCode and Edge-TTS. Earlier actual provider rate limits and source retry remain relevant. Fresh run is logged locally under `cleanup/qa/current-real-recovery.log`. No provider switching, fabricated speech, force-verified semantic metadata or bypassed media gate.
+
+### Follow-up: output availability must not overwrite review runtime
+
+Found the frontend still forced `COMPLETED/100%` on every `result_ready`. It now consumes the authoritative progress supplied by review-only export, keeps the draft downloadable and leaves review/Stop controls truthful. Export failure likewise retains the runtime snapshot and any existing valid MP4. History polling cannot resurrect an explicitly invalidated older export. Backend progress exposes `can_export_review_draft` only at an unleased validated review boundary; all source/text/audio/timing and edit gates remain enforced by the export endpoint.
+
+Validation: 113 related Python tests PASS, plus 347 JavaScript tests PASS. The new Python case checks lease/Stop availability; JavaScript cases check review-pending success, failed render with retained output, stale polling and manual export gating. These are regression tests, not a new real MP4 acceptance result. The long real run continues on its launch-time backend; these subsequent API/UI changes require the next fresh runtime/page.

@@ -2137,6 +2137,9 @@ class StreamingPipelineSession:
         snapshot["can_resume"] = bool(self.initialized and self.is_running and snapshot["status"] == "PAUSED")
         snapshot["can_stop"] = (snapshot["status"] in {"RUNNING", "PAUSED"}
                                 or bool(self.edit_tasks) and not getattr(self, "_stop_draining", False))
+        from core.streaming.export_lease import review_export_ready, review_export_leased
+        snapshot["can_export_review_draft"] = (not review_export_leased(self)
+            and review_export_ready(self))
         from core.streaming.progress_eta import processing_eta
         snapshot.update(processing_eta(self, snapshot))
         return snapshot
