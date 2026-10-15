@@ -1062,7 +1062,15 @@ class StreamingPipelineSession:
         proposed wording differs. The candidate's uncertainty remains visible;
         its wording/address/pacing approvals are deliberately discarded.
         """
+        from core.translation_review import AutomaticTranslationReviewer
         audit = candidate.get("verification") or {}
+        orthography = audit.get("target_orthography") or {}
+        spelling_correction = (isinstance(orthography, dict)
+            and orthography.get("status") == "draft_corrected"
+            and orthography.get("original") == segment.final_vi
+            and orthography.get("proposal") == candidate.get("final_vi")
+            and AutomaticTranslationReviewer._orthography_only(
+                segment.final_vi, candidate.get("final_vi", "")))
         if (segment.status not in {"READY", "PLAYED"}
                 or not self._has_valid_dub_audio(segment)
                 or not str(segment.final_vi or "").strip()
@@ -1071,6 +1079,7 @@ class StreamingPipelineSession:
                 or candidate.get("text_zh") != segment.text_zh
                 or (segment.verification or {}).get("status") == "manual"
                 or segment.tts_voice_outdated
+                or spelling_correction
                 or audit.get("status") not in {"unresolved", "incomplete"}
                 or audit.get("semantic_verified") is True):
             return False
@@ -1092,7 +1101,7 @@ class StreamingPipelineSession:
                     "meaning_preserved", "natural", "accepted", "verified", "equivalent",
                     "same_meaning", "semantic_status"):
             retained.pop(key, None)
-        retained.update(status="unresolved", semantic_verified=False,
+        retained.update(status=audit["status"], semantic_verified=False,
                         needs_review=True, translation_changed=False,
                         text_preserved=True, candidate=proposed, reason=reason)
         retained["address_verified"] = False

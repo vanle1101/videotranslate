@@ -157,6 +157,40 @@ def test_uncertain_review_stability_does_not_bypass_correction_or_media_gates(re
     assert candidate == before
 
 
+@pytest.mark.parametrize("mismatch", [None, "original", "proposal", "meaning"])
+def test_accepted_spelling_repair_is_not_suppressed_by_draft_stability(reviewed_session, mismatch):
+    session = reviewed_session
+    row = session.segments[112]
+    row.audio_url = "/isolated/seg_112.wav"
+    row.final_vi = "Loi cu."
+    candidate = {**row.to_dict(), "final_vi": "Lời cũ.",
+        "verification": {"status": "unresolved", "semantic_verified": False,
+            "target_orthography": {"status": "draft_corrected",
+                "original": "Loi cu.", "proposal": "Lời cũ."}}}
+    correction = candidate["verification"]["target_orthography"]
+    if mismatch == "original": correction["original"] = "Bản khác."
+    elif mismatch == "proposal": correction["proposal"] = "Bản khác."
+    elif mismatch == "meaning":
+        correction["proposal"] = candidate["final_vi"] = "Nội dung khác."
+    assert session._retain_stable_review_audio(row, candidate) is (mismatch is not None)
+
+
+def test_incomplete_review_keeps_technical_failure_with_retained_audio(reviewed_session, monkeypatch):
+    session = reviewed_session
+    row = session.segments[112]
+    row.audio_url = "/isolated/seg_112.wav"
+    row.speaker_review_pending = True
+    original = row.audio_path
+    candidate = {**row.to_dict(), "final_vi": "Lời đề xuất khác.",
+        "verification": {"status": "incomplete", "semantic_verified": False,
+            "diagnostic": {"stage": "semantic_second_pass", "code": "timeout"}}}
+    assert session._retain_stable_review_audio(row, candidate)
+    session._apply_review_metadata(row, candidate)
+    assert row.audio_path == original and row.final_vi == "Lời cũ."
+    assert row.verification["status"] == "incomplete" and row.speaker_review_pending
+    assert row.verification["diagnostic"]["code"] == "timeout"
+
+
 def test_verified_review_rewrite_still_replaces_existing_speech(reviewed_session, monkeypatch):
     session = reviewed_session
     focus = session.segments[112]
