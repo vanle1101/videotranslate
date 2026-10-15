@@ -1,0 +1,24 @@
+{
+  "task_id": "5bea8fe5",
+  "state": "STOPPED",
+  "source_seconds": 453.508934,
+  "segments": 75,
+  "decoded_audio": 69,
+  "decode_failures": [],
+  "missing_text_ids": [
+    27,
+    43,
+    57,
+    64
+  ],
+  "missing_audio_ids": [
+    39,
+    47
+  ],
+  "review_required": 48,
+  "retry_pending": 23,
+  "output_filename": "",
+  "new_full_mp4_acceptance": "BLOCKED",
+  "stopped_by": "agent production UI Stop for reload after measured recovery; not provider crash",
+  "max_speed_ratio": 1.15
+}
