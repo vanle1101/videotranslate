@@ -1,0 +1,24 @@
+{
+  "task_id": "76f5aa6b",
+  "observed_at_local": "2026-10-15T08:45:10",
+  "state": "STOPPED",
+  "source_seconds": 320.040635,
+  "segments": 193,
+  "valid_audio": 191,
+  "missing_audio_ids": [
+    87,
+    119
+  ],
+  "manual_preserved": 15,
+  "review_required": 36,
+  "retry_claims": 2,
+  "output_filename": "",
+  "full_mp4_acceptance": "NOT_ACHIEVED",
+  "stop_reason": "900s observation deadline, normal Stop API, backend drained",
+  "real_provider_observations": [
+    "Muse timeout retried",
+    "RAM admission timeout saved for later retry",
+    "Cooldown expired and same row resumed",
+    "Existing TTS and semantic cache reused"
+  ]
+}
