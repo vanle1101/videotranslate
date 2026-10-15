@@ -2669,3 +2669,19 @@ Fix: a shared Unicode letter-script check rejects foreign-script letters in prov
 Validation:282 tests plus17 subtests PASS across provider/visual/blind/multilingual/revalidation/cache contracts;249 tests PASS in overlapping source-review/pacing/export-gate regressions. Initial tests exposed an unregistered pacing error code and an obsolete visual-validation expectation; both corrected and retested. Evidence: `docs/reports/multilingual-output-2026-10-15.json`. Files: `core/vietnamese_output.py`, `core/engines/translation/semantic_translator.py`, `core/video_intelligence.py`, `core/engines/alignment/speech_cache.py`, `core/review_checkpoint.py`, `tests/test_vietnamese_output.py`, `tests/test_video_intelligence.py`. Goal remains incomplete; no full long-video acceptance or new-language end-to-end claim.
 
 Independent review caught a false positive for Latin names containing U+02BC modifier apostrophe (`NʼDjamena`): added that precise exception, retaining rejection of Japanese modifier letters. Final focused guard/blind-context suite85 PASS. Owned test processes exited. Cleanup of current-turn `%TEMP%/pytest-of-acer/pytest-1437`, `pytest-1438`, `pytest-1439` was rejected by automatic approval review (`blocked by policy`); those temporary test directories were retained, with no alternate deletion attempted. No user data was removed.
+
+### Live resource and completion audit — blocked acceptance, October 15, 2026
+
+The preceding turn made verified code/test progress (`82b0775` pushed); it was not a waiting provider run. Current worktree is clean. A fresh30-second invocation of the actual `CLIResourceAdmission` policy, without launching a child, returned `local_memory_pressure`: available1,588,785,152 bytes versus3,087,007,744 bytes required (2GiB reserve plus896MiB child). No provider request started. This same resource condition has persisted across at least three consecutive goal turns. No unrelated application was terminated and the admission guard was not lowered.
+
+Fresh read-only project inspection confirms:
+
+| Project | Current durable state | Outstanding speech | Manual rows retained | Full output filename |
+|---|---|---|---|---|
+|5bea8fe5|STOPPED,75 rows|Missing Vietnamese27/43/57;42 review flags|0|Empty|
+|76f5aa6b|STOPPED,193 rows|Missing fitted audio87/119;36 review flags|15|Empty|
+|38680e43|FAILED,14 rows|Missing fitted audio5;2 review flags|1|Empty|
+
+Installed Edge-TTS is7.3.1. Legacy manifests265796c3 and2b5ef22b are absent on this machine. Existing partial export/runtime evidence remains as previously recorded; it does not satisfy full output acceptance. Current config/UI source still exposes1/3/5/10/15/20/30/40/50 with default20, but this source inspection is not another concurrency benchmark.
+
+Completion remains unproven: fresh provider re-evaluation after the latest changes, fitting all retained speech, complete long-video MP4 validation, fresh external Chinese/Korean-with-Chinese-subtitles/mixed-language end-to-end runs, and long-duration throughput acceptance remain missing. Controlled tests do not replace them. No new actionable code defect was established in this audit, and no owned task is still running. Further provider/runtime acceptance currently needs available system resources; unresolved source readings may still need direct content review even after memory recovers. Goal should remain explicitly blocked/incomplete, never marked complete.
