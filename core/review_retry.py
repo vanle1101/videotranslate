@@ -54,18 +54,24 @@ def retain_failure(result, error, rows):
     return descriptor
 
 
+def local_audio_failure_code(error):
+    """Only timeouts and unsuccessful process exits authorize a new wave."""
+    from core.engines.asr.native_process import ASRWorkerExitError
+    if isinstance(error, TimeoutError):
+        return "asr_timeout"
+    if isinstance(error, ASRWorkerExitError):
+        return "asr_failed"
+    return None
+
+
 def retain_audio_failure(result, error, rows):
     """Schedule only typed transient failures from the local evidence boundary.
 
     Recognition disagreement is data, never an exception. Missing models,
     invalid inputs and arbitrary RuntimeErrors must not become retry requests.
     """
-    from core.engines.asr.native_process import ASRWorkerExitError
-    if isinstance(error, TimeoutError):
-        code = "asr_timeout"
-    elif isinstance(error, ASRWorkerExitError):
-        code = "asr_failed"
-    else:
+    code = local_audio_failure_code(error)
+    if code is None:
         return None
     ids = sorted({row["id"] for row in rows if type(row.get("id")) is int})
     if not ids:

@@ -22,7 +22,7 @@ from core.screen_ocr import ScreenOCR
 from core.video_intelligence import VideoIntelligence, VideoIntelligenceError
 from core.runtime_context import current_execution_context
 from core.review_checkpoint import ReviewCheckpoint
-from core.review_retry import retain_failure, retain_audio_failure, annotate_failure
+from core.review_retry import retain_failure, retain_audio_failure, local_audio_failure_code, annotate_failure
 from core.chinese_text import comparable_chinese, comparable_audio_chinese
 from core.source_language import source_ocr_script_conflict
 from core.semantic_segments import SEMANTIC_TRANSLATION_POLICY
@@ -739,8 +739,9 @@ class AutomaticTranslationReviewer:
                     errors = failure_errors.get(row["id"], [general_failure_error])
                     # Preserve the original typed failure at this boundary;
                     # persisted diagnostics/provider JSON cannot authorize work.
-                    # Any missing setup takes precedence over a transient sibling.
-                    if not any(isinstance(error, (FileNotFoundError, ImportError)) for error in errors):
+                    # A setup/protocol/unknown failure takes precedence over a
+                    # transient sibling; retrying that sibling cannot fix it.
+                    if errors and all(local_audio_failure_code(error) for error in errors):
                         for error in errors:
                             if retain_audio_failure(result, error, [row]):
                                 audit.update(status="incomplete", semantic_verified=False)

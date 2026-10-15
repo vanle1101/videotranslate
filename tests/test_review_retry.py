@@ -54,12 +54,14 @@ def test_local_collector_failure_preserves_text_and_returns_durable_scope(review
     review.client.translate.assert_not_called()
 
 
-def test_missing_model_takes_precedence_over_sibling_timeout(review):
+@pytest.mark.parametrize("terminal", [FileNotFoundError(), ImportError(),
+    ASRProcessError("bad protocol"), ValueError("bad bounds"), RuntimeError("unknown")])
+def test_terminal_local_failure_takes_precedence_over_sibling_timeout(review, terminal):
     from unittest.mock import Mock
     from test_auto_review import audio_result
     review.audio_evidence = Mock()
     review.audio_evidence.collect.return_value = {}
-    review.audio_evidence.last_errors = {0: {"sensevoice": TimeoutError(), "whisper": FileNotFoundError()}}
+    review.audio_evidence.last_errors = {0: {"sensevoice": TimeoutError(), "whisper": terminal}}
     result = review.resolve_audio_uncertainty("isolated.mp4", audio_result())
     assert not result.get("retry_failures")
 
