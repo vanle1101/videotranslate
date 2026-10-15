@@ -122,6 +122,10 @@ def synthesize_natural_speech(*, text, source, duration, output_path, engine, al
                     if row.get("code") != "duplicate"}
         eligible = [row for row in historical_measured
                     if pacing_candidate_key(row["text"]) != pacing_candidate_key(current)
+                    # This exact scope includes voice, timing policy and the
+                    # maximum available slot. A measured over-budget version
+                    # cannot become usable by repeating semantic approval.
+                    and row["measured_seconds"] <= max_duration * aligner.max_speed + 1e-9
                     and pacing_candidate_key(row["text"]) not in rejected
                     and isinstance(row.get("pacing_verification"), dict)
                     and (row["pacing_verification"].get("status") == "verified"

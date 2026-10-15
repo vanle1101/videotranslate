@@ -110,11 +110,24 @@ def test_substantive_rejection_excludes_candidate_but_duplicate_does_not(durable
     adapter = CapableAdapter()
     engine = RecordedSynthesizer({"Lời ban đầu.": 2., "Cũ dài.": .7})
     args = options(durable, aligner, adapter, engine)
-    seed(args, feedback={"rejected_candidates": [
+    seed(args, rows=[("Cũ ngắn.", .2), ("Cũ dài.", .8)], feedback={"rejected_candidates": [
         {"text": "Cũ ngắn.", "code": "semantic_mismatch", "reason": "Missing meaning"},
         {"text": "Cũ dài.", "code": "duplicate", "reason": "Repeated"}]})
     assert synthesize_natural_speech(**args)["text"] == "Cũ dài."
     assert engine.calls == ["Lời ban đầu.", "Cũ dài."]
+
+
+def test_exact_scope_overlong_history_does_not_spend_revalidation_or_tts(durable, aligner):
+    adapter = CapableAdapter()
+    engine = RecordedSynthesizer({"Lời ban đầu.": 2., "Mới.": .7})
+    args = options(durable, aligner, adapter, engine)
+    seed(args, rows=[("Đã đo quá dài.", 1.51)])
+    result = synthesize_natural_speech(**args)
+    adapter.validate.assert_not_called()
+    assert engine.calls == ["Lời ban đầu.", "Mới."]
+    assert result["pacing_proposals_used"] == 1
+    assert adapter.rewrite_for_pacing.call_args.kwargs["feedback"]["measured_candidates"][0] == {
+        "text": "Đã đo quá dài.", "measured_seconds": 1.51}
 
 
 def test_fitting_original_does_not_request_revalidation(durable, aligner):
