@@ -61,6 +61,34 @@ def test_repeated_nested_review_json_failure_cannot_become_validated_output():
     assert client.translate.call_count == 3
 
 
+@pytest.mark.parametrize("malformed,code", [
+    ('{"segments":[{"address_uses":[]} financially],"screen_texts":[],"summary":""}',
+     "invalid_json"),
+    ('{"segments":[{"address_uses":[{"term":"anh","role":"self"}/blockchain]}]}',
+     "invalid_json"),
+    ('{"segments":[],"segments":[{"final_vi":"private-rejected-draft"}]}',
+     "invalid_content"),
+])
+def test_contaminated_or_duplicate_json_requires_fresh_complete_review(malformed, code, caplog):
+    row = source()
+    valid = {"segments": [{**row, "semantic_verified": False,
+        "verification_reason": "Chưa đủ dẫn chứng."}], "screen_texts": [], "summary": ""}
+    client = Mock(translate=Mock(side_effect=[malformed, valid]))
+    data, checked = AutomaticTranslationReviewer._validated_review_request(
+        client, "Nguồn gốc cần kiểm định.", [row], 0, 1, lambda: None,
+        AutomaticTranslationReviewer._require_semantic_fields)
+    assert client.translate.call_count == 2
+    assert data == valid and checked["segments"][0]["final_vi"] == row["final_vi"]
+    assert data["segments"][0]["semantic_verified"] is False
+    retry = client.translate.call_args_list[1].args[0]
+    assert retry.startswith("Nguồn gốc cần kiểm định.")
+    assert "Mỗi tên trường chỉ xuất hiện một lần" in retry
+    assert "không chèn suy luận hoặc văn bản rời" in retry
+    assert malformed not in retry + caplog.text
+    assert "private-rejected-draft" not in retry + caplog.text
+    assert f"code={code}" in caplog.text
+
+
 @pytest.mark.parametrize("recovered", [False, True])
 def test_missing_translation_recovery_keeps_uncertainty_and_bounds_attempt(recovered):
     client, scanner, prompts = components()
@@ -110,8 +138,8 @@ def test_later_batch_uses_evidence_qualified_corrected_context():
     reviewer = AutomaticTranslationReviewer(client, scanner, audio_evidence=False)
     result = reviewer.review("unused", [source(i) for i in range(13)], [])
     context = json.loads(prompts[2].split("Ngữ cảnh lân cận (không tạo thêm ID): ", 1)[1])
-    assert result["segments"][10]["verification"]["status"] == "corrected"
-    assert next(row for row in context if row["start"] == 10)["final_vi"] == "Xin chào"
+    assert result["segments"][7]["verification"]["status"] == "corrected"
+    assert next(row for row in context if row["start"] == 7)["final_vi"] == "Xin chào"
 
 
 def test_subset_review_retains_remote_source_context_without_reviewing_other_ids():
@@ -261,8 +289,8 @@ def test_address_request_failure_isolated_to_audio_semantic_batch(cancelled):
     reviewer = AutomaticTranslationReviewer(client, Mock(), audio)
     error = asyncio.CancelledError("cancelled") if cancelled else RuntimeError("private-address-failure")
     reviewer._address_reading = Mock(side_effect=[error, {}])
-    reply = {"segments": [{**source(12), "literal_vi": "Xin chào", "natural_vi": "Xin chào",
-        "final_vi": "Xin chào", "semantic_verified": True, "verification_reason": "Giữ lời chào."}],
+    reply = {"segments": [{**source(i), "literal_vi": "Xin chào", "natural_vi": "Xin chào",
+        "final_vi": "Xin chào", "semantic_verified": True, "verification_reason": "Giữ lời chào."} for i in range(8, 13)],
         "screen_texts": [], "summary": ""}
     client.translate.return_value = reply
     data = {"segments": {i: {**source(i), "needs_review": True,
@@ -275,7 +303,7 @@ def test_address_request_failure_isolated_to_audio_semantic_batch(cancelled):
         client.translate.assert_not_called()
         return
     result = reviewer.resolve_audio_uncertainty("unused", data)
-    assert all(result["segments"][i]["verification"]["status"] == "incomplete" for i in range(12))
+    assert all(result["segments"][i]["verification"]["status"] == "incomplete" for i in range(8))
     assert result["segments"][12]["verification"]["status"] == "corrected"
     assert result["segments"][12]["final_vi"] == "Xin chào"
     assert reviewer._address_reading.call_count == 2 and client.translate.call_count == 2

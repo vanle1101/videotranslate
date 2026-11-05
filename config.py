@@ -12,7 +12,7 @@ LOGS_DIR.mkdir(parents=True, exist_ok=True)
 
 # Presets exposed by Studio. Environment settings retain intermediate values
 # for existing installations; the settings API accepts only these presets.
-TRANSLATION_CHUNK_WORKER_OPTIONS = (1, 3, 5, 10, 15, 20)
+TRANSLATION_CHUNK_WORKER_OPTIONS = (1, 3, 5, 10, 15, 20, 30, 40, 50)
 
 class SafeStream:
     """Safe stream wrapper for Windows GUI / pythonw.exe where stdout/stderr is None."""
@@ -97,7 +97,10 @@ class Settings(BaseSettings):
 
     # LLM Translation API Settings
     # OpenCode reuses its local login; no translation LLM is loaded into RAM.
-    LLM_PROVIDER: str = "opencode" # also 'openrouter-free', 'free', 'gemini', 'deepseek', 'openai', 'muse'
+    LLM_PROVIDER: str = "opencode" # also 'ollama', 'openrouter-free', 'free', 'gemini', 'deepseek', 'openai', 'muse'
+    OLLAMA_BASE_URL: str = "http://127.0.0.1:11434"
+    OLLAMA_MODEL: str = "qwen2.5:7b"
+    OLLAMA_TIMEOUT: float = Field(default=600.0, gt=0, le=600)
     MUSE_BROWSER_MODE: Literal["dedicated", "existing"] = "dedicated"
     MUSE_CHROME_PORT: int = Field(default=0, ge=0, le=65535)
     OPENCODE_API_KEY: str = "" # Optional local override; otherwise read OpenCode auth.json.
@@ -105,15 +108,15 @@ class Settings(BaseSettings):
     OPENCODE_TIMEOUT: float = 60.0
     # Let the source producer overlap the independent review/TTS consumer.
     # Stage deadlines shorten, never extend, each adapter's request timeout.
-    OPENCODE_CONCURRENCY: int = Field(default=5, ge=1, le=20)
+    OPENCODE_CONCURRENCY: int = Field(default=20, ge=1, le=50)
     # Independent time ranges for full translation; preview remains bounded.
     TRANSLATION_CHUNK_SECONDS: float = Field(default=60.0, ge=15, le=90)
-    TRANSLATION_CHUNK_WORKERS: int = Field(default=5, ge=1, le=20)
-    OPENCODE_QUEUE_LIMIT: int = Field(default=24, ge=1, le=256)
+    TRANSLATION_CHUNK_WORKERS: int = Field(default=20, ge=1, le=50)
+    OPENCODE_QUEUE_LIMIT: int = Field(default=128, ge=1, le=1024)
     # Queue admission is separate from a provider request deadline. It must
     # cover the longest bounded review request already ahead in the FIFO.
     OPENCODE_QUEUE_TIMEOUT: float = Field(default=180.0, gt=0, le=600)
-    OPENCODE_CIRCUIT_FAILURES: int = Field(default=4, ge=1, le=20)
+    OPENCODE_CIRCUIT_FAILURES: int = Field(default=6, ge=1, le=50)
     OPENCODE_CIRCUIT_COOLDOWN: float = Field(default=30.0, gt=0, le=300)
     OPENCODE_TASK_TIMEOUTS: dict[str, float] = Field(default_factory=lambda: {
         "translation": 60.0, "summary": 60.0, "semantic_review": 90.0,
@@ -138,6 +141,8 @@ class Settings(BaseSettings):
     INITIAL_BUFFER_SECONDS: float = Field(default=10.0, gt=0, le=120)
     DEMUCS_MODEL: str = "htdemucs"
     ROFORMER_MODEL: str = "model_bs_roformer_ep_317_sdr_12.9755.ckpt"
+    # 2.55s equals the model's 256-frame window. Smaller steps improve overlap-add quality but cost more GPU time.
+    ROFORMER_STEP_SECONDS: float = Field(default=0.6375, gt=0, le=2.55)
 
     # Chinese Speech-to-Text (ASR)
     # Options: 'sensevoice', 'faster-whisper', 'whisper'
@@ -147,8 +152,21 @@ class Settings(BaseSettings):
     WHISPER_COMPUTE_TYPE: str = "int8"
     ASR_CPU_THREADS: int = 6
     ASR_PROCESS_TIMEOUT: float = Field(default=600.0, gt=0, le=21600)
+    # RoFormer vocal evidence can take much longer than Whisper on CPU; keep
+    # its bounded timeout separate so a slower evidence pass doesn't restart
+    # the same source interval at the ordinary ASR deadline.
+    ASR_VOCAL_EVIDENCE_TIMEOUT: float = Field(default=3600.0, gt=0, le=21600)
+    # 'on_gap' performs the expensive vocal-separation evidence pass only when
+    # the original-audio ASR pass reports unresolved speech windows.
+    ASR_VOCAL_EVIDENCE_STRATEGY: Literal["always", "on_gap", "never"] = "always"
     ASR_PROCESS_QUEUE_TIMEOUT: float = Field(default=180.0, gt=0, le=21600)
     ASR_REVIEW_PROCESS_TIMEOUT: float = Field(default=600.0, gt=0, le=21600)
+    ASR_REVIEW_WHISPER_MODEL: Literal["small", "medium", "large-v3"] = "small"
+
+    # Use larger bounded source windows for full-video work. This lowers the
+    # number of repeated ASR/vocal-evidence and background-preparation passes;
+    # previews keep their shorter first-result window.
+    FULL_SOURCE_CHUNK_SECONDS: float = Field(default=48.0, ge=24, le=48)
 
     # Vietnamese Text-to-Speech (TTS)
     # Options: 'edge-tts', 'vieneu-tts', 'zerotts', 'custom-api'
@@ -161,6 +179,15 @@ class Settings(BaseSettings):
     BGM_VOLUME_DUCKED_DB: float = -14.0 # Volume of BGM when voice is speaking
     BGM_VOLUME_NORMAL_DB: float = -2.0  # Volume of BGM when no speech
     VOICE_VOLUME_BOOST_DB: float = 2.0  # Boost for Vietnamese voiceover
+
+    # Final H.264 / AAC export quality
+    VIDEO_CRF: int = Field(default=20, ge=0, le=51)
+    VIDEO_ENCODER_PRESET: Literal[
+        "ultrafast", "superfast", "veryfast", "faster", "fast", "medium",
+        "slow", "slower", "veryslow", "placebo",
+    ] = "superfast"
+    VIDEO_CPU_THREADS: int = Field(default=4, ge=1, le=16)
+    EXPORT_AUDIO_BITRATE: Literal["128k", "192k", "256k", "320k"] = "192k"
 
     # Subtitle & Video layout
     SUBTITLE_FONT: str = "Arial"
@@ -175,6 +202,12 @@ class Settings(BaseSettings):
     )
 
 settings = Settings()
+# A stale launcher environment can hide every CUDA device from CTranslate2
+# with CUDA_VISIBLE_DEVICES=-1 even when this install explicitly selects CUDA.
+# Honor DEVICE=cuda for this application while preserving normal device lists.
+if (str(settings.DEVICE).strip().lower() == "cuda"
+        and os.getenv("CUDA_VISIBLE_DEVICES", "").strip() == "-1"):
+    os.environ.pop("CUDA_VISIBLE_DEVICES", None)
 settings.INPUT_DIR.mkdir(parents=True, exist_ok=True)
 settings.OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 settings.TEMP_DIR.mkdir(parents=True, exist_ok=True)

@@ -24,8 +24,11 @@ def validate_graph(path, size, sha256):
     path = Path(path)
     if path.is_symlink() or not path.is_file() or path.stat().st_size != size:
         raise ValueError(f"Missing/incomplete diarization graph: {path}")
+    digest = hashlib.sha256()
     with path.open("rb") as stream:
-        actual = hashlib.file_digest(stream, "sha256").hexdigest()
+        for block in iter(lambda: stream.read(1024 * 1024), b""):
+            digest.update(block)
+    actual = digest.hexdigest()
     if actual != sha256:
         raise ValueError(f"Diarization graph checksum mismatch; existing file preserved: {path}")
     return path.resolve()

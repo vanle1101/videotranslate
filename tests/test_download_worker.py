@@ -271,11 +271,30 @@ def test_worker_public_success_emits_result_without_entering_fallback(monkeypatc
     assert events[-1]["kind"] == "result" and events[-1]["result"]["source"] == "douyin-public"
 
 
-def test_worker_resolver_failure_enters_existing_fallback(monkeypatch, work_directory, mp4_bytes, capsys):
+@pytest.mark.parametrize("source_url, expected_url, use_resolver", [
+    (VIDEO_URL, VIDEO_URL, True),
+    ("https://www.douyin.com/jingxuan?modal_id=7696479918071757238",
+     "https://www.douyin.com/video/7696479918071757238", True),
+    ("https://www.douyin.com/jingxuan?modal_id=7681666868934921512",
+     "https://www.douyin.com/video/7681666868934921512", True),
+    ("https://v.douyin.com/unknown/", "https://v.douyin.com/unknown/", True),
+    ("https://www.douyin.com/jingxuan?modal_id=invalid",
+     "https://www.douyin.com/jingxuan?modal_id=invalid", True),
+    ("https://example.com/watch?modal_id=7696479918071757238",
+     "https://example.com/watch?modal_id=7696479918071757238", False),
+    ("https://www.douyin.com.example.com/jingxuan?modal_id=7681666868934921512",
+     "https://www.douyin.com.example.com/jingxuan?modal_id=7681666868934921512", False),
+])
+def test_worker_resolver_failure_enters_existing_fallback(
+    monkeypatch, work_directory, mp4_bytes, capsys, source_url, expected_url, use_resolver
+):
     prefix = str(work_directory / "video")
-    monkeypatch.setattr(worker.sys, "argv", ["download_worker.py", VIDEO_URL, prefix])
+    monkeypatch.setattr(worker.sys, "argv", ["download_worker.py", source_url, prefix])
+    resolved_urls = []
 
-    def resolve(*args):
+    def resolve(url, progress):
+        assert use_resolver
+        resolved_urls.append(url)
         raise worker.DouyinResolveError("private-signature should never be logged")
 
     closed = []
@@ -288,7 +307,7 @@ def test_worker_resolver_failure_enters_existing_fallback(monkeypatch, work_dire
             closed.append(True)
 
         def extract_info(self, url, download):
-            assert url == VIDEO_URL and download is True
+            assert url == expected_url and download is True
             Path(prefix + ".mp4").write_bytes(mp4_bytes)
             return {"id": VIDEO_ID, "title": "Fallback video", "duration": 0.5}
 
@@ -296,16 +315,20 @@ def test_worker_resolver_failure_enters_existing_fallback(monkeypatch, work_dire
             return prefix + ".mp4"
 
     def fallback(options, url):
-        assert url == VIDEO_URL and options["noplaylist"] is True
+        assert url == expected_url and options["noplaylist"] is True
+        assert options["outtmpl"] == prefix + ".%(ext)s"
         assert "cookiesfrombrowser" not in options
+        assert "cookiefile" not in options
         return Fallback()
 
     monkeypatch.setattr(worker, "resolve_douyin", resolve)
     monkeypatch.setattr(worker, "single_video_downloader", fallback)
     assert worker.main() == 0
     events = read_events(capsys)
-    assert any(event.get("source") == "yt-dlp" for event in events)
+    assert resolved_urls == ([source_url] if use_resolver else [])
+    assert any(event.get("source") == "yt-dlp" for event in events) is use_resolver
     assert events[-1]["kind"] == "result"
+    assert events[-1]["result"]["file_path"] == prefix + ".mp4"
     assert "private-signature" not in json.dumps(events)
     assert closed
 
@@ -691,6 +714,166 @@ def test_diagnostic_uses_safe_http_status_and_no_exception_text(monkeypatch, wor
     assert "private-url-token" not in json.dumps(events)
 
 
+def test_http_429_retries_same_candidate_and_honors_sanitized_retry_after(
+        monkeypatch, work_directory, mp4_bytes):
+    calls, waits = [], []
+
+    def open_media(url, headers=None):
+        calls.append((url, headers))
+        if len(calls) == 1:
+            raise worker.DouyinResolveError(
+                "private-token", code="http_error", status_code=429,
+                error_type="HTTPError", retry_after=3)
+        return MediaResponse(mp4_bytes, headers={"ETag": ETAG})
+
+    monkeypatch.setattr(worker, "open_public_media", open_media)
+    monkeypatch.setattr(worker.time, "sleep", waits.append)
+    urls = [ORIGINAL_URL, ORIGINAL_URL + "&mirror=2"]
+    result = worker.download_resolved_video(video_info(urls=urls),
+                                            str(work_directory / "video"),
+                                            lambda _event: None)
+    assert Path(result["file_path"]).read_bytes() == mp4_bytes
+    assert [url for url, _headers in calls] == [ORIGINAL_URL, ORIGINAL_URL]
+    assert waits == [3]
+
+
+def test_http_429_long_retry_after_defers_without_watchdog_timeout(
+        monkeypatch, work_directory, mp4_bytes):
+    calls, waits = [], []
+
+    def open_media(url, headers=None):
+        del headers
+        calls.append(url)
+        if len(calls) == 1:
+            raise worker.DouyinResolveError(
+                "private-token", code="http_error", status_code=429,
+                error_type="HTTPError", retry_after=999999)
+        return MediaResponse(mp4_bytes)
+
+    monkeypatch.setattr(worker, "open_public_media", open_media)
+    monkeypatch.setattr(worker.time, "sleep", waits.append)
+    with pytest.raises(worker.MediaDownloadError, match="HTTP 429"):
+        worker.download_resolved_video(
+            video_info(urls=[ORIGINAL_URL, ORIGINAL_URL + "&mirror=2"]),
+            str(work_directory / "video"), lambda _event: None)
+    assert calls == [ORIGINAL_URL]
+    assert waits == []
+
+
+def test_http_403_fails_fast_without_mirror_retry(monkeypatch, work_directory):
+    calls, waits = [], []
+
+    def open_media(url, headers=None):
+        del headers
+        calls.append(url)
+        raise worker.DouyinResolveError(
+            "private-token", code="http_error", status_code=403,
+            error_type="HTTPError")
+
+    monkeypatch.setattr(worker, "open_public_media", open_media)
+    monkeypatch.setattr(worker.time, "sleep", waits.append)
+    with pytest.raises(worker.MediaDownloadError, match="HTTP 403"):
+        worker.download_resolved_video(
+            video_info(urls=[ORIGINAL_URL, ORIGINAL_URL + "&mirror=2"]),
+            str(work_directory / "video"), lambda _event: None)
+    assert calls == [ORIGINAL_URL]
+    assert waits == []
+
+
+@pytest.mark.parametrize("status", [403, 429])
+def test_access_restriction_preserves_validated_partial_for_later_resume(
+        monkeypatch, work_directory, mp4_bytes, status):
+    prefix = save_interrupted_checkpoint(monkeypatch, work_directory, mp4_bytes)
+    calls, waits = [], []
+
+    def restricted(url, headers=None):
+        calls.append((url, headers))
+        raise worker.DouyinResolveError(
+            "private-token", code="http_error", status_code=status,
+            retry_after=120 if status == 429 else None)
+
+    monkeypatch.setattr(worker, "open_public_media", restricted)
+    monkeypatch.setattr(worker.time, "sleep", waits.append)
+    with pytest.raises(worker.MediaDownloadError) as error:
+        worker.download_resolved_video(video_info(), prefix, lambda _event: None)
+    assert error.value.resumable
+    assert len(calls) == 1 and waits == []
+    assert Path(prefix + ".mp4.part").read_bytes() == mp4_bytes[:512]
+    monkeypatch.setattr(worker, "open_public_media",
+                        lambda _url, headers=None: ranged_response(mp4_bytes, 512))
+    result = worker.download_resolved_video(video_info(), prefix, lambda _event: None)
+    assert Path(result["file_path"]).read_bytes() == mp4_bytes
+
+
+@pytest.mark.parametrize("failure", ["content_range", "short_body"])
+def test_adaptive_batch_failure_resumes_only_contiguous_validated_prefix(
+        monkeypatch, work_directory, mp4_bytes, failure):
+    from core import download_ranges as ranges
+
+    monkeypatch.setattr(ranges, "SAMPLE_BYTES", 512)
+    monkeypatch.setattr(ranges, "SEGMENT_BYTES", 512)
+    monkeypatch.setattr(ranges, "MIN_REMAINING", 512)
+    monkeypatch.setattr(ranges, "FAST_ENOUGH", 10**12)
+    prefix = str(work_directory / "video")
+    calls, events = [], []
+
+    def open_media(url, headers=None):
+        calls.append(headers)
+        if headers is None:
+            response = MediaResponse(mp4_bytes, headers={"ETag": ETAG})
+            response._request_url = url
+            return response
+        assert headers["If-Range"] == ETAG
+        first, last = headers["Range"][6:].split("-")
+        start = int(first)
+        if not last:
+            # No segment from the failed batch may have reached the file.
+            assert start == 512
+            assert Path(prefix + ".mp4.part").read_bytes() == mp4_bytes[:512]
+            return ranged_response(mp4_bytes, start)
+        end = int(last)
+        body = mp4_bytes[start:end + 1]
+        content_range = f"bytes {start}-{end}/{len(mp4_bytes)}"
+        if start == 512:
+            if failure == "content_range":
+                content_range = f"bytes {start + 1}-{end + 1}/{len(mp4_bytes)}"
+            else:
+                body = body[:-1]
+        return MediaResponse(body, status=206, headers={
+            "ETag": ETAG, "Content-Range": content_range,
+            "Content-Length": str(end - start + 1),
+        })
+
+    monkeypatch.setattr(worker, "open_public_media", open_media)
+    result = worker.download_resolved_video(video_info(), prefix, events.append)
+    assert Path(result["file_path"]).read_bytes() == mp4_bytes
+    assert result["download_metrics"]["retry_count"] == 1
+    assert result["download_metrics"]["strategy"] == "single-stream"
+    assert any(event.get("strategy") == "parallel-range" for event in events)
+    assert calls[-1] == {"Range": "bytes=512-", "If-Range": ETAG}
+
+
+@pytest.mark.parametrize("status", [403, 429])
+def test_main_resolver_access_limit_does_not_enter_ytdlp_fallback(
+        monkeypatch, work_directory, capsys, status):
+    prefix = str(work_directory / "video")
+    monkeypatch.setattr(worker.sys, "argv", ["download_worker.py", VIDEO_URL, prefix])
+    monkeypatch.setattr(
+        worker, "resolve_douyin",
+        lambda *_args: (_ for _ in ()).throw(worker.DouyinResolveError(
+            "private-token", code="http_error", status_code=status,
+            error_type="HTTPError")))
+
+    def unexpected_fallback(*_args, **_kwargs):
+        raise AssertionError("403 must not enter yt-dlp fallback")
+
+    monkeypatch.setattr(worker, "single_video_downloader", unexpected_fallback)
+    assert worker.main() == 1
+    events = read_events(capsys)
+    assert events[-1]["kind"] == "error"
+    assert not any(event.get("source") == "yt-dlp" for event in events)
+
+
 def test_main_emits_resumable_flag_only_for_validated_checkpoint(monkeypatch, work_directory, capsys):
     prefix = str(work_directory / "video")
     monkeypatch.setattr(worker.sys, "argv", ["download_worker.py", VIDEO_URL, prefix])
@@ -759,11 +942,12 @@ def test_main_emits_disk_cause_for_diagnostics(monkeypatch, work_directory, caps
     assert "private-path" not in json.dumps(events)
 
 
-def test_resolver_failure_retains_validated_source_checkpoint_without_rendition_fallback(monkeypatch, work_directory, mp4_bytes, capsys):
+@pytest.mark.parametrize("status", [503, 403, 429])
+def test_resolver_failure_retains_validated_source_checkpoint_without_rendition_fallback(monkeypatch, work_directory, mp4_bytes, capsys, status):
     prefix = save_interrupted_checkpoint(monkeypatch, work_directory, mp4_bytes)
     before = {suffix: Path(prefix + suffix).read_bytes() for suffix in (".mp4.part", ".resume.json")}
     monkeypatch.setattr(worker.sys, "argv", ["download_worker.py", VIDEO_URL, prefix])
-    error = worker.DouyinResolveError("private-server-url", code="http_error", status_code=503, error_type="HTTPError")
+    error = worker.DouyinResolveError("private-server-url", code="http_error", status_code=status, error_type="HTTPError")
     def resolve(*args):
         raise error
     monkeypatch.setattr(worker, "resolve_douyin", resolve)
@@ -773,7 +957,7 @@ def test_resolver_failure_retains_validated_source_checkpoint_without_rendition_
     assert not any(event.get("source") == "yt-dlp" for event in events)
     diagnostic = next(event for event in events if event["kind"] == "diagnostic")
     assert diagnostic["downloaded_bytes"] == 512
-    assert diagnostic["status_code"] == 503 and diagnostic["error_type"] == "HTTPError"
+    assert diagnostic["status_code"] == status and diagnostic["error_type"] == "HTTPError"
     assert "private-server-url" not in json.dumps(events)
     assert all(Path(prefix + suffix).read_bytes() == data for suffix, data in before.items())
 

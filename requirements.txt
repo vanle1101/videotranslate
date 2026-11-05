@@ -22,9 +22,11 @@ av>=11,<19
 # AI Translation
 google-genai>=1.0.0
 openai>=1.14.0
+opencc-python-reimplemented>=0.1.7
 
 # Text-to-Speech (TTS)
-edge-tts>=6.1.10
+# 7.3.1 supports the provider's current GEC v2 protocol; older clients return 403.
+edge-tts>=7.3.1,<8
 
 # Audio & Video Processing
 pydub>=0.25.1

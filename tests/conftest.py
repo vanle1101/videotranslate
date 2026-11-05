@@ -10,6 +10,21 @@ import pytest
 _TEST_LOG_HANDLERS = []
 
 
+@pytest.fixture(autouse=True)
+def isolate_real_startup_projects(monkeypatch):
+    """API test lifespans must never resume projects from the user's checkout."""
+    from pathlib import Path
+    from config import settings
+    from core.streaming import retry_lifecycle
+    real_root = Path(__file__).resolve().parents[1]
+    original = retry_lifecycle.resume_interrupted_sessions
+    async def isolated_resume(*args, **kwargs):
+        if settings.BASE_DIR.resolve() == real_root:
+            return []
+        return await original(*args, **kwargs)
+    monkeypatch.setattr(retry_lifecycle, "resume_interrupted_sessions", isolated_resume)
+
+
 def pytest_sessionstart(session):
     # Install before collection imports ServiceManager. Offline provider/error
     # fixtures must never pollute the user's live Diagnostics files. Records

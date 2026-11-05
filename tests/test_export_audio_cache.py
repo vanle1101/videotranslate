@@ -43,11 +43,79 @@ def records(root):
     return list((root / "cache/export_audio").glob("*.mix"))
 
 
+@pytest.mark.parametrize("change", ["voice", "revision", "gain"])
+def test_narration_edits_reuse_background_without_extracting_or_suppressing(media, monkeypatch, change):
+    from core.engines.separator.realtime_suppressor import RealtimeVocalSuppressor
+    import core.streaming.export as module
+    export(media)
+    assert list((media[2] / "cache/export_background").glob("*.bg"))
+    if change == "voice":
+        run_media(["ffmpeg", "-v", "error", "-y", "-f", "lavfi", "-i",
+                   "sine=frequency=620:sample_rate=44100:duration=0.5", "-ac", "2", media[1][0]["audio_path"]])
+    elif change == "revision":
+        media[1][0]["revision"] += 1
+    else:
+        monkeypatch.setattr(settings, "BGM_VOLUME_NORMAL_DB", settings.BGM_VOLUME_NORMAL_DB - 4)
+    monkeypatch.setattr(RealtimeVocalSuppressor, "process_file", Mock(side_effect=AssertionError("repeated separation")))
+    original = module.run_media
+    def guard(command, *args, **kwargs):
+        assert not any(str(part).endswith("raw_audio.wav") for part in command), "Repeated source extraction"
+        return original(command, *args, **kwargs)
+    monkeypatch.setattr(module, "run_media", guard)
+    result = export(media, "edited")
+    HQExporter.validate_output(result["output_path"], 1)
+
+
+def test_failed_render_preserves_separated_background_for_retry(media, monkeypatch):
+    from core.engines.separator.realtime_suppressor import RealtimeVocalSuppressor
+    first = HQExporter()
+    monkeypatch.setattr(first.composer, "compose", Mock(side_effect=RuntimeError("render failed")))
+    with pytest.raises(RuntimeError, match="render failed"):
+        first.export("failed", media[0], media[1], 1)
+    assert not records(media[2])
+    monkeypatch.setattr(RealtimeVocalSuppressor, "process_file", Mock(side_effect=AssertionError("repeated separation")))
+    result = export(media, "retry")
+    HQExporter.validate_output(result["output_path"], 1)
+
+
+def test_prepared_and_full_separation_mixes_have_distinct_cache_keys(media):
+    exporter = HQExporter()
+    args = (media[0], media[1], 1, exporter.mixer, exporter.suppressor)
+    regular = audio_cache.build_audio_cache_identity(*args)
+    prepared = audio_cache.build_audio_cache_identity(*args, background_variant="a" * 64)
+    assert regular.key != prepared.key
+
+
+def test_roformer_background_survives_new_exporter_and_skips_separator(media, monkeypatch):
+    from core.engines.separator.roformer_engine import BSRoFormerSeparator
+    source, _, root = media
+    monkeypatch.setattr(settings, "SEPARATION_ENGINE", "roformer")
+    model = root / "workspace/models/audio_separator" / settings.ROFORMER_MODEL
+    model.parent.mkdir(parents=True)
+    model.write_bytes(b"test model identity")
+    monkeypatch.setattr(BSRoFormerSeparator, "is_available", property(lambda self: True))
+    separator = Mock(side_effect=lambda raw, directory: (raw, raw))
+    monkeypatch.setattr(BSRoFormerSeparator, "separate", separator)
+    first, second = root / "first", root / "second"
+    first.mkdir()
+    second.mkdir()
+    HQExporter()._background(source, 1, first, lambda *args: None, lambda: None, None)
+    assert separator.call_count == 1
+    separator.side_effect = AssertionError("RoFormer must not run on a background cache hit")
+    path, metadata = HQExporter()._background(source, 1, second, lambda *args: None, lambda: None, None)
+    assert path.is_file() and metadata["separation_engine"] == "roformer"
+    assert not (second / "raw_audio.wav").exists()
+
+
 def test_real_caption_only_export_skips_all_audio_processing_and_keeps_audio_bytes(media, monkeypatch):
     from core.streaming import progress_eta
     import sqlite3
     source, rows, root = media
     first = export(media)
+    phase_timings = first["phase_timings_seconds"]
+    assert {"audio_cache_lookup", "audio_mix", "subtitle_generation", "render_mp4", "validate_publish"} <= set(phase_timings)
+    assert all(value >= 0 for value in phase_timings.values())
+    assert sum(phase_timings.values()) <= first["elapsed_seconds"] + 1.
     with sqlite3.connect(progress_eta._database()) as db:
         samples = db.execute("SELECT media, elapsed FROM samples").fetchall()
     assert len(samples) == 1 and samples[0][0] == 1 and samples[0][1] > 0
@@ -60,6 +128,7 @@ def test_real_caption_only_export_skips_all_audio_processing_and_keeps_audio_byt
     stages = []
     result = exporter.export("restyled", source, rows, 1, caption_style={"position": "top", "text_color": "#FFFFFF", "background_color": "#123456"},
                              progress_callback=lambda pct, stage: stages.append(stage))
+    assert result["phase_timings_seconds"]["audio_mix"] == 0.
     assert result["separation_engine"] == first["separation_engine"] == "dsp"
     assert result["warnings"] == first["warnings"] == []
     assert any("dùng lại" in stage for stage in stages)
@@ -81,6 +150,33 @@ def test_real_caption_only_export_skips_all_audio_processing_and_keeps_audio_byt
                  "-of", "json", rendered["output_path"]], capture_output=True))
         pytest.fail(f'Caption-only export changed decoded audio: {details}')
     HQExporter.validate_output(result["output_path"], 1)
+
+
+def test_real_partial_export_keeps_subtitle_with_missing_voice_and_separate_mix(media, monkeypatch):
+    source, rows, root = media
+    full = export(media)
+    full_audio = run_media(["ffmpeg", "-v", "error", "-i", full["output_path"],
+                           "-map", "0:a", "-f", "s16le", "pipe:1"], capture_output=True)
+    partial_rows = [dict(rows[0], omit_voice=True, audio_path=str(root / "missing-tts.wav"))]
+    exporter = HQExporter()
+    with pytest.raises(ValueError, match="xuất phần đã xử lý"):
+        exporter.export("strict", source, partial_rows, 1)
+    built = Mock(wraps=exporter._mix_audio)
+    monkeypatch.setattr(exporter, "_mix_audio", built)
+    observed_subtitles = []
+    generate_srt = exporter.sub_gen.generate_srt
+    def capture_subtitles(subtitle_rows, output_path):
+        observed_subtitles.extend(subtitle_rows)
+        return generate_srt(subtitle_rows, output_path)
+    monkeypatch.setattr(exporter.sub_gen, "generate_srt", capture_subtitles)
+    partial = exporter.export("partial", source, partial_rows, 1, allow_incomplete=True)
+    assert built.call_count == 1, "Partial output must not reuse the full spoken mix"
+    assert observed_subtitles[0]["vi_text"] == rows[0]["final_vi"]
+    assert len(records(root)) == 2
+    partial_audio = run_media(["ffmpeg", "-v", "error", "-i", partial["output_path"],
+                              "-map", "0:a", "-f", "s16le", "pipe:1"], capture_output=True)
+    assert full_audio != partial_audio
+    HQExporter.validate_output(partial["output_path"], 1)
 
 
 @pytest.mark.parametrize("change", ["voice", "revision", "timing", "source", "ducking", "gain", "mode", "engine", "code"])

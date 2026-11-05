@@ -108,6 +108,7 @@ class VieNeuEngine(TTSEngine):
         return {
             "name": self.name, "version": "v3-Turbo", "is_available": self.is_available,
             "model_path": record["path"], "supports_cloning": True, "sample_rate": 48000,
+            "device": "cpu", "runtime": "onnx", "execution_provider": "CPUExecutionProvider",
         }
 
     def list_preset_voices(self) -> List[Tuple[str, str]]:

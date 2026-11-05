@@ -7,6 +7,130 @@ const source = readFileSync(new URL('../static/app.js', import.meta.url), 'utf8'
 const template = readFileSync(new URL('../templates/index.html', import.meta.url), 'utf8');
 const stylesheet = readFileSync(new URL('../static/style.css', import.meta.url), 'utf8');
 
+test('status journal preserves historical failure time and safely renders reason with stopped countdown', async () => {
+  const ui=studio(); await ui.start(); const socket=ui.sockets.at(-1);
+  const timestamp=Date.parse('2026-10-14T02:15:37+07:00')/1000;
+  socket.receive({type:'progress', status:'FAILED', phase:'failed', translation_mode:'full',
+    progress_pct:84.2, media_translation_pct:6.1, total_seconds:395.8, processed_seconds:24,
+    translated_segment_count:80,translated_furthest_segment:98,translated_furthest_seconds:250,
+    ready_through_segment:16,processing_ready_seconds:23.32,
+    status_history:[{timestamp,status:'FAILED',phase:'tts',message:'Không đủ thời gian đọc <script>alert(1)</script>'}]});
+  assert.match(ui.el('task-activity').textContent,/ĐÃ NGỪNG DO LỖI/);
+  assert.equal(ui.el('task-countdown').textContent,'Đã ngừng · không có đếm ngược');
+  assert.equal(ui.el('task-progress-value').textContent,'');
+  assert.match(ui.el('task-status-history').children[0].textContent,/02:15:37/);
+  assert.match(ui.el('task-status-history').children[0].textContent,/FAILED.*Không đủ thời gian đọc/);
+  assert.equal(ui.el('task-status-history').children[0].innerHTML,'');
+  assert.match(ui.el('task-media-progress').textContent,/#98.*04:10/);
+  assert.match(ui.el('task-media-progress').textContent,/#16.*00:23/);
+});
+
+test('seconds countdown is scoped and stops on pause, waiting, failure and disconnect', async () => {
+  const ui=studio(); await ui.start(); const socket=ui.sockets.at(-1);
+  socket.receive({type:'progress',status:'RUNNING',phase:'tts',activity_state:'active',eta_seconds:123,eta_scope:'speech'});
+  assert.match(ui.el('task-countdown').textContent,/123 giây.*chưa gồm xuất MP4/);
+  socket.receive({type:'progress',status:'PAUSED'});
+  assert.match(ui.el('task-countdown').textContent,/Tạm dừng/);
+  socket.receive({type:'progress',status:'RUNNING',activity_state:'waiting',eta_seconds:120,eta_scope:'final'});
+  assert.match(ui.el('task-countdown').textContent,/Tạm ngưng ước tính/);
+  socket.receive({type:'progress',status:'RUNNING',activity_state:'active',eta_seconds:null});
+  assert.match(ui.el('task-countdown').textContent,/chưa đủ dữ liệu/);
+  socket.receive({type:'progress',status:'FAILED'});
+  await ui.tickIntervals(1000);
+  assert.match(ui.el('task-countdown').textContent,/Đã ngừng/);
+});
+
+test('automatic recovery shows retry countdown instead of a stalled worker or completion ETA', async () => {
+  const ui=studio(); await ui.start(); const socket=ui.sockets.at(-1);
+  socket.receive({type:'progress',status:'RUNNING',phase:'recovery_wait',activity_state:'waiting',
+    activity_stage:'Dịch vụ giọng nói lỗi tạm thời',activity_age_seconds:40,
+    recovery_remaining_seconds:15,recovery_attempt:2,recovery_max_attempts:3,eta_seconds:null});
+  assert.match(ui.el('task-activity').textContent,/Đang chờ tự thử lại.*giọng nói/);
+  assert.doesNotMatch(ui.el('task-activity-age').textContent,/bị kẹt/);
+  assert.match(ui.el('task-countdown').textContent,/Tự thử lại sau 15 giây · lần 2\/3/);
+  socket.receive({type:'progress',status:'PAUSED'});
+  assert.match(ui.el('task-countdown').textContent,/Tạm dừng/);
+  socket.receive({type:'progress',status:'FAILED'});
+  assert.match(ui.el('task-countdown').textContent,/Đã ngừng/);
+});
+
+test('full-run progress keeps scanned coverage separate while the sentence total is unknown', async () => {
+  const ui=studio(); await ui.start(); const socket=ui.sockets.at(-1);
+  socket.receive({type:'progress',status:'RUNNING',phase:'visual',translation_mode:'full',
+    processing_total_known:false,processing_progress_pct:100,processing_completed_segments:16,
+    processing_total_segments:16,media_translation_pct:6.1,media_ready_pct:4,
+    source_progress_pct:12.2,processed_seconds:24,source_prepared_seconds:48,total_seconds:395});
+  assert.equal(ui.el('task-progress-value').textContent,'Chưa biết tổng số câu');
+  assert.equal(ui.el('task-progress-track').dataset.indeterminate,'true');
+  assert.match(ui.el('task-media-progress').textContent,/Đã phân tích các đoạn: 00:24 \/ 06:35/);
+  assert.match(ui.el('task-media-progress').textContent,/chưa xác nhận đủ bản dịch và giọng đọc/);
+  assert.match(ui.el('task-media-progress').textContent,/Sẵn sàng phát liên tục:.*4%/);
+  assert.match(ui.el('task-media-progress').textContent,/Nguồn đã chuẩn bị: 00:48 \/ 06:35 \(12.2%\)/);
+  socket.receive({type:'progress',status:'RUNNING',phase:'export',progress_pct:15});
+  assert.equal(ui.el('task-progress-value').textContent,'15%');
+});
+
+test('full source coverage never replaces unfinished sentence audio progress in Studio or history', async () => {
+  const ui=studio(); await ui.start(); const socket=ui.sockets.at(-1);
+  const progress={status:'RUNNING',phase:'tts',translation_mode:'full',processing_scope:'full',
+    processing_total_known:true,media_translation_pct:100,source_progress_pct:100,progress_pct:100,
+    processing_completed_segments:93,processing_total_segments:146,processing_progress_pct:100,
+    source_prepared_seconds:395,total_seconds:395,processed_seconds:395};
+  socket.receive({type:'progress',...progress});
+  assert.equal(ui.el('task-progress-value').textContent,'63.7% lời & giọng');
+  assert.equal(ui.el('task-progress-bar').style.width,'63.7%');
+  assert.equal(ui.el('task-progress-track')['aria-valuenow'],'63.7');
+  socket.receive({type:'progress',processing_completed_segments:63,processing_progress_pct:43.2});
+  assert.equal(ui.el('task-progress-value').textContent,'43.2% lời & giọng');
+  ui.replies.set('/api/tasks',{tasks:[{task_id:'fixture',...progress}]});
+  await ui.el('btn-refresh-tasks').click();
+  assert.match(ui.el('tasks-table-body').children[0].innerHTML,/63.7% lời &amp; giọng/);
+  assert.doesNotMatch(ui.el('tasks-table-body').children[0].innerHTML,/100% video đã xử lý/);
+  socket.receive({type:'progress',phase:'export',progress_pct:12});
+  assert.equal(ui.el('task-progress-value').textContent,'12%');
+});
+
+test('activity-only polls reveal long source ASR work, its unchanged advancement age and a vanished worker', async () => {
+  const ui=studio(); await ui.start(); const socket=ui.sockets.at(-1);
+  const task={task_id:'fixture',status:'RUNNING',phase:'prepare',activity_state:'active',
+    activity_age_seconds:20,activity_stage:'Đang nhận diện lời nói đoạn tiếp theo',
+    activity_has_worker:true,source_activity_stage:'asr'};
+  socket.receive({type:'progress',...task});
+  assert.match(ui.el('task-activity').textContent,/Đang chạy.*nhận diện/);
+  assert.equal(ui.el('worker-asr-badge').textContent,'ASR: nhận diện đoạn tiếp theo');
+  for (const age of [25,25,30]) {
+    ui.replies.set('/api/tasks',{tasks:[{...task,activity_age_seconds:age}]});
+    await ui.el('btn-refresh-tasks').click();
+    assert.equal(ui.el('task-activity-age').textContent,`Tiến triển gần nhất ${age} giây trước`);
+  }
+  ui.replies.set('/api/tasks',{tasks:[{...task,activity_state:'waiting',activity_age_seconds:240}]});
+  await ui.el('btn-refresh-tasks').click();
+  assert.equal(ui.el('task-activity').dataset.state,'waiting');
+  assert.match(ui.el('task-activity-age').textContent,/4 phút trước.*có thể chậm hoặc bị kẹt/);
+  assert.doesNotMatch(ui.el('task-progress-eta').textContent,/Có video sau/);
+  ui.replies.set('/api/tasks',{tasks:[{...task,activity_state:'stalled',activity_has_worker:false}]});
+  await ui.el('btn-refresh-tasks').click();
+  assert.match(ui.el('task-activity').textContent,/Luồng xử lý đã ngưng/);
+  assert.equal(ui.el('worker-asr-badge').textContent,'ASR: Idle');
+});
+
+test('failed status reads or disconnected socket never keep a live worker claim or final ETA', async () => {
+  const ui=studio(); await ui.start(); const socket=ui.sockets.at(-1);
+  const task={task_id:'fixture',status:'RUNNING',phase:'prepare',activity_state:'active',
+    activity_age_seconds:10,activity_has_worker:true,source_activity_stage:'asr',eta_seconds:120,eta_scope:'final'};
+  socket.receive({type:'progress',...task});
+  ui.replies.set('/api/tasks',{failure:true});
+  await ui.el('btn-refresh-tasks').click();
+  assert.equal(ui.el('task-activity').dataset.state,'disconnected');
+  assert.match(ui.el('task-activity').textContent,/chưa xác nhận còn chạy/);
+  assert.equal(ui.el('worker-asr-badge').textContent,'ASR: Idle');
+  assert.doesNotMatch(ui.el('task-progress-eta').textContent,/Có video sau/);
+  ui.replies.set('/api/tasks',{tasks:[task]}); await ui.el('btn-refresh-tasks').click();
+  assert.equal(ui.el('task-activity').dataset.state,'active');
+  socket.onclose();
+  assert.equal(ui.el('task-activity').dataset.state,'disconnected');
+});
+
 test('measured final ETA appears beside percentage in minutes or hours without rounding a live job to zero', async () => {
   const ui = studio(); await ui.start(); const socket = ui.sockets.at(-1);
   for (const [seconds, expected] of [[.1,'1 phút'],[59.9,'1 phút'],[60,'1 phút'],[61,'2 phút'],
@@ -101,14 +225,14 @@ test('automatic export uses its own measured ETA in Studio and MP4 modal, not st
 test('manual MP4 status polling displays measured remaining time and clears it after success', async () => {
   const ui=studio();await ui.start();const socket=ui.sockets.at(-1);
   socket.receive({type:'progress',status:'COMPLETED',phase:'complete'});
-  let finishExport;
-  ui.replies.set('/api/streaming/export-hq',()=>new Promise(resolve=>{finishExport=resolve;}));
+  ui.replies.set('/api/streaming/export-hq/jobs',{status:'RUNNING'});
   ui.replies.set('/api/streaming/export-hq/status/fixture',{status:'RUNNING',progress:25,stage:'Đang xuất',
     eta_seconds:7260,eta_scope:'final'});
-  const exporting=ui.el('btn-confirm-export').click();await ui.flush();await ui.tickIntervals(1000);
+  const exporting=ui.el('btn-confirm-export').click();await ui.flush();await ui.tickTimeouts(1000);
   assert.equal(ui.el('export-progress-pct').textContent,'25%');
   assert.equal(ui.el('export-progress-eta').textContent,'Có video sau khoảng 2 giờ 1 phút');
-  finishExport({ok:true,json:async()=>({video_url:'/api/outputs/final.mp4',output_filename:'final.mp4'})});
+  ui.replies.set('/api/streaming/export-hq/status/fixture',{status:'COMPLETED',video_url:'/api/outputs/final.mp4',output_filename:'final.mp4'});
+  await ui.tickTimeouts(1000);
   await exporting;
   assert.equal(ui.el('export-progress-eta').textContent,'');
   assert.equal(ui.el('export-progress-eta').classList.contains('hidden'),true);
@@ -249,7 +373,7 @@ test('speaker confirmation broadcasts update the other client without approving 
   assert.equal(ui.el('seg-speaker-0').textContent,'Vai: A');
   assert.equal(ui.el('task-result-link').classList.contains('hidden'),true);
   assert.equal(ui.el('task-progress').dataset.status,'PREPARED');
-  assert.equal(ui.el('btn-export-hq').disabled,true);
+  assert.equal(ui.el('btn-export-hq').disabled,false);
   assert.doesNotMatch(ui.el('seg-badge-0').textContent,/AI đã kiểm tra/);
 });
 
@@ -312,7 +436,7 @@ test('preview checkpoint exposes explicit full-translation promotion and keeps e
   assert.equal(ui.el('btn-translate-full').classList.contains('hidden'), true);
 });
 
-test('all actual start paths request the same preview mode and bounded interval', async () => {
+test('all actual start paths request full translation mode by default without auto-promoting preview', async () => {
   for (const path of ['local', 'url', 'upload']) {
     const ui = studio(); await ui.flush();
     if (path === 'local') ui.window.loadDroppedLocalVideo('D:/clip.mp4');
@@ -322,12 +446,12 @@ test('all actual start paths request the same preview mode and bounded interval'
       await ui.el('video-file').emit('change');
     }
     const endpoint = path === 'local' ? 'start-local-file' : path === 'url' ? 'start-url' : 'start-upload';
-    ui.replies.set(`/api/streaming/${endpoint}`, {task_id:'preview-start'});
+    ui.replies.set(`/api/streaming/${endpoint}`, {task_id:'full-start'});
     await ui.el('btn-start').click();
     const request = ui.requests.find(item => item.url === `/api/streaming/${endpoint}`);
     const payload = path === 'upload' ? Object.fromEntries(request.options.body.parts.map(item => [item.name,item.value])) : JSON.parse(request.options.body);
-    assert.equal(payload.translation_mode, 'preview', path);
-    assert.equal(Number(payload.preview_seconds), 24, path);
+    assert.equal(payload.translation_mode, 'full', path);
+    assert.equal(payload.preview_seconds, undefined, path);
     assert.equal(ui.requests.some(item => item.url.endsWith('/translate-full')), false, path);
   }
 });
@@ -597,8 +721,8 @@ test('forward seek past preview requests a bounded source window and clearly pla
   await ui.el('segments-timeline-track').emit('click',{clientX:50}); await ui.flush();
   const request=JSON.parse(ui.requests.filter(item=>item.url==='/api/preview').at(-1).options.body);
   assert.equal(request.start_seconds,148);
-  assert.equal(request.end_seconds,268);
-  assert.equal(request.coverage_seconds,120);
+  assert.equal(request.end_seconds,184);
+  assert.equal(request.coverage_seconds,36);
   video.currentSrc=video.src; video.duration=120;
   await video.emit('loadedmetadata'); await video.emit('canplay'); await video.emit('seeking'); await video.emit('seeked');
   assert.equal(video.currentTime,12);
@@ -679,8 +803,8 @@ test('transcript seek beyond ten minutes swaps a bounded window and retains glob
     start_seconds:888,end_seconds:1008,coverage_seconds:120,source_duration:1300});
   await ui.el('seg-row-1').querySelector('.transcript-time').click(); await ui.flush();
   const body=JSON.parse(ui.requests.filter(item=>item.url==='/api/preview').at(-1).options.body);
-  assert.equal(body.start_seconds,888); assert.equal(body.end_seconds,1008);
-  assert.equal(body.coverage_seconds,120);
+  assert.equal(body.start_seconds,888); assert.equal(body.end_seconds,924);
+  assert.equal(body.coverage_seconds,36);
   video.currentSrc=video.src; video.duration=120;
   await video.emit('loadedmetadata'); await video.emit('canplay'); await video.emit('seeking'); await video.emit('timeupdate');
   assert.equal(video.currentTime,12);
@@ -723,6 +847,54 @@ test('stop pagehide and changing source abort a pending compatibility window wit
   }
 });
 
+test('failed translation updates preserve the compatibility loading indicator', async () => {
+  for (const phase of ['tts', 'review']) {
+    const ui = await compatibleLongStudio(), video = ui.el('video-player');
+    let release;
+    ui.replies.set('/api/preview', () => new Promise(resolve => { release = resolve; }));
+    await ui.el('seg-row-1').querySelector('.transcript-time').click(); await ui.flush();
+    const pending = ui.requests.filter(item => item.url === '/api/preview').at(-1);
+    const loadingMessage = ui.el('buffering-text').textContent;
+    ui.sockets.at(-1).receive({type:'progress', status:'FAILED', phase, stage:'Giọng chưa hoàn tất'});
+    assert.equal(pending.options.signal.aborted, false);
+    assert.equal(ui.el('buffering-alert').classList.contains('hidden'), false, phase);
+    assert.equal(ui.el('buffering-alert').dataset.state, 'loading');
+    assert.equal(ui.el('buffering-text').textContent, loadingMessage);
+    release({ok:true, json:async () => ({preview_id:'failed-view', status:'READY',
+      video_url:'/api/preview/failed-view/media', start_seconds:888, end_seconds:1008,
+      coverage_seconds:120, source_duration:1300})});
+    await ui.flush(); video.currentSrc = video.src; video.duration = 120;
+    await video.emit('loadedmetadata'); await video.emit('canplay');
+    assert.equal(video.currentSrc, '/api/preview/failed-view/media');
+    assert.equal(video.currentTime, 12);
+  }
+});
+
+test('repeated stopped updates preserve a new preview seek and its deferred playback intent', async () => {
+  for (const status of ['STOPPED', 'CANCELLED']) {
+    const ui = await compatibleLongStudio(), video = ui.el('video-player');
+    const socket = ui.sockets.at(-1);
+    socket.receive({type:'progress', status, phase:'stopped'});
+    await video.play();
+    let release;
+    ui.replies.set('/api/preview', () => new Promise(resolve => { release = resolve; }));
+    await ui.el('seg-row-1').querySelector('.transcript-time').click(); await ui.flush();
+    const pending = ui.requests.filter(item => item.url === '/api/preview').at(-1);
+    socket.receive({type:'progress', status, phase:'stopped'});
+    assert.equal(pending.options.signal.aborted, false, status);
+    assert.equal(ui.el('buffering-alert').classList.contains('hidden'), false);
+    assert.equal(ui.el('buffering-alert').dataset.state, 'loading');
+    release({ok:true, json:async () => ({preview_id:'stopped-view', status:'READY',
+      video_url:'/api/preview/stopped-view/media', start_seconds:888, end_seconds:1008,
+      coverage_seconds:120, source_duration:1300})});
+    await ui.flush(); video.currentSrc = video.src; video.duration = 120;
+    ui.audio.filter(item => item.src === '/later.wav').forEach(item => { item.duration = 5; });
+    await video.emit('loadedmetadata'); await video.emit('canplay'); await ui.flush();
+    assert.equal(video.currentTime, 12);
+    assert.equal(video.paused, false, status);
+  }
+});
+
 test('window conversion preserves explicit playback intent and a user pause cancels the deferred resume', async () => {
   for(const pauseWhileWaiting of [false,true]) {
     const ui=await compatibleLongStudio(), video=ui.el('video-player');
@@ -743,6 +915,43 @@ test('window conversion preserves explicit playback intent and a user pause canc
   }
 });
 
+test('playback warms the next window without pausing and crossing adopts it without a second conversion', async () => {
+  const ui=await compatibleLongStudio(),video=ui.el('video-player');
+  let release;
+  ui.replies.set('/api/preview',()=>new Promise(resolve=>{release=resolve;}));
+  const before=ui.requests.filter(r=>r.url==='/api/preview').length;
+  video.currentTime=15; await video.play(); await ui.flush();
+  assert.equal(video.paused,false);
+  assert.equal(ui.requests.filter(r=>r.url==='/api/preview').length,before+1);
+  release({ok:true,json:async()=>({preview_id:'warm',status:'READY',video_url:'/api/preview/warm/media',
+    start_seconds:108,end_seconds:144,coverage_seconds:36,source_duration:1300})}); await ui.flush();
+  assert.equal(video.paused,false);
+  video.currentTime=119.1; await video.emit('timeupdate'); await ui.flush();
+  assert.equal(video.src,'/api/preview/warm/media');
+  assert.equal(ui.requests.filter(r=>r.url==='/api/preview').length,before+1);
+  video.currentSrc=video.src;video.duration=36;
+  await video.emit('loadedmetadata');await video.emit('canplay');await ui.flush();
+  assert.equal(video.currentTime,11.099999999999994);
+  assert.equal(video.paused,false);
+});
+
+test('nearby repeated seeks reuse the pending conversion and land at the latest requested time', async () => {
+  const ui=await compatibleLongStudio(),video=ui.el('video-player');
+  let release;
+  ui.replies.set('/api/preview',()=>new Promise(resolve=>{release=resolve;}));
+  await ui.el('seg-row-1').querySelector('.transcript-time').click(); await ui.flush();
+  const pending=ui.requests.filter(r=>r.url==='/api/preview').at(-1), count=ui.requests.length;
+  await ui.el('player-seek-forward').click();await ui.el('player-seek-forward').click();await ui.flush();
+  assert.equal(pending.options.signal.aborted,false);
+  assert.equal(ui.requests.length,count);
+  release({ok:true,json:async()=>({preview_id:'shared',status:'READY',video_url:'/api/preview/shared/media',
+    start_seconds:888,end_seconds:924,coverage_seconds:36,source_duration:1300})});await ui.flush();
+  video.currentSrc=video.src;video.duration=36;
+  await video.emit('loadedmetadata');await video.emit('canplay');
+  assert.equal(video.currentTime,22);
+  assert.equal(video.paused,true);
+});
+
 test('the end of a compatibility window advances at the exact global boundary instead of ending the source video', async () => {
   const ui=await compatibleLongStudio(), video=ui.el('video-player');
   ui.replies.set('/api/preview',{preview_id:'next-window',status:'READY',video_url:'/api/preview/next-window/media',
@@ -750,7 +959,7 @@ test('the end of a compatibility window advances at the exact global boundary in
   video.currentTime=120; video.ended=true;
   await video.emit('ended'); await ui.flush();
   const body=JSON.parse(ui.requests.filter(item=>item.url==='/api/preview').at(-1).options.body);
-  assert.equal(body.start_seconds,108); assert.equal(body.end_seconds,228);
+  assert.equal(body.start_seconds,108); assert.equal(body.end_seconds,144);
   video.currentSrc=video.src; video.duration=120; video.ended=false;
   await video.emit('loadedmetadata'); await video.emit('canplay'); await video.emit('timeupdate');
   assert.equal(video.currentTime,12);
@@ -844,10 +1053,10 @@ function studio(cookieReply = { configured: false, count: 0, message: '' }, voic
     elements.set(match[2], element);
   }
   const el = id => elements.get(id);
-  const diagnosticsButtons = [...template.matchAll(/<button data-cat="([^"]+)" class="([^"]+)"/g)].map(match => {
-    const button = new Element();
-    button.dataset.cat = match[1];
-    button.className = match[2];
+  const diagnosticsButtons = [...template.matchAll(/<button (?:id="([^"]+)" )?data-cat="([^"]+)" class="([^"]+)"/g)].map(match => {
+    const button = match[1] ? el(match[1]) : new Element();
+    button.dataset.cat = match[2];
+    button.className = match[3];
     return button;
   });
   // Match these intentional image-preserving defaults in the actual template.
@@ -1333,11 +1542,11 @@ test('parallel translation worker presets are visible outside the collapsed Open
   assert.ok(select, 'Settings must expose the worker selector');
   assert.match(template, /<label\b[^>]*for="settings-translation-workers"[^>]*>Luồng dịch song song<\/label>/);
   assert.match(select, /aria-describedby="settings-translation-workers-help"/);
-  assert.match(select, /\{% for workers in \[1, 3, 5, 10, 15, 20\] %\}/);
+  assert.match(select, /\{% for workers in \[1, 3, 5, 10, 15, 20, 30, 40, 50\] %\}/);
   const help = template.match(/<p\b[^>]*id="settings-translation-workers-help"[^>]*>([^<]+)<\/p>/)?.[1];
-  assert.match(help, /Dịch toàn bộ/);
-  assert.match(help, /tự giảm theo CPU\/RAM/);
-  assert.match(help, /Bản xem trước vẫn dịch đoạn ngắn/);
+  assert.match(help, /đồng thời tối đa cho mỗi video/);
+  assert.match(help, /Mặc định 20/);
+  assert.match(help, /dùng giới hạn riêng/);
   const collapsedSections = [...template.matchAll(/<details\b[^>]*>[\s\S]*?<\/details>/g)].map(match => match[0]);
   assert.ok(collapsedSections.some(section => /settings-opencode-model/.test(section)));
   assert.ok(collapsedSections.every(section => !/settings-translation-workers/.test(section)), 'Worker choice must remain visible when provider details are collapsed');
@@ -1352,7 +1561,7 @@ test('parallel translation worker presets are visible outside the collapsed Open
 });
 
 test('each parallel translation preset saves a numeric value and restores the acknowledged backend setting', async () => {
-  for (const workers of [1, 3, 5, 10, 15, 20]) {
+  for (const workers of [1, 3, 5, 10, 15, 20, 30, 40, 50]) {
     const ui = studio(); await ui.flush();
     const cfg = {...ui.replies.get('/api/settings')};
     const select = ui.el('settings-translation-workers');
@@ -1392,7 +1601,7 @@ test('invalid parallel translation worker values focus the selector and never su
     assert.equal(ui.document.activeElement, select, value);
     assert.equal(ui.requests.some(request => request.url === '/api/settings' && request.options.method === 'POST'), false, value);
     assert.equal(ui.el('btn-save-settings').disabled, false, value);
-    assert.match(ui.alerts.at(-1), /1, 3, 5, 10, 15 hoặc 20/, value);
+    assert.match(ui.alerts.at(-1), /1, 3, 5, 10, 15, 20, 30, 40 hoặc 50/, value);
     assert.doesNotMatch(ui.el('btn-save-settings').innerHTML, /Đã lưu thành công/, value);
   }
 });
@@ -1432,7 +1641,7 @@ test('translation worker progress shows effective and configured counts from soc
   await ui.el('btn-refresh-tasks').click();
   assert.match(ui.el('task-progress-detail').textContent, /Giới hạn đoạn: 5\/20 luồng/);
   assert.doesNotMatch(ui.el('task-progress-detail').textContent, /3\/10 luồng/);
-  assert.equal(ui.el('task-progress-value').textContent, '25%');
+  assert.equal(ui.el('task-progress-value').textContent, 'Chưa biết tổng số câu');
   ui.replies.set('/api/tasks', {tasks: [{task_id: 'fixture', ...initial, chunk_workers: 5, configured_chunk_workers: 15}]});
   await ui.el('btn-refresh-tasks').click();
   assert.match(ui.el('task-progress-detail').textContent, /Giới hạn đoạn: 5\/15 luồng/);
@@ -1605,6 +1814,65 @@ test('returning to Studio cancels pending Settings navigation and fullscreen lab
   assert.equal(ui.el('player-fullscreen').getAttribute('aria-label'), 'Thoát toàn màn hình');
   assert.match(ui.el('player-fullscreen').getAttribute('title'), /Esc/);
   assert.match(ui.el('player-fullscreen').innerHTML, /fa-compress/);
+});
+
+test('five-second buttons clamp to video bounds and preserve paused or playing state with synced audio', async () => {
+  const ui = studio(); await ui.start();
+  const video = ui.el('video-player');
+  video.duration = 10; video.currentTime = 2;
+  await ui.el('player-seek-forward').click();
+  assert.equal(video.currentTime, 7);
+  assert.equal(video.paused, true);
+  const dub = ui.audio.find(item => item.src === '/dub.wav');
+  const bgm = ui.audio.find(item => item.src === '/bgm.m4a');
+  assert.equal(dub.playCount, 0, 'Seeking a paused video must not start speech');
+  assert.equal(bgm.currentTime, 7);
+  await ui.el('player-seek-backward').click();
+  assert.equal(video.currentTime, 2);
+  await ui.el('player-seek-backward').click();
+  assert.equal(video.currentTime, 0);
+  video.currentTime = 8;
+  await ui.el('player-seek-forward').click();
+  assert.equal(video.currentTime, 10);
+  assert.equal(video.paused, true);
+  video.currentTime = 2; await video.play();
+  await ui.el('player-seek-forward').click();
+  assert.equal(video.currentTime, 7);
+  assert.equal(video.paused, false);
+  const resumedDub = ui.audio.findLast(item => item.src === '/dub.wav');
+  assert.equal(resumedDub.paused, false);
+  assert.equal(resumedDub.currentTime, 7);
+  assert.equal(bgm.currentTime, 7);
+  await ui.el('player-seek-backward').click();
+  assert.equal(video.currentTime, 2);
+  assert.equal(video.paused, false);
+  assert.equal(resumedDub.currentTime, 2);
+});
+
+test('five-second buttons cross compatibility windows using global time and preserve playback intent', async () => {
+  for (const playing of [false, true]) {
+    const ui = await partiallyTranslatedSource({failed:true});
+    const video = ui.el('video-player');
+    video.currentTime = 22;
+    if (playing) await ui.el('player-play-toggle').click();
+    ui.replies.set('/api/preview', {preview_id:'seek-five-forward',status:'READY',
+      video_url:'/api/preview/seek-five-forward/media',start_seconds:15,end_seconds:135,
+      coverage_seconds:120,source_duration:320});
+    await ui.el('player-seek-forward').click(); await ui.flush();
+    const body = JSON.parse(ui.requests.filter(item=>item.url==='/api/preview').at(-1).options.body);
+    assert.equal(body.start_seconds, 15);
+    assert.equal(body.end_seconds, 51);
+    video.currentSrc = video.src; video.duration = 120;
+    await video.emit('loadedmetadata'); await video.emit('canplay'); await video.emit('timeupdate');
+    assert.equal(video.currentTime, 12, 'Global 27 seconds is local 12 in the new window');
+    assert.equal(ui.el('bar-current-time').textContent, '00:27');
+    assert.equal(video.paused, !playing);
+    await ui.el('player-seek-backward').click(); await video.emit('timeupdate');
+    assert.equal(video.currentTime, 7);
+    assert.equal(ui.el('bar-current-time').textContent, '00:22');
+    assert.equal(video.paused, !playing);
+    assert.equal(ui.requests.some(item=>item.url.endsWith('/translate-full')), false);
+  }
 });
 
 test('paused seek never plays dubbing, play resumes same segment, and speed stays synchronized', async () => {
@@ -2008,14 +2276,15 @@ test('worker errors do not pretend pause succeeded; success updates Studio from 
 
 test('reopening export cannot create a duplicate export', async () => {
   const ui = studio(); await ui.start();
+  ui.sockets.at(-1).receive({type:'progress',status:'COMPLETED',phase:'complete'});
   let finish;
-  ui.replies.set('/api/streaming/export-hq', () => new Promise(resolve => { finish = resolve; }));
+  ui.replies.set('/api/streaming/export-hq/jobs', () => new Promise(resolve => { finish = resolve; }));
   const exporting = ui.el('btn-confirm-export').click();
   await ui.flush();
   await ui.el('btn-export-hq').click();
   assert.equal(ui.el('btn-confirm-export').classList.contains('hidden'), true);
   await ui.el('btn-confirm-export').click();
-  assert.equal(ui.requests.filter(req => req.url === '/api/streaming/export-hq').length, 1);
+  assert.equal(ui.requests.filter(req => req.url === '/api/streaming/export-hq/jobs').length, 1);
   finish({ ok: true, json: async () => ({ video_url: '/out.mp4', output_filename: 'out.mp4' }) });
   await exporting;
 });
@@ -2207,6 +2476,7 @@ test('player shows measured download percentage, bytes, speed and ETA beside the
     type: 'progress', phase: 'download', stage: 'Đang tải bản gốc Douyin 1080p',
     progress_pct: 2.2, status: 'RUNNING', can_pause: false,
     downloaded_bytes: 438680000, total_bytes: 19940000000, speed: 12500000, eta: 120,
+    average_speed: 10000000, strategy: 'parallel-range', connections: 2, retry_count: 1,
   };
   socket.receive(downloading);
   assert.equal(ui.el('player-download-progress').classList.contains('hidden'), false);
@@ -2217,6 +2487,9 @@ test('player shows measured download percentage, bytes, speed and ETA beside the
   assert.match(firstDetail, /(?:438[.,]68\s*MB|0[.,]44\s*GB)/);
   assert.match(firstDetail, /19[.,]94\s*GB/);
   assert.match(firstDetail, /12[.,]5(?:0)?\s*MB\/s/);
+  assert.match(firstDetail, /trung bình 10(?:[.,]0)?\s*MB\/s/);
+  assert.match(firstDetail, /Range · 2 kết nối/);
+  assert.match(firstDetail, /thử lại 1 lần/);
   assert.match(firstDetail, /(?:2\s*(?:phút|min)|0?2:00)/);
 
   socket.receive({ ...downloading, downloaded_bytes: 2200000000, progress_pct: 11 });
@@ -2625,7 +2898,7 @@ test('Diagnostics defaults to task logs and polls only while its view and docume
   const calls = () => ui.requests.filter(request => request.url === endpoint).length;
   await ui.tickIntervals(3000);
   assert.equal(calls(), 0);
-  assert.equal(ui.document.querySelectorAll('.diag-cat-btn')[0].dataset.cat, 'pipeline');
+  assert.ok(ui.document.querySelectorAll('.diag-cat-btn').some(button => button.dataset.cat === 'pipeline'));
   await ui.el('tab-diagnostics').click(); await ui.flush();
   assert.equal(calls(), 1);
   assert.match(ui.el('log-console-output').innerHTML, /Chưa có nhật ký tác vụ/);
@@ -2745,6 +3018,8 @@ test('transcript draft survives worker updates and same-session init, then cance
   assert.equal(ui.el('seg-row-0').querySelector('.transcript-editor').hidden, false);
   await ui.el('seg-row-0').querySelector('.transcript-editor-actions').children[1].click();
   assert.equal(ui.el('seg-vi-0').textContent, '<b>Xin chào</b>');
+  assert.equal(ui.el('btn-export-hq').disabled, true, 'The worker is still active');
+  ui.sockets.at(-1).receive({type:'progress',status:'COMPLETED',phase:'complete'});
   assert.equal(ui.el('btn-export-hq').disabled, false);
 });
 
@@ -2771,6 +3046,8 @@ test('saving transcript commits server text and a new audio revision, blocks dup
   assert.equal(oldDub.paused, true);
   assert.ok(ui.audio.find(a => a.src === '/dub.wav?rev=1'));
   assert.equal(ui.el('seg-row-0').querySelector('.transcript-editor').hidden, true);
+  assert.equal(ui.el('btn-export-hq').disabled, true, 'The worker is still active');
+  ui.sockets.at(-1).receive({type:'progress',status:'COMPLETED',phase:'complete'});
   assert.equal(ui.el('btn-export-hq').disabled, false);
   ui.sockets.at(-1).receive({ type: 'segment_update', ...segment, revision: 0, final_vi: 'stale', audio_url: '/dub.wav' });
   assert.equal(ui.el('seg-vi-0').textContent, 'Bản dịch đã chỉnh.');
@@ -2969,15 +3246,41 @@ test('a stalled task read times out and allows polling to recover without stoppi
   }));
   const poll = ui.el('btn-refresh-tasks').click();
   await ui.flush();
-  await ui.tickTimeouts(8000);
+  await ui.tickTimeouts(20000);
   await poll;
   assert.equal(signal.aborted, true);
   assert.equal(ui.el('player-task-status').dataset.state, 'disconnected');
+  assert.match(ui.el('player-task-status').textContent, /quá thời gian chờ/);
+  assert.doesNotMatch(ui.el('task-connection-status').textContent, /Không kết nối được máy chủ/);
   ui.replies.set('/api/tasks', { tasks: [{ task_id: 'download-fixture', phase: 'download', status: 'RUNNING', progress_pct: 3.4 }] });
   await ui.el('btn-refresh-tasks').click();
   assert.equal(ui.el('player-progress-value').textContent, '3.4%');
   assert.equal(ui.el('player-task-status').classList.contains('hidden'), true);
   assert.equal(ui.requests.some(request => request.url.endsWith('/stop')), false);
+});
+
+test('slow history polling preserves the last valid list and reports the bounded timeout', async () => {
+  const ui = studio();
+  ui.replies.set('/api/tasks', {
+    tasks: [{task_id: 'history-first', status: 'COMPLETED', title: 'Video đã lưu', can_open: false, duration: 12}],
+    videos: [{task_id: 'history-first', status: 'COMPLETED', title: 'Video đã lưu', can_open: false, duration: 12}],
+  });
+  await ui.el('btn-refresh-tasks').click();
+  const firstRow = ui.el('tasks-table-body').children[0];
+  assert.match(firstRow.innerHTML, /Video đã lưu/);
+
+  let signal;
+  ui.replies.set('/api/tasks', options => new Promise((resolve, reject) => {
+    signal = options.signal;
+    signal.addEventListener('abort', () => reject(Object.assign(Error('history timed out'), {name: 'AbortError'})));
+  }));
+  const poll = ui.el('btn-refresh-tasks').click();
+  await ui.flush();
+  await ui.tickTimeouts(20000);
+  await poll;
+  assert.equal(signal.aborted, true);
+  assert.equal(ui.el('tasks-table-body').children[0], firstRow);
+  assert.match(ui.el('tasks-table-body').children.at(-1).innerHTML, /quá lâu/);
 });
 
 test('server stop clears predownload spinner, controls and stale events without requiring the local Stop button', async () => {
@@ -3167,7 +3470,7 @@ test('later provider failure leaves the already translated prefix visible and pl
   assert.equal(ui.el('task-progress').dataset.status,'FAILED');
   assert.match(ui.el('task-progress-stage').textContent,/OpenCode phản hồi quá lâu/);
   assert.match(ui.el('seg-vi-0').textContent,/Xin chào/);
-  assert.equal(ui.el('btn-export-hq').disabled,true);
+  assert.equal(ui.el('btn-export-hq').disabled,false);
 });
 
 test('long translation appears as compact sequential pages with every word and sentence timing retained', async () => {
@@ -3233,6 +3536,83 @@ function styledCaptionReply(segment, style, revision = 1) {
     has_subtitle_regions: true, segments: [{...segment, caption_layout: restyle(segment.caption_layout),
       caption_bottom_layout: restyle(segment.caption_bottom_layout)}]};
 }
+
+test('empty Studio shows expanded caption controls with a reason and cannot save without a project', async () => {
+  const openingTag = template.match(/<details\b[^>]*id="caption-style-panel"[^>]*>/)[0];
+  assert.match(openingTag, /\bopen\b/);
+  assert.doesNotMatch(openingTag, /\bhidden\b/);
+  const ui = studio(); await ui.flush();
+  assert.equal(ui.el('caption-style-panel').classList.contains('hidden'), false);
+  assert.equal(ui.el('caption-style-controls').disabled, true);
+  assert.match(ui.el('caption-style-availability').textContent, /Mở dự án.*giọng Việt/);
+  ui.el('caption-text-color').value = '#112233';
+  await ui.el('caption-text-color').emit('change');
+  await ui.el('caption-style-reset').click();
+  await ui.tickTimeouts(250);
+  assert.equal(ui.requests.some(request => request.url.endsWith('/caption-style')), false);
+});
+
+test('running review and TTS keep caption controls discoverable while READY audio cannot authorize a style save', async () => {
+  for (const phase of ['review', 'tts']) {
+    const ui = studio(); await ui.start();
+    captionFixture(ui);
+    ui.sockets.at(-1).receive({type: 'progress', status: 'RUNNING', phase,
+      processed_seconds: 24, source_prepared_seconds: 96, preview_output_ready: true,
+      review_summary: {status: phase === 'review' ? 'running' : 'completed'}});
+    assert.equal(ui.el('caption-style-panel').classList.contains('hidden'), false);
+    assert.equal(ui.el('caption-style-controls').disabled, true);
+    assert.equal(ui.el('caption-style-availability').classList.contains('hidden'), false);
+    assert.match(ui.el('caption-style-availability').textContent,
+      phase === 'review' ? /AI đang kiểm tra/ : /Chờ bản xem trước/);
+    ui.el('caption-font-size-pt').value = '18';
+    await ui.el('caption-font-size-pt').emit('change');
+    ui.el('caption-text-color').value = '#112233';
+    await ui.el('caption-text-color').emit('change');
+    await ui.el('caption-transparent-background').emit('change');
+    await ui.tickTimeouts(250);
+    assert.equal(ui.requests.some(request => request.url.endsWith('/caption-style')), false);
+  }
+});
+
+test('prepared and completed projects enable the visible caption controls and save through the style API', async () => {
+  for (const status of ['PREPARED', 'COMPLETED']) {
+    const ui = studio(); await ui.start();
+    const segment = captionFixture(ui);
+    ui.sockets.at(-1).receive({type: 'progress', status, phase: status === 'PREPARED' ? 'prepared' : 'complete'});
+    assert.equal(ui.el('caption-style-panel').classList.contains('hidden'), false);
+    assert.equal(ui.el('caption-style-controls').disabled, false);
+    assert.equal(ui.el('caption-style-availability').classList.contains('hidden'), true);
+    const style = {background_color: null, text_color: '#112233', position: 'auto', blur_original: false};
+    ui.replies.set('/api/streaming/fixture/caption-style', styledCaptionReply(segment, style));
+    ui.el('caption-text-color').value = style.text_color;
+    await ui.el('caption-text-color').emit('change'); await ui.tickTimeouts(250);
+    const writes = ui.requests.filter(request => request.url.endsWith('/caption-style'));
+    assert.equal(writes.length, 1);
+    assert.equal(writes[0].options.method, 'POST');
+    assert.equal(JSON.parse(writes[0].options.body).text_color, style.text_color);
+    assert.match(ui.el('caption-style-status').textContent, /Đã lưu kiểu phụ đề/);
+  }
+});
+
+test('caption availability reasons preserve pending-save feedback and a rejected style error across progress updates', async () => {
+  const ui = studio(); await ui.start(); completedCaptionFixture(ui);
+  let finish;
+  ui.replies.set('/api/streaming/fixture/caption-style', () => new Promise(resolve => {finish = resolve;}));
+  ui.el('caption-text-color').value = '#112233';
+  await ui.el('caption-text-color').emit('change'); await ui.tickTimeouts(250);
+  const socket = ui.sockets.at(-1);
+  socket.receive({type: 'progress', status: 'RUNNING', phase: 'review', review_summary: {status: 'running'}});
+  assert.match(ui.el('caption-style-availability').textContent, /AI đang kiểm tra/);
+  assert.equal(ui.el('caption-style-status').textContent, 'Đang cập nhật phụ đề…');
+  finish({ok: false, json: async () => ({detail: 'Tác vụ đang xử lý; chưa lưu được kiểu phụ đề.'})});
+  await ui.flush();
+  assert.equal(ui.el('caption-style-status').dataset.error, 'true');
+  const failure = ui.el('caption-style-status').textContent;
+  socket.receive({type: 'progress', status: 'RUNNING', phase: 'tts', review_summary: {status: 'completed'}});
+  assert.match(ui.el('caption-style-availability').textContent, /Chờ bản xem trước/);
+  assert.equal(ui.el('caption-style-status').textContent, failure);
+  assert.equal(ui.el('caption-style-status').dataset.error, 'true');
+});
 
 test('transparent background saves independent color and blur with readable outline and opaque text', async () => {
   const ui = studio(); await ui.start(); const {segment, style} = completedCaptionFixture(ui);
@@ -3527,7 +3907,7 @@ test('missing dubbed preview never exposes usable styling and real preview enabl
   socket.receive({type: 'progress', status: 'PREVIEW_READY', phase: 'preview_ready',
     processed_seconds: 4, source_prepared_seconds: 4, preview_output_ready: false});
   assert.equal(ui.el('caption-style-controls').disabled, true);
-  assert.equal(ui.el('caption-style-panel').classList.contains('hidden'), true);
+  assert.equal(ui.el('caption-style-panel').classList.contains('hidden'), false);
   segment = {...segment, audio_url: '/real-dub.wav', needs_review: true};
   socket.receive({type: 'segment_update', ...segment});
   socket.receive({type: 'progress', status: 'PREVIEW_READY', phase: 'preview_ready',
@@ -3590,7 +3970,8 @@ test('source-time blur remains across translated cue gaps and updates independen
 
 test('completed caption controls update measured preview and invalidate old MP4 without changing speech', async () => {
   const ui = studio(); await ui.start();
-  assert.equal(ui.el('caption-style-panel').classList.contains('hidden'), true);
+  assert.equal(ui.el('caption-style-panel').classList.contains('hidden'), false);
+  assert.equal(ui.el('caption-style-controls').disabled, true);
   const {segment} = completedCaptionFixture(ui);
   assert.equal(ui.el('caption-style-panel').classList.contains('hidden'), false);
   assert.equal(ui.el('caption-style-controls').disabled, false);
@@ -3628,7 +4009,7 @@ test('completed caption controls update measured preview and invalidate old MP4 
   assert.equal(ui.el('screen-text-overlay').children.length, 0);
   ui.sockets.at(-1).receive({type: 'progress', status: 'COMPLETED', output_video_url: '/api/outputs/before.mp4'});
   assert.equal(ui.el('btn-save-result').disabled, true, 'old progress cannot restore stale output');
-  ui.replies.set('/api/streaming/export-hq', {video_url: '/api/outputs/after.mp4', output_filename: 'after.mp4'});
+  ui.replies.set('/api/streaming/export-hq/jobs', {video_url: '/api/outputs/after.mp4', output_filename: 'after.mp4'});
   await ui.el('btn-export-hq').click(); await ui.el('btn-confirm-export').click();
   assert.equal(ui.el('btn-save-result').disabled, false);
   assert.match(ui.el('task-result-link').href, /after\.mp4$/);
@@ -3742,10 +4123,13 @@ test('caption controls lock during transcript editing, review and export and res
   const row = ui.el('segments-list').children[0];
   await row.querySelector('.transcript-translation').click();
   assert.equal(ui.el('caption-style-controls').disabled, true);
+  assert.match(ui.el('caption-style-availability').textContent, /Lưu hoặc hủy bản sửa/);
   await row.querySelector('textarea').emit('keydown', {key: 'Escape'});
   assert.equal(ui.el('caption-style-controls').disabled, false);
   ui.sockets.at(-1).receive({type: 'progress', status: 'RUNNING', phase: 'review', review_summary: {status: 'running'}});
   assert.equal(ui.el('caption-style-controls').disabled, true);
+  assert.equal(ui.el('caption-style-panel').classList.contains('hidden'), false);
+  assert.match(ui.el('caption-style-availability').textContent, /AI đang kiểm tra/);
   const before = ui.requests.length;
   ui.el('caption-text-color').value = '#FFFFFF'; await ui.el('caption-text-color').emit('change');
   await ui.tickTimeouts(250); assert.equal(ui.requests.length, before);
@@ -3756,6 +4140,7 @@ test('caption controls lock during transcript editing, review and export and res
   assert.deepEqual(JSON.parse(ui.requests.at(-1).options.body), {...defaultTypography, ...style});
   ui.sockets.at(-1).receive({type: 'export_progress', progress: 12, stage: 'Đang xuất'});
   assert.equal(ui.el('caption-style-controls').disabled, true);
+  assert.match(ui.el('caption-style-availability').textContent, /Đang xuất video/);
 });
 
 test('leaving a task ignores an outstanding caption mutation and pagehide prevents queued writes', async () => {
@@ -3766,7 +4151,8 @@ test('leaving a task ignores an outstanding caption mutation and pagehide preven
   ui.window.loadDroppedLocalVideo('D:/next.mp4');
   finish({ok: true, json: async () => styledCaptionReply(segment, {...style, position: 'top'})}); await ui.flush();
   assert.equal(ui.el('caption-position').value, 'auto');
-  assert.equal(ui.el('caption-style-panel').classList.contains('hidden'), true);
+  assert.equal(ui.el('caption-style-panel').classList.contains('hidden'), false);
+  assert.equal(ui.el('caption-style-controls').disabled, true);
   const other = studio(); await other.start(); completedCaptionFixture(other);
   other.el('caption-position').value = 'bottom'; await other.el('caption-position').emit('change');
   const before = other.requests.length; await other.window.emit('pagehide'); await other.tickTimeouts(250);
@@ -3841,6 +4227,8 @@ test('uncertain transcript remains editable, shows review reason and can confirm
   assert.equal(warning.hidden, true);
   assert.equal(row.dataset.needsReview, 'false');
   assert.equal(ui.el('subtitle-text').textContent, segment.final_vi);
+  assert.equal(ui.el('btn-export-hq').disabled, true, 'The worker is still active');
+  ui.sockets.at(-1).receive({type:'progress',status:'COMPLETED',phase:'complete'});
   assert.equal(ui.el('btn-export-hq').disabled, false);
 });
 
@@ -3878,6 +4266,8 @@ test('ready draft keeps review visible while playing its dub and captions, then 
   assert.deepEqual(JSON.parse(patch.options.body), { final_vi: 'Lời thoại đã sửa.' });
   assert.equal(warning.hidden, true);
   assert.equal(ui.el('subtitle-text').textContent, 'Lời thoại đã sửa.');
+  assert.equal(ui.el('btn-export-hq').disabled, true, 'The worker is still active');
+  ui.sockets.at(-1).receive({type:'progress',status:'COMPLETED',phase:'complete'});
   assert.equal(ui.el('btn-export-hq').disabled, false);
   await video.play();
   assert.equal(ui.audio.find(item => item.src === '/edited-draft.wav').paused, false);
@@ -4010,6 +4400,8 @@ test('review silence requires its explicit action and becomes a ready silent int
   assert.equal(row.querySelector('.transcript-review').hidden, true);
   assert.equal(ui.el('seg-vi-0').textContent, 'Đã xác nhận không có lời thoại');
   assert.equal(ui.el('subtitle-text').textContent, '');
+  assert.equal(ui.el('btn-export-hq').disabled, true, 'The worker is still active');
+  ui.sockets.at(-1).receive({type:'progress',status:'COMPLETED',phase:'complete'});
   assert.equal(ui.el('btn-export-hq').disabled, false);
   await ui.el('video-player').play();
   assert.equal(ui.el('video-player').paused, false);
@@ -4096,13 +4488,14 @@ test('caption export sends the position mode while the source mask stays false',
   for (const positioned of [true, false]) {
     const ui = studio(); await ui.start();
     ui.el('toggle-screen-text').checked = positioned; await ui.el('toggle-screen-text').emit('change');
+    ui.sockets.at(-1).receive({type:'progress',status:'COMPLETED',phase:'complete'});
     await ui.el('btn-export-hq').click();
     const summary = ui.el('export-screen-text-summary').textContent;
     assert.match(summary, positioned ? /giữ sub Trung.*nền vàng/i : /Giữ nguyên chữ và hình nguồn/);
     assert.doesNotMatch(summary, /che vùng|làm mờ/i);
-    ui.replies.set('/api/streaming/export-hq', { video_url: '/outputs/final.mp4' });
+    ui.replies.set('/api/streaming/export-hq/jobs', { video_url: '/outputs/final.mp4' });
     await ui.el('btn-confirm-export').click();
-    const request = ui.requests.find(item => item.url === '/api/streaming/export-hq');
+    const request = ui.requests.find(item => item.url === '/api/streaming/export-hq/jobs');
     const body = JSON.parse(request.options.body);
     assert.equal(body.translate_screen_text, positioned);
     assert.equal(body.mask_chinese, false);
@@ -4447,7 +4840,31 @@ test('AI review receives corrected audio revision at the current playhead and re
   assert.equal(ui.el('btn-export-hq').disabled,false, 'An explicitly audited unresolved source may export with its uncertainty retained');
   assert.equal(ui.el('seg-row-0').dataset.needsReview,'true');
   socket.receive({type:'segment_update',...corrected,revision:4,needs_review:true,verification:null});
-  assert.equal(ui.el('btn-export-hq').disabled,true, 'An unaudited uncertain row remains blocked');
+  assert.equal(ui.el('btn-export-hq').disabled,false, 'An idle draft can be exported explicitly with a warning');
+});
+
+test('task warnings live only in Diagnostics and stay current without reading a fake log category', async () => {
+  assert.ok(template.indexOf('id="pipeline-warning"') > template.indexOf('id="view-diagnostics"'));
+  const ui=studio(); await ui.start();
+  const socket=ui.sockets.at(-1);
+  socket.receive({type:'telemetry',warnings:['Câu 42 lỗi.','<b>Nguồn chưa rõ</b>','Câu 42 lỗi.']});
+  await ui.el('tab-diagnostics').click(); await ui.flush();
+  await ui.el('diag-warnings-tab').click();
+  assert.equal(ui.el('diagnostics-warnings-panel').classList.contains('hidden'),false);
+  assert.equal(ui.el('log-console-output').classList.contains('hidden'),true);
+  assert.equal(ui.el('pipeline-warning').textContent,'Câu 42 lỗi.\n\n<b>Nguồn chưa rõ</b>');
+  assert.equal(ui.el('pipeline-warning').innerHTML,'');
+  assert.equal(ui.el('diag-warnings-tab').textContent,'Thông báo tác vụ (2)');
+  await ui.tickIntervals(3000);
+  assert.equal(ui.requests.some(r=>r.url.includes('category=warnings')),false);
+  await ui.el('btn-copy-log').click();
+  assert.equal(ui.copied.at(-1),ui.el('pipeline-warning').textContent);
+  socket.receive({type:'telemetry',warnings:[]});
+  assert.equal(ui.el('diagnostics-warnings-empty').classList.contains('hidden'),false);
+  await ui.document.querySelectorAll('.diag-cat-btn').find(b=>b.dataset.cat==='errors').click(); await ui.flush();
+  assert.equal(ui.el('diagnostics-warnings-panel').classList.contains('hidden'),true);
+  assert.equal(ui.el('log-console-output').classList.contains('hidden'),false);
+  assert.equal(ui.el('btn-clear-log').disabled,false);
 });
 
 test('review completion replaces stale failure warnings but retains current source warnings', async () => {
@@ -4492,7 +4909,7 @@ test('AI review cannot overwrite unsaved transcript edits or run alongside an ex
   assert.equal(ui.el('seg-input-0').value,'Bản đang sửa');
   await ui.el('seg-row-0').querySelector('.transcript-editor-actions').children[1].click();
   let finish;
-  ui.replies.set('/api/streaming/export-hq',()=>new Promise(resolve=>{finish=resolve;}));
+  ui.replies.set('/api/streaming/export-hq/jobs',()=>new Promise(resolve=>{finish=resolve;}));
   await ui.el('btn-export-hq').click();
   const pending=ui.el('btn-confirm-export').click();
   assert.equal(ui.el('btn-review-worker').disabled,true);
@@ -4534,7 +4951,7 @@ test('AI review reconnect retains preview and existing audio and reports failed 
   assert.ok(ui.audio.includes(audio));
   ui.sockets.at(-1).receive({type:'progress',status:'COMPLETED',phase:'complete',can_review:true,review_summary:{status:'failed',checked:0}});
   assert.match(ui.el('task-progress-detail').textContent,/AI chưa kiểm tra đủ nguồn/);
-  assert.equal(ui.el('btn-export-hq').disabled,true);
+  assert.equal(ui.el('btn-export-hq').disabled,false);
   assert.equal(ui.el('btn-review-worker').disabled,false);
   assertWorkerSourceBusy(ui,false);
 });
@@ -4580,7 +4997,7 @@ test('backend automatic export locks edits and displays a final result without a
   assert.equal(video.paused,true);
   assert.equal(video.playCount,plays);
   assert.equal(video.loadCount,loads);
-  assert.equal(ui.requests.filter(item=>item.url==='/api/streaming/export-hq').length,0);
+  assert.equal(ui.requests.filter(item=>item.url==='/api/streaming/export-hq/jobs').length,0);
   const saved=[];
   ui.window.desktopBridge={saveVideoAs:(name,callback)=>{saved.push(name);callback('D:/saved.mp4');}};
   await ui.el('btn-save-result').click();
@@ -4598,7 +5015,7 @@ test('failed backend export releases controls and preserves playable reviewed tr
   assert.equal(ui.el('seg-vi-0').textContent,'<b>Xin chào</b>');
   assert.match(ui.el('task-result-status').textContent,/Không đủ dung lượng/);
   assert.equal(ui.el('task-result-link').classList.contains('hidden'),true);
-  assert.equal(ui.requests.filter(item=>item.url==='/api/streaming/export-hq').length,0);
+  assert.equal(ui.requests.filter(item=>item.url==='/api/streaming/export-hq/jobs').length,0);
 });
 
 test('attached result restores the output link and selecting a different source removes the old result', async () => {
@@ -4936,24 +5353,22 @@ test('task polling exposes missed export failure and cancellation while allowing
   }
 });
 
-test('manual export polling is serial and ignores an in-flight read after successful export', async () => {
+test('manual export job polling stays serial until validated completion', async () => {
   const ui = studio(); await ui.start();
-  ui.sockets.at(-1).receive({type: 'progress', status: 'COMPLETED', phase: 'complete'});
-  let finishExport, finishPoll;
-  ui.replies.set('/api/streaming/export-hq', () => new Promise(resolve => { finishExport = resolve; }));
-  ui.replies.set('/api/streaming/export-hq/status/fixture', () => new Promise(resolve => { finishPoll = resolve; }));
-  const exporting = ui.el('btn-confirm-export').click(); await ui.flush();
-  assert.equal(ui.el('export-progress-pct').textContent, '');
-  const polling = ui.tickIntervals(1000); await ui.flush();
-  await ui.tickIntervals(1000);
-  assert.equal(ui.requests.filter(request => request.url.includes('/export-hq/status/')).length, 1);
-  finishExport({ok: true, json: async () => ({video_url: '/api/outputs/done.mp4', output_filename: 'done.mp4'})});
+  ui.sockets.at(-1).receive({type:'progress',status:'COMPLETED',phase:'complete'});
+  let finishPoll;
+  ui.replies.set('/api/streaming/export-hq/jobs',{status:'RUNNING'});
+  ui.replies.set('/api/streaming/export-hq/status/fixture',()=>new Promise(resolve=>{finishPoll=resolve;}));
+  const exporting=ui.el('btn-confirm-export').click(); await ui.flush();
+  await ui.tickTimeouts(1000); await ui.flush();
+  await ui.tickTimeouts(1000);
+  assert.equal(ui.requests.filter(request=>request.url.includes('/export-hq/status/')).length,1);
+  finishPoll({ok:true,json:async()=>({status:'COMPLETED',video_url:'/api/outputs/done.mp4',output_filename:'done.mp4',output_is_draft:true,output_review_segment_ids:[0]})});
   await exporting;
-  finishPoll({ok: true, json: async () => ({status: 'RUNNING', progress: 35, stage: 'Old progress'})});
-  await polling;
-  assert.equal(ui.el('export-progress-pct').textContent, '100%');
-  assert.doesNotMatch(ui.el('export-status-text').textContent, /Old/);
-  assert.equal(ui.el('export-result-box').classList.contains('hidden'), false);
+  assert.equal(ui.el('export-progress-pct').textContent,'100%');
+  assert.equal(ui.el('export-result-box').classList.contains('hidden'),false);
+  assert.match(ui.el('task-result-status').textContent,/Bản nháp — cần kiểm tra/);
+  assert.match(ui.el('export-result-warning').textContent,/#1/);
 });
 
 test('null export stage progress never appears as a fabricated percentage in modal or Studio', async () => {
@@ -4966,7 +5381,7 @@ test('null export stage progress never appears as a fabricated percentage in mod
   assert.doesNotMatch(ui.el('task-progress-value').textContent, /null|5%|NaN/);
 });
 
-test('incomplete automatic review stays playable, exposes retry, and blocks export without showing a false success', async () => {
+test('incomplete automatic review stays playable and permits explicit draft export without claiming review success', async () => {
   const ui = studio(); await ui.start();
   const socket = ui.sockets.at(-1);
   socket.receive({type:'progress', status:'FAILED', phase:'review', stage:'AI kiểm tra lại chưa hoàn tất.',
@@ -4977,7 +5392,7 @@ test('incomplete automatic review stays playable, exposes retry, and blocks expo
   assert.match(ui.el('transcript-status').textContent, /chưa kiểm tra đủ nguồn/i);
   assert.equal(ui.el('btn-review-worker').classList.contains('hidden'), false);
   assert.equal(ui.el('btn-review-worker').disabled, false);
-  assert.equal(ui.el('btn-export-hq').disabled, true);
+  assert.equal(ui.el('btn-export-hq').disabled, false);
   assertWorkerSourceBusy(ui, false);
   assert.equal(ui.el('video-player').paused, true);
 });
@@ -4995,11 +5410,11 @@ test('incomplete review survives finished telemetry and polling without stopping
   ui.replies.set('/api/tasks', {tasks:[{task_id:'fixture', task_type:'Realtime Dubbing', ...progress}]});
   await ui.tickIntervals(2000); await ui.tickIntervals(2000);
   assert.equal(ui.el('video-player').paused, false);
-  assert.equal(ui.el('btn-export-hq').disabled, true);
+  assert.equal(ui.el('btn-export-hq').disabled, false);
   assertWorkerSourceBusy(ui, false);
-  socket.receive({type:'result_ready', output_video_url:'/api/outputs/stale.mp4', review_summary:summary});
-  assert.equal(ui.el('task-result').classList.contains('hidden'), true);
-  assert.equal(ui.el('task-progress').dataset.status, 'FAILED');
+  socket.receive({type:'result_ready', output_video_url:'/api/outputs/stale.mp4', output_is_draft:true, review_summary:summary});
+  assert.equal(ui.el('task-result').classList.contains('hidden'), false);
+  assert.match(ui.el('task-result-status').textContent,/Bản nháp/);
   ui.replies.set('/api/streaming/fixture/review', {progress:{status:'RUNNING',phase:'review',review_summary:{status:'running'}}});
   await ui.el('btn-review-worker').click();
   assert.equal(ui.requests.filter(request => request.url === '/api/streaming/fixture/review').length, 1);
@@ -5094,22 +5509,25 @@ test('an intentionally empty reviewed translation does not revive a discarded dr
   ui.sockets.at(-1).receive({type:'progress', status:'PREPARED', phase:'prepared',
     review_summary:{status:'completed', checked:1, unresolved:1}, can_review:true});
   assert.equal(ui.el('btn-export-hq').disabled, true);
-  assert.match(ui.el('btn-export-hq').title, /chưa có lời Việt/);
+  assert.match(ui.el('export-incomplete-warning').textContent, /#1.*chưa có đủ lời hoặc giọng Việt/);
   assert.equal(ui.el('btn-review-worker').disabled, false);
 });
 
-test('the durable missing-speech gate disables full export until explicitly cleared', async () => {
+test('the durable missing-speech gate warns with exact row numbers and clears only when explicitly resolved', async () => {
   const ui = studio(); await ui.start();
   const socket = ui.sockets.at(-1);
   socket.receive({type:'progress', status:'PREPARED', phase:'prepared', final_output_blocked:true,
     missing_speech_ids:[120,121], content_review_state:'REVIEW_REQUIRED', can_review:true});
-  assert.equal(ui.el('btn-export-hq').disabled, true);
-  const modalWasHidden = ui.el('export-modal').classList.contains('hidden');
+  assert.equal(ui.el('btn-export-hq').disabled, false);
   await ui.el('btn-export-hq').click();
-  assert.equal(ui.el('export-modal').classList.contains('hidden'), modalWasHidden);
+  assert.equal(ui.el('export-modal').classList.contains('hidden'), false);
+  assert.match(ui.el('export-incomplete-warning').textContent, /#121, #122/);
+  assert.equal(ui.el('btn-confirm-export').textContent, 'Xuất bản hiện có');
   socket.receive({type:'progress', status:'COMPLETED', phase:'complete', final_output_blocked:false,
     missing_speech_ids:[], content_review_state:'NO_PENDING_REVIEW'});
   assert.equal(ui.el('btn-export-hq').disabled, false);
+  assert.equal(ui.el('export-incomplete-warning').classList.contains('hidden'), true);
+  assert.equal(ui.el('btn-confirm-export').textContent, 'Bắt đầu xuất video HQ');
 });
 
 test('a new run clears previous warnings and playable duration while resolving its source', async () => {
@@ -5251,4 +5669,221 @@ test('result conversion requests time out and genuine autoplay denial alone offe
   result.play = async () => { throw Object.assign(Error('policy'), {name:'NotAllowedError'}); };
   await ui.el('task-result-link').click(); await ui.flush();
   assert.match(ui.el('result-preview-status').textContent, /Bấm Phát/);
+});
+
+test('idle partial export warns exact missing speech and TTS rows, preserves failed status and downloads the MP4', async () => {
+  for (const status of ['FAILED','STOPPED','CANCELLED','PREPARED']) {
+    const ui = studio(); await ui.start(); const socket = ui.sockets.at(-1);
+    socket.receive({type:'segment_update',id:1,start:3,end:4,status:'NEEDS_REVIEW',final_vi:'',text_zh:'原文',needs_review:true,audio_url:null});
+    socket.receive({type:'segment_update',id:2,start:4,end:5,status:'FAILED',final_vi:'Lời đã dịch',failed_stage:'TTS',audio_url:null});
+    socket.receive({type:'progress',status,phase:'review',translation_mode:'full',can_stop:false,
+      final_output_blocked:true,missing_speech_ids:[1],review_summary:{status:'incomplete'}});
+    assert.equal(ui.el('btn-export-hq').disabled,false,status);
+    await ui.el('btn-export-hq').click();
+    const warning = ui.el('export-incomplete-warning').textContent;
+    assert.match(warning,/#2, #3.*không có giọng Việt.*âm nền.*có thể còn giọng gốc/);
+    assert.match(warning,/Bản nháp — cần kiểm tra/);
+    assert.equal(ui.el('btn-confirm-export').textContent,'Xuất bản hiện có');
+    ui.replies.set('/api/streaming/export-hq/jobs',{status:'ok',video_url:'/api/outputs/partial.mp4',output_filename:'partial.mp4',
+      output_incomplete:true,output_missing_segment_ids:[1,2],output_warning:'Bản xuất còn 2 câu thiếu giọng Việt.'});
+    await ui.el('btn-confirm-export').click();
+    const request=ui.requests.find(item=>item.url==='/api/streaming/export-hq/jobs');
+    assert.equal(JSON.parse(request.options.body).allow_incomplete,true);
+    assert.equal(ui.el('btn-save-result').disabled,false);
+    assert.match(ui.el('task-result-status').textContent,/Bản hiện có đã xuất.*2 câu/);
+    assert.equal(ui.el('export-result-warning').classList.contains('hidden'),false);
+    assert.equal(ui.el('task-progress').dataset.status,status);
+    assert.equal(ui.el('btn-export-hq').disabled,false,'response status ok must not replace task status');
+    assert.equal(ui.alerts.length,0,'the modal warning needs no second confirmation');
+  }
+});
+
+test('manual export preserves strict completion and confirmed silence but opts in for review or missing audio', async () => {
+  for (const kind of ['complete','silence','unreviewed','no-audio']) {
+    const ui=studio(); await ui.start(); const socket=ui.sockets.at(-1);
+    if (kind==='silence') socket.receive({type:'segment_update',id:0,start:0,end:10,status:'READY',final_vi:'',confirmed_silence:true,audio_url:null});
+    if (kind==='unreviewed') socket.receive({type:'segment_update',id:0,start:0,end:10,status:'READY',final_vi:'Bản nháp',audio_url:'/dub.wav',needs_review:true});
+    if (kind==='no-audio') socket.receive({type:'segment_update',id:0,start:0,end:10,status:'READY',final_vi:'Lời đã dịch',audio_url:null});
+    socket.receive({type:'progress',status:'PREPARED',phase:'prepared',translation_mode:'full'});
+    ui.replies.set('/api/streaming/export-hq/jobs',{video_url:'/api/outputs/result.mp4'});
+    await ui.el('btn-export-hq').click(); await ui.el('btn-confirm-export').click();
+    const request=ui.requests.find(item=>item.url==='/api/streaming/export-hq/jobs');
+    assert.equal(JSON.parse(request.options.body).allow_incomplete,kind === 'no-audio',kind);
+  }
+});
+
+test('partial export stays blocked during active work, draining, preview or an open transcript editor', async () => {
+  const ui=studio(); await ui.start(); const socket=ui.sockets.at(-1);
+  socket.receive({type:'segment_update',id:1,start:4,end:5,status:'FAILED',final_vi:'Câu thiếu giọng',audio_url:null});
+  for (const status of ['RUNNING','QUEUED','PAUSED','CANCELLING']) {
+    socket.receive({type:'progress',status,translation_mode:'full',can_stop:true});
+    assert.equal(ui.el('btn-export-hq').disabled,true,status);
+    await ui.el('btn-confirm-export').click();
+  }
+  socket.receive({type:'progress',status:'FAILED',translation_mode:'preview',can_stop:false});
+  assert.equal(ui.el('btn-export-hq').disabled,true);
+  socket.receive({type:'progress',status:'STOPPED',translation_mode:'full',can_stop:false});
+  assert.equal(ui.el('btn-export-hq').disabled,false);
+  await ui.el('seg-vi-0').click();
+  assert.equal(ui.el('btn-export-hq').disabled,true,'even an unchanged open editor must finish first');
+  await ui.el('btn-confirm-export').click();
+  assert.equal(ui.requests.filter(item=>item.url==='/api/streaming/export-hq/jobs').length,0);
+});
+
+test('partial result socket and history restore keep downloads visible beside unresolved review warnings', async () => {
+  for (const delivery of ['socket','history','poll']) {
+    const ui=studio(); await ui.start(); const socket=ui.sockets.at(-1);
+    const output={output_video_url:'/api/outputs/partial.mp4',output_filename:'partial.mp4',output_incomplete:true,
+      output_missing_segment_ids:[1],output_warning:'Câu #2 chưa có giọng Việt.'};
+    const progress={status:'FAILED',phase:'review',translation_mode:'full',review_summary:{status:'incomplete'},
+      final_output_blocked:true,missing_speech_ids:[1],...output};
+    socket.receive({type:'progress',status:'FAILED',phase:'review',review_summary:{status:'incomplete'}});
+    if(delivery==='socket') socket.receive({type:'result_ready',...output,review_summary:{status:'incomplete'}});
+    if(delivery==='history') {
+      ui.replies.set('/api/streaming/partial',{task_id:'partial',initialized:true,video_url:'/source.mp4',duration:10,
+        progress,...output,segments:[{id:0,start:0,end:10,status:'READY',final_vi:'Lời đã lưu',audio_url:'/saved.wav'}]});
+      assert.equal(await ui.window.studioAttachTask('partial'),true);
+    }
+    const task={task_id:delivery==='history'?'partial':'fixture',saved:true,duration:10,...progress};
+    await ui.flush();
+    ui.replies.set('/api/tasks',{tasks:[task],videos:[task]});
+    await ui.el('btn-refresh-tasks').click();
+    assert.equal(ui.el('btn-save-result').disabled,false,delivery);
+    assert.match(ui.el('task-result-status').textContent,/Câu #2 chưa có giọng Việt/);
+    assert.equal(ui.el('task-result-link').classList.contains('hidden'),false,delivery);
+    const history=ui.el('tasks-table-body').children[0].innerHTML;
+    assert.match(history,/ĐÃ XUẤT BẢN HIỆN CÓ/);
+    assert.match(history,/Câu #2 chưa có giọng Việt/);
+    assert.match(history,/href="\/api\/outputs\/partial.mp4"/);
+    assert.equal(ui.el('task-progress').dataset.status,'FAILED');
+  }
+});
+
+
+test('per-video start workers are sent for URL local and upload without settings mutation', async () => {
+  for (const path of ['local', 'url', 'upload']) {
+    for (const selected of [1, 3, 5, 10, 15, 20, 30, 40, 50]) {
+      const ui = studio(); await ui.flush();
+      ui.el('start-translation-workers').value = String(selected);
+      if (path === 'local') ui.window.loadDroppedLocalVideo('D:/clip.mp4');
+      else if (path === 'url') ui.el('video-url').value = 'https://www.douyin.com/video/7692745161054506290';
+      else {
+        ui.el('video-file').files = [{name:'clip.mp4', type:'video/mp4', size:200}];
+        await ui.el('video-file').emit('change');
+      }
+      const endpoint = path === 'local' ? 'start-local-file' : path === 'url' ? 'start-url' : 'start-upload';
+      ui.replies.set(`/api/streaming/${endpoint}`, {task_id:'per-video'});
+      await ui.el('btn-start').click();
+      const request = ui.requests.find(item => item.url === `/api/streaming/${endpoint}`);
+      const payload = path === 'upload' ? Object.fromEntries(request.options.body.parts.map(item => [item.name,item.value])) : JSON.parse(request.options.body);
+      assert.equal(Number(payload.translation_chunk_workers), selected, path);
+      assert.equal(ui.el('start-translation-workers').disabled, true);
+      assert.equal(ui.requests.some(item => ['/api/settings','/api/config'].includes(item.url) && item.options?.method === 'POST'), false);
+    }
+  }
+});
+
+test('invalid per-video worker selection makes no start request', async () => {
+  const ui = studio(); await ui.flush();
+  ui.window.loadDroppedLocalVideo('D:/clip.mp4');
+  ui.el('start-translation-workers').value = '7';
+  await ui.el('btn-start').click();
+  assert.equal(ui.requests.some(item => item.url.startsWith('/api/streaming/start-')), false);
+  assert.match(ui.alerts.at(-1), /luồng/);
+});
+
+test('settings refresh never replaces the per-click worker choice', async () => {
+  const ui = studio(); await ui.flush();
+  ui.el('start-translation-workers').value = '40';
+  ui.replies.set('/api/settings', {translation_chunk_workers: 5});
+  await ui.el('player-settings').click();
+  await ui.flush();
+  assert.equal(ui.el('start-translation-workers').value, '40');
+});
+
+test('audit capabilities keep Studio pause and resume visible on completed media', async () => {
+  const ui = studio(); await ui.start();
+  const socket=ui.sockets.at(-1);
+  socket.receive({type:'progress',status:'COMPLETED',phase:'complete',can_pause:true,can_resume:false,can_stop:true,audit_pending_count:1});
+  assert.equal(ui.el('btn-pause-worker').classList.contains('hidden'),false);
+  socket.receive({type:'progress',status:'STOPPED',phase:'stopped',can_pause:false,can_resume:true,can_stop:false});
+  assert.equal(ui.el('btn-resume-worker').classList.contains('hidden'),false);
+});
+
+test('automatic_output blocked error and completed states render clear next actions without misleading finished labels', async () => {
+  const ui = studio(); await ui.start();
+  const socket = ui.sockets.at(-1);
+
+  socket.receive({
+    type: 'result_error',
+    message: 'Chưa thể xuất MP4 tự động vì nguồn, lời dịch hoặc giọng đọc chưa đầy đủ/hợp lệ.',
+    automatic_output: { status: 'blocked', policy: 'strict_media', reason: 'media_incomplete' },
+    final_output_blocked: true,
+    missing_speech_ids: [0],
+  });
+  assert.equal(ui.el('task-progress').dataset.status, 'PREPARED');
+  assert.equal(ui.el('task-result').classList.contains('hidden'), false);
+  assert.equal(ui.el('task-result').dataset.automaticStatus, 'blocked');
+  assert.equal(ui.el('task-result-link').classList.contains('hidden'), true);
+  assert.equal(ui.el('btn-save-result').disabled, true);
+  assert.match(ui.el('task-result-status').textContent, /Chưa thể xuất MP4 tự động/);
+  assert.doesNotMatch(ui.el('task-progress-stage').textContent, /Hoàn tất|Video kết quả đã sẵn sàng/);
+
+  socket.receive({
+    type: 'progress',
+    status: 'COMPLETED',
+    phase: 'complete',
+    automatic_output: { status: 'failed', policy: 'strict_media', reason: 'export_retry_exhausted' },
+    output_video_url: '',
+  });
+  assert.equal(ui.el('task-progress').dataset.status, 'FAILED');
+  assert.equal(ui.el('task-result').dataset.automaticStatus, 'failed');
+  assert.equal(ui.el('task-result-link').classList.contains('hidden'), true);
+  assert.match(ui.el('task-result-status').textContent, /hết lượt thử lại.*Bấm Xuất MP4/);
+  assert.match(ui.el('task-progress-detail').textContent, /Bấm Xuất MP4/);
+
+  ui.replies.set('/api/tasks', {
+    tasks: [
+      { task_id: 'blocked-task', status: 'PREPARED', saved: true, automatic_output: { status: 'blocked', policy: 'strict_media', reason: 'media_incomplete' }, output_video_url: '' },
+      { task_id: 'failed-task', status: 'COMPLETED', saved: true, automatic_output: { status: 'failed', policy: 'strict_media', reason: 'export_failed' }, output_video_url: '' },
+    ],
+  });
+  await ui.el('btn-refresh-tasks').click();
+  assert.match(ui.el('tasks-table-body').children[0].innerHTML, /CHƯA THỂ XUẤT MP4/);
+  assert.doesNotMatch(ui.el('tasks-table-body').children[0].innerHTML, /ĐÃ XUẤT VIDEO/);
+  assert.match(ui.el('tasks-table-body').children[1].innerHTML, /LỖI XUẤT MP4/);
+  assert.doesNotMatch(ui.el('tasks-table-body').children[1].innerHTML, /ĐÃ XUẤT VIDEO|ĐÃ DỊCH · CHƯA XUẤT/);
+
+  socket.receive({
+    type: 'result_ready',
+    output_video_url: '/api/outputs/auto-complete.mp4',
+    output_filename: 'auto-complete.mp4',
+    automatic_output: { status: 'completed', policy: 'strict_media', reason: 'validated' },
+  });
+  assert.equal(ui.el('task-progress').dataset.status, 'COMPLETED');
+  assert.equal(ui.el('task-result').dataset.automaticStatus, 'completed');
+  assert.equal(ui.el('task-result-link').classList.contains('hidden'), false);
+  assert.equal(ui.el('btn-save-result').disabled, false);
+  assert.match(ui.el('task-result-status').textContent, /Video kết quả đã sẵn sàng: auto-complete\.mp4/);
+  assert.equal(ui.requests.filter(item => item.url.includes('/export-hq')).length, 0);
+
+  ui.replies.set('/api/streaming/attached-blocked', {
+    task_id: 'attached-blocked',
+    initialized: true,
+    video_url: '/source.mp4',
+    duration: 10,
+    segments_count: 1,
+    segments: [{ id: 0, start: 0, end: 10, status: 'NEEDS_REVIEW', text_zh: '测试', final_vi: '', needs_review: true }],
+    automatic_output: { status: 'blocked', policy: 'strict_media', reason: 'media_incomplete' },
+    progress: { status: 'PREPARED', phase: 'prepared', final_output_blocked: true, missing_speech_ids: [0] },
+  });
+  await ui.window.studioAttachTask('attached-blocked');
+  assert.equal(ui.el('task-progress').dataset.status, 'PREPARED');
+  assert.equal(ui.el('task-result').classList.contains('hidden'), false);
+  assert.equal(ui.el('task-result').dataset.automaticStatus, 'blocked');
+  assert.equal(ui.el('task-result-link').classList.contains('hidden'), true);
+  assert.match(ui.el('task-result-status').textContent, /Chưa thể xuất MP4 tự động.*#1/);
+  ui.sockets.at(-1).receive({ type: 'finished', status: 'finished' });
+  assert.equal(ui.el('task-progress').dataset.status, 'PREPARED');
+  assert.doesNotMatch(ui.el('task-progress-stage').textContent, /Hoàn tất/);
 });

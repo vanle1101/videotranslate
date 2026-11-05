@@ -17,6 +17,11 @@ from core.media_process import run_media
 from core.subtitle_cues import build_caption_layout, normalize_caption_style
 from core.streaming.audio_cache import (build_audio_cache_identity, load_audio_cache,
                                        prepare_audio_cache, commit_audio_cache, resolve_dub_timing)
+from core.streaming.background_cache import (build_background_identity, load_background_cache,
+                                            store_background_cache)
+from core.streaming.prepared_background import load_prepared_background, prepared_background_identity
+from core.streaming.output_gate import (final_output_metadata, missing_spoken_output_ids,
+                                       missing_speech_message, invalid_dub_timing_ids)
 
 
 # Standard RIFF stores the entire file-minus-eight size in an unsigned 32-bit
@@ -103,18 +108,32 @@ class HQExporter:
         publish_callback: Optional[Any] = None,
         caption_style: Optional[Dict[str, Any]] = None,
         source_screen_texts: Optional[List[Dict[str, Any]]] = None,
+        allow_incomplete: bool = False,
     ) -> Dict[str, Any]:
         with tempfile.TemporaryDirectory(prefix=f"hq_export_{task_id}_", dir=settings.TEMP_DIR) as temp_dir:
             return self._export(
                 task_id, Path(video_path), segments, total_duration, Path(temp_dir),
                 mask_chinese, progress_callback, cancel_check, screen_texts, publish_callback, caption_style, source_screen_texts,
+                allow_incomplete,
             )
 
     def _export(self, task_id, video_path, segments, total_duration, task_dir,
-                mask_chinese, progress_callback, cancel_check, screen_texts=None, publish_callback=None, caption_style=None, source_screen_texts=None):
+                mask_chinese, progress_callback, cancel_check, screen_texts=None, publish_callback=None, caption_style=None, source_screen_texts=None,
+                allow_incomplete=False):
         caption_style = normalize_caption_style(caption_style)
         if not math.isfinite(total_duration) or total_duration <= 0:
             raise ValueError("Thời lượng video phải lớn hơn 0.")
+        if not allow_incomplete and any(row.get("omit_voice", False) for row in segments):
+            raise ValueError("Cần chọn xuất phần đã xử lý trước khi bỏ qua câu thiếu giọng đọc.")
+        spoken_rows = [row for row in segments if not row.get("omit_voice", False)]
+        missing = missing_spoken_output_ids(spoken_rows)
+        if missing:
+            raise ValueError(missing_speech_message(missing))
+        if invalid_dub_timing_ids(spoken_rows, total_duration):
+            raise ValueError("Timeline lồng tiếng bị chồng lấn hoặc có thời gian không hợp lệ.")
+        # A reusable mix cannot waive the current text and timeline checks.
+        # Semantic uncertainty is retained as draft metadata, never a media gap.
+        quality = final_output_metadata(segments)
         t0 = time.monotonic()
 
         def _report(pct: int, stage: str):
@@ -128,26 +147,52 @@ class HQExporter:
             if cancel_check and cancel_check():
                 raise RuntimeError("Tác vụ xuất video HQ đã bị hủy bởi người dùng.")
 
+        phase_timings = {}
+        phase_started = time.monotonic()
         _report(None, "Đang kiểm tra âm thanh đã xử lý để dùng lại...")
+        prepared_identity = prepared_background_identity(video_path, task_id, total_duration, cancel_check)
         audio_identity = build_audio_cache_identity(video_path, segments, total_duration,
-                                                    self.mixer, self.suppressor, cancel_check)
+                                                    self.mixer, self.suppressor, cancel_check,
+                                                    background_variant=prepared_identity)
         reused = load_audio_cache(audio_identity, task_dir, cancel_check)
+        phase_timings["audio_cache_lookup"] = round(time.monotonic() - phase_started, 3)
         pending_audio = None
         if reused is not None:
             master_audio, audio_metadata = reused
             _report(None, "Đã dùng lại bản âm thanh đã kiểm tra; chỉ xuất lại hình và phụ đề...")
+            phase_timings["audio_mix"] = 0.
         else:
+            phase_started = time.monotonic()
             master_audio, audio_metadata = self._mix_audio(
-                video_path, segments, total_duration, task_dir, _report, _check_cancel, cancel_check)
+                video_path, segments, total_duration, task_dir, _report, _check_cancel, cancel_check,
+                task_id=task_id)
+            # A packet can disappear or fail decoding after the identity check.
+            # Never publish a fallback mix under the prepared-background key.
+            if prepared_identity != audio_metadata.get("background_interval_digest"):
+                audio_identity = None
             pending_audio = prepare_audio_cache(audio_identity, master_audio, audio_metadata, task_dir, cancel_check)
+            phase_timings["audio_mix"] = round(time.monotonic() - phase_started, 3)
         separation_engine, warnings = audio_metadata["separation_engine"], audio_metadata["warnings"]
 
         # 5. Subtitles
+        phase_started = time.monotonic()
         _report(None, "5/6 Tạo phụ đề tiếng Việt...")
         _check_cancel()
         srt_path = task_dir / "subtitles.srt"
         ass_path = task_dir / "subtitles.ass"
+        # Keep every supplied row in the subtitle track.  Partial exports mark
+        # rows with ``omit_voice`` while retaining their translated text; the
+        # voice assembler omits only those rows and leaves the timeline silent.
         subtitle_segments = [dict(s, vi_text=s.get("final_vi") or s.get("vi_text") or s.get("text_vi") or "") for s in segments]
+        if allow_incomplete:
+            for row in subtitle_segments:
+                if row.get("omit_voice"):
+                    # Failed TTS never produced measured speech cues. Render
+                    # its saved text on source bounds without inventing audio
+                    # alignment or changing the editable project.
+                    for field in ("subtitle_cues", "speech_start", "speech_end", "dub_start", "dub_end", "dub_tail_limit"):
+                        row.pop(field, None)
+                    row["preview_is_draft"] = True
         self.sub_gen.generate_srt(subtitle_segments, srt_path)
         video_size = self._video_size(video_path, cancel_check)
         caption_plan = build_caption_layout(subtitle_segments, screen_texts, video_size, caption_style=caption_style)
@@ -164,6 +209,7 @@ class HQExporter:
             video_size=video_size,
             caption_layout=caption_plan,
         )
+        phase_timings["subtitle_generation"] = round(time.monotonic() - phase_started, 3)
 
         # 6. Render final video at its original dimensions.
         _report(None, "6/6 Render MP4 với phụ đề và âm thanh tiếng Việt...")
@@ -174,6 +220,7 @@ class HQExporter:
         # Render into the temporary task directory. Failed/cancelled exports must
         # never leave a partial video in outputs or replace a previous result.
         rendered_video = task_dir / output_filename
+        phase_started = time.monotonic()
         self.composer.compose(
             video_path=video_path,
             audio_path=master_audio,
@@ -185,7 +232,9 @@ class HQExporter:
             cancel_check=cancel_check,
             source_masks=caption_plan.get("source_masks"),
         )
+        phase_timings["render_mp4"] = round(time.monotonic() - phase_started, 3)
         _check_cancel()
+        phase_started = time.monotonic()
         _report(None, "Đang kiểm tra hình ảnh, âm thanh và thời lượng video kết quả...")
         self.validate_output(rendered_video, total_duration, cancel_check)
         _check_cancel()
@@ -197,6 +246,7 @@ class HQExporter:
         # Cancelled or invalid video exports never publish a reusable mix. Once
         # the MP4 commit succeeded, cache I/O cannot change its success state.
         commit_audio_cache(audio_identity, pending_audio)
+        phase_timings["validate_publish"] = round(time.monotonic() - phase_started, 3)
 
         elapsed = round(time.monotonic() - t0, 1)
         if reused is None:
@@ -208,11 +258,42 @@ class HQExporter:
             "final_video_path": str(final_video_path.resolve()),
             "output_path": str(final_video_path.resolve()),
             "elapsed_seconds": elapsed,
+            "phase_timings_seconds": phase_timings,
+            "audio_cache_reused": reused is not None,
             "separation_engine": separation_engine,
-            "warnings": warnings
+            "warnings": warnings,
+            "output_is_draft": quality["output_is_draft"],
+            "output_quality_label": quality["output_quality_label"],
+            "output_review_segment_ids": quality["output_review_segment_ids"],
+            "content_review_state": quality["content_review_state"],
+            "output_incomplete": any(row.get("omit_voice", False) for row in segments),
         }
 
-    def _mix_audio(self, video_path, segments, total_duration, task_dir, report, check_cancel, cancel_check):
+    def _background(self, video_path, total_duration, task_dir, report, check_cancel, cancel_check, task_id=None):
+        check_cancel()
+        prepared = load_prepared_background(video_path, task_id, total_duration, task_dir, cancel_check)
+        if prepared is not None:
+            report(None, "2/6 Dùng lại nền đã xử lý khi dịch; không tách giọng lại...")
+            return prepared
+
+        separation_engine, warnings = settings.SEPARATION_ENGINE, []
+        if separation_engine == "roformer":
+            self.separator = self.separator or BSRoFormerSeparator(settings.ROFORMER_MODEL)
+            if not self.separator.is_available:
+                warnings.append("RoFormer chưa được cài; đã dùng bộ giảm giọng DSP.")
+                separation_engine = "dsp"
+        elif separation_engine != "none":
+            if separation_engine not in ("dsp", "realtime"):
+                warnings.append(f"Export dùng DSP thay cho {separation_engine}.")
+            separation_engine = "dsp"
+        metadata = {"separation_engine": separation_engine, "warnings": warnings}
+        identity = build_background_identity(video_path, total_duration, self.suppressor,
+                                             cancel_check, engine=separation_engine)
+        background = load_background_cache(identity, task_dir, cancel_check)
+        if background is not None:
+            report(None, "2/6 Dùng lại nền đã tách; chỉ ráp và trộn giọng Việt...")
+            return background, metadata
+
         report(None, "1/6 Trích xuất âm thanh gốc...")
         check_cancel()
         raw_audio = task_dir / "raw_audio.wav"
@@ -221,24 +302,29 @@ class HQExporter:
 
         report(None, "2/6 Xử lý giọng gốc và âm thanh nền...")
         check_cancel()
-        separation_engine, warnings = settings.SEPARATION_ENGINE, []
         if separation_engine == "roformer":
-            self.separator = self.separator or BSRoFormerSeparator(settings.ROFORMER_MODEL)
-            if self.separator.is_available:
-                _, instrumental_path = self.separator.separate(raw_audio, task_dir / "separated")
-            else:
-                warnings.append("RoFormer chưa được cài; đã dùng bộ giảm giọng DSP.")
-                separation_engine = "dsp"
-        if separation_engine == "none":
+            _, instrumental_path = self.separator.separate(raw_audio, task_dir / "separated")
+        elif separation_engine == "none":
             instrumental_path = raw_audio
-        elif separation_engine != "roformer":
-            if separation_engine not in ("dsp", "realtime"):
-                warnings.append(f"Export dùng DSP thay cho {separation_engine}.")
+        else:
             instrumental_path = task_dir / "background.wav"
             self.suppressor.process_file(raw_audio, instrumental_path,
                 forced_mode=None if settings.SUPPRESSION_MODE == "AUTO" else settings.SUPPRESSION_MODE,
                 cancel_check=cancel_check)
-            separation_engine = "dsp"
+        check_cancel()
+        # Store immediately: subsequent render failure or narration edits do not
+        # invalidate a fully validated source stem. A first run may download its
+        # checkpoint during separation, so resolve the identity again then.
+        if identity is None:
+            identity = build_background_identity(video_path, total_duration, self.suppressor,
+                                                 cancel_check, engine=separation_engine)
+        store_background_cache(identity, instrumental_path, cancel_check)
+        return instrumental_path, metadata
+
+    def _mix_audio(self, video_path, segments, total_duration, task_dir, report, check_cancel, cancel_check,
+                   task_id=None):
+        instrumental_path, metadata = self._background(
+            video_path, total_duration, task_dir, report, check_cancel, cancel_check, task_id)
 
         report(None, "3/6 Ráp timeline giọng đọc tiếng Việt...")
         check_cancel()
@@ -250,7 +336,7 @@ class HQExporter:
         master_audio = task_dir / "master_audio_ducked.wav"
         self.mixer.mix(instrumental_path=instrumental_path, voice_path=voice_wav,
                        output_path=master_audio, total_duration=total_duration, cancel_check=cancel_check)
-        return master_audio, {"separation_engine": separation_engine, "warnings": warnings}
+        return master_audio, metadata
 
     @staticmethod
     def validate_output(path, expected_duration, cancel_check=None):
@@ -258,20 +344,33 @@ class HQExporter:
         if not path.is_file() or path.stat().st_size <= 0:
             raise ValueError("Chưa tạo được tệp video kết quả.")
         raw = run_media(["ffprobe", "-v", "error", "-show_entries",
-                         "format=duration:stream=codec_type,width,height", "-of", "json", str(path)],
+                         "format=duration:stream=codec_type,width,height,start_time,duration", "-of", "json", str(path)],
                         cancel_check, capture_output=True)
         try:
             metadata = json.loads(raw)
             duration = float(metadata["format"]["duration"])
             streams = metadata["streams"]
             video = next(item for item in streams if item.get("codec_type") == "video")
+            audio = next(item for item in streams if item.get("codec_type") == "audio")
+
+            def covers_timeline(stream):
+                # Container duration is the longest track. A truncated but
+                # otherwise decodable audio/video track must not borrow that
+                # duration from the other track and be published as complete.
+                start = float(stream["start_time"])
+                length = float(stream["duration"])
+                return (math.isfinite(start) and math.isfinite(length) and length > 0
+                        and abs(start) <= 0.5
+                        and abs(length - expected_duration) <= 0.5
+                        and abs(start + length - expected_duration) <= 0.5)
+
             valid = (math.isfinite(duration) and duration > 0
                      # A percentage tolerance would permit minutes of missing
                      # media on multi-hour output. Encoder/frame rounding does
                      # not grow with video length, so use an absolute bound.
                      and abs(duration - expected_duration) <= 0.5
                      and video.get("width", 0) > 0 and video.get("height", 0) > 0
-                     and any(item.get("codec_type") == "audio" for item in streams))
+                     and covers_timeline(video) and covers_timeline(audio))
         except (ValueError, TypeError, KeyError, StopIteration):
             valid = False
         if not valid:
@@ -330,7 +429,11 @@ class HQExporter:
                     write_pcm(silence[:frames * frame_bytes])
                     position += frames
 
-            for item in sorted(segments, key=lambda row: resolve_dub_timing(row)[0]):
+            # Omitted rows are intentionally not validated for audio or timing
+            # here.  Their subtitles remain in the render, while this interval
+            # is padded with silence by the surrounding valid rows.
+            voice_segments = [item for item in segments if not item.get("omit_voice", False)]
+            for item in sorted(voice_segments, key=lambda row: resolve_dub_timing(row)[0]):
                 check_cancel()
                 dub_start, dub_end = resolve_dub_timing(item)
                 if not item.get("audio_path"):

@@ -40,6 +40,24 @@ def test_cancelled_asr_never_loads_model():
     assert engine.model is None
 
 
+def test_whisper_availability_probe_does_not_load_native_ct2_in_desktop_process():
+    program = textwrap.dedent('''
+        import sys
+        from core.engines.asr.faster_whisper_engine import FasterWhisperFallbackEngine
+        assert "ctranslate2" not in sys.modules
+        assert FasterWhisperFallbackEngine().is_available
+        assert "faster_whisper" not in sys.modules
+        assert "ctranslate2" not in sys.modules
+        print("availability probe stayed metadata-only")
+    ''')
+    result = subprocess.run([sys.executable, "-B", "-X", "utf8", "-c", program],
+                            cwd=Path(__file__).resolve().parents[1], capture_output=True,
+                            text=True, timeout=15,
+                            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+    assert result.returncode == 0, result.stderr
+    assert "availability probe stayed metadata-only" in result.stdout
+
+
 def test_pipeline_drains_native_cancellation_without_blocking_event_loop():
     # A regression here spins without yielding, so an asyncio timeout cannot
     # protect pytest. A bounded subprocess exercises the real executor safely.

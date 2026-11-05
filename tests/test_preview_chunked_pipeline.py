@@ -30,6 +30,7 @@ def wav(path, seconds=.5):
 
 @pytest.fixture
 def preview(tmp_path, monkeypatch):
+    monkeypatch.setattr("core.streaming.pipeline.AUTOMATIC_RECOVERY_DELAYS", (0., 0., 0.))
     monkeypatch.setattr(settings, "BASE_DIR", tmp_path)
     monkeypatch.setattr(settings, "LLM_PROVIDER", "opencode")
     monkeypatch.setattr(settings, "DIARIZATION_ENABLED", False)
@@ -127,6 +128,39 @@ def test_source_preparation_failure_with_no_rows_never_publishes_ready_preview(p
     assert "unavailable_source" in caplog.text
     assert not any(event == "progress" and payload["status"] in {"PREVIEW_READY", "COMPLETED"}
                    for event, payload in events)
+
+
+def test_native_preview_publication_advances_contiguous_coverage_and_can_promote(preview, monkeypatch):
+    from core.streaming import chunked_source
+    session, prepared, analyzed, speech, events = preview
+    original_prepare = chunked_source.prepare_interval
+    async def native_prepare(current, start, end):
+        record = await original_prepare(current, start, end)
+        for row in record["rows"]:
+            row.update(text_zh="안 했어", source_language="ko", source_language_probability=.99)
+        return record
+    monkeypatch.setattr(chunked_source, "prepare_interval", native_prepare)
+    monkeypatch.setattr("core.streaming.native_recovery.native_ocr_evidence",
+                        lambda engine, path, rows, *args, **kwargs: rows)
+    def native_review(rows, **kwargs):
+        return {"segments": {row.id: {**row.to_dict(), "final_vi": "Chưa làm.", "needs_review": True,
+            "verification": {"status": "unresolved", "source_supported": False}} for row in rows}}
+    monkeypatch.setattr("core.streaming.pipeline.review_native_rows", native_review)
+    async def unexpected_review(**options):
+        pytest.fail("Already reviewed native rows must not enter Chinese review")
+    monkeypatch.setattr(session, "_review_translations", unexpected_review)
+    async def run():
+        await session.start()
+        await session.worker_task
+        snapshot = session.get_progress()
+        assert session._source_prepared_seconds == 32
+        assert session._visual_completed_seconds == 24
+        assert snapshot["status"] == "PREVIEW_READY" and snapshot["can_translate_full"]
+        assert all(chunk["state"] == "COMPLETED" for chunk in session._chunk_jobs)
+        assert all(row.needs_review for row in session.segments.values() if row.status == "READY")
+    asyncio.run(run())
+    assert speech == [0, 1, 2]
+    assert not analyzed
 
 
 def test_unresolved_source_with_no_vi_or_wav_is_prepared_for_review_without_false_preview(preview, monkeypatch):
@@ -258,7 +292,7 @@ def test_provider_hole_does_not_block_later_intervals_and_resume_reuses_success(
         nonlocal broken
         await session.start()
         await session.worker_task
-        assert requests == [0, 24, 48, 0]
+        assert requests == [0, 24, 48, 0, 0, 0]
         assert session._visual_scanned_seconds == 64 and session._visual_completed_seconds == 0
         assert session.get_progress()["retry_chunks"] == 1
         assert session.get_progress()["status"] == "FAILED" and session.can_retry
@@ -268,7 +302,7 @@ def test_provider_hole_does_not_block_later_intervals_and_resume_reuses_success(
         await session.retry_failed_synthesis()
         await session.start_task
         await session.worker_task
-        assert requests == [0, 24, 48, 0, 0], "Completed intervals must not call the provider again"
+        assert requests == [0, 24, 48, 0, 0, 0, 0], "Completed intervals must not call the provider again"
         assert session._visual_completed_seconds == 64
         assert all(row.status == "READY" for row in session.segments.values())
         assert all(Path(session.segments[sid].audio_path).read_bytes() == data for sid, data in healthy.items())
@@ -545,6 +579,46 @@ def test_followup_worker_failure_does_not_leave_producer_hung(preview, monkeypat
     asyncio.run(run())
 
 
+def test_first_source_failure_never_claims_empty_preview_ready(preview, monkeypatch, caplog):
+    session, _, _, _, events = preview
+    async def failure(*args):
+        session._source_preparation_stage = "source_validate"
+        raise ValueError("Video nguồn đã thay đổi khi đang nhận diện; không dùng lại lời cũ.")
+    monkeypatch.setattr("core.streaming.chunked_source.prepare_interval", failure)
+    async def run():
+        await session.start()
+        await session.worker_task
+        assert session.get_progress()["status"] == "FAILED"
+        assert session.get_telemetry()["status"] == "failed"
+        assert not session._preview_ready and session.can_retry
+        assert session._source_prepared_seconds == session._visual_completed_seconds == 0
+        assert not any(event == "progress" and payload["status"] == "PREVIEW_READY" for event, payload in events)
+        saved = session.persist()
+        data = json.loads(saved.read_text(encoding="utf-8"))
+        assert data["state"] == "FAILED" and data["session"]["_preview_ready"] is False
+    asyncio.run(run())
+    assert "source_stage=source_validate" in caplog.text
+    assert "error_code=source_identity_changed" in caplog.text
+
+
+def test_valid_measured_silent_preview_remains_ready(preview, monkeypatch):
+    session, _, _, _, _ = preview
+    original = __import__("core.streaming.chunked_source", fromlist=["prepare_interval"]).prepare_interval
+    async def silent(current, start, end):
+        record = await original(current, start, end)
+        record["rows"] = []
+        return record
+    monkeypatch.setattr("core.streaming.chunked_source.prepare_interval", silent)
+    async def run():
+        await session.start()
+        await session.worker_task
+        assert session.get_progress()["status"] == "PREVIEW_READY"
+        assert session._visual_completed_seconds >= session.preview_seconds
+        assert session._source_prepared_seconds >= session.preview_seconds
+        assert session._preview_ready and not session.segments
+    asyncio.run(run())
+
+
 def test_source_memory_failure_drains_admitted_work_and_resumes_exact_tail(preview, monkeypatch):
     import core.streaming.chunked_source as source
     session, prepared, analyzed, speech, events = preview
@@ -582,6 +656,8 @@ def test_source_memory_failure_drains_admitted_work_and_resumes_exact_tail(previ
                    for row in session.segments.values() if row.status == "READY"}
         assert set(healthy) == {0, 1, 2}
         assert any("32.00" in warning for warning in session.warnings)
+        assert any(event == "progress" and payload.get("phase") == "source_blocked"
+                   and "32.00" in payload.get("stage", "") for event, payload in events)
         assert not any(event == "progress" and payload["status"] == "COMPLETED" for event, payload in events)
         blocked = False
         await session.retry_failed_synthesis()
@@ -839,6 +915,8 @@ def test_turning_ocr_review_off_still_uses_bounded_preview_then_full(preview, mo
         row.final_vi = f"Lời {row.id}."
         await session._synthesize_segment(row)
     monkeypatch.setattr(session, "_process_segment", process)
+    monkeypatch.setattr(session.translator, "translate_single_segment", lambda **kwargs:
+        {"final_vi": f"Lời {int(kwargs['text_zh'].removeprefix('源')) // 8}."})
     async def run():
         await session.start()
         await session.worker_task
@@ -1184,6 +1262,70 @@ def test_obsolete_negative_gates_are_reviewed_once_without_force_approval(previe
     assert session.segments[1].verification["status"] == "unresolved"
     assert all(session.segments[sid].verification == audits[sid] for sid in range(2, 6))
     assert all(row.final_vi == "Lời đã lưu." for row in session.segments.values())
+
+
+@pytest.mark.parametrize("reviewed_status", ["verified", "corrected", "unresolved"])
+def test_obsolete_positive_address_gates_reaudit_once_without_replacing_saved_text(preview, monkeypatch, reviewed_status):
+    from core.translation_review import AutomaticTranslationReviewer
+    session, *_ = preview
+    session._chunked_source_started = True
+    session._visual_completed_seconds = 24
+    session.segments = {}
+    revision = AutomaticTranslationReviewer.REVIEW_GATE_REVISION
+    old_positive = {"status": "verified", "semantic_verified": True,
+        "address_applicable": True, "address_verified": True,
+        "address_context": {"self_address": "con", "listener_address": "mẹ", "uncertain": False}}
+    audits = [
+        old_positive,
+        {**old_positive, "status": "corrected", "review_gate_revision": revision - 1},
+        {**old_positive, "review_gate_revision": revision},
+        {**old_positive, "status": "manual"},
+        {**old_positive, "address_context": {}},
+        {**old_positive, "address_context": []},
+        {**old_positive, "address_applicable": False},
+        {key: value for key, value in old_positive.items() if key != "address_applicable"},
+        old_positive,  # Different provider.
+        old_positive,  # Source beyond the published preview.
+        old_positive,  # Different source method.
+    ]
+    for sid, audit in enumerate(audits):
+        row = SegmentItem(sid, 26 if sid == 9 else sid, 27 if sid == 9 else sid + .5, .5)
+        row.status, row.text_zh, row.final_vi = "READY", "听她说是我女儿", "Nghe cô ấy nói là con gái của tôi."
+        row.literal_vi = row.natural_vi = row.final_vi
+        row.source_method, row.translation_provider = "text-ai", "opencode"
+        if sid == 8:
+            row.translation_provider = "other"
+        if sid == 10:
+            row.source_method = "other"
+        row.verification = deepcopy(audit)
+        session.segments[sid] = row
+    saved_texts = {sid: (row.text_zh, row.literal_vi, row.natural_vi, row.final_vi)
+                   for sid, row in session.segments.items()}
+    calls = []
+
+    async def review(**options):
+        calls.append(options)
+        # Scheduling a fresh verdict must not silently fix wording or approve
+        # a role before the reviewer has checked the actual source dialogue.
+        assert {sid: (row.text_zh, row.literal_vi, row.natural_vi, row.final_vi)
+                for sid, row in session.segments.items()} == saved_texts
+        for sid in options["segment_ids"]:
+            assert session.segments[sid].verification == audits[sid]
+            session.segments[sid].verification.update(status=reviewed_status,
+                semantic_verified=reviewed_status != "unresolved", review_gate_revision=revision)
+
+    monkeypatch.setattr(session, "_review_translations", review)
+
+    async def run():
+        await session._resume_pending_chunk_reviews()
+        await session._resume_pending_chunk_reviews()
+
+    asyncio.run(run())
+    assert calls == [{"regenerate_audio": True, "segment_ids": {0, 1}}]
+    assert all(session.segments[sid].verification["status"] == reviewed_status for sid in (0, 1))
+    assert all(session.segments[sid].verification == audits[sid] for sid in range(2, len(audits)))
+    assert {sid: (row.text_zh, row.literal_vi, row.natural_vi, row.final_vi)
+            for sid, row in session.segments.items()} == saved_texts
 
 
 def test_resume_reaudits_exact_numeric_audio_false_negative_without_approving_content(preview, monkeypatch):

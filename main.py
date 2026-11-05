@@ -1,6 +1,8 @@
 import asyncio
+from contextvars import ContextVar
 import hashlib
 import json
+import math
 import os
 import shutil
 import stat
@@ -12,9 +14,11 @@ import re
 import threading
 import tempfile
 import weakref
+from copy import deepcopy
+from types import SimpleNamespace
 from pathlib import Path
 from urllib.parse import quote
-from typing import Dict, Any, Optional, List, Literal
+from typing import Annotated, Dict, Any, Optional, List, Literal
 from fastapi import FastAPI, UploadFile, File, Form, WebSocket, WebSocketDisconnect, HTTPException
 from fastapi.responses import HTMLResponse, Response
 from core.services.file_response import FileResponse
@@ -51,12 +55,26 @@ from core.history_thumbnail import (
 )
 from core.streaming.output_gate import final_output_metadata, missing_spoken_output_ids, missing_speech_message
 from core.runtime_errors import export_failure
+from core.runtime_revision import STARTED_SOURCE_REVISION
 from core.media_preview import preview_manager, DEFAULT_COMPATIBILITY_SECONDS
 from core.voice_catalog import list_voices, resolve_voice
 from core.voice_preview import select_voice, voice_preview_manager, VoicePreviewBusy
 from core.services.muse_service import ERRORS as MUSE_ERRORS, MuseError, muse_service
+from core.studio_layout import router as studio_layout_router
 
 app = FastAPI(title=f"{settings.APP_NAME} - Realtime Streaming Studio")
+app.include_router(studio_layout_router)
+_e2e_request_started_at = ContextVar("e2e_request_started_at", default=None)
+
+
+@app.middleware("http")
+async def capture_http_request_start(request: Request, call_next):
+    # Includes multipart receive/spooling for upload-to-MP4 measurements.
+    token = _e2e_request_started_at.set(time.time())
+    try:
+        return await call_next(request)
+    finally:
+        _e2e_request_started_at.reset(token)
 
 # Static and Mounts
 app.mount("/static", StaticFiles(directory=str(settings.BASE_DIR / "static")), name="static")
@@ -73,6 +91,31 @@ downloader = VideoDownloader()
 _source_start_locks = weakref.WeakKeyDictionary()
 
 
+@app.on_event("startup")
+async def resume_saved_video_work():
+    from core.streaming.retry_lifecycle import resume_interrupted_sessions
+    await resume_interrupted_sessions(event_callback_factory=lambda task_id:
+        lambda event, data: broadcast_session_event(task_id, event, data))
+
+
+@app.on_event("shutdown")
+async def drain_video_work():
+    sessions = list(active_streaming_sessions.values())
+    owners = set()
+    for session in sessions:
+        for name in ("start_task", "worker_task", "review_task", "_chunk_followup_task",
+                     "export_task", "auto_export_task", "_retry_lifecycle_task", "native_audit_task"):
+            owner = getattr(session, name, None)
+            if owner is not None and not owner.done():
+                owners.add(owner)
+        owners.update(task for task in getattr(session, "edit_tasks", ()) if not task.done())
+        shutdown = getattr(session, "shutdown", None)
+        if shutdown:
+            shutdown()
+    if owners:
+        await asyncio.gather(*owners, return_exceptions=True)
+
+
 def _source_start_lock():
     loop = asyncio.get_running_loop()
     return _source_start_locks.setdefault(loop, asyncio.Lock())
@@ -80,14 +123,14 @@ def _source_start_lock():
 @app.get("/api/health")
 async def health():
     return {"status": "ok", "ffmpeg": bool(shutil.which("ffmpeg")),
-            "ffprobe": bool(shutil.which("ffprobe"))}
+            "ffprobe": bool(shutil.which("ffprobe")), "source_revision": STARTED_SOURCE_REVISION}
 
 @app.get("/api/library")
 def list_library():
     """List completed source videos without following links or scanning subfolders."""
     source_dir = Path(settings.INPUT_DIR)
     try:
-        if source_dir.is_symlink() or source_dir.is_junction():
+        if source_dir.is_symlink() or getattr(source_dir, "is_junction", lambda: False)():
             return {"items": []}
         root = source_dir.resolve(strict=True)
         entries = list(root.iterdir())
@@ -126,7 +169,28 @@ def qt_webchannel_client():
         raise HTTPException(status_code=503, detail="Qt WebChannel client unavailable")
     return Response(bytes(resource.readAll()), media_type="application/javascript")
 
-class StreamUrlRequest(BaseModel):
+class PerVideoWorkerRequest(BaseModel):
+    translation_chunk_workers: Optional[int] = Field(default=None, strict=True)
+
+    @field_validator("translation_chunk_workers")
+    @classmethod
+    def validate_per_video_workers(cls, value):
+        if value is not None and value not in TRANSLATION_CHUNK_WORKER_OPTIONS:
+            raise ValueError("Số luồng dịch phải là 1, 3, 5, 10, 15, 20, 30, 40 hoặc 50")
+        return value
+
+
+def parse_upload_workers(value):
+    # Multipart fields are text. Accept canonical presets, never bool/float
+    # coercion; run before saving the uploaded media or creating its owner.
+    if value is None:
+        return None
+    if not isinstance(value, str) or value not in {str(n) for n in TRANSLATION_CHUNK_WORKER_OPTIONS}:
+        raise HTTPException(status_code=422, detail="Số luồng dịch phải là 1, 3, 5, 10, 15, 20, 30, 40 hoặc 50")
+    return int(value)
+
+
+class StreamUrlRequest(PerVideoWorkerRequest):
     url: str
     initial_buffer_seconds: Optional[float] = Field(default=None, gt=0, le=120)
     voice: Optional[str] = None
@@ -134,7 +198,7 @@ class StreamUrlRequest(BaseModel):
     tts_engine: Optional[str] = None
     asr_engine: Optional[str] = None
     visual_translation: bool = False
-    translation_mode: Literal["preview", "full"] = "preview"
+    translation_mode: Literal["preview", "full"] = "full"
 
 class SeekRequest(BaseModel):
     task_id: str
@@ -144,6 +208,7 @@ class ExportHQRequest(BaseModel):
     task_id: str
     mask_chinese: Optional[bool] = True
     translate_screen_text: bool = True
+    allow_incomplete: bool = Field(default=False, strict=True)
 
 class SegmentEditRequest(BaseModel):
     final_vi: str = Field(max_length=2000, strict=True)
@@ -179,6 +244,7 @@ class ConfigRequest(BaseModel):
     llm_provider: Optional[str] = None
     gemini_model: Optional[str] = None
     opencode_model: Optional[str] = None
+    ollama_model: Optional[str] = None
     openrouter_model: Optional[str] = None
     muse_browser_mode: Optional[str] = None
     suppression_mode: Optional[str] = None
@@ -190,7 +256,7 @@ class ConfigRequest(BaseModel):
     @classmethod
     def validate_translation_chunk_workers(cls, value):
         if value is not None and value not in TRANSLATION_CHUNK_WORKER_OPTIONS:
-            raise ValueError("Số luồng dịch phải là 1, 3, 5, 10, 15 hoặc 20")
+            raise ValueError("Số luồng dịch phải là 1, 3, 5, 10, 15, 20, 30, 40 hoặc 50")
         return value
 
 
@@ -325,6 +391,7 @@ async def get_settings():
         "device": settings.DEVICE,
         "whisper_model": settings.WHISPER_MODEL_SIZE,
         "llm_provider": settings.LLM_PROVIDER,
+        "ollama_model": settings.OLLAMA_MODEL,
         "muse_browser_mode": settings.MUSE_BROWSER_MODE,
         "opencode_model": settings.OPENCODE_MODEL,
         "opencode_configured": bool(resolve_api_key()),
@@ -390,7 +457,7 @@ async def delete_douyin_cookie_file(request: Request):
 @app.post("/api/config")
 async def update_settings(req: ConfigRequest):
     # Validate before changing any active settings or persisting the local file.
-    if req.llm_provider and req.llm_provider not in {"openrouter-free", "opencode", "free", "gemini", "deepseek", "openai", "muse"}:
+    if req.llm_provider and req.llm_provider not in {"openrouter-free", "opencode", "ollama", "free", "gemini", "deepseek", "openai", "muse"}:
         raise HTTPException(status_code=422, detail="Nhà cung cấp dịch không hợp lệ")
     if req.muse_browser_mode is not None and req.muse_browser_mode not in {"dedicated", "existing"}:
         raise HTTPException(status_code=422, detail="Chế độ trình duyệt Muse không hợp lệ")
@@ -400,11 +467,27 @@ async def update_settings(req: ConfigRequest):
             opencode_model = OpenCodeZenClient(model=req.opencode_model).validate_model()
         except OpenCodeClientError:
             raise HTTPException(status_code=422, detail="Hãy chọn model OpenCode miễn phí trong danh sách") from None
+    ollama_model = None
+    if req.ollama_model is not None:
+        candidate = req.ollama_model.strip()
+        if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.:-]{0,159}", candidate):
+            raise HTTPException(status_code=422, detail="Tên model Ollama không hợp lệ")
+        ollama_model = candidate
+    if req.llm_provider == "ollama" or ollama_model is not None:
+        from core.engines.translation.ollama_client import OllamaClient
+        client = OllamaClient(model=ollama_model or settings.OLLAMA_MODEL,
+                              base_url=settings.OLLAMA_BASE_URL, timeout=settings.OLLAMA_TIMEOUT)
+        if not await asyncio.to_thread(client.verify_model):
+            raise HTTPException(status_code=503, detail="Ollama local hoặc model đã chọn chưa sẵn sàng")
     for value in (req.gemini_key, req.deepseek_key, req.gemini_model):
         if value is not None and ("\n" in value or "\r" in value):
             raise HTTPException(status_code=422, detail="Cấu hình không được chứa ký tự xuống dòng")
     env_updates = {}
-    if req.translation_chunk_workers is not None:
+    selected_provider = req.llm_provider or settings.LLM_PROVIDER
+    if selected_provider == "ollama":
+        # Local Ollama here has one inference runner; extra worker threads only queue requests.
+        env_updates["TRANSLATION_CHUNK_WORKERS"] = "1"
+    elif req.translation_chunk_workers is not None:
         selected_workers = str(req.translation_chunk_workers)
         env_updates["TRANSLATION_CHUNK_WORKERS"] = selected_workers
         env_updates["OPENCODE_CONCURRENCY"] = selected_workers
@@ -423,7 +506,6 @@ async def update_settings(req: ConfigRequest):
     if req.muse_browser_mode is not None:
         env_updates["MUSE_BROWSER_MODE"] = req.muse_browser_mode
     if req.openrouter_model is not None:
-        import re
         if not re.fullmatch(r"[a-zA-Z0-9_.-]+/[a-zA-Z0-9_.-]+:free", req.openrouter_model):
             raise HTTPException(status_code=422, detail="Model OpenRouter phải là bản :free")
         env_updates["OPENROUTER_MODEL"] = req.openrouter_model
@@ -437,6 +519,8 @@ async def update_settings(req: ConfigRequest):
         env_updates["GEMINI_MODEL"] = req.gemini_model
     if opencode_model:
         env_updates["OPENCODE_MODEL"] = opencode_model
+    if ollama_model:
+        env_updates["OLLAMA_MODEL"] = ollama_model
     if req.ducking_level:
         try:
             value = float(req.ducking_level)
@@ -493,15 +577,19 @@ task_history: List[Dict[str, Any]] = []
 def review_result_details(session):
     """Keep unresolved findings visible even when the user receives a final file."""
     summary = dict(getattr(session, "review_summary", {}) or {})
+    pending_ids = set(final_output_metadata(session.segments.values())["output_review_segment_ids"])
     findings = [{"segment_id": s.id, "start": s.start, "end": s.end,
                  "text_zh": s.text_zh, "final_vi": s.final_vi,
                  "reason": s.review_reason or "Nguồn chưa đủ rõ để xác minh chắc chắn.",
                  "verification": getattr(s, "verification", None)}
-                for s in session.segments.values() if getattr(s, "needs_review", False)]
+                for s in session.segments.values() if s.id in pending_ids]
     return {"review_summary": summary, "review_report": findings,
-            "review_warning": (f"AI đã kiểm tra toàn bộ; {len(findings)} câu còn thiếu bằng chứng rõ từ nguồn. "
-                               "Video giữ bản dịch tốt nhất hiện có; chi tiết nằm trong báo cáo kiểm tra.")
-            if findings and summary.get("status") == "completed" else ""}
+            "review_warning": "Kiểm tra nội dung chưa hoàn tất; MP4 là bản nháp chưa được duyệt."
+            if summary.get("status") in {"failed", "incomplete"} else
+            (f"AI đã kiểm tra toàn bộ; {len(findings)} câu còn thiếu bằng chứng rõ từ nguồn. "
+             "Video giữ bản dịch tốt nhất hiện có; chi tiết nằm trong báo cáo kiểm tra.")
+            if findings and summary.get("status") == "completed" else
+            f"Bản nháp — cần kiểm tra. Còn {len(findings)} câu cần rà nội dung." if findings else ""}
 
 
 def review_sidecar_payload(session):
@@ -524,14 +612,83 @@ def review_sidecar_payload(session):
             **review_result_details(session)}
 
 
+def _session_output_snapshot(session):
+    return SimpleNamespace(segments=deepcopy(session.segments), **{
+        name: deepcopy(getattr(session, name)) for name in (
+            "total_duration", "initialized", "_chunked_source_started", "_source_prepared_seconds",
+            "_visual_incremental_started", "_visual_completed_seconds", "review_summary",
+            "_source_missing_speech_spans", "_source_coverage_intervals",
+            "output_video_url", "output_filename", "output_review_url", "caption_output_outdated",
+            "output_incomplete", "output_missing_segment_ids") if hasattr(session, name)})
+
+
 def session_output_details(session):
-    gate = final_output_metadata(session.segments.values())
-    return {"output_video_url": "" if gate["final_output_blocked"] else getattr(session, "output_video_url", ""),
-            "output_filename": "" if gate["final_output_blocked"] else getattr(session, "output_filename", ""),
-            "review_url": "" if gate["final_output_blocked"] else getattr(session, "output_review_url", ""),
+    gate = session_media_gate(session)
+    published_incomplete = bool(getattr(session, "output_incomplete", False))
+    visible = not gate["final_output_blocked"] or published_incomplete
+    missing_spans = getattr(session, "_source_missing_speech_spans", []) or []
+    if not missing_spans:
+        missing_spans = [
+            [row.get("start"), row.get("end")]
+            for row in (getattr(session, "_source_coverage_intervals", []) or [])
+            if row.get("state") == "unresolved"
+        ]
+    valid_spans = []
+    for span in missing_spans:
+        try:
+            start, end = float(span[0]), float(span[1])
+        except (TypeError, ValueError, IndexError):
+            continue
+        if math.isfinite(start) and math.isfinite(end) and 0 <= start < end:
+            valid_spans.append((start, end))
+    if valid_spans:
+        span_text = ", ".join(f"{start:.3f}–{end:.3f} giây" for start, end in valid_spans[:3])
+        if len(valid_spans) > 3:
+            span_text += f" và {len(valid_spans) - 3} khoảng khác"
+        source_draft_warning = (
+            f"Bản nháp đã render và kiểm tra tệp, nhưng chưa phải MP4 hoàn chỉnh: "
+            f"còn {len(valid_spans)} khoảng nguồn chưa xác minh ({span_text}). "
+            "Không coi các khoảng này là im lặng; cần phục hồi coverage trước khi xuất bản hoàn chỉnh."
+        )
+    else:
+        source_draft_warning = (
+            "Bản nháp đã render và kiểm tra tệp, nhưng source coverage chưa hoàn tất; "
+            "không coi phần chưa xử lý là im lặng hoặc MP4 hoàn chỉnh."
+        )
+    return {"automatic_output": dict(getattr(session, "automatic_output", {}) or {}),
+            "output_video_url": getattr(session, "output_video_url", "") if visible else "",
+            "output_filename": getattr(session, "output_filename", "") if visible else "",
+            "review_url": getattr(session, "output_review_url", "") if visible else "",
             "output_outdated": getattr(session, "caption_output_outdated", False),
+            "output_incomplete": published_incomplete,
+            "output_missing_segment_ids": list(getattr(session, "output_missing_segment_ids", [])),
+            "output_warning": ((f"Bản xuất còn {len(getattr(session, 'output_missing_segment_ids', []))} câu thiếu giọng Việt. "
+                "Phụ đề đã dịch và âm thanh nền được giữ; có thể tải video và bổ sung sau.")
+                if published_incomplete and getattr(session, "output_missing_segment_ids", []) else
+                source_draft_warning if published_incomplete else ""),
             **gate,
             **review_result_details(session)}
+
+
+def session_media_gate(session):
+    from core.streaming.session_store import _valid_row_audio
+    duration = getattr(session, "total_duration", 0)
+    covered = bool(duration > 0 and (
+        getattr(session, "_source_prepared_seconds", 0) + .001 >= duration
+        if getattr(session, "_chunked_source_started", False) else getattr(session, "initialized", False)))
+    if getattr(session, "_visual_incremental_started", False):
+        covered = covered and getattr(session, "_visual_completed_seconds", 0) + .001 >= duration
+    result = final_output_metadata(session.segments.values(), source_complete=covered,
+        total_duration=duration, valid_audio=lambda row: _valid_row_audio(row.to_dict(), row.audio_path))
+    if not covered:
+        # A rendered file from known-incomplete source coverage is always a
+        # draft, even when every materialized row has good Vietnamese audio.
+        result.update(output_is_draft=True, output_quality_label="Bản nháp — source coverage chưa hoàn tất",
+                      content_review_state="REVIEW_REQUIRED")
+    if getattr(session, "review_summary", {}).get("status") in {"failed", "incomplete", "running"}:
+        result.update(output_is_draft=True, output_quality_label="Bản nháp — cần kiểm tra",
+                      content_review_state="REVIEW_REQUIRED")
+    return result
 
 
 async def validate_live_output(session):
@@ -616,6 +773,7 @@ def export_revision_signature(session):
                              "confirmed_silence": getattr(s, "confirmed_silence", False),
                              "needs_review": getattr(s, "needs_review", False),
                              "audio_path": getattr(s, "audio_path", None),
+                             "status": "READY" if s.status in ("READY", "PLAYED") else s.status,
                              "dub_start": getattr(s, "dub_start", None), "dub_end": getattr(s, "dub_end", None),
                              "verification": getattr(s, "verification", None)}
                             for s in session.segments.values()],
@@ -625,16 +783,125 @@ def export_revision_signature(session):
     return hashlib.sha256(json.dumps(content, ensure_ascii=False, sort_keys=True).encode("utf-8")).hexdigest()
 
 
-def schedule_reviewed_export(task_id):
+AUTO_EXPORT_MAX_ATTEMPTS = 2
+SOURCE_OUTPUT_BLOCKED_WARNING = (
+    "Chưa thể xuất MP4 tự động vì nguồn, lời dịch hoặc giọng đọc chưa đầy đủ/hợp lệ. "
+    "Phần đã xử lý được giữ; không tự bỏ qua lỗi hoặc xuất thiếu lời."
+)
+
+
+def _source_gap_draft_ready(session, gate=None):
+    """Allow a clearly labeled draft only for known source gaps.
+
+    This never converts absent transcript/audio/timing into silence. All
+    materialized speech rows must remain renderable; only the unresolved source
+    coverage gate may be incomplete.
+    """
+    gate = gate or session_media_gate(session)
+    error = getattr(session, "error", None)
+    recovery_error = ("Dịch video chưa xong; các câu đã dịch và giọng đọc được giữ. Bấm Tiếp tục để xử lý phần còn lại.",
+                      "Chuẩn bị video bị gián đoạn; bấm Tiếp tục để khôi phục phần đã lưu.")
+    source_resume_error = bool(error and getattr(session, "_startup_failed", False)
+                               and error in recovery_error)
+    if ((error and not source_resume_error) or not session.segments
+            or gate.get("source_coverage_complete") is not False
+            or gate.get("missing_speech_ids") or gate.get("missing_audio_ids")
+            or gate.get("invalid_timing_ids")
+            or missing_spoken_output_ids(session.segments.values())
+            or any(row.status not in ("READY", "PLAYED") for row in session.segments.values())):
+        return False
+    has_gap_evidence = bool(getattr(session, "_source_missing_speech_spans", None)
+                            or getattr(session, "_source_failure_code", None)
+                            or any(row.get("state") == "unresolved"
+                                   for row in (getattr(session, "_source_coverage_intervals", []) or [])))
+    return has_gap_evidence
+
+
+async def finalize_session_output(task_id):
     session = get_streaming_session(task_id)
     if (session is None or getattr(session, "auto_export_result", False) is not True
-            or getattr(session, "review_summary", {}).get("status") != "completed"
-            or session.is_running or session.error or getattr(session, "is_stopped", False)
+            or session.is_running or getattr(session, "is_stopped", False)
+            or getattr(session, "is_paused", False) or getattr(session, "is_editing", False)
+            or getattr(session, "_stop_draining", False)
+            or getattr(session, "review_summary", {}).get("status") == "running"
+            or (getattr(session, "translation_mode", "full") == "preview"
+                and not getattr(session, "_visual_prepass_complete", False))):
+        return
+    gate = session_media_gate(session)
+    source_gap_draft = _source_gap_draft_ready(session, gate)
+    if ((getattr(session, "error", None) and not source_gap_draft) or not session.segments
+            or (gate["final_output_blocked"] and not source_gap_draft)
+            or any(row.status not in ("READY", "PLAYED") for row in session.segments.values())):
+        state = {"status": "blocked", "policy": "strict_media",
+                 "reason": "media_incomplete"}
+        if getattr(session, "automatic_output", None) == state:
+            return
+        session.automatic_output = state
+        session.run_intent = "idle"
+        message = SOURCE_OUTPUT_BLOCKED_WARNING
+        if message not in session.warnings:
+            session.warnings.append(message)
+        persist_session(session)
+        await broadcast_session_event(task_id, "result_error", {
+            "message": message, "automatic_output": state, **session_output_details(session)})
+        return
+    if source_gap_draft:
+        message = session_output_details(session)["output_warning"]
+        if message and message not in session.warnings:
+            session.warnings.append(message)
+        session.automatic_output = {"status": "pending", "policy": "strict_media",
+                                   "reason": "source_coverage_draft"}
+        session.run_intent = "idle"
+        persist_session(session)
+        schedule_reviewed_export(task_id, allow_incomplete=True)
+        return
+    summary = dict(getattr(session, "review_summary", {}) or {})
+    review = getattr(session, "start_automatic_review", None)
+    if (not summary.get("status") and callable(review)
+            and settings.LLM_PROVIDER in {"opencode", "ollama"}
+            and (getattr(session, "automatic_output", {}) or {}).get("reason") != "review_incomplete"):
+        session.automatic_output = {"status": "pending", "policy": "strict_media", "reason": "review_pending"}
+        session.run_intent = "running"
+        persist_session(session)
+        try:
+            await review()
+            persist_session(session)
+            return
+        except Exception as error:
+            logging.getLogger("errors").error("AUTO_REVIEW_START_FAILED run_id=%s error_type=%s",
+                                               task_id, type(error).__name__)
+    if summary.get("status") != "completed":
+        state = {"status": "blocked", "policy": "strict_media", "reason": "review_incomplete"}
+        if getattr(session, "automatic_output", None) == state:
+            return
+        session.automatic_output = state
+        session.run_intent = "idle"
+        message = ("Kiểm tra nội dung chưa hoàn tất; chưa xuất kết quả tự động. "
+                   "Dữ liệu đã xử lý được giữ. Không tự bỏ qua kiểm tra khi chưa được đồng ý.")
+        if message not in session.warnings:
+            session.warnings.append(message)
+        persist_session(session)
+        await broadcast_session_event(task_id, "result_error", {
+            "message": message, **session_output_details(session)})
+        return
+    schedule_reviewed_export(task_id)
+
+
+def schedule_reviewed_export(task_id, *, allow_incomplete=False):
+    session = get_streaming_session(task_id)
+    gate = session_media_gate(session) if session is not None else {}
+    source_gap_draft = bool(allow_incomplete and session is not None
+                            and _source_gap_draft_ready(session, gate))
+    if (session is None or getattr(session, "auto_export_result", False) is not True
+            or session.is_running or (session.error and not source_gap_draft) or getattr(session, "is_stopped", False)
+            or (getattr(session, "review_summary", {}).get("status") != "completed" and not source_gap_draft)
+            or getattr(session, "is_paused", False)
             or getattr(session, "_stop_draining", False)
             or getattr(session, "is_editing", False) or not session.segments
             or (getattr(session, "translation_mode", "full") == "preview"
                 and not getattr(session, "_visual_prepass_complete", False))
             or missing_spoken_output_ids(session.segments.values())
+            or (gate["final_output_blocked"] and not source_gap_draft)
             or any(s.status not in ("READY", "PLAYED") for s in session.segments.values())):
         return
     owner = getattr(session, "auto_export_task", None)
@@ -644,9 +911,23 @@ def schedule_reviewed_export(task_id):
     signature = export_revision_signature(session)
     if getattr(session, "auto_export_signature", None) == signature:
         return
+    previous_signature, attempts = getattr(session, "_auto_export_attempts", (None, 0))
+    attempts = attempts if previous_signature == signature else 0
+    if attempts >= AUTO_EXPORT_MAX_ATTEMPTS:
+        session.automatic_output = {"status": "failed", "policy": "strict_media",
+                                    "reason": "export_retry_exhausted"}
+        session.run_intent = "idle"
+        message = "Xuất tự động đã đạt giới hạn thử lại; dữ liệu được giữ. Không có MP4 mới được xác nhận hoàn tất."
+        if message not in session.warnings:
+            session.warnings.append(message)
+        persist_session(session)
+        return
+    session._auto_export_attempts = (signature, attempts + 1)
+    session.automatic_output = {"status": "running", "policy": "strict_media",
+                                "reason": "source_coverage_draft" if source_gap_draft else "media_ready"}
     session.auto_export_signature = signature
-    session.output_video_url = ""
-    session.output_filename = ""
+    session.run_intent = "running"
+    persist_session(session)
 
     async def generate_result():
         failed = False
@@ -657,13 +938,25 @@ def schedule_reviewed_export(task_id):
                     or getattr(session, "_stop_draining", False)
                     or getattr(session, "auto_export_signature", None) != signature):
                 return
-            await export_hq(ExportHQRequest(task_id=task_id))
+            await export_hq(ExportHQRequest(task_id=task_id, allow_incomplete=source_gap_draft))
         except asyncio.CancelledError:
-            # export_hq owns cancellation and drains its media thread. Do not
-            # mutate whichever export now occupies this ID after it returns.
+            if get_streaming_session(task_id) is session and getattr(session, "auto_export_signature", None) == signature:
+                interrupted = getattr(session, "_application_shutdown", False) and session.run_intent == "running"
+                session.automatic_output = {"status": "pending" if interrupted else "cancelled", "policy": "strict_media",
+                                            "reason": "application_interrupted" if interrupted else "user_cancelled"}
+                if not interrupted:
+                    session.run_intent = "stopped"
+                persist_session(session)
             raise
         except Exception as error:
             failed = True
+            cancelled = (getattr(session, "run_intent", "idle") == "stopped"
+                         or active_export_tasks.get(f"export_{task_id}", {}).get("cancelled"))
+            session.automatic_output = {"status": "cancelled" if cancelled else "failed", "policy": "strict_media",
+                                        "reason": "user_cancelled" if cancelled else "export_failed"}
+            if getattr(session, "run_intent", "idle") == "running":
+                session.run_intent = "idle"
+            persist_session(session)
             # export_hq already emitted its classified error. A second generic
             # event would replace the useful cause in the user's status panel.
             if getattr(error, "result_error_reported", False):
@@ -713,18 +1006,19 @@ async def list_tasks():
             "elapsed_seconds": round(time.time() - sess.start_wall_time, 1) if sess.start_wall_time else 0,
         }
         status_str = progress["status"]
-        tasks.append({
+        task = deepcopy({
             "task_id": task_id,
             "task_type": "Realtime Dubbing",
             **source_metadata(sess),
             "status": status_str,
             **progress,
             "duration": sess.total_duration,
-            "video_url": session_output_details(sess)["output_video_url"],
-            **session_output_details(sess),
-            "can_resume": status_str == "PAUSED",
+            "can_resume": progress.get("can_resume", status_str == "PAUSED"),
             "can_stop": progress.get("can_stop", status_str in ["RUNNING", "PAUSED"])
         })
+        output_snapshot = _session_output_snapshot(sess)
+        output_details = await asyncio.to_thread(session_output_details, output_snapshot)
+        tasks.append({**task, "video_url": output_details["output_video_url"], **output_details})
 
     # 2. HQ Export Tasks
     for export_id, exp in list(active_export_tasks.items()):
@@ -749,6 +1043,12 @@ async def list_tasks():
             "video_url": exp.get("video_url", ""),
             "output_filename": exp.get("output_filename", ""),
             "output_video_url": exp.get("video_url", ""),
+            "output_incomplete": exp.get("output_incomplete", False),
+            "output_missing_segment_ids": exp.get("output_missing_segment_ids", []),
+            "output_warning": exp.get("output_warning", ""),
+            "output_is_draft": exp.get("output_is_draft", False),
+            "output_quality_label": exp.get("output_quality_label", ""),
+            "output_review_segment_ids": exp.get("output_review_segment_ids", []),
             "review_summary": exp.get("review_summary", {}),
             "review_warning": exp.get("review_warning", ""),
             "review_report": exp.get("review_report", []),
@@ -823,7 +1123,10 @@ async def history_thumbnail(session_id: str, request: Request, v: str = ""):
 async def pause_task(task_id: str):
     sess = get_streaming_session(task_id)
     if sess:
-        if not sess.is_running or getattr(sess, "is_stopped", False):
+        audit_owner = getattr(sess, "native_audit_task", None)
+        from core.streaming.native_audit_lifecycle import has_pending
+        if ((not sess.is_running and (audit_owner is None or audit_owner.done()) and not has_pending(sess))
+                or getattr(sess, "is_stopped", False)):
             raise HTTPException(status_code=409, detail="Phiên dịch đã kết thúc")
         if not getattr(sess, "initialized", True):
             raise HTTPException(status_code=409, detail="Chưa thể tạm dừng ở bước tải và chuẩn bị video. Bạn có thể bấm Dừng.")
@@ -837,8 +1140,12 @@ async def pause_task(task_id: str):
 async def resume_task(task_id: str):
     sess = get_streaming_session(task_id)
     if sess:
-        if not sess.is_running or getattr(sess, "is_stopped", False):
+        audit_owner = getattr(sess, "native_audit_task", None)
+        from core.streaming.native_audit_lifecycle import has_pending
+        if not sess.is_running and (audit_owner is None or audit_owner.done()) and not has_pending(sess):
             raise HTTPException(status_code=409, detail="Phiên dịch đã kết thúc")
+        if has_pending(sess):
+            sess.is_stopped = False
         sess.resume()
         if hasattr(sess, "get_progress"):
             await sess.emit("progress", sess.get_progress())
@@ -851,7 +1158,7 @@ async def stop_task(task_id: str):
     if sess:
         workers = [worker for worker in (getattr(sess, "start_task", None), getattr(sess, "worker_task", None),
                                         getattr(sess, "review_task", None), getattr(sess, "auto_export_task", None),
-                                        getattr(sess, "_chunk_followup_task", None))
+                                        getattr(sess, "_chunk_followup_task", None), getattr(sess, "native_audit_task", None))
                    if worker is not None and not worker.done()]
         workers.extend(task for task in getattr(sess, "edit_tasks", ()) if not task.done())
         progress = sess.get_progress() if hasattr(sess, "get_progress") else {}
@@ -956,7 +1263,7 @@ async def broadcast_session_event(task_id: str, event_type: str, data: Dict[str,
     # so an unresponsive UI cannot prevent healthy clients receiving this event.
     await asyncio.gather(*(deliver(ws) for ws in list(stream_sockets.get(task_id, ()))))
     if event_type == "finished":
-        schedule_reviewed_export(task_id)
+        await finalize_session_output(task_id)
 
 async def run_session(session):
     try:
@@ -968,6 +1275,7 @@ async def run_session(session):
 def _retry_configuration_signature():
     """Compare captured engines without recording keys in logs or checkpoints."""
     names = ("LLM_PROVIDER", "GEMINI_MODEL", "OPENCODE_MODEL", "OPENROUTER_MODEL",
+             "OLLAMA_MODEL", "OLLAMA_BASE_URL",
              "WHISPER_MODEL_SIZE", "WHISPER_COMPUTE_TYPE", "SUPPRESSION_MODE",
              "MUSE_BROWSER_MODE", "OPENCODE_API_KEY", "OPENROUTER_API_KEY",
              "GEMINI_API_KEY", "DEEPSEEK_API_KEY", "OPENAI_API_KEY")
@@ -1093,6 +1401,8 @@ async def _restore_matching_saved_project(*, source_url=None, video_path=None,
             continue
         candidates.insert(0, (owner.task_id, {}, mode))
     for task_id, _data, _saved_mode in candidates:
+        if active_export_tasks.get(f"export_{task_id}", {}).get("status") in {"RUNNING", "CANCELLING"}:
+            raise HTTPException(status_code=409, detail="Video này đang xuất. Hãy chờ xuất xong trước khi tiếp tục dịch.")
         if task_id in active_streaming_sessions:
             session = active_streaming_sessions[task_id]
             durable_config = getattr(session, "_processing_signature", None)
@@ -1116,7 +1426,7 @@ async def _restore_matching_saved_project(*, source_url=None, video_path=None,
             # Recreate only the idle stopped owner from that same manifest so
             # WAITING/in-flight rows enter the existing recovery normalization.
             workers = (getattr(session, name, None) for name in
-                       ("start_task", "worker_task", "review_task", "export_task", "auto_export_task", "_chunk_followup_task"))
+                       ("start_task", "worker_task", "review_task", "export_task", "auto_export_task", "_chunk_followup_task", "native_audit_task"))
             if any(worker is not None and not worker.done() for worker in workers):
                 raise HTTPException(status_code=409, detail="Tác vụ đang dừng; hãy chờ lưu xong trước khi tiếp tục.")
             active_streaming_sessions.pop(task_id, None)
@@ -1146,10 +1456,12 @@ async def _restore_matching_saved_project(*, source_url=None, video_path=None,
 @app.post("/api/streaming/start-url")
 async def start_streaming_url(req: StreamUrlRequest):
     async with _source_start_lock():
-        return await _start_streaming_url_owned(req)
+        return await _start_streaming_url_owned(
+            req, request_started_at=_e2e_request_started_at.get())
 
 
-async def _start_streaming_url_owned(req: StreamUrlRequest):
+async def _start_streaming_url_owned(req: StreamUrlRequest, request_started_at=None):
+    request_started_at = request_started_at or time.time()
     validate_visual_translation(req.visual_translation)
     if not req.url:
         raise HTTPException(status_code=400, detail="Vui lòng cung cấp link video")
@@ -1176,6 +1488,8 @@ async def _start_streaming_url_owned(req: StreamUrlRequest):
         if existing.is_running or (not existing.initialized and not existing.error):
             raise HTTPException(status_code=409, detail="Video này đang xử lý. Mở tác vụ hiện tại để xem tiến độ.")
         if existing.can_retry:
+            existing.auto_export_result = True
+            persist_session(existing)
             try:
                 await existing.retry_failed_synthesis()
             except SegmentEditConflict as exc:
@@ -1194,6 +1508,10 @@ async def _start_streaming_url_owned(req: StreamUrlRequest):
         translation_mode=req.translation_mode,
         source_downloader=downloader)
     if restored is not None:
+        restored.auto_export_result = True
+        persist_session(restored)
+        if not getattr(restored, "output_filename", "") or getattr(restored, "caption_output_outdated", False):
+            await finalize_session_output(restored.task_id)
         return {"task_id": restored.task_id, "video_url": restored.source_video_url,
                 "initial_buffer_seconds": restored.initial_buffer_seconds,
                 "progress": restored.get_progress(), "status": "started",
@@ -1212,7 +1530,10 @@ async def _start_streaming_url_owned(req: StreamUrlRequest):
         translation_mode=req.translation_mode,
         event_callback=lambda event_type, data: broadcast_session_event(task_id, event_type, data)
     )
-    session.auto_export_result = bool(req.visual_translation and settings.LLM_PROVIDER == "opencode")
+    if req.translation_chunk_workers is not None:
+        session.translation_chunk_workers = req.translation_chunk_workers
+    session.auto_export_result = True
+    session.start_wall_time = getattr(session, "start_wall_time", None) or request_started_at
     session.source_url, session._source_downloader = url, downloader
     session._retry_config_signature = config_signature
     session._processing_signature = processing_signature()
@@ -1273,9 +1594,12 @@ async def start_streaming_upload(
     tts_engine: Optional[str] = Form(None),
     asr_engine: str = Form(settings.ASR_ENGINE),
     visual_translation: bool = Form(False),
-    translation_mode: Literal["preview", "full"] = Form("preview"),
-    ref_audio: Optional[UploadFile] = File(None)
+    translation_mode: Literal["preview", "full"] = Form("full"),
+    ref_audio: Optional[UploadFile] = File(None),
+    translation_chunk_workers: Annotated[Optional[str], Form()] = None,
 ):
+    request_started_at = _e2e_request_started_at.get() or time.time()
+    selected_workers = parse_upload_workers(translation_chunk_workers)
     validate_visual_translation(visual_translation)
     tts_engine, voice = validated_voice(voice_id, tts_engine, voice)
     if ref_audio and ref_audio.filename and tts_engine != "vieneu-tts":
@@ -1306,7 +1630,11 @@ async def start_streaming_upload(
         ref_audio=ref_audio_path,
         event_callback=lambda event_type, data: broadcast_session_event(task_id, event_type, data)
     )
-    session.auto_export_result = bool(visual_translation and settings.LLM_PROVIDER == "opencode")
+    if selected_workers is not None:
+        session.translation_chunk_workers = selected_workers
+    session.auto_export_result = True
+    # Include the server-side copy of the received upload and all later stages.
+    session.start_wall_time = getattr(session, "start_wall_time", None) or request_started_at
     session._processing_signature = processing_signature()
 
     asyncio.create_task(run_session(session))
@@ -1440,7 +1768,8 @@ async def update_caption_style(task_id: str, req: CaptionStyleRequest):
         raise HTTPException(status_code=422, detail="Chưa xác định được vùng phụ đề gốc đủ rõ để làm mờ.")
     if style != previous["caption_style"]:
         fields = ("caption_style", "caption_style_revision", "caption_output_outdated",
-                  "output_video_url", "output_filename", "output_review_url", "auto_export_signature")
+                  "output_video_url", "output_filename", "output_review_url", "auto_export_signature",
+                  "output_incomplete", "output_missing_segment_ids")
         prior = {key: getattr(session, key) for key in fields if hasattr(session, key)}
         session.caption_style = style
         session.caption_style_revision = previous["caption_style_revision"] + 1
@@ -1610,6 +1939,31 @@ async def streaming_seek(req: SeekRequest):
     await session.seek(req.time)
     return {"status": "ok", "seek_time": req.time}
 
+@app.post("/api/streaming/export-hq/jobs", status_code=202)
+async def start_export_hq_job(req: ExportHQRequest):
+    """Own the render independently of a browser's HTTP connection."""
+    session = get_streaming_session(req.task_id)
+    if session is None:
+        raise HTTPException(status_code=404, detail="Session not found")
+    owner = getattr(session, "export_task", None)
+    if owner is not None and not owner.done():
+        raise HTTPException(status_code=409, detail="Video này đang được xuất.")
+    task = asyncio.create_task(export_hq(req))
+    session.export_task = task
+    # Export validation and registration run before the coroutine's first await.
+    # Yield once to expose validation errors in this bounded creation request.
+    await asyncio.sleep(0)
+    if task.done():
+        result = task.result()
+        return {"status": "COMPLETED", "export_id": f"export_{req.task_id}", **result}
+    def consume_failure(done):
+        if not done.cancelled():
+            done.exception()  # The job registry already holds the user diagnostic.
+    task.add_done_callback(consume_failure)
+    return {"status": "RUNNING", "export_id": f"export_{req.task_id}",
+            "status_url": f"/api/streaming/export-hq/status/{req.task_id}"}
+
+
 @app.post("/api/streaming/export-hq")
 async def export_hq(req: ExportHQRequest):
     session = get_streaming_session(req.task_id)
@@ -1622,7 +1976,7 @@ async def export_hq(req: ExportHQRequest):
             ensure_source_identity(session)
         except (OSError, ValueError, KeyError, TypeError):
             raise HTTPException(status_code=409, detail="Video nguồn đã thay đổi hoặc mất; hãy tạo tác vụ mới trước khi xuất.") from None
-    if getattr(session, "is_editing", False):
+    if getattr(session, "is_editing", False) or getattr(session, "_stop_draining", False):
         raise HTTPException(status_code=409, detail="Đang lưu lời thoại và tạo lại giọng đọc. Hãy chờ lưu xong trước khi xuất.")
     if getattr(session, "_persistence_capacity_failed", False):
         raise HTTPException(status_code=409, detail="Dự án đạt giới hạn dữ liệu lưu. Phần đã lưu được giữ; hãy dùng video ngắn hơn.")
@@ -1630,22 +1984,38 @@ async def export_hq(req: ExportHQRequest):
             and not getattr(session, "_visual_prepass_complete", False)):
         raise HTTPException(status_code=409, detail="Đây là bản xem trước. Bấm Dịch toàn bộ trước khi xuất video đầy đủ.")
     missing_speech = missing_spoken_output_ids(session.segments.values())
-    if missing_speech:
+    media_gate = session_media_gate(session)
+    incomplete_ids = set(missing_speech)
+    incomplete_ids.update(media_gate["missing_audio_ids"])
+    incomplete_ids.update(media_gate["invalid_timing_ids"])
+    for row in session.segments.values():
+        has_text = bool(str(getattr(row, "final_vi", "") or "").strip())
+        audio = getattr(row, "audio_path", None)
+        if row.status not in ("READY", "PLAYED") or (has_text and not getattr(row, "confirmed_silence", False)
+                and (not audio or not Path(audio).is_file())):
+            incomplete_ids.add(row.id)
+    if missing_speech and not req.allow_incomplete:
         raise HTTPException(status_code=409, detail=missing_speech_message(missing_speech))
     review_status = getattr(session, "review_summary", {}).get("status")
-    if review_status in {"failed", "running", "incomplete"}:
-        raise HTTPException(status_code=409, detail="AI kiểm tra lại chưa hoàn tất. Bấm AI kiểm tra lại để tiếp tục trước khi xuất.")
-    uncertain = [s for s in session.segments.values() if getattr(s, "needs_review", False)]
-    if uncertain and not (review_status == "completed" and all(
-            (getattr(s, "verification", None) or {}).get("status") == "unresolved" for s in uncertain)):
-        raise HTTPException(status_code=409, detail="Bản dịch chưa được AI kiểm tra đầy đủ. Bấm AI kiểm tra lại trước khi xuất.")
-    if session.is_running or session.error or any(
-        s.status not in ("READY", "PLAYED") for s in session.segments.values()
-    ):
+    if review_status == "running":
+        raise HTTPException(status_code=409, detail="AI đang cập nhật lời thoại; hãy chờ lượt hiện tại kết thúc trước khi xuất.")
+    pending_review = bool(media_gate["output_is_draft"] or review_status in {"failed", "incomplete"})
+    if not req.allow_incomplete and media_gate["final_output_blocked"]:
+        raise HTTPException(status_code=409, detail="Chưa đủ nguồn, giọng Việt hợp lệ hoặc timeline còn chồng lấn; hãy tiếp tục xử lý hoặc chọn xuất phần hiện có.")
+    if (session.is_running
+            or (any(s.status not in ("READY", "PLAYED") for s in session.segments.values())
+                and not req.allow_incomplete)):
         raise HTTPException(status_code=409, detail="Hãy chờ dịch xong toàn bộ video trước khi xuất.")
     export_signature = export_revision_signature(session)
     segments_data = [dict(s.to_dict(), audio_path=s.audio_path)
-                     for s in session.segments.values() if s.status in ["READY", "PLAYED"]]
+                     for s in session.segments.values()]
+    if req.allow_incomplete:
+        for row in segments_data:
+            if row["id"] in incomplete_ids:
+                row["audio_path"] = None
+                row["omit_voice"] = True
+    output_incomplete = bool(req.allow_incomplete and (incomplete_ids or not media_gate["source_coverage_complete"]))
+    stopped_at_start = bool(getattr(session, "is_stopped", False))
     if not segments_data:
         raise HTTPException(status_code=400, detail="Chưa có câu thoại nào sẵn sàng để xuất HQ")
 
@@ -1672,6 +2042,10 @@ async def export_hq(req: ExportHQRequest):
     active_export_tasks[export_id]["_eta_started_at"] = time.monotonic()
     active_export_tasks[export_id].update(export_eta(active_export_tasks[export_id]["_eta_expected_seconds"], 0))
     session.export_task = asyncio.current_task()
+    from core.streaming.status_history import record_status
+    warnings_before_export = list(session.warnings)
+    record_status(session, "RUNNING", "export", "Bắt đầu xuất video MP4 từ phần đã xử lý.")
+    persist_session(session)
 
     loop = asyncio.get_event_loop()
 
@@ -1695,15 +2069,19 @@ async def export_hq(req: ExportHQRequest):
     async def _commit_output(rendered, final):
         # Same event loop as cancellation: no await between the decision,
         # atomic publication and commit flag. Late Stop cannot undo this file.
-        if _cancel_chk() or getattr(session, "is_stopped", False):
+        if _cancel_chk() or (getattr(session, "is_stopped", False) and not stopped_at_start):
             raise RuntimeError("Export cancelled before publishing")
         missing_speech = missing_spoken_output_ids(session.segments.values())
-        if missing_speech:
+        if missing_speech and not req.allow_incomplete:
             raise RuntimeError(missing_speech_message(missing_speech))
         if export_revision_signature(session) != export_signature:
             raise RuntimeError("Lời thoại hoặc cấu hình đã thay đổi trong khi xuất; giữ video trước đó và xuất lại từ bản đang lưu.")
         rendered.replace(final)
         active_export_tasks[export_id]["published"] = True
+        active_export_tasks[export_id]["published_at"] = time.time()
+        if getattr(session, "start_wall_time", None):
+            session.end_to_end_seconds = round(max(
+                0., active_export_tasks[export_id]["published_at"] - session.start_wall_time), 1)
 
     def _publish_output(rendered, final):
         asyncio.run_coroutine_threadsafe(_commit_output(rendered, final), loop).result()
@@ -1730,6 +2108,7 @@ async def export_hq(req: ExportHQRequest):
             publish_callback=_publish_output,
             caption_style=dict(getattr(session, "caption_style", {}) or {}),
             source_screen_texts=getattr(session, "screen_texts", []),
+            allow_incomplete=req.allow_incomplete,
         ))
         try:
             result = await asyncio.shield(render_worker)
@@ -1745,19 +2124,38 @@ async def export_hq(req: ExportHQRequest):
                     continue
             result = render_worker.result()
 
-        if not active_export_tasks[export_id].get("published") and (_cancel_chk() or getattr(session, "is_stopped", False)):
+        if not active_export_tasks[export_id].get("published") and (_cancel_chk() or
+                (getattr(session, "is_stopped", False) and not stopped_at_start)):
             raise RuntimeError("Export cancelled before publishing")
 
+        session.output_incomplete = output_incomplete
+        if output_incomplete:
+            session.warnings[:] = [warning for warning in session.warnings
+                                   if warning != SOURCE_OUTPUT_BLOCKED_WARNING]
+            draft_warning = session_output_details(session)["output_warning"]
+            if draft_warning and draft_warning not in session.warnings:
+                session.warnings.append(draft_warning)
         review_url = ""
         metadata_warning = ""
         sidecar_warning = ("Video MP4 đã xuất và có thể tải, nhưng chưa lưu được báo cáo kiểm tra. "
                            "Kiểm tra dung lượng/quyền ghi thư mục kết quả rồi xuất lại để lưu báo cáo.")
-        if review_status == "completed":
+        if review_status == "completed" or pending_review or output_incomplete:
             sidecar_name = f"{Path(result['output_filename']).stem}.review.json"
             sidecar_path = settings.OUTPUT_DIR / sidecar_name
             sidecar_temp = sidecar_path.with_name(f".{sidecar_name}.{uuid.uuid4().hex}.tmp")
             try:
-                sidecar_temp.write_text(json.dumps(review_sidecar_payload(session), ensure_ascii=False, indent=2), encoding="utf-8")
+                payload = {**review_sidecar_payload(session), "output_incomplete": output_incomplete,
+                           "output_is_draft": pending_review,
+                           "output_quality_label": media_gate["output_quality_label"],
+                           "output_review_segment_ids": media_gate["output_review_segment_ids"],
+                           "source_coverage": {
+                               "complete": bool(media_gate["source_coverage_complete"]),
+                               "unresolved_spans": list(getattr(session, "_source_missing_speech_spans", []) or []),
+                               "failure_code": getattr(session, "_source_failure_code", None),
+                               "failure_start": getattr(session, "_source_failure_start", None),
+                           },
+                           "output_missing_segment_ids": sorted(incomplete_ids) if req.allow_incomplete else []}
+                sidecar_temp.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
                 sidecar_temp.replace(sidecar_path)
                 review_url = f"/api/outputs/{sidecar_name}"
                 if sidecar_warning in session.warnings:
@@ -1782,24 +2180,68 @@ async def export_hq(req: ExportHQRequest):
         session.output_video_url = f"/api/outputs/{result['output_filename']}"
         session.output_filename = result["output_filename"]
         session.output_review_url = review_url
+        session.automatic_output = {"status": "blocked" if output_incomplete else "completed", "policy": "strict_media",
+                                    "reason": "partial_output" if output_incomplete else "review_required" if pending_review else "validated"}
+        if getattr(session, "run_intent", "idle") == "running":
+            session.run_intent = "idle"
+        session.output_missing_segment_ids = sorted(incomplete_ids) if req.allow_incomplete else []
         session.caption_output_outdated = False
         from core.subtitle_cues import CAPTION_RENDERER_VERSION
         session.caption_renderer_version = CAPTION_RENDERER_VERSION
-        await session.report_progress("complete", "MP4 đã xuất và giải mã kiểm tra thành công.", 100)
-        warnings_before_save = list(session.warnings)
+        export_terminal_status = "PREPARED" if output_incomplete else "COMPLETED"
+        export_terminal_message = (session_output_details(session)["output_warning"] if output_incomplete
+                                   else "MP4 đã xuất và giải mã kiểm tra thành công.")
+        record_status(session, export_terminal_status, "export", export_terminal_message)
+        # Persist the published result with its terminal export state. A late
+        # progress/event notification is best-effort and must not leave the
+        # durable session manifest claiming that this validated MP4 is still
+        # running.
+        active_export_tasks[export_id].update(status="COMPLETED", progress=100,
+            eta_seconds=0, eta_scope="final", eta_reason="validated",
+            elapsed_seconds=result["elapsed_seconds"],
+            end_to_end_seconds=(round(max(0., active_export_tasks[export_id]["published_at"]
+                                             - session.start_wall_time), 1)
+                                if session.start_wall_time else None),
+            phase_timings_seconds=dict(result.get("phase_timings_seconds") or {}),
+            audio_cache_reused=bool(result.get("audio_cache_reused", False)),
+            updated_at=max(time.time(), getattr(session, "_history_updated_at", 0) or 0),
+            stage=("Bản nháp đã render và giải mã kiểm tra; source coverage còn thiếu."
+                   if output_incomplete else "MP4 đã xuất và giải mã kiểm tra thành công."),
+            video_url=session.output_video_url, output_filename=session.output_filename,
+            review_url=review_url, warnings=list(session.warnings), metadata_warning=metadata_warning)
+        warnings_before_save = warnings_before_export
         persist_session(session)
         save_warnings = [warning for warning in session.warnings if warning not in warnings_before_save]
-        metadata_warning = " ".join(filter(None, [metadata_warning, *save_warnings]))
+        metadata_warning = " ".join(dict.fromkeys(filter(None, [metadata_warning, *save_warnings])))
         active_export_tasks[export_id].update(
             status="COMPLETED", progress=100,
             eta_seconds=0, eta_scope="final", eta_reason="validated",
+            elapsed_seconds=result["elapsed_seconds"],
+            end_to_end_seconds=(round(max(0., active_export_tasks[export_id]["published_at"]
+                                             - session.start_wall_time), 1)
+                                if session.start_wall_time else None),
+            phase_timings_seconds=dict(result.get("phase_timings_seconds") or {}),
+            audio_cache_reused=bool(result.get("audio_cache_reused", False)),
             updated_at=max(time.time(), getattr(session, "_history_updated_at", 0) or 0),
-            stage=metadata_warning or "Xuất video hoàn tất thành công!",
+            stage=(metadata_warning or ("Bản nháp đã render và giải mã kiểm tra; source coverage còn thiếu."
+                                        if output_incomplete else "Xuất video hoàn tất thành công!")),
             video_url=session.output_video_url, output_filename=session.output_filename,
             review_url=review_url, warnings=list(session.warnings), metadata_warning=metadata_warning)
         output_details = {**session_output_details(session), "warnings": list(session.warnings),
                           "metadata_warning": metadata_warning}
-        await broadcast_session_event(req.task_id, "result_ready", output_details)
+        active_export_tasks[export_id].update({key: output_details[key] for key in
+            ("output_incomplete", "output_missing_segment_ids", "output_warning", "output_is_draft",
+             "output_quality_label", "output_review_segment_ids", "content_review_state")})
+        try:
+            await session.report_progress(
+                "prepared" if output_incomplete else "complete",
+                export_terminal_message,
+                None if output_incomplete else 100,
+            )
+            await broadcast_session_event(req.task_id, "result_ready", output_details)
+        except (Exception, asyncio.CancelledError) as notification_error:
+            logging.getLogger("errors").warning("EXPORT_NOTIFICATION_FAILED run_id=%s error_type=%s",
+                                                export_id, type(notification_error).__name__)
 
         return {
             "status": "ok",
@@ -1807,6 +2249,9 @@ async def export_hq(req: ExportHQRequest):
             "output_filename": result["output_filename"],
             "video_url": f"/api/outputs/{result['output_filename']}",
             "elapsed_seconds": result["elapsed_seconds"],
+            "end_to_end_seconds": active_export_tasks[export_id].get("end_to_end_seconds"),
+            "phase_timings_seconds": dict(result.get("phase_timings_seconds") or {}),
+            "audio_cache_reused": bool(result.get("audio_cache_reused", False)),
             **output_details,
             "review_url": review_url,
         }
@@ -1822,6 +2267,13 @@ async def export_hq(req: ExportHQRequest):
                 continue
             except Exception:
                 break
+        interrupted = getattr(session, "_application_shutdown", False) and getattr(session, "run_intent", "idle") == "running"
+        session.automatic_output = {"status": "pending" if interrupted else "cancelled", "policy": "strict_media",
+                                    "reason": "application_interrupted" if interrupted else "user_cancelled"}
+        if not interrupted:
+            session.run_intent = "stopped"
+        record_status(session, "PREPARED" if interrupted else "STOPPED", "export",
+                      "Xuất video bị gián đoạn khi đóng ứng dụng." if interrupted else "Đã hủy xuất video theo yêu cầu.")
         persist_session(session)
         active_export_tasks[export_id].update(status="CANCELLED", stage="Đã hủy xuất video",
             updated_at=max(time.time(), getattr(session, "_history_updated_at", 0) or 0))
@@ -1830,6 +2282,7 @@ async def export_hq(req: ExportHQRequest):
         status_name = "CANCELLED" if active_export_tasks.get(export_id, {}).get("cancelled") else "FAILED"
         stage = active_export_tasks.get(export_id, {}).get("stage", "export")
         message = "Đã hủy xuất video" if status_name == "CANCELLED" else export_failure(error, export_id, stage)
+        record_status(session, "STOPPED" if status_name == "CANCELLED" else "FAILED", "export", message)
         if export_id in active_export_tasks:
             active_export_tasks[export_id]["status"] = status_name
             active_export_tasks[export_id]["stage"] = message
@@ -1864,13 +2317,18 @@ async def cancel_export_hq(task_id: str):
         if (active_export_tasks[export_id].get("published")
                 or active_export_tasks[export_id]["status"] not in {"RUNNING", "CANCELLING"}):
             raise HTTPException(status_code=409, detail="Tác vụ xuất đã kết thúc")
+        session = get_streaming_session(export_id.removeprefix("export_"))
+        if session is not None:
+            session.run_intent = "stopped"
+            session.automatic_output = {"status": "cancelled", "policy": "strict_media", "reason": "user_cancelled"}
+            persist_session(session)
         active_export_tasks[export_id]["cancelled"] = True
         active_export_tasks[export_id]["status"] = "CANCELLING"
         active_export_tasks[export_id]["stage"] = "Đang dừng xuất video..."
         return {"status": "ok", "message": "Đã yêu cầu hủy xuất video"}
     raise HTTPException(status_code=404, detail="Không tìm thấy tác vụ export")
 
-class StreamLocalFileRequest(BaseModel):
+class StreamLocalFileRequest(PerVideoWorkerRequest):
     file_path: str
     initial_buffer_seconds: Optional[float] = Field(default=None, gt=0, le=120)
     voice: Optional[str] = None
@@ -1878,7 +2336,7 @@ class StreamLocalFileRequest(BaseModel):
     tts_engine: Optional[str] = None
     asr_engine: Optional[str] = None
     visual_translation: bool = False
-    translation_mode: Literal["preview", "full"] = "preview"
+    translation_mode: Literal["preview", "full"] = "full"
 
 
 def validate_visual_translation(enabled):
@@ -1915,6 +2373,10 @@ async def _start_streaming_local_file_owned(req: StreamLocalFileRequest):
         visual_translation=req.visual_translation,
         translation_mode=req.translation_mode)
     if restored is not None:
+        restored.auto_export_result = True
+        persist_session(restored)
+        if not getattr(restored, "output_filename", "") or getattr(restored, "caption_output_outdated", False):
+            await finalize_session_output(restored.task_id)
         return {"task_id": restored.task_id, "video_url": restored.source_video_url,
                 "initial_buffer_seconds": restored.initial_buffer_seconds,
                 "status": "started", "progress": restored.get_progress(),
@@ -1932,7 +2394,9 @@ async def _start_streaming_local_file_owned(req: StreamLocalFileRequest):
         event_callback=lambda event_type, data: broadcast_session_event(task_id, event_type, data)
     )
     session.source_video_url = f"/api/local-file?path={quote(p.as_posix(), safe='')}"
-    session.auto_export_result = bool(req.visual_translation and settings.LLM_PROVIDER == "opencode")
+    if req.translation_chunk_workers is not None:
+        session.translation_chunk_workers = req.translation_chunk_workers
+    session.auto_export_result = True
     session._processing_signature = processing_signature()
     asyncio.create_task(run_session(session))
 
@@ -1979,7 +2443,7 @@ async def create_media_preview(req: PreviewRequest):
             candidate = root / name
             info = candidate.lstat()
             source = candidate.resolve(strict=True)
-            if (candidate.is_symlink() or candidate.is_junction()
+            if (candidate.is_symlink() or getattr(candidate, "is_junction", lambda: False)()
                     or getattr(info, "st_file_attributes", 0) & 0x400
                     or source.parent != root or not source.is_file()):
                 raise ValueError("Invalid output")
@@ -2292,7 +2756,8 @@ async def websocket_stream(websocket: WebSocket, task_id: str):
         session = get_streaming_session(task_id)
         if session:
             if hasattr(session, "get_progress"):
-                await _send_stream_payload(task_id, websocket, {"type": "progress", "task_id": task_id, **session.get_progress()})
+                await _send_stream_payload(task_id, websocket, {"type": "progress", "task_id": task_id,
+                    **session.get_progress(), **(session_output_details(session) if hasattr(session, "segments") else {})})
             if getattr(session, "source_video_url", None):
                 await _send_stream_payload(task_id, websocket, {"type": "source_ready", "task_id": task_id, "video_url": session.source_video_url})
         if session and getattr(session, "initialized", True):

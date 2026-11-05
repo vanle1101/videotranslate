@@ -359,3 +359,70 @@ def test_transport_pins_public_ip_and_keeps_original_tls_hostname(monkeypatch):
     assert calls["host"] == "v26-web.douyinvod.com" and calls["verify_hostname"]
     assert calls["target"] == "/media.mp4?token=opaque%2Fsignature"
     assert calls["closed"]
+
+
+def test_transport_falls_back_to_next_public_ip_and_preserves_tls_hostname(monkeypatch):
+    addresses = [(socket.AF_INET, socket.SOCK_STREAM, socket.IPPROTO_TCP, "", ("1.1.1.1", 443)),
+                 (socket.AF_INET, socket.SOCK_STREAM, socket.IPPROTO_TCP, "", ("2.2.2.2", 443))]
+    monkeypatch.setattr(socket, "getaddrinfo", lambda *args, **kwargs: addresses)
+    attempts = []
+    destinations = []
+
+    class Connection:
+        def __init__(self, host, timeout, context):
+            attempts.append({"host": host, "timeout": timeout, "verify_hostname": context.check_hostname})
+            self.host = host
+            self.closed = False
+
+        def connect(self):
+            self._create_connection((self.host, 443), 6)
+
+        def request(self, method, target, headers):
+            self.connect()
+
+        def getresponse(self):
+            return Response(b"media", headers={"Content-Type": "video/mp4"})
+
+        def close(self):
+            self.closed = True
+
+    def connect(destination, timeout, source_address):
+        destinations.append(destination)
+        if destination[0] == "1.1.1.1":
+            raise OSError("synthetic first-address failure")
+        return object()
+
+    monkeypatch.setattr(resolver.http.client, "HTTPSConnection", Connection)
+    monkeypatch.setattr(socket, "create_connection", connect)
+    with REQUEST_ONCE(MEDIA_URL, {"Accept": "video/mp4"}) as response:
+        assert response.read() == b"media"
+        telemetry = response.telemetry
+
+    assert destinations == [("1.1.1.1", 443), ("2.2.2.2", 443)]
+    assert [attempt["host"] for attempt in attempts] == ["v26-web.douyinvod.com"] * 2
+    assert all(attempt["verify_hostname"] for attempt in attempts)
+    assert telemetry["peer_ip"] == "2.2.2.2"
+    assert telemetry["bytes_received"] == len(b"media")
+    assert all(isinstance(telemetry[key], (int, float)) for key in ("dns_ms", "tcp_ms", "tls_ms", "ttfb_ms", "header_ttfb_ms", "first_byte_ms"))
+
+
+@pytest.mark.parametrize("status", [403, 429])
+def test_limited_feed_response_is_not_repeated_on_second_endpoint(monkeypatch, status):
+    calls = []
+
+    def request(url, headers):
+        calls.append(url)
+        return Response(b"forbidden", status=status, headers={"Content-Type": "application/json"}, url=url)
+
+    monkeypatch.setattr(resolver, "_request_once", request)
+    with pytest.raises(resolver.DouyinResolveError) as captured:
+        resolver.resolve_douyin(VIDEO_URL)
+    assert captured.value.status_code == status
+    assert calls == [resolver.FEED_ENDPOINTS[0] + f"?aweme_id={VIDEO_ID}&aid=1128"]
+
+
+def test_retry_after_supports_http_date_and_retains_long_wait(monkeypatch):
+    monkeypatch.setattr(resolver.time, "time", lambda: 0)
+    assert resolver._retry_after_seconds("Thu, 01 Jan 1970 00:02:00 GMT") == 120
+    assert resolver._retry_after_seconds("999999") == 3601
+    assert resolver._retry_after_seconds("invalid private header") is None

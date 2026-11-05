@@ -184,9 +184,12 @@ class AIExecutionLayer:
         self._condition = threading.Condition()
         self._queue = deque()
         self._active = 0
+        self._scope_active = {}
+        self._scope_limits = {}
         self._active_keys = set()
         self._failures = 0
         self._open_until = 0.0
+        self._server_retry_until = 0.0
         self._half_open = False
         self._requests = self._retries = self._cache_hits = 0
 
@@ -209,23 +212,34 @@ class AIExecutionLayer:
         if cancel_check is not None and cancel_check():
             raise AIExecutionCancelledError("Đã hủy yêu cầu AI đang chờ.")
 
-    def _admit(self, cancel_check, key):
-        ticket = object()
+    def _admit(self, cancel_check, key, scope_id="unscoped", concurrency_limit=None, admission_check=None):
+        ticket = (object(), scope_id, key, admission_check)
         deadline = time.monotonic() + self.policy.queue_timeout
         with self._condition:
             self._cancel(cancel_check)
             self._check_circuit()
-            if len(self._queue) >= self.policy.queue_limit:
+            if sum(item[1] == scope_id for item in self._queue) >= self.policy.queue_limit:
                 raise AIQueueFullError("Hàng đợi Muse đã đầy; phần chưa xong sẽ được thử lại.")
             self._queue.append(ticket)
+            self._scope_limits[scope_id] = concurrency_limit
             try:
                 while True:
                     self._cancel(cancel_check)
+                    if admission_check is not None and not admission_check():
+                        paused_at = time.monotonic()
+                        self._condition.wait(.1)
+                        deadline += time.monotonic() - paused_at
+                        continue
                     self._check_circuit()
-                    if (self._queue[0] is ticket and self._active < self.policy.concurrency
+                    first = next((item for item in self._queue
+                        if self._scope_active.get(item[1], 0) < (self._scope_limits[item[1]] or self.policy.concurrency)
+                        and item[2] not in self._active_keys
+                        and (item[3] is None or item[3]())), None)
+                    if (first is ticket
                             and not self._half_open and key not in self._active_keys):
-                        self._queue.popleft()
+                        self._queue.remove(ticket)
                         self._active += 1
+                        self._scope_active[scope_id] = self._scope_active.get(scope_id, 0) + 1
                         self._active_keys.add(key)
                         if self._open_until:
                             self._half_open = True
@@ -240,9 +254,12 @@ class AIExecutionLayer:
                     self._queue.remove(ticket)
                     self._condition.notify_all()
 
-    def _check_circuit(self):
-        if self._open_until and time.monotonic() < self._open_until:
-            raise AICircuitOpenError(self._open_until - time.monotonic())
+    def _check_circuit(self, *, include_server=True):
+        with self._condition:
+            now = time.monotonic()
+            deadline = max(self._open_until, self._server_retry_until)
+            if now < (deadline if include_server else self._open_until):
+                raise AICircuitOpenError(deadline - now)
 
     def _success(self):
         with self._condition:
@@ -250,17 +267,24 @@ class AIExecutionLayer:
             self._open_until = 0.0
             self._half_open = False
 
-    def _failure(self):
+    def _failure(self, retry_after=None):
         with self._condition:
+            # A provider deadline applies to sibling requests too. Keep it
+            # separate: an older in-flight success may reset the breaker but
+            # cannot revoke the server's Retry-After instruction.
+            now = time.monotonic()
+            if type(retry_after) in (int, float) and math.isfinite(retry_after) and retry_after >= 0:
+                self._server_retry_until = max(self._server_retry_until, now + retry_after)
             self._failures += 1
             if self._half_open or self._failures >= self.policy.circuit_failures:
-                self._open_until = time.monotonic() + self.policy.circuit_cooldown
+                self._open_until = now + self.policy.circuit_cooldown
             self._half_open = False
             self._condition.notify_all()
 
-    def _release(self, key):
+    def _release(self, key, scope_id):
         with self._condition:
             self._active -= 1
+            self._scope_active[scope_id] = max(0, self._scope_active.get(scope_id, 1) - 1)
             self._active_keys.discard(key)
             # Cancellation/configuration of a half-open probe does not prove
             # the service recovered. Preserve cooldown for the next probe.
@@ -271,7 +295,8 @@ class AIExecutionLayer:
 
     def retry_delay(self, retry_index: int) -> float:
         base = min(self.policy.retry_cap, self.policy.retry_base * 2 ** retry_index)
-        return max(0, base * (1 + self.policy.retry_jitter * (2 * random.random() - 1)))
+        return min(self.policy.retry_cap, max(self.policy.retry_base,
+            base * (1 + self.policy.retry_jitter * (2 * random.random() - 1))))
 
     def execute(self, operation: Callable[[int], str], *, identity: Mapping[str, Any],
                 max_retries: int = 0, cancel_check=None,
@@ -281,9 +306,13 @@ class AIExecutionLayer:
                 validate: Optional[Callable[[str], Any]] = None,
                 use_cache: bool = True,
                 on_cache_hit: Optional[Callable[[], None]] = None,
-                cache_allowed: Optional[Callable[[str], bool]] = None) -> str:
+                cache_allowed: Optional[Callable[[str], bool]] = None,
+                scope_id: str = "unscoped", concurrency_limit: Optional[int] = None,
+                admission_check=None) -> str:
         self._cancel(cancel_check)
-        max_retries = max(0, min(int(max_retries), 2))
+        max_retries = max(0, min(int(max_retries), 5))
+        if concurrency_limit is not None and (type(concurrency_limit) is not int or not 1 <= concurrency_limit <= 50):
+            raise ValueError("concurrency_limit must be between 1 and 50")
         key = response_cache_key(identity)
         cache_enabled = use_cache and validate is not None
         if cache_enabled:
@@ -295,7 +324,12 @@ class AIExecutionLayer:
                 if on_cache_hit:
                     on_cache_hit()
                 return cached
-        self._admit(cancel_check, key)
+        if admission_check is not None:
+            self._admit(cancel_check, key, scope_id, concurrency_limit, admission_check)
+        elif scope_id == "unscoped" and concurrency_limit is None:
+            self._admit(cancel_check, key)
+        else:
+            self._admit(cancel_check, key, scope_id, concurrency_limit)
         try:
             # Same-key requests queued behind a successful request use its
             # validated result rather than starting another provider request.
@@ -310,6 +344,10 @@ class AIExecutionLayer:
                     return cached
             for attempt in range(max_retries + 1):
                 self._cancel(cancel_check)
+                while admission_check is not None and not admission_check():
+                    self._wait(.1, cancel_check)
+                # Another admitted request can extend the provider deadline
+                # during this owner's backoff. Recheck before every attempt.
                 self._check_circuit()
                 with self._condition:
                     self._requests += 1
@@ -323,15 +361,21 @@ class AIExecutionLayer:
                 except Exception as error:
                     if not retryable(error):
                         raise
-                    self._failure()
+                    retry_after = getattr(error, "retry_after", None)
+                    self._failure(retry_after)
                     if attempt >= max_retries:
                         raise
                     # A breaker opened on this failure: do not spin through
                     # retries or sleep for the whole cooldown in this caller.
-                    self._check_circuit()
+                    # Below the breaker threshold this owner waits its bounded
+                    # retry delay; sibling admission still sees the server
+                    # deadline. An opened breaker propagates the longer wait.
+                    self._check_circuit(include_server=False)
                     with self._condition:
                         self._retries += 1
                     delay = self.retry_delay(attempt)
+                    if type(retry_after) in (int, float) and math.isfinite(retry_after) and retry_after >= 0:
+                        delay = max(delay, float(retry_after))
                     if wait_retry is None:
                         self._wait(delay, cancel_check)
                     else:
@@ -346,7 +390,7 @@ class AIExecutionLayer:
                 self._cancel(cancel_check)
                 return result
         finally:
-            self._release(key)
+            self._release(key, scope_id)
         raise AIExecutionError("AI execution exhausted without a response")
 
     def _wait(self, seconds, cancel_check):
@@ -358,11 +402,11 @@ class AIExecutionLayer:
                 return
             time.sleep(min(0.1, remaining))
 
-    def snapshot(self):
+    def snapshot(self, scope_id=None):
         with self._condition:
-            return {"active_requests": self._active, "queued_requests": len(self._queue),
-                    "concurrency": self.policy.concurrency,
+            return {"active_requests": self._active if scope_id is None else self._scope_active.get(scope_id, 0), "queued_requests": len(self._queue) if scope_id is None else sum(item[1] == scope_id for item in self._queue),
+                    "concurrency": self._scope_limits.get(scope_id) or self.policy.concurrency,
                     "requests": self._requests, "retry_requests": self._retries,
                     "cache_hits": self._cache_hits, "consecutive_failures": self._failures,
-                    "circuit_retry_after": max(0, self._open_until - time.monotonic()),
+                    "circuit_retry_after": max(0, max(self._open_until, self._server_retry_until) - time.monotonic()),
                     "half_open": self._half_open}

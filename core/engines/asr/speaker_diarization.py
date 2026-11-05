@@ -11,6 +11,7 @@ import math
 from pathlib import Path
 
 from config import settings
+from core.review_checkpoint import file_digest
 from core.runtime_context import current_execution_context
 from core.engines.asr.diarization_assets import installed_assets
 from core.engines.asr.native_process import (ASRProcessError, check_cancelled,
@@ -80,9 +81,8 @@ class BoundedSpeakerDiarizer:
         # without asking the caller to discard ASR, translations or WAVs.
         implementation = {}
         for filename in ("speaker_diarization.py", "speaker_registry.py", "diarization_worker.py", "diarization_assets.py"):
-            import hashlib
-            with Path(__file__).with_name(filename).open("rb") as code:
-                implementation[filename] = hashlib.file_digest(code, "sha256").hexdigest()
+            implementation[filename] = file_digest(
+                Path(__file__).with_name(filename), lambda: check_cancelled(check))
         models = {**models, "runtime_version": runtime_version, "inference_policy": asdict(self.policy),
                   "adapter_version": 1, "implementation": implementation}
         registry = SpeakerRegistry(self.registry_path, self.source_id, models, self.matching_policy, media_identity=identity)

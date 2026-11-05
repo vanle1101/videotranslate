@@ -19,6 +19,7 @@ from core.translation_review import AutomaticTranslationReviewer
 
 @pytest.fixture
 def reviewed_session(tmp_path, monkeypatch):
+    monkeypatch.setattr(pipeline, "AUTOMATIC_RECOVERY_DELAYS", (0., 0., 0.))
     for name, value in {
         "BASE_DIR": tmp_path, "WORKSPACE_DIR": tmp_path / "workspace",
         "INPUT_DIR": tmp_path / "workspace/inputs", "OUTPUT_DIR": tmp_path / "workspace/outputs",
@@ -54,6 +55,94 @@ def review_response():
         113: {"id": 113, "text_zh": "跟你开玩笑的", "final_vi": "Để đùa đâu.",
             "needs_review": False, "verification": {"status": "verified", "semantic_verified": True}},
     }, "summary": {"checked": 2, "verified": 1, "corrected": 1, "unresolved": 0, "manual": 0}}
+
+
+def test_full_source_recovery_can_use_proven_two_sided_budget_without_changing_source(reviewed_session):
+    session = reviewed_session
+    session._chunked_source_started = False
+    focus = session.segments[112]
+    # Keep the complete neighboring source reservation, with a measured gap
+    # large enough for the independently bounded forward endpoint allowance.
+    session.segments[113].start, session.segments[113].end = 172., 173.
+    original = (focus.start, focus.end)
+    _, duration, old_capacity, _, _ = session._dub_fit_window(focus, session._dub_rows())
+    session._recovery_bidirectional_reflow = True
+    _, _, new_capacity, _, _ = session._dub_fit_window(focus, session._dub_rows())
+    assert old_capacity <= duration + .35 + 1e-9
+    assert new_capacity == pytest.approx(duration + .70)
+    assert (focus.start, focus.end) == original
+
+
+def test_deferred_speech_resumes_after_neighbor_only_retimes_its_slot(reviewed_session, monkeypatch):
+    from core.engines.alignment.timing_aligner import SpeechBudgetError
+    session = reviewed_session
+    session._visual_completed_seconds = session.total_duration
+    focus = session.segments[112]
+    focus.status, focus.audio_path = 'WAITING', None
+    calls = []
+    async def speech(row, **options):
+        calls.append((row.id, options, row.revision, row.dub_start))
+        if options.get('allow_pacing') is False:
+            raise SpeechBudgetError('Needs the deferred fitting pass')
+        row.status = 'READY'
+    monkeypatch.setattr(session, '_synthesize_segment', speech)
+    async def recover():
+        deferred = await session._resume_speech_rows([focus], defer_pacing=True)
+        session._publish_dub_plan({112: {'dub_start': focus.start - .1, 'dub_end': focus.end - .1}}, None)
+        assert focus.revision == 1
+        await session._resume_deferred_speech_rows(deferred)
+    asyncio.run(recover())
+    assert focus.status == 'READY' and len(calls) == 2
+    assert calls[1][2:] == (1, focus.start - .1)
+
+
+@pytest.mark.parametrize('change', ['text_zh', 'final_vi', 'voice_id', 'start', 'verification'])
+def test_deferred_speech_keeps_new_source_manual_or_voice_edits(reviewed_session, monkeypatch, change):
+    from core.engines.alignment.timing_aligner import SpeechBudgetError
+    session = reviewed_session
+    session._visual_completed_seconds = session.total_duration
+    focus = session.segments[112]
+    focus.status, focus.audio_path = 'WAITING', None
+    calls = []
+    async def speech(row, **options):
+        calls.append(row.id)
+        raise SpeechBudgetError('Deferred')
+    monkeypatch.setattr(session, '_synthesize_segment', speech)
+    async def recover():
+        deferred = await session._resume_speech_rows([focus], defer_pacing=True)
+        value = {'verification': {'status': 'manual'}, 'start': focus.start + .01,
+                 'voice_id': 'vi-VN-NamMinhNeural', 'text_zh': '新源', 'final_vi': 'Lời sửa mới.'}[change]
+        setattr(focus, change, value)
+        focus.revision += 1
+        await session._resume_deferred_speech_rows(deferred)
+        assert getattr(focus, change) == value
+    asyncio.run(recover())
+    assert calls == [112] and focus.status == 'WAITING'
+
+
+def test_recovery_speech_logs_the_chained_cause_and_keeps_siblings_running(
+        reviewed_session, monkeypatch, caplog):
+    import logging
+    session = reviewed_session
+    session._visual_completed_seconds = session.total_duration
+    focus = session.segments[112]
+    focus.status, focus._retry_synthesis = "WAITING", True
+    healthy = session.segments[113]
+    healthy.status = "READY"
+    async def failing_speech(row, **options):
+        try:
+            raise ValueError("Authorization: Bearer private-provider-token")
+        except ValueError as cause:
+            raise RuntimeError("speech transport failed") from cause
+    monkeypatch.setattr(session, "_synthesize_segment", failing_speech)
+    with caplog.at_level(logging.ERROR, logger="errors"):
+        asyncio.run(session._resume_speech_rows([focus, healthy]))
+    assert focus.status == "FAILED" and healthy.status == "READY"
+    assert session.is_running
+    assert "RECOVERY_SPEECH_FAILED" in caplog.text
+    assert "failing_speech" in caplog.text and "direct cause" in caplog.text
+    assert "ValueError: Authorization: Bearer [redacted]" in caplog.text
+    assert "private-provider-token" not in caplog.text
 
 
 def source_scope_recovery_row(session):
@@ -255,7 +344,7 @@ def test_interrupted_or_changed_review_cannot_publish_source_scope_stamp(reviewe
         asyncio.run(session._resume_pending_chunk_reviews())
     assert not session._source_scope_review_is_current(focus)
     assert "source" not in focus.verification
-    assert calls == [1]
+    assert calls == [1] * (4 if failure == "provider" else 1)
 
 
 def test_group_source_corrections_are_visible_before_scope_stamp_publication(reviewed_session, monkeypatch):

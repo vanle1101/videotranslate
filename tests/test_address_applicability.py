@@ -88,6 +88,43 @@ def test_exact_named_listener_retains_full_grounded_form_at_its_position():
     assert AutomaticTranslationReviewer._address_gate(reading, 12, audit, "野哥", "Anh Dã ơi!") is False
 
 
+def test_school_grade_is_a_number_without_masking_a_separate_parent_address():
+    assert address_expressions("Vừa tốt nghiệp cấp ba xong.") == []
+    assert address_expressions("Ba bảo học hết cấp ba.") == ["Ba"]
+    audit = {"address_applicable": False, "address_verified": False,
+        "address_neutral_faithful": True, "semantic_verified": True,
+        "address_reason": "高中 là cấp ba; lời Việt không thêm đại từ hay quan hệ."}
+    assert not AutomaticTranslationReviewer._address_gate({0: {"uncertain": True}}, 0,
+        audit, "刚高中毕业", "Vừa tốt nghiệp cấp ba xong.")
+
+
+def test_source_grounded_plural_listener_does_not_require_unused_self():
+    reading = listener_reading()
+    reading[12]["listener_address"] = "hai người"
+    reading[12]["evidence"] = [{"id": 12, "quote": "你们两个什么关系"}]
+    audit = {**listener_audit(), "address_uses": [{"term": "Hai người", "role": "listener"}]}
+    assert address_expressions("Hai người có quan hệ gì?", grounded_terms=["hai người"]) == ["Hai người"]
+    assert not AutomaticTranslationReviewer._address_gate(reading, 12, audit,
+        "你们两个什么关系", "Hai người có quan hệ gì?")
+    reading[12]["listener_uncertain"] = True
+    assert AutomaticTranslationReviewer._address_gate(reading, 12, audit,
+        "你们两个什么关系", "Hai người có quan hệ gì?")
+
+
+@pytest.mark.parametrize("candidate,uses", [
+    ("Ba người có quan hệ gì?", [{"term": "Hai người", "role": "listener"}]),
+    ("Hai người có quan hệ gì?", []),
+    ("Tôi hỏi hai người.", [{"term": "Hai người", "role": "listener"}]),
+    ("Hai người có quan hệ gì?", [{"term": "Hai người", "role": "self"}]),
+])
+def test_plural_role_requires_exact_count_all_uses_and_known_direction(candidate, uses):
+    reading = listener_reading()
+    reading[12]["listener_address"] = "hai người"
+    audit = {**listener_audit(), "address_uses": uses}
+    assert AutomaticTranslationReviewer._address_gate(reading, 12, audit,
+        "你们两个什么关系", candidate)
+
+
 @pytest.mark.parametrize("candidate,uses", [
     ("Anh ơi!", [{"term": "Anh", "role": "listener"}]),
     ("Anh Dã ơi!", [{"term": "Anh", "role": "listener"}]),
@@ -247,14 +284,16 @@ def test_real_review_path_requests_reading_for_existing_pronoun_and_records_new_
         requests.append(prompt)
         if "ID cần kiểm định: " in prompt:
             return {"address_context": [{"id": 0, "self_address": "tôi", "listener_address": "",
-                "uncertain": False, "reason": "Người nói tự nói đang làm việc, không suy thêm quan hệ.",
+                "self_uncertain": False, "listener_uncertain": True,
+                "uncertain": True, "reason": "Người nói tự nói đang làm việc, không suy thêm quan hệ.",
                 "turn_check": {"ambiguous_roles": [], "reason": "Không có lời đối chiếu của người khác.",
                                "evidence": [{"id": 0, "quote": "我在工作"}]},
                 "evidence": [{"id": 0, "quote": "我在工作"}]}]}
         return {"segments": [{**source, "literal_vi": candidate, "natural_vi": candidate, "final_vi": candidate,
             "semantic_verified": True, "verification_reason": "Giữ đang làm việc.",
             "source_evidence_ids": ["review0"], "address_applicable": True,
-            "address_verified": True, "address_reason": "Đối chiếu lời nguồn."}], "screen_texts": [], "summary": ""}
+            "address_verified": True, "address_reason": "Đối chiếu lời nguồn.",
+            "address_uses": [{"term": "Tôi" if expected_reading else "Em", "role": "self"}]}], "screen_texts": [], "summary": ""}
     client = Mock(has_credentials=True, model="offline-selection", translate=Mock(side_effect=respond))
     scanner = Mock(extract=Mock(return_value=[{"start": 0., "end": 2., "text_zh": "我在工作",
         "confidence": .99, "bbox": [.2, .7, .5, .1]}]))
@@ -477,3 +516,98 @@ def test_full_review_recovers_actual_grounded_cogai_phrase(monkeypatch):
     assert row["verification"]["address_verified"]
     assert row["verification"]["address_context"]["self_uncertain"]
     assert client.translate.call_count == 3
+def test_passive_named_neighbor_is_agent_reference_not_listener_address():
+    candidate = "bị dì hàng xóm bắt gặp,"
+    assert address_expressions(candidate) == []
+    audit = {"address_applicable": False, "address_neutral_faithful": True,
+        "semantic_verified": True, "address_reason": "大婶 là người thứ ba bắt gặp sự việc, không gọi người nghe."}
+    reading = {24: {"uncertain": True}}
+    assert not AutomaticTranslationReviewer._address_gate(reading, 24, audit, "被隔壁大婶撞见", candidate)
+    for key in ("address_neutral_faithful", "semantic_verified"):
+        assert AutomaticTranslationReviewer._address_gate(reading, 24, {**audit,key:False}, "被隔壁大婶撞见", candidate)
+
+
+def test_neighbor_noun_exclusion_never_hides_direct_calls_or_other_roles():
+    assert address_expressions("Dì hàng xóm, em nhờ dì!") == ["Dì", "em", "dì"]
+    assert address_expressions("Con bị dì hàng xóm bắt gặp.") == ["Con"]
+    assert address_expressions("Bị dì bắt gặp rồi.") == ["dì"]
+    assert address_expressions("Bị dì hàng xóm gọi, con chạy ra.") == ["dì", "con"]
+
+
+@pytest.mark.parametrize("candidate", [
+    "Vì ở vương quốc ba lê,",
+    "Ba lê là một điệu múa.",
+    "Học BA LÊ.",
+    "Học ba\tlê.",
+    "Mi Sa nhìn đôi cánh trắng trong gương rồi mỉm cười.",
+    "Mi\tSa đến rồi.",
+    "Ngay khoảnh khắc hoàn thành vòng mười ba,",
+    "MƯỜI BA.",
+    "Hai mươi ba.",
+    "Ba mươi ba.",
+    "Ba trăm ba mươi ba.",
+    "Một trăm linh ba.",
+    "Một trăm lẻ ba.",
+    "Ba nghìn, ba ngàn, ba triệu, ba tỷ, ba tỉ.",
+])
+def test_lexical_compounds_and_exact_name_do_not_override_neutral_verdict(candidate):
+    assert address_expressions(candidate) == []
+    assert not contains_address_expression(candidate)
+    assert not needs_address_audit([{"text_zh": "旁白", "final_vi": candidate}])
+    audit = {"address_applicable": False, "address_verified": False,
+        "address_neutral_faithful": True, "semantic_verified": True,
+        "address_reason": "Giữ tên riêng, danh từ hoặc số trong lời kể nguồn."}
+    reading = {0: {"uncertain": True}}
+    assert not AutomaticTranslationReviewer._address_applicable(audit, "旁白", candidate)
+    assert not AutomaticTranslationReviewer._address_gate(reading, 0, audit, "旁白", candidate)
+    for key in ("address_neutral_faithful", "semantic_verified"):
+        assert AutomaticTranslationReviewer._address_gate(
+            reading, 0, {**audit, key: False}, "旁白", candidate)
+
+
+@pytest.mark.parametrize("candidate,expected", [
+    ("Ba dạy ba lê.", ["Ba"]),
+    ("Ba ơi, học ba lê nhé!", ["Ba"]),
+    ("Ba, Lê gọi rồi.", ["Ba"]),
+    ("Ba lễ phép chào.", ["Ba"]),
+    ("Ba le lưỡi.", ["Ba"]),
+    ("Ba\nlê bước đi.", ["Ba"]),
+    ("Ba bảo con chờ.", ["Ba", "con"]),
+    ("Ba mẹ chờ.", ["Ba mẹ"]),
+    ("Ba chờ mười ba phút.", ["Ba"]),
+    ("Ba ba mươi tuổi.", ["Ba"]),
+    ("Mười ba, ba chờ nhé.", ["ba"]),
+    ("Mười, ba chờ nhé.", ["ba"]),
+    ("Mười\nba chờ nhé.", ["ba"]),
+    ("BA, MƯỜI PHÚT NỮA NHÉ.", ["BA"]),
+    ("Ba muoi.", ["Ba"]),
+    ("Ba người đến rồi.", ["Ba"]),
+    ("Mi Sa, mi nghe đây!", ["mi"]),
+    ("Mi nói đi.", ["Mi"]),
+    ("MI NÓI ĐI.", ["MI"]),
+    ("Mi, Sa gọi kìa!", ["Mi"]),
+    ("Mi sa vào bẫy rồi.", ["Mi"]),
+    ("mi sa vào bẫy rồi.", ["mi"]),
+    ("MI SA VÀO BẪY RỒI.", ["MI"]),
+    ("Mi Sang đến rồi.", ["Mi"]),
+    ("Mi Sá đến rồi.", ["Mi"]),
+    ("Mi-Sa đến rồi.", ["Mi"]),
+    ("Mi\nSa gọi kìa!", ["Mi"]),
+    ("Anh Mi Sa ơi!", ["Anh"]),
+    ("Ba dạy Mi Sa học ba lê trong mười ba phút.", ["Ba"]),
+])
+def test_compound_exclusions_preserve_real_and_ambiguous_addresses(candidate, expected):
+    assert address_expressions(candidate) == expected
+    audit = {"address_applicable": False, "address_verified": False,
+        "address_neutral_faithful": True, "semantic_verified": True,
+        "address_reason": "Provider gọi đây là lời kể."}
+    assert AutomaticTranslationReviewer._address_applicable(audit, "旁白", candidate)
+    assert AutomaticTranslationReviewer._address_gate(
+        {0: {"uncertain": True}}, 0, audit, "旁白", candidate)
+
+
+def test_compound_masking_preserves_grounded_roles_without_creating_new_phrases():
+    assert address_expressions("Ba người có quan hệ gì?", grounded_terms=["ba người"]) == ["Ba người"]
+    assert address_expressions("Anh Mi Sa ơi!", grounded_terms=["anh Sa"]) == ["Anh"]
+    assert address_expressions("Anh Mi Sa ơi!", grounded_terms=["anh Mi Sa"]) == ["Anh Mi Sa"]
+    assert address_expressions("Ba Mi Sa mẹ gọi.") == ["Ba", "mẹ"]

@@ -41,6 +41,37 @@ def row(session, identity, start, end, *, ready=False, speech=True):
     return item
 
 
+def test_stage_label_counts_valid_speech_instead_of_empty_ready_drafts(session, monkeypatch):
+    from unittest.mock import AsyncMock
+    session.translation_mode = "full"
+    session._source_prepared_seconds = session.total_duration
+    row(session, 0, 0, 2, ready=True)
+    draft = row(session, 1, 2, 4)
+    draft.status = "READY"
+    row(session, 2, 4, 6)
+    report = AsyncMock()
+    monkeypatch.setattr(session, "report_progress", report)
+    asyncio.run(session._segment_progress("tts", "Đang tạo giọng"))
+    args = report.call_args.args
+    assert "1/3 câu" in args[1] and "Đã hoàn tất" not in args[1]
+    assert args[2] == 33.3
+    assert report.call_args.kwargs["completed_segments"] == 1
+
+
+def test_sentence_frontier_does_not_jump_over_a_missing_voice(session):
+    session.translation_mode = "full"
+    session._source_prepared_seconds = session.total_duration
+    row(session, 0, 0, 2, ready=True)
+    row(session, 1, 2, 4)
+    row(session, 2, 4, 6, ready=True)
+    progress = session._processing_progress_metadata()
+    assert progress["ready_through_segment"] == 1
+    assert progress["processing_ready_seconds"] == 2
+    assert progress["translated_segment_count"] == 2
+    assert progress["translated_furthest_segment"] == 3
+    assert progress["translated_furthest_seconds"] == 6
+
+
 def test_unknown_source_denominator_stays_indeterminate(session):
     snapshot = session.get_progress()
     assert snapshot["processing_scope"] == "preview"
@@ -138,14 +169,16 @@ def test_untranslated_source_never_counts_as_silence(session):
     assert session.get_progress()["processing_progress_pct"] == 100
 
 
-def test_actual_asr_silence_counts_only_after_processing(session):
+def test_empty_asr_counts_only_with_explicit_silence_confirmation(session):
     item = row(session, 0, 0, 2, ready=True, speech=False)
     session._source_prepared_seconds = 24
     assert session.get_progress()["processing_progress_pct"] == 0
     item.subtitle_timing_source = "empty"
-    assert session.get_progress()["processing_progress_pct"] == 100
+    assert session.get_progress()["processing_progress_pct"] == 0
     item.needs_review = True
     assert session.get_progress()["processing_progress_pct"] == 0
+    item.confirmed_silence = True
+    assert session.get_progress()["processing_progress_pct"] == 100
 
 
 def test_review_invalidation_recomputes_media_work_instead_of_pinning_maximum(session):
@@ -234,3 +267,44 @@ def test_progress_fields_survive_live_project_and_task_list_api_boundaries(sessi
             assert project.json()["progress"][key] == task[key] == value
 
     asyncio.run(check())
+
+
+def test_phase_profiler_measures_source_substages_and_active_phase_from_monotonic_times():
+    from core.streaming.profiler import StageProfiler
+    profile = StageProfiler()
+    profile.reset(started_at=10., initial_phase="resolve")
+    profile.advance("prepare", now=12., source_stage="audio_extract")
+    profile.advance("asr", now=17., source_stage="asr")
+    assert profile.snapshot(now=20.) == {
+        "resolve": 2., "source.asr": 3., "source.audio_extract": 5.}
+    profile.finish(now=21.)
+    finished = profile.snapshot(now=40.)
+    assert finished == {"resolve": 2., "source.asr": 4., "source.audio_extract": 5.}
+    assert sum(finished.values()) == 11.
+
+
+def test_phase_profiler_can_resume_after_review_or_retry_without_losing_prior_phases():
+    from core.streaming.profiler import StageProfiler
+    profile = StageProfiler()
+    profile.reset(started_at=10., initial_phase="prepare")
+    profile.advance("translate", now=13.)
+    profile.finish(now=15.)
+    profile.reset(started_at=20., initial_phase="review", preserve=True)
+    profile.finish(now=22.)
+
+    assert profile.snapshot(now=40.) == {"prepare": 3., "review": 2., "translate": 2.}
+
+
+def test_stage_work_profiler_keeps_overlapping_worker_time_separate_from_visible_phase():
+    from core.streaming.profiler import StageProfiler
+    profile = StageProfiler()
+    profile.reset(started_at=10., initial_phase="translate")
+    profile.advance("tts", now=12.)
+    profile.record_work("translation", 4.2, units=3)
+    profile.record_work("tts", 3.5, units=2)
+
+    assert profile.snapshot(now=15.) == {"translate": 2., "tts": 3.}
+    assert profile.work_snapshot() == {
+        "seconds": {"translation": 4.2, "tts": 3.5},
+        "units": {"translation": 3, "tts": 2},
+    }

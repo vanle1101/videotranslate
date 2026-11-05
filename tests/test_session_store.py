@@ -61,6 +61,33 @@ def source_proof(kind, identity, *, method="audio_diarization", verified=True):
         "confidence": .94, "model": "upstream-audio-model", "scope_id": "video-scope-1"}
 
 
+def test_native_language_and_uncertain_pacing_roundtrip(persisted):
+    row = persisted.segments[0]
+    row.source_language, row.source_language_probability, row.source_language_uncertain = "ko", .72, True
+    row.needs_review = True
+    row.verification = {"status": "unresolved", "semantic_verified": False, "pacing": {
+        "status": "unresolved", "text": row.final_vi, "source_language": "ko",
+        "semantic_verdict": "uncertain", "draft_allowed": True, "natural": True,
+        "reason": "Chưa rõ chủ thể.", "source_quote": "우리"}}
+    persisted.persist()
+    restored = restore_saved_session(persisted.task_id)
+    actual = restored.segments[0]
+    assert actual.source_language == "ko" and actual.source_language_probability == .72
+    assert actual.source_language_uncertain is True and actual.needs_review is True
+    assert actual.verification["pacing"] == row.verification["pacing"]
+
+
+@pytest.mark.parametrize("field,value", [("source_language", "unsupported"),
+    ("source_language_probability", True), ("source_language_probability", 1.01),
+    ("source_language_uncertain", "yes")])
+def test_invalid_native_metadata_rejected_before_save(persisted, field, value):
+    setattr(persisted.segments[0], field, value)
+    before = _project_path(persisted.task_id).read_bytes()
+    with pytest.raises(ValueError):
+        persisted.persist()
+    assert _project_path(persisted.task_id).read_bytes() == before
+
+
 def test_source_identity_evidence_and_asr_provenance_roundtrip_without_inventing_certainty(persisted):
     segment = persisted.segments[0]
     segment.speaker_id, segment.utterance_id = "voice-a", 17
@@ -346,12 +373,157 @@ def persisted(tmp_path, monkeypatch):
     active_streaming_sessions.update(old)
 
 
+@pytest.mark.parametrize("speech_fails", [False, True])
+@pytest.mark.parametrize("missing_draft", ["", "[không rõ nghĩa]"])
+def test_missing_saved_translation_retries_only_its_draft_and_preserves_peers(persisted, monkeypatch, speech_fails, missing_draft):
+    from copy import deepcopy
+    session = persisted
+    session.total_duration = 6
+    session.visual_translation = True
+    session._chunked_source_started = True
+    session._visual_prepass_complete = True
+    session._visual_completed_seconds = session._visual_scanned_seconds = 6
+    healthy = session.segments[0]
+    healthy.source_method, healthy.translation_provider = "text-ai", "opencode"
+    healthy.needs_review = True
+    healthy.verification = {"status": "unresolved", "source_supported": False}
+    missing = SegmentItem(38, 2, 4, 2)
+    missing.status, missing.text_zh = "PLAYED", "叶哥"
+    missing.final_vi = missing_draft
+    missing.source_method, missing.translation_provider = "text-ai", "opencode"
+    missing.needs_review = True
+    missing.verification = {"status": "unresolved", "source_supported": False}
+    manual = deepcopy(healthy)
+    manual.id, manual.start, manual.end = 39, 4, 6
+    manual.final_vi, manual.verification = "Lời người dùng.", {"status": "manual"}
+    manual.audio_path = str(session.segments_dir / "seg_39.wav")
+    Path(manual.audio_path).write_bytes(Path(healthy.audio_path).read_bytes())
+    session.segments.update({38: missing, 39: manual})
+    session.persist()
+    restored = restore_saved_session(session.task_id)
+    assert restored.can_retry and not restored._startup_failed
+    assert restored.segments[38].status == "FAILED"
+    assert restored.segments[38].failed_stage == "TRANSLATING"
+    assert restored.get_progress()["missing_speech_ids"] == [38]
+    # The recovery classification must survive another restart before Retry.
+    restored.persist()
+    active_streaming_sessions.pop(session.task_id)
+    restored = restore_saved_session(session.task_id)
+    assert restored.can_retry and restored.segments[38].failed_stage == "TRANSLATING"
+    peers = {sid: deepcopy(vars(restored.segments[sid])) for sid in (0, 39)}
+    translate = Mock(return_value={"literal_vi": "Anh Diệp.", "natural_vi": "Anh Diệp.",
+                                  "final_vi": "Anh Diệp.", "needs_review": False})
+    monkeypatch.setattr(restored.translator, "translate_single_segment", translate)
+    monkeypatch.setattr(restored, "_ensure_tts_engine", lambda: None)
+    monkeypatch.setattr(restored, "_resume_pending_chunk_reviews", Mock(side_effect=AssertionError("healthy rows must not be reviewed")))
+    monkeypatch.setattr(restored.faster_whisper, "transcribe", Mock(side_effect=AssertionError("must retain saved source")))
+    generated = []
+    async def synthesize(row):
+        generated.append(row.id)
+        if speech_fails:
+            row.status = "TTS"
+            raise RuntimeError("speech service unavailable")
+        row.audio_path = str(restored.segments_dir / f"seg_{row.id}.wav")
+        with wave.open(row.audio_path, "wb") as output:
+            output.setparams((1, 2, 24000, 0, "NONE", "not compressed"))
+            output.writeframes(b"\x01\x00" * 2400)
+        row.status, row.failed_stage, row.error = "READY", None, None
+    monkeypatch.setattr(restored, "_synthesize_segment", synthesize)
+    async def run():
+        await restored.retry_failed_synthesis()
+        await restored.worker_task
+    asyncio.run(run())
+    assert generated == [38] and translate.call_count == 1
+    assert translate.call_args.kwargs["text_zh"] == "叶哥"
+    row = restored.segments[38]
+    assert (row.id, row.start, row.end, row.text_zh, row.final_vi) == (38, 2, 4, "叶哥", "Anh Diệp.")
+    assert row.needs_review and row.verification["source_supported"] is False
+    assert row.verification["status"] == "unresolved" and row.verification["semantic_verified"] is False
+    assert restored.get_progress()["missing_speech_ids"] == []
+    if speech_fails:
+        assert row.status == "FAILED" and row.failed_stage == "TTS"
+        assert restored.can_retry and row.final_vi == "Anh Diệp."
+        restored.persist()
+        active_streaming_sessions.pop(session.task_id)
+        reopened = restore_saved_session(session.task_id)
+        assert reopened.segments[38].final_vi == "Anh Diệp."
+        assert reopened.segments[38].failed_stage == "TTS"
+    for sid in (0, 39):
+        assert vars(restored.segments[sid]) == peers[sid]
+
+
+def test_missing_translation_recovery_preserves_manual_edit_during_provider_call(persisted, monkeypatch):
+    row = persisted.segments[0]
+    row.final_vi, row.failed_stage = "", "TRANSLATING"
+    def concurrent_edit(**kwargs):
+        row.final_vi, row.verification = "Lời mới của người dùng.", {"status": "manual"}
+        row.revision += 1
+        return {"final_vi": "Bản AI đã cũ."}
+    monkeypatch.setattr(persisted.translator, "translate_single_segment", concurrent_edit)
+    from core.streaming.pipeline import SegmentEditConflict
+    with pytest.raises(SegmentEditConflict):
+        asyncio.run(persisted._recover_missing_translation(row))
+    assert row.final_vi == "Lời mới của người dùng." and row.verification == {"status": "manual"}
+
+
+@pytest.mark.parametrize("draft", ["", "[không rõ nghĩa]"])
+def test_missing_translation_provider_note_never_becomes_a_recovered_draft(persisted, monkeypatch, draft):
+    row = persisted.segments[0]
+    row.final_vi, row.failed_stage = "", "TRANSLATING"
+    row.verification = {"status": "unresolved", "source_supported": False}
+    monkeypatch.setattr(persisted.translator, "translate_single_segment", Mock(return_value={"final_vi": draft}))
+    with pytest.raises(RuntimeError, match="chưa tạo được"):
+        asyncio.run(persisted._recover_missing_translation(row))
+    assert row.final_vi == "" and row.verification["source_supported"] is False
+
+
 def test_corrupt_manifest_is_listed_but_cannot_open(persisted):
     _project_path(persisted.task_id).write_text("{\"version\":", encoding="utf-8")
     row = next(item for item in list_saved_sessions() if item["task_id"] == persisted.task_id)
     assert row["can_open"] is False and row["status"] == "FAILED"
     with pytest.raises((ValueError, json.JSONDecodeError)):
         restore_saved_session(persisted.task_id)
+
+
+def test_status_history_preserves_failure_time_and_reason_after_repeated_reopen(persisted):
+    from core.streaming.status_history import record_snapshot, record_status
+    from core.streaming import session_store as store
+    persisted.segments[0].status = "FAILED"
+    persisted.segments[0].error = "Âm thanh chưa vừa khoảng thoại."
+    persisted.error = "1 câu chưa tạo được giọng."
+    record_status(persisted, "RUNNING", "tts", "Đang tạo giọng", timestamp=100)
+    record_snapshot(persisted, {"status": "FAILED", "phase": "failed", "stage": persisted.error})
+    original = persisted.status_history.copy()
+    original_time = persisted.status_changed_at
+    persisted.persist()
+    assert store._read(persisted.task_id)["session"]["status_history"] == original
+    for _ in range(2):
+        restored = restore_saved_session(persisted.task_id)
+        assert restored.get_progress()["status_history"] == original
+        assert restored.get_progress()["status_changed_at"] == original_time
+        restored.persist()
+        active_streaming_sessions.pop(persisted.task_id)
+    assert "Âm thanh chưa vừa khoảng thoại" in original[-1]["message"]
+
+
+def test_work_events_journal_failure_without_polling_or_recursive_saves(persisted):
+    persisted._persistence_enabled = True
+    persisted.is_running = True
+    asyncio.run(persisted.report_progress("tts", "Đang tạo giọng câu 1"))
+    asyncio.run(persisted.report_progress("tts", "Đang tạo giọng câu 2"))
+    assert len(persisted.status_history) == 1
+    persisted.pause()
+    persisted.resume()
+    persisted.is_running = False
+    persisted.error = "Nguồn nhận diện sai mốc thời gian tại 287 giây."
+    asyncio.run(persisted.emit("error", {"message": persisted.error}))
+    assert [row["status"] for row in persisted.status_history] == ["RUNNING", "PAUSED", "RUNNING", "FAILED"]
+    from core.streaming import session_store as store
+    history = store._read(persisted.task_id)["session"]["status_history"]
+    assert history[-1]["message"] == persisted.error
+    for _ in range(5):
+        persisted.get_progress()
+    assert persisted.status_history == history
 
 
 def test_history_excluded_manifest_is_never_read_or_media_validated(persisted, monkeypatch):
@@ -668,7 +840,9 @@ def test_address_evidence_pacing_and_context_survive_repeated_restore(
                       "confidence": .98, "bbox": [.1, .8, .8, .05]}],
         "address_context_sources": {"0": "拜托姐"},
         "pacing": {"status": "verified", "provider": "opencode", "text": segment.final_vi,
-                   "reason": "Giữ cách xưng hô đã đối chiếu.", "address_preserved": True}}
+                   "reason": "Giữ cách xưng hô đã đối chiếu.", "address_preserved": True,
+                   "meaning_preserved": True, "natural": True,
+                   "fluency": {"natural": True, "reason": "Lượt đọc Việt độc lập xác nhận cấu trúc rõ."}}}
     persisted.rolling_context = [{"id": 0, "start": 0.0, "end": 2.0, "zh": "拜托姐", "vi": "Thôi mà chị.",
         "is_focus": True, "speaker_id": "A", "addressee_id": "B", "source_needs_review": True,
         "source_truncated": True, "translation_is_draft": True, "reviewed_address_context": reading}]
@@ -855,7 +1029,9 @@ def test_review_diagnostics_and_independent_audio_evidence_round_trip(persisted,
     assert saved["segments"][0]["verification"] == segment.verification
     restored = restore_saved_session(persisted.task_id)
     assert restored.segments[0].verification == segment.verification
-    assert restored.get_progress()["status"] == "FAILED"
+    assert restored.get_progress()["media_complete"] is True
+    assert restored.get_progress()["output_is_draft"] is True
+    assert restored.get_progress()["final_output_blocked"] is False
     assert restored.get_progress()["can_review"]
     restored.persist()
     active_streaming_sessions.clear()
@@ -925,7 +1101,9 @@ def test_interrupted_review_is_explicit_and_does_not_call_provider(persisted, mo
     monkeypatch.setattr(intelligence, "validate_visual_provider", Mock(side_effect=AssertionError("no provider lookup")))
     restored = restore_saved_session(persisted.task_id)
     assert restored.review_summary["status"] == "incomplete"
-    assert restored.get_progress()["status"] == "FAILED"
+    assert restored.get_progress()["media_complete"] is True
+    assert restored.get_progress()["output_is_draft"] is True
+    assert restored.get_progress()["final_output_blocked"] is False
     assert restored.get_progress()["can_review"]
     assert not restored.is_running and restored.worker_task is None and restored.review_task is None
 
@@ -1730,3 +1908,119 @@ def test_concurrent_redaction_operations_have_independent_snapshots(monkeypatch)
         futures = [workers.submit(clean, key) for key in ("synthetic-thread-one", "synthetic-thread-two")]
         assert all(future.result(timeout=10) for future in futures)
     assert store._REDACTION_VALUES.get() is None
+
+
+@pytest.mark.parametrize("valid", [False, True])
+def test_history_checks_each_row_audio_once_per_snapshot(persisted, monkeypatch, valid):
+    from core.streaming import session_store as store
+    data = store._read(persisted.task_id)
+    probe = Mock(return_value=valid)
+    monkeypatch.setattr(store, "_valid_row_audio", probe)
+    for _ in range(2):
+        probe.reset_mock()
+        result = store._availability(data)
+        assert result["final_output_blocked"] is not valid
+        assert probe.call_count == 1
+
+
+@pytest.mark.parametrize("change", ["missing", "same_stat_corrupt", "truncated", "overlong"])
+def test_history_rechecks_media_changes_between_reads(persisted, change):
+    import os
+    from core.streaming import session_store as store
+    audio_path = Path(persisted.segments[0].audio_path)
+    original = audio_path.read_bytes()
+    before = audio_path.stat()
+    assert not store.list_saved_sessions()[0]["final_output_blocked"]
+    if change == "missing":
+        audio_path.unlink()
+    elif change == "same_stat_corrupt":
+        audio_path.write_bytes(b"X" * len(original))
+        os.utime(audio_path, ns=(before.st_atime_ns, before.st_mtime_ns))
+    elif change == "truncated":
+        audio_path.write_bytes(original[:-2])
+    else:
+        with wave.open(str(audio_path), "wb") as output:
+            output.setparams((1, 2, 24000, 0, "NONE", "not compressed"))
+            output.writeframes(b"\x01\x00" * 72000)
+    invalid = store.list_saved_sessions()[0]
+    assert invalid["final_output_blocked"] and invalid["missing_media"]
+    assert store._availability(store._read(persisted.task_id))["missing_audio_ids"] == [0]
+    audio_path.write_bytes(original)
+    assert not store.list_saved_sessions()[0]["final_output_blocked"]
+
+
+def test_history_rechecks_manual_manifest_edits_without_timestamp_change(persisted):
+    import os
+    from core.streaming import session_store as store
+    path = store._project_path(persisted.task_id)
+    data = json.loads(path.read_text(encoding="utf-8"))
+    before = path.stat()
+    timestamp = data["updated_at"]
+    assert not store.list_saved_sessions()[0]["final_output_blocked"]
+    data["segments"][0]["final_vi"] = "Người dùng sửa trực tiếp."
+    path.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
+    os.utime(path, ns=(before.st_atime_ns, before.st_mtime_ns))
+    assert store._read(persisted.task_id)["segments"][0]["final_vi"] == "Người dùng sửa trực tiếp."
+    data["segments"][0]["status"] = "INVALID"
+    path.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
+    os.utime(path, ns=(before.st_atime_ns, before.st_mtime_ns))
+    assert data["updated_at"] == timestamp
+    invalid = store.list_saved_sessions()[0]
+    assert invalid["status"] == "FAILED" and not invalid["can_open"]
+
+
+def test_concurrent_history_audio_checks_do_not_share_row_results(persisted, monkeypatch):
+    import threading
+    from copy import deepcopy
+    from concurrent.futures import ThreadPoolExecutor
+    from core.streaming import session_store as store
+    healthy = store._read(persisted.task_id)
+    missing = deepcopy(healthy)
+    missing["segments"][0]["audio_path"] = str(persisted.segments_dir / "absent.wav")
+    barrier = threading.Barrier(2)
+    original = store._valid_row_audio
+    calls = []
+    def probe(row, value):
+        calls.append(value)
+        barrier.wait(timeout=5)
+        return original(row, value)
+    monkeypatch.setattr(store, "_valid_row_audio", probe)
+    with ThreadPoolExecutor(max_workers=2) as workers:
+        futures = [workers.submit(store._availability, data) for data in (healthy, missing)]
+        results = [future.result(timeout=10) for future in futures]
+    assert not results[0]["final_output_blocked"]
+    assert results[1]["final_output_blocked"]
+    assert len(calls) == 2
+
+
+def test_row_audio_uses_one_handle_and_retains_per_row_timing(persisted, monkeypatch):
+    from core.streaming import session_store as store
+    row = store._read(persisted.task_id)["segments"][0]
+    opened = Mock(wraps=store.wave.open)
+    monkeypatch.setattr(store.wave, "open", opened)
+    assert store._valid_row_audio(row, row["audio_path"])
+    assert opened.call_count == 1
+    row.update(dub_start=0, dub_end=.001)
+    assert not store._valid_row_audio(row, row["audio_path"])
+    assert opened.call_count == 2
+
+
+@pytest.mark.parametrize("kind", ["leaf", "ancestor"])
+def test_history_revalidates_new_media_symlinks(persisted, kind):
+    from core.streaming import session_store as store
+    audio = Path(persisted.segments[0].audio_path)
+    assert not store.list_saved_sessions()[0]["final_output_blocked"]
+    if kind == "leaf":
+        target = audio.with_name("original.wav")
+        audio.rename(target)
+        alias = audio
+    else:
+        alias = audio.parent
+        target = alias.with_name("original_segments")
+        alias.rename(target)
+    try:
+        alias.symlink_to(target, target_is_directory=kind == "ancestor")
+    except OSError as error:
+        pytest.skip(f"Symlink creation unavailable: {error}")
+    result = store.list_saved_sessions()[0]
+    assert not result["can_open"] and result["status"] == "FAILED"

@@ -18,7 +18,10 @@ _RATE_LOCK = threading.Lock()
 
 def processing_profile(session, stage):
     """Rates belong to the real provider/voice/settings, not a global guess."""
-    payload = ["stage-eta-3", stage, settings.LLM_PROVIDER, settings.OPENCODE_MODEL,
+    model = {"ollama": settings.OLLAMA_MODEL, "opencode": settings.OPENCODE_MODEL,
+             "gemini": settings.GEMINI_MODEL, "openrouter-free": settings.OPENROUTER_MODEL}.get(
+                 settings.LLM_PROVIDER, settings.OPENCODE_MODEL)
+    payload = ["stage-eta-3", stage, settings.LLM_PROVIDER, model,
                getattr(session, "tts_engine_name", None), getattr(session, "voice", None),
                getattr(getattr(session, "aligner", None), "max_speed", None)]
     return "stage:" + hashlib.sha256(json.dumps(payload, sort_keys=True).encode()).hexdigest()

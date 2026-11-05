@@ -1,0 +1,16 @@
+# Optional BS-RoFormer separation runtime, compatible with requirements.txt.
+# 0.30.2 retains NumPy 1.x support and accepts PyTorch 2.6; 0.31+ requires NumPy 2.
+# On this GTX 1050 Ti Windows setup, install matching CUDA wheels first:
+# python -m pip install torch==2.6.0 torchaudio==2.6.0 torchvision==0.21.0 --index-url https://download.pytorch.org/whl/cu124
+# Then: python -m pip install -r requirements-roformer.txt
+audio-separator==0.30.2
+numpy==1.26.4
+torch==2.6.0
+torchaudio==2.6.0
+torchvision==0.21.0
+onnxruntime==1.23.2
+onnx==1.17.0
+onnx2torch==1.5.15
+beartype==0.18.5
+rotary-embedding-torch==0.6.1
+samplerate==0.1.0

@@ -38,19 +38,22 @@ def test_empty_service_responses_retry_fresh_stream_and_discard_partial_audio(tm
     assert len(attempts) == 3
     assert all(args == ("Xin chào", "vi-VN-NamMinhNeural") for args, _ in attempts)
     assert [kwargs["boundary"] for _, kwargs in attempts] == ["WordBoundary", "SentenceBoundary", "SentenceBoundary"]
-    assert [call.args[0] for call in sleep.await_args_list] == [3.0, 8.0]
+    assert all(lo <= call.args[0] <= hi for call, lo, hi in zip(sleep.await_args_list, [2, 3], [2.5, 5]))
     assert not list(tmp_path.glob("edge_tts_*"))
 
 
 def test_empty_word_metadata_request_recovers_with_sentence_audio_without_fake_word_timings(tmp_path):
     modes = []
+    metadata_paths = []
     def communicate(*args, **kwargs):
         modes.append(kwargs["boundary"])
-        async def save(path, metadata):
+        async def save(path, metadata=None):
+            metadata_paths.append(metadata)
             if kwargs["boundary"] == "WordBoundary":
                 raise NoAudioReceived("service rejected word boundary mode")
             Path(path).write_bytes(b"real provider audio")
-            Path(metadata).write_text('{"type":"SentenceBoundary","text":"Xin chào","offset":0,"duration":10000000}\n', encoding="utf-8")
+            if metadata:
+                Path(metadata).write_text('{"type":"SentenceBoundary","text":"Xin chào","offset":0,"duration":10000000}\n', encoding="utf-8")
         return Mock(save=save)
     output = tmp_path / "speech.mp3"
     engine = EdgeTTSFallbackEngine()
@@ -58,6 +61,7 @@ def test_empty_word_metadata_request_recovers_with_sentence_audio_without_fake_w
             patch("core.engines.tts.edge_fallback.asyncio.sleep", new_callable=AsyncMock):
         engine.synthesize("Xin chào", output)
     assert modes == ["WordBoundary", "SentenceBoundary"]
+    assert metadata_paths[0] is not None and metadata_paths[1] is None
     assert output.read_bytes() == b"real provider audio"
     assert engine.take_word_boundaries(output) == []
 
@@ -68,10 +72,10 @@ def test_repeated_empty_responses_fail_cleanly_and_preserve_previous_output(tmp_
     response = Mock(save=AsyncMock(side_effect=NoAudioReceived("empty service response")))
     with patch("core.engines.tts.edge_fallback.edge_tts.Communicate", return_value=response) as factory, \
             patch("core.engines.tts.edge_fallback.asyncio.sleep", new_callable=AsyncMock):
-        with pytest.raises(EdgeTTSRequestError, match="sau 3 lần thử") as caught:
+        with pytest.raises(EdgeTTSRequestError, match="sau 6 lần thử") as caught:
             EdgeTTSFallbackEngine().synthesize("Xin chào", output)
     assert caught.value.code == "tts_empty_audio" and caught.value.retryable and caught.value.status is None
-    assert factory.call_count == 3
+    assert factory.call_count == 6
     assert output.read_bytes() == b"existing user audio"
     assert not list(tmp_path.glob("edge_tts_*"))
 
@@ -84,6 +88,17 @@ def test_configuration_errors_are_not_retried(tmp_path):
     factory.assert_called_once()
     sleep.assert_not_awaited()
     assert not list(tmp_path.iterdir())
+
+
+def test_rate_limit_honors_retry_after_and_retains_it_after_six_attempts(tmp_path):
+    error = aiohttp.ClientResponseError(None, (), status=429, headers={"Retry-After": "90"})
+    with patch("core.engines.tts.edge_fallback.edge_tts.Communicate", side_effect=error) as factory, \
+            patch("core.engines.tts.edge_fallback.asyncio.sleep", new_callable=AsyncMock) as sleep:
+        with pytest.raises(EdgeTTSRequestError) as caught:
+            EdgeTTSFallbackEngine().synthesize("Xin chào", tmp_path / "speech.mp3")
+    assert factory.call_count == 6
+    assert [call.args[0] for call in sleep.await_args_list] == [90] * 5
+    assert caught.value.retry_after == 90
 
 
 @pytest.mark.parametrize("kind", ["disconnect", "timeout", "429", "503"])
@@ -197,9 +212,9 @@ def test_total_service_timeout_is_bounded_and_drains_each_attempt(tmp_path):
     with patch("core.engines.tts.edge_fallback.EDGE_REQUEST_TIMEOUT", .01), \
             patch("core.engines.tts.edge_fallback.asyncio.sleep", new_callable=AsyncMock), \
             patch("core.engines.tts.edge_fallback.edge_tts.Communicate", return_value=Mock(save=save)) as factory:
-        with pytest.raises(RuntimeError, match="kết nối ổn định.*3 lần"):
+        with pytest.raises(RuntimeError, match="kết nối ổn định.*6 lần"):
             EdgeTTSFallbackEngine().synthesize("Xin chào", tmp_path / "speech.mp3")
-    assert factory.call_count == 3 and len(drained) == 3
+    assert factory.call_count == 6 and len(drained) == 6
     assert not list(tmp_path.iterdir())
 
 
@@ -218,7 +233,7 @@ def test_exhausted_transient_failures_keep_safe_type_for_late_recovery(tmp_path,
         with pytest.raises(EdgeTTSRequestError) as caught:
             EdgeTTSFallbackEngine().synthesize("Xin chào", output)
     assert caught.value.code == code and caught.value.status == status and caught.value.retryable is True
-    assert factory.call_count == 3 and "private-" not in str(caught.value)
+    assert factory.call_count == 6 and "private-" not in str(caught.value)
     assert output.read_bytes() == b"previous accepted audio" and not list(tmp_path.glob("edge_tts_*"))
 
 

@@ -13,7 +13,21 @@ from copy import deepcopy
 from core.semantic_segments import source_speaker_confirmation
 
 
-ADDRESS_POLICY_REVISION = 9
+ADDRESS_POLICY_REVISION = 11
+
+
+def neighbor_context(rows, focus=(), neighbors=3):
+    """Return focus rows plus at most N chronological neighbors each side."""
+    ordered = sorted(list(rows), key=lambda row: (row.get("start", 0), row.get("id", 0)))
+    wanted = {row.get("id") for row in focus}
+    indexes = {row.get("id"): i for i, row in enumerate(ordered)}
+    keep = set()
+    for row in focus:
+        index = indexes.get(row.get("id"))
+        if index is None:
+            continue
+        keep.update(range(max(0, index - neighbors), min(len(ordered), index + neighbors + 1)))
+    return [row for i, row in enumerate(ordered) if i in keep or row.get("id") in wanted]
 
 VIETNAMESE_ADDRESS_POLICY = """
 QUY TẮC XƯNG HÔ THEO NGỮ CẢNH (áp dụng cả dịch, kiểm định và rút gọn lời đọc):
@@ -22,7 +36,13 @@ QUY TẮC XƯNG HÔ THEO NGỮ CẢNH (áp dụng cả dịch, kiểm định v�
   con/em/chị/anh là những lựa chọn theo quan hệ; 我 không có một bản dịch cố định.
   你 cũng không mặc định là mày. Không tự thêm sắc thái hỗn hoặc hạ vai người nói.
 - Khi con nói với bố/mẹ đã được nguồn xác nhận: xưng con, gọi bố/mẹ theo ngữ cảnh;
-  không đổi thành tôi/tao/tớ chỉ vì nguồn dùng 我. Khi nguồn xác nhận cách gọi 姐,
+  không đổi thành tôi/tao/tớ chỉ vì nguồn dùng 我. Chiều ngược lại, bố/mẹ nói với
+  con thì gọi con, tự xưng bố/mẹ khi cần; không gọi bạn chỉ vì nguồn dùng 你.
+  Giữ đúng vai cả trong sở hữu: 我女儿 là 'con gái của con' khi người con đang
+  nói với mẹ, còn 你的 là 'của con' khi mẹ đang đáp người con. 'Con gái' ở đây
+  chỉ người thứ ba, không phải người đang nghe. Không đổi nội dung quan hệ
+  được nhắc đến thành quan hệ giữa hai người đang nói.
+  Khi nguồn xác nhận cách gọi 姐,
   xem ai gọi ai là chị; người gọi có thể xưng em, người được gọi có thể xưng chị.
   Một lời gọi chị và câu giải thích ngay sau có thể vẫn do cùng người nói tiếp.
   Segment/đổi mốc ASR không đồng nghĩa đổi
@@ -31,6 +51,15 @@ QUY TẮC XƯNG HÔ THEO NGỮ CẢNH (áp dụng cả dịch, kiểm định v�
   bằng chứng cùng người nói: phải xét cả cách đọc nối lời và hỏi–đáp/đối chiếu
   giữa những người khác nhau. Không mặc định tao hoặc tự luân phiên
   chị/em theo số câu; không gán một chiều đại từ cho toàn bộ nhân vật.
+- Đọc trọn lượt hỏi–đáp và phản ứng trước/sau trước khi quyết định xưng hô,
+  kể cả khi lời gọi bố/mẹ xuất hiện SAU câu cần dịch. Ví dụ một người hỏi về
+  cô gái, người kia đáp 'nghe cô ấy nói là con gái của mình', rồi người hỏi
+  phủ nhận và người đáp phản ứng bằng 妈: xét chuỗi hỏi, đáp, phủ nhận, gọi mẹ
+  để xác định chiều mẹ–con. Khi mạch nguồn đủ rõ, giữ con ở lời tự xưng của
+  người con và lời mẹ gọi con, không quay về tôi/bạn chỉ vì từng câu không
+  lặp lời gọi mẹ hoặc thiếu speaker_id. Dẫn cả câu đang xét, lời gọi và lượt
+  nối chúng; từ 妈 đứng gần một mình không đủ. Kiểm tra lời trích, người thứ ba
+  hoặc đổi cảnh; chỉ giữ chưa rõ khi còn cách phân vai hợp nguồn làm đổi lời Việt.
 - Các câu tự giới thiệu, tuổi hoặc quan điểm đối lập ở gần nhau có thể là hai
   người đáp nhau, lời sửa lại của một người, hoặc lời trích. Kiểm tra từng cách
   đọc với cả câu trước và sau; không ép hai 我 thành cùng người chỉ vì không có
@@ -41,6 +70,10 @@ QUY TẮC XƯNG HÔ THEO NGỮ CẢNH (áp dụng cả dịch, kiểm định v�
   không tự chứng minh người đang nói, không dùng lịch hiện tại hoặc giả định
   bố/mẹ luôn lớn tuổi hơn để loại một cách phân vai hợp lời nguồn. Không tự bịa
   du hành thời gian; giữ các cách đọc còn hợp lý và báo chưa rõ nếu nguồn thiếu.
+- Khi thoại cố ý đùa đổi vai, giả làm người lớn hoặc đòi gọi anh/chị theo tuổi,
+  giữ đúng ý đùa và cách xưng hô tạm thời có căn cứ trong chính lượt đó. Không
+  ép mọi câu về bố–con chỉ vì đã biết quan hệ thật. Khi hết đoạn trêu đổi vai,
+  trở về cách xưng hô của cuộc thoại bình thường; không lan vai đùa sang cảnh khác.
 - 姐/哥 có thể là cách gọi xã giao; 爸/妈/老师 có thể nằm trong lời kể hoặc lời trích.
   Một từ đơn lẻ không chứng minh quan hệ ruột thịt, người nói, tuổi hay giới tính.
   Không gán quan hệ của cảnh trước cho nhân vật mới. Dùng mốc câu, lời gọi/đáp,
@@ -76,7 +109,7 @@ QUY TẮC XƯNG HÔ THEO NGỮ CẢNH (áp dụng cả dịch, kiểm định v�
 """.strip()
 
 # Only chooses evidence to retain; it must never decide the Vietnamese pronoun.
-_ADDRESS_CUE = re.compile(r"[爸妈媽父母姐哥弟妹爷爺奶叔姨姑舅婶嬸伯嫂叔婆娘]|老师|老師|师傅|師傅|师父|師父|先生|女士|您")
+_ADDRESS_CUE = re.compile(r"[爸妈媽父母姐哥弟妹爷爺奶叔姨姑舅婶嬸伯嫂叔婆娘]|儿子|兒子|女儿|女兒|孩子|孙子|孫子|孙女|孫女|老师|老師|师傅|師傅|师父|師父|先生|女士|您")
 
 # Select complete role phrases without deciding their meaning or certainty.
 # The provider may ground ``cô gái`` or ``bố mẹ`` as one role. Splitting the
@@ -164,7 +197,11 @@ def dialogue_context(rows, focus=(), *, max_rows=64, max_chars=18000):
     nearby = sorted(range(len(normalized)), key=lambda i: min(abs(i - target) for target in focused))
     cue_indices = [i for i, (_, item) in enumerate(normalized) if _ADDRESS_CUE.search(item["text_zh"])]
     cue_indices.sort(key=lambda i: abs(i - anchor))
-    cue_neighbors = [j for i in cue_indices for j in (i, i - 1, i + 1) if 0 <= j < len(normalized)]
+    # A vocative can resolve the preceding question/answer/reaction, while
+    # the next response distinguishes direct address from reported speech.
+    # Keep that bounded exchange as evidence, without assigning its speakers.
+    cue_neighbors = [j for i in cue_indices for j in (i, i - 1, i + 1, i - 2, i + 2, i - 3, i + 3)
+                     if 0 <= j < len(normalized)]
     # Preserve the current exchange first, then relationships, then other turns.
     priority = focused + nearby[:12] + cue_neighbors + nearby
     selected, size = {}, 0
@@ -211,12 +248,22 @@ def address_expressions(candidate, *, grounded_terms=()):
                   "", text, flags=re.I)
     text = re.sub(r"(?<!\w)" + kinship + r"(?=\s+của\s)", "", text, flags=re.I)
     text = re.sub(r"(?<!\w)" + third_person + r"(?!\w)", "", text, flags=re.I)
+    # In this explicit passive construction the qualified neighbour is the
+    # agent being referenced, not a self/listener address. Preserve direct
+    # vocatives and unqualified kinship terms, which remain ambiguous.
+    text = re.sub(r"(?<=bị )dì\s+hàng\s+xóm(?=\s+bắt\s+gặp\b)", "", text, flags=re.I)
     text = re.sub(r"\bcon\s+(?:mèo|vật|số|đường|người)\b", "", text, flags=re.I)
     text = re.sub(r"\bmột\s+mình\b", "", text, flags=re.I)
+    text = re.sub(r"(?<!\w)ba[ \t]+lê(?!\w)", ",", text, flags=re.I)
+    text = re.sub(
+        r"(?<!\w)(?:(?:mười|mươi|trăm[ \t]+(?:linh|lẻ))[ \t]+ba|"
+        r"ba(?=[ \t]+(?:mươi|trăm|nghìn|ngàn|triệu|tỷ|tỉ)(?!\w)))(?!\w)",
+        ",", text, flags=re.I)
     # A small set of unambiguous numeric-unit spans is not an address. Keep
     # the rest of the sentence: 'Ba chờ ba phút' still contains the parent.
     text = re.sub(r"\bba\s+(?:phút|giây|giờ|ngày|tuần|tháng|năm|lần|chiếc|cái)\b", "", text, flags=re.I)
     text = re.sub(r"\bthứ\s+ba\b", "", text, flags=re.I)
+    text = re.sub(r"\bcấp\s+ba\b", "", text, flags=re.I)
     # Extract multiword role terms first and mask their spans so the token
     # pass cannot split them into unrelated address uses.  Return everything
     # in source order; the provider's address_uses is ordered the same way.
@@ -228,8 +275,26 @@ def address_expressions(candidate, *, grounded_terms=()):
     token_re = re.compile(
         r"(?<!\w)(?:tôi|tao|tớ|mình|bạn|mày|chị|em|anh|cô|chú|bác|con|bố|ba|mẹ|má|"
         r"thầy|cậu|ông|bà|ta|cháu|dì|cụ|cưng|ngươi|mi)(?!\w)", re.I)
+    for match in re.finditer(r"(?<!\w)Mi[ \t]+Sa(?!\w)", text):
+        masked[match.start():match.start() + 2] = [" "] * 2
     spans.extend((match.start(), match.end(), match.group(0))
                  for match in token_re.finditer("".join(masked)))
+    # A plural listener such as ``hai người`` has no token in the pronoun
+    # vocabulary. Select it only when the separate source reading supplied
+    # that exact role; counts, usage direction and certainty are still
+    # checked by the caller. Arbitrary provider phrases cannot become roles.
+    plural_roles = {"hai người", "ba người", "các bạn", "mọi người", "các con"}
+    for term in grounded_terms:
+        if not isinstance(term, str) or " ".join(term.casefold().split()) not in plural_roles:
+            continue
+        pattern = r"(?<!\w)" + r"\s+".join(re.escape(word) for word in term.split()) + r"(?!\w)"
+        for match in re.finditer(pattern, text, re.I):
+            owned = [span for span in spans if span[0] < match.end() and span[1] > match.start()]
+            if any(span[0] < match.start() or span[1] > match.end() for span in owned):
+                continue
+            for span in owned:
+                spans.remove(span)
+            spans.append((match.start(), match.end(), match.group(0)))
     # An independently read named address can be 'anh Dã', while lexical
     # selection alone sees 'anh'. Retain the whole EXACT named form when it
     # occurs at the selected position. This neither equates shorter forms nor
@@ -290,6 +355,9 @@ def address_reading_prompt(rows, context):
         "không bắt buộc có speaker_id, không tự gán danh tính, giới tính hoặc luân phiên theo segment. "
         "OCR chỉ chứng minh chữ nguồn, KHÔNG tự chứng minh ai nói. Được kết luận từ mạch đối thoại "
         "và lời gọi/đáp nếu đủ rõ; nếu hai cách phân vai vẫn hợp lý thì uncertain=true. "
+        "Dùng cả lời đáp hoặc lời gọi xuất hiện sau ID đang xét để nối vai trong cùng cuộc thoại; "
+        "không đòi mỗi câu phải lặp lại quan hệ. Phân biệt mẹ nói với con và con nói với mẹ, "
+        "kể cả đại từ sở hữu 我/你 và người thứ ba như 我女儿. "
         "Với câu phụ thuộc nối vai từ câu khác, so sánh ÍT NHẤT cách đọc cùng người nói và "
         "cách đọc đổi người/hỏi–đáp/đối chiếu; xét thêm tự sửa và trích dẫn khi phù hợp. "
         "Phải có căn cứ khẳng định cách đọc được chọn; 'không thấy đổi lượt' không đủ. "
@@ -355,7 +423,10 @@ def validate_address_reading(data, rows, context, *, require_turn_check=False):
             if (not isinstance(citation, dict) or type(citation.get("id")) is not int
                     or citation["id"] not in by_id or not isinstance(citation.get("quote"), str)
                     or not citation["quote"].strip() or citation["quote"] not in by_id[citation["id"]]):
-                raise ValueError("Dẫn chứng xưng hô không khớp lời nguồn.")
+                sid = citation.get("id") if isinstance(citation, dict) else None
+                expected_text = by_id.get(sid, "ID không có trong ngữ cảnh nguồn") if type(sid) is int else "ID nguồn phải là số nguyên"
+                raise ValueError(f"Dẫn chứng xưng hô không khớp lời nguồn. ID={sid}; "
+                                 f"quote phải sao chép từ text_zh={expected_text!r}.")
         checked = dict(row)
         # Older saved readings did not contain a competing-turn analysis. Do
         # not invent one on their behalf. When the provider does declare that
@@ -379,7 +450,10 @@ def validate_address_reading(data, rows, context, *, require_turn_check=False):
                 if (not isinstance(citation, dict) or type(citation.get("id")) is not int
                         or citation["id"] not in by_id or not isinstance(citation.get("quote"), str)
                         or not citation["quote"].strip() or citation["quote"] not in by_id[citation["id"]]):
-                    raise ValueError("Dẫn chứng phân lượt không khớp lời nguồn.")
+                    sid = citation.get("id") if isinstance(citation, dict) else None
+                    expected_text = by_id.get(sid, "ID không có trong ngữ cảnh nguồn") if type(sid) is int else "ID nguồn phải là số nguyên"
+                    raise ValueError(f"Dẫn chứng phân lượt không khớp lời nguồn. ID={sid}; "
+                                     f"quote phải sao chép từ text_zh={expected_text!r}.")
                 turn_refs.add(citation["id"])
             if row["id"] not in turn_refs:
                 raise ValueError("Kiểm tra phân lượt chưa dẫn chính câu đang xét.")
@@ -419,6 +493,13 @@ def address_review_instruction(reading):
           "mỗi mục {\"term\":\"chị\",\"role\":\"listener\"}; role chỉ self hoặc listener. "
           "Không thêm danh từ chỉ người thứ ba hoặc vai reference vào address_uses; "
           "không có tự xưng/gọi người nghe thì dùng mảng rỗng. "
+          "Giữ rõ sở hữu khi nguồn dùng 我妈/我爸/你妈/你爸: người được nhắc tới là người thứ ba, "
+          "còn đại từ sở hữu vẫn phải đúng vai đã đọc. Nếu từ thân tộc đứng trần làm lời Việt "
+          "có thể bị hiểu là tự xưng/gọi người nghe, dùng cấu trúc sở hữu rõ như 'mẹ của con' "
+          "khi self=con đã có căn cứ, thay vì tự xác nhận vai cho từ 'mẹ'. "
+          "Ví dụ 我妈让我回来 với self=con đã rõ có thể là 'Mẹ của con bảo con về', "
+          "address_uses gồm hai lần con/self; mẹ là người thứ ba. Đây chỉ là cách giữ đúng "
+          "sở hữu đã có trong nguồn, không được thêm quan hệ hay ép self=con khi còn chưa rõ. "
           "Ghi đủ cả từ lặp, đúng từ đã dùng; 'Chị ơi, nhờ chị đấy!' có hai mục chị/listener. "
           "'Em nhờ chị' có em/self và chị/listener. Không đổi vai của từ để né kết luận chưa rõ. "
           "Giữ nguyên cả cụm 'cô gái', 'anh trai', 'chị gái', 'em gái', 'em trai', 'bố mẹ', 'ba má' "

@@ -84,7 +84,8 @@ def implementation_revision():
              "video_intelligence.py", "screen_ocr.py", "media_process.py", "chinese_text.py", "structured_response.py", "semantic_segments.py", "ai_execution.py",
              "engines/translation/opencode_client.py", "engines/asr/sensevoice_engine.py",
              "engines/asr/native_process.py", "engines/asr/whisper_process.py",
-             "engines/asr/whisper_worker.py", "engines/asr/review_evidence_worker.py")]
+             "engines/asr/whisper_worker.py", "engines/asr/review_evidence_worker.py",
+             "engines/asr/contextual_evidence.py")]
     return {str(path.relative_to(root)): file_digest(path) for path in paths}
 
 
@@ -115,9 +116,10 @@ def evidence_revision(check):
         except metadata.PackageNotFoundError:
             versions[package] = "unavailable"
     model_root = settings.BASE_DIR / "workspace" / "models"
+    whisper = "faster-whisper-" + settings.ASR_REVIEW_WHISPER_MODEL
     for relative in ("sensevoice_onnx/model.int8.onnx", "sensevoice_onnx/tokens.txt",
-                     "faster-whisper-small/model.bin", "faster-whisper-small/config.json",
-                     "faster-whisper-small/tokenizer.json", "faster-whisper-small/vocabulary.json"):
+                     *(whisper + "/" + name for name in
+                       ("model.bin", "config.json", "tokenizer.json", "vocabulary.json", "vocabulary.txt"))):
         path = model_root / relative
         assets[relative] = file_digest(path, check) if path.is_file() else "unavailable"
     return {"versions": versions, "assets": assets}

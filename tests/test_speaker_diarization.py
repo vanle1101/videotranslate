@@ -311,10 +311,20 @@ def test_invalid_worker_never_publishes_partial_result(worker_fixture, failure):
 def test_native_diarization_cancel_stops_child_and_releases_shared_slot(worker_fixture):
     media, engine, calls, install = worker_fixture
     install("import time; time.sleep(30)")
-    start = time.monotonic()
+    cancellation = []
+    def cancel_spawned_child():
+        # Asset hashes/SQLite initialization can exceed 250 ms on a busy
+        # machine. Trigger this child-cleanup check only after it exists;
+        # cancellation before spawn is covered separately below.
+        if not calls or calls[0].get("process") is None:
+            return False
+        if not cancellation:
+            cancellation.append(time.monotonic())
+        return True
     with pytest.raises(asyncio.CancelledError):
-        engine.diarize(media, 0., 10., cancel_check=lambda: time.monotonic() - start > .25)
-    assert time.monotonic() - start < 5 and calls[0]["process"].poll() is not None
+        engine.diarize(media, 0., 10., cancel_check=cancel_spawned_child)
+    assert cancellation and time.monotonic() - cancellation[0] < 5
+    assert len(calls) == 1 and calls[0]["process"].poll() is not None
     assert native_process.WORKER_SLOT.acquire(blocking=False)
     native_process.WORKER_SLOT.release()
     assert not list(settings.TEMP_DIR.glob("diarization-worker-*"))
@@ -346,6 +356,16 @@ def test_replaced_media_cannot_reuse_old_speaker_prototypes(worker_fixture):
     assert len(calls) == 1
     with sqlite3.connect(engine.registry_path) as db:
         assert db.execute("SELECT COUNT(*) FROM chunks").fetchone()[0] == 1
+
+
+def test_native_diarization_cancel_before_spawn_does_not_start_a_child(worker_fixture):
+    media, engine, calls, install = worker_fixture
+    install("raise AssertionError('must not spawn')")
+    with pytest.raises(asyncio.CancelledError):
+        engine.diarize(media, 0., 10., cancel_check=lambda: True)
+    assert not calls
+    assert native_process.WORKER_SLOT.acquire(blocking=False)
+    native_process.WORKER_SLOT.release()
 
 
 def test_existing_verified_segmentation_archive_is_not_deleted(tmp_path, monkeypatch):

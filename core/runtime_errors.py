@@ -22,6 +22,32 @@ def redacted_detail(value):
     return text[-6000:]
 
 
+def redacted_traceback(error, *, include_messages=True):
+    """Keep every frame and chained cause without logging credentials or locals."""
+    if not include_messages:
+        # Provider bodies can contain arbitrary prompt text that cannot be
+        # reliably recognized as a credential. Preserve every frame, exception
+        # type and cause boundary without echoing those strings or source lines.
+        seen = set()
+        def frames(current):
+            if id(current) in seen:
+                return ""
+            seen.add(id(current))
+            before = ""
+            if current.__cause__ is not None:
+                before = frames(current.__cause__) + "\nThe above exception was the direct cause of the following exception:\n\n"
+            elif current.__context__ is not None and not current.__suppress_context__:
+                before = frames(current.__context__) + "\nDuring handling of the above exception, another exception occurred:\n\n"
+            stack = "Traceback (most recent call last):\n" if current.__traceback__ else ""
+            for frame, number in traceback.walk_tb(current.__traceback__):
+                stack += f'  File {frame.f_code.co_filename!r}, line {number}, in {frame.f_code.co_name}\n'
+            kind = type(current)
+            return before + stack + f"{kind.__module__}.{kind.__qualname__}: [provider detail withheld]\n"
+        return "".join(redacted_detail(line) for line in frames(error).splitlines(keepends=True))
+    return "".join(redacted_detail(line) for block in traceback.format_exception(
+        type(error), error, error.__traceback__) for line in block.splitlines(keepends=True))
+
+
 def export_failure(error, export_id, stage):
     lowered = str(error).casefold()
     if isinstance(error, FileNotFoundError):
@@ -39,5 +65,5 @@ def export_failure(error, export_id, stage):
     logging.getLogger("errors").error(
         "EXPORT_FAILED run_id=%s category=%s stage=%s error_type=%s detail=%s traceback=%s",
         export_id, category, redacted_detail(stage), type(error).__name__,
-        redacted_detail(error), redacted_detail("".join(traceback.format_tb(error.__traceback__))))
+        redacted_detail(error), redacted_traceback(error))
     return f"{action} Bản dịch và giọng đọc vẫn được giữ. Mã: {export_id}."

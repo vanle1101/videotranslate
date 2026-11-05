@@ -181,7 +181,7 @@ class PreviewManager:
                 "ffprobe", "-v", "error", "-show_entries", "format=duration", "-of", "json", str(source),
             ], cancel_check=job["cancel"].is_set, capture_output=True, timeout=30))
             duration = float(probe.get("format", {}).get("duration", 0))
-            if duration <= 0:
+            if not math.isfinite(duration) or duration <= 0:
                 raise RuntimeError("Không đọc được thời lượng video")
             requested_start = float(job.get("start_seconds") or 0)
             requested_end = job.get("end_seconds")
@@ -232,10 +232,15 @@ class PreviewManager:
                 self._evict_jobs_locked()
         except Exception as error:
             output.unlink(missing_ok=True)
-            logger.warning("Compatible video preview failed: %s", error)
+            cancelled = job["cancel"].is_set()
+            if cancelled:
+                logger.info("Compatible video preview cancelled by request")
+            else:
+                logger.warning("Compatible video preview failed: %s", error)
             with self._lock:
-                job["status"] = "CANCELLED" if job["cancel"].is_set() else "FAILED"
-                job["error"] = "Đã dừng tạo bản xem trước" if job["cancel"].is_set() else str(error)
+                job["status"] = "CANCELLED" if cancelled else "FAILED"
+                job["error"] = "Đã dừng tạo bản xem trước" if cancelled else str(error)
+                job["error_code"] = "cancelled" if cancelled else "preview_failed"
                 job["finished_at"] = time.monotonic()
                 self._evict_jobs_locked()
         finally:
@@ -253,6 +258,7 @@ class PreviewManager:
             return {"preview_id": key, "status": job["status"],
                     "video_url": f"/api/preview/{key}/media" if job["status"] == "READY" else None,
                     "error": job.get("error"),
+                    "error_code": job.get("error_code"),
                     "source_duration": job.get("source_duration"),
                     "coverage_seconds": job.get("coverage_seconds"),
                     "start_seconds": job.get("start_seconds", 0),

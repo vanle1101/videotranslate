@@ -3,6 +3,30 @@ from pathlib import Path
 from core import review_checkpoint as cache
 
 
+def test_review_model_choice_and_changed_weights_invalidate_evidence_identity(tmp_path, monkeypatch):
+    from config import settings
+    from importlib import metadata
+    monkeypatch.setattr(settings, "BASE_DIR", tmp_path)
+    def unavailable(name):
+        raise metadata.PackageNotFoundError(name)
+    monkeypatch.setattr(cache.metadata, "distribution", unavailable)
+    root = tmp_path / "workspace/models"
+    for model in ("small", "large-v3"):
+        directory = root / ("faster-whisper-" + model)
+        directory.mkdir(parents=True)
+        for name in ("model.bin", "config.json", "tokenizer.json", "vocabulary.json"):
+            (directory / name).write_bytes((model + name).encode())
+    monkeypatch.setattr(settings, "ASR_REVIEW_WHISPER_MODEL", "small")
+    small = cache.evidence_revision(lambda: None)
+    monkeypatch.setattr(settings, "ASR_REVIEW_WHISPER_MODEL", "large-v3")
+    large = cache.evidence_revision(lambda: None)
+    assert small != large
+    assert "faster-whisper-large-v3/model.bin" in large["assets"]
+    assert "faster-whisper-small/model.bin" not in large["assets"]
+    (root / "faster-whisper-large-v3/model.bin").write_bytes(b"changed-large-weights")
+    assert cache.evidence_revision(lambda: None) != large
+
+
 def test_address_policy_only_change_invalidates_prior_review(tmp_path, monkeypatch):
     video = tmp_path / "source.mp4"
     video.write_bytes(b"offline-source-identity")

@@ -1,5 +1,6 @@
 """Local API contracts using stub sessions; no AI models or external services."""
 import os
+import wave
 import asyncio
 import threading
 import stat
@@ -68,9 +69,11 @@ class LocalAPITests(unittest.TestCase):
         segment.status = "READY"
         segment.final_vi = "Xin chào"
         segment.audio_path = str(self.root / "giọng Việt.wav")
-        Path(segment.audio_path).write_bytes(b"audio fixture")
+        with wave.open(segment.audio_path, "wb") as audio:
+            audio.setparams((1, 2, 24000, 0, "NONE", "not compressed"))
+            audio.writeframes(b"\x01\x00" * 24000)
         attrs = dict(
-            task_id="local-test", video_path=self.video, total_duration=1.0,
+            task_id="local-test", video_path=self.video, total_duration=1.0, initialized=True,
             initial_buffer_seconds=10.0, segments={0: segment},
             screen_texts=[], video_size=(1080, 1920), warnings=[],
             is_running=False, is_paused=False, error=None,
@@ -97,6 +100,29 @@ class LocalAPITests(unittest.TestCase):
         self.assertEqual(response.json()["status"], "ok")
         self.assertIsInstance(response.json()["ffmpeg"], bool)
         self.assertIsInstance(response.json()["ffprobe"], bool)
+
+    def test_ollama_local_provider_requires_installed_model_before_persisting(self):
+        with patch.object(settings, "LLM_PROVIDER", "opencode"), \
+             patch("main.update_env_file") as persist, \
+             patch("core.engines.translation.ollama_client.OllamaClient.verify_model", return_value=True):
+            response = self.client.post("/api/settings", json={"llm_provider": "ollama"})
+            self.assertEqual(response.status_code, 200, response.text)
+            self.assertEqual(settings.LLM_PROVIDER, "ollama")
+            persist.assert_called_once_with({"LLM_PROVIDER": "ollama"})
+
+    def test_ollama_provider_is_not_selected_when_local_model_is_unavailable(self):
+        with patch.object(settings, "LLM_PROVIDER", "opencode"), \
+             patch("main.update_env_file") as persist, \
+             patch("core.engines.translation.ollama_client.OllamaClient.verify_model", return_value=False):
+            response = self.client.post("/api/settings", json={"llm_provider": "ollama"})
+            self.assertEqual(response.status_code, 503)
+            self.assertEqual(settings.LLM_PROVIDER, "opencode")
+            persist.assert_not_called()
+
+    def test_settings_reports_local_ollama_model(self):
+        response = self.client.get("/api/settings")
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["ollama_model"], settings.OLLAMA_MODEL)
 
     def test_library_lists_only_direct_completed_media_without_reading_contents(self):
         nested = self.root / "private"
@@ -285,6 +311,8 @@ class LocalAPITests(unittest.TestCase):
         for state in ({"is_running": True}, {"error": "TTS offline"}):
             with self.subTest(state=state):
                 session = self.session(**state)
+                if state.get("error"):
+                    session.segments[0].audio_path = None
                 main.active_streaming_sessions[session.task_id] = session
                 with patch.object(main, "HQExporter") as exporter:
                     response = self.client.post("/api/streaming/export-hq", json={"task_id": session.task_id})
@@ -419,6 +447,7 @@ class LocalAPITests(unittest.TestCase):
         # both preview paths, including text-only provider reconnections.
         self.assertEqual(cue["background"], "yellow")
         self.assertEqual(snapshot["caption_bottom_layout"]["cues"][0]["background"], "yellow")
+
         self.assertEqual(snapshot["caption_layout"]["video_size"], [1080, 1920])
         self.assertNotIn("audio_path", snapshot)
 

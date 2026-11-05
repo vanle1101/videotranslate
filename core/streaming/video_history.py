@@ -73,6 +73,18 @@ def _owner(row):
     return str(row.get("parent_session_id") or (task_id[7:] if task_id.startswith("export_") else task_id))
 
 
+def _checkpoint_depth(row):
+    """Return durable work depth without inspecting the source file."""
+    values = (
+        row.get("checkpoint_segments"), row.get("processing_completed_segments"),
+        row.get("segments_count"), row.get("checkpoint_processed_seconds"),
+        row.get("processed_seconds"), row.get("checkpoint_source_prepared_seconds"),
+        row.get("source_prepared_seconds"),
+    )
+    numeric = [value for value in values if type(value) in {int, float} and math.isfinite(value) and value > 0]
+    return (2 if row.get("checkpoint_initialized") or row.get("initialized") else 0) + (1 if numeric else 0)
+
+
 def group_video_history(tasks):
     """Join exact source evidence and owning export IDs in O(n log n) time."""
     rows = [dict(row) for row in tasks]
@@ -130,6 +142,15 @@ def group_video_history(tasks):
         # owns the progress. Its Stop action still uses the export task ID.
         representative = max(candidates, key=lambda row: (
             _timestamp(row), bool(active and row.get("is_export")), str(row.get("task_id", ""))))
+        # A newly-created preview can be newer while containing no source,
+        # transcript, or audio. Keep it in the version list, but make the
+        # latest useful checkpoint the main row so "Mở lại" resumes work.
+        if (not active and representative.get("status") in {"STOPPED", "CANCELLED"}
+                and _checkpoint_depth(representative) == 0):
+            useful = [row for row in projects if _checkpoint_depth(row) > 0
+                      and row.get("can_open") is not False]
+            if useful:
+                representative = max(useful, key=lambda row: (_timestamp(row), str(row.get("task_id", ""))))
         if not active:
             terminal_exports = [row for _, row in members if row.get("is_export")
                 and row.get("status") in {"FAILED", "CANCELLED", "STOPPED", "TIMED_OUT"}
@@ -142,7 +163,8 @@ def group_video_history(tasks):
         identities = sorted({key for index, _ in members for key in keys[index] if not key.startswith("session:")})
         identity = next((key for key in identities if key.startswith("douyin:")), identities[0] if identities else "session:" + _owner(representative))
         versions = [{key: row.get(key) for key in (
-            "task_id", "title", "updated_at", "status", "can_open", "translation_mode", "output_video_url", "stage", "saved")}
+            "task_id", "title", "updated_at", "status", "can_open", "translation_mode", "output_video_url", "stage", "saved",
+            "checkpoint_initialized", "checkpoint_segments", "checkpoint_processed_seconds")}
             for row in ordered_projects]
         view = {**representative,
             "video_id": hashlib.sha256(identity.encode("utf-8")).hexdigest()[:24],
@@ -151,6 +173,8 @@ def group_video_history(tasks):
             "source_url": source.get("source_url") or "",
             "source_video_url": source.get("source_video_url") or "",
             "versions": versions, "version_count": len(versions),
+            "history_resume_hint": ("Đang mở bản có dữ liệu đã lưu; bản xem trước rỗng được giữ trong Các bản đã lưu."
+                if any(_checkpoint_depth(row) == 0 for _, row in members) and _checkpoint_depth(representative) > 0 else ""),
             "updated_at": max((_timestamp(row) for _, row in members), default=0),
             "can_open": bool(any(row.get("can_open") and row.get("task_id") == _owner(representative) for row in projects)),
             "is_export": bool(representative.get("is_export")),

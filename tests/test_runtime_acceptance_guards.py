@@ -61,7 +61,7 @@ def test_export_rejects_missing_or_unreadable_media(tmp_path, monkeypatch, case)
     if case != 'missing':
         video.write_bytes(b'' if case == 'empty' else b'fixture')
     metadata = {'format': {'duration': '2'}, 'streams': [
-        {'codec_type': 'video', 'width': 10, 'height': 10}, {'codec_type': 'audio'}]}
+        {'codec_type': 'video', 'width': 10, 'height': 10, 'start_time': '0', 'duration': '2'}, {'codec_type': 'audio', 'start_time': '0', 'duration': '2'}]}
     if case == 'bad_metadata':
         metadata = {}
     elif case == 'no_audio':
@@ -85,7 +85,7 @@ def test_export_validation_decodes_the_complete_result(tmp_path, monkeypatch):
     video = tmp_path / "result.mp4"
     video.write_bytes(b"fixture")
     metadata = json.dumps({'format': {'duration': '2'}, 'streams': [
-        {'codec_type': 'video', 'width': 10, 'height': 10}, {'codec_type': 'audio'}]}).encode()
+        {'codec_type': 'video', 'width': 10, 'height': 10, 'start_time': '0', 'duration': '2'}, {'codec_type': 'audio', 'start_time': '0', 'duration': '2'}]}).encode()
     commands = []
 
     def media(command, *args, **kwargs):

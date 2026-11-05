@@ -78,10 +78,16 @@ def synthesize_natural_speech(*, text, source, duration, output_path, engine, al
     measurements = []
     measured_candidates = []
     seen_candidates = set()
+    # Production native-language rewriting opts into five proposals in total;
+    # legacy/plugin adapters retain their established three acoustic attempts.
+    proposal_limit = getattr(translator, "max_pacing_proposals", None)
+    proposal_limit = min(5, max(1, proposal_limit)) if type(proposal_limit) is int else None
+    proposal_count = 0
+    acoustic_attempts = proposal_limit + 1 if proposal_limit is not None else 3
     original_duration = duration
     with tempfile.TemporaryDirectory(prefix="speech-fit-", dir=output_path.parent) as temporary:
         raw, fitted = Path(temporary) / "raw.wav", Path(temporary) / "fitted.wav"
-        for attempt in range(3):
+        for attempt in range(acoustic_attempts):
             duration = original_duration
             raw_budget = duration * aligner.max_speed
             execution = current_execution_context()
@@ -182,7 +188,7 @@ def synthesize_natural_speech(*, text, source, duration, output_path, engine, al
                                     execution.run_id, speech_id, attempt + 1, before, measured,
                                     sum(right - left for left, right in cuts + edge_cuts), len(cuts) + len(edge_cuts))
             except SpeechBudgetError:
-                if translator is None or attempt == 2:
+                if translator is None or attempt == acoustic_attempts - 1 or (proposal_limit is not None and proposal_count >= proposal_limit):
                     logger.warning("PACING_FAILED run_id=%s speech_id=%s attempt=%d reason=%s",
                                    execution.run_id, speech_id, attempt + 1, "rewrite_disabled" if translator is None else "budget_exhausted")
                     failure = SpeechBudgetError(
@@ -212,7 +218,8 @@ def synthesize_natural_speech(*, text, source, duration, output_path, engine, al
                     "measured_candidates": list(measurements),
                 }
                 review_feedback = dict(timing_feedback)
-                for review_attempt in range(3):
+                review_attempts = proposal_limit - proposal_count if proposal_limit is not None else 3
+                for review_attempt in range(review_attempts):
                     if execution.cancel_check and execution.cancel_check():
                         import asyncio
                         raise asyncio.CancelledError
@@ -220,13 +227,19 @@ def synthesize_natural_speech(*, text, source, duration, output_path, engine, al
                         logger.info("PACING_REWRITE run_id=%s speech_id=%s attempt=%d proposal=%d request_budget_seconds=%.4f reduction_pct=%.1f",
                                     execution.run_id, speech_id, attempt + 1, review_attempt + 1,
                                     request_budget, timing_feedback["required_reduction_pct"])
+                        proposal_count += 1
                         proposed = translator.rewrite_for_pacing(
                             source, current, request_budget, context,
                             measured_duration=measured, feedback=review_feedback)
                         candidate = proposed.get("final_vi")
                         proof = proposed.get("pacing_verification")
-                        if (not isinstance(candidate, str) or not candidate.strip()
-                                or not isinstance(proof, dict) or proof.get("status") != "verified"
+                        draft_allowed = (getattr(translator, "allow_uncertain_pacing", False) is True
+                            and isinstance(proof, dict) and proof.get("status") == "unresolved"
+                            and proof.get("semantic_verdict") == "uncertain" and proof.get("draft_allowed") is True
+                            and proof.get("natural") is True and bool(proof.get("reason")))
+                        from core.multilingual_translation import is_untranslated_placeholder
+                        if (not isinstance(candidate, str) or not candidate.strip() or is_untranslated_placeholder(candidate)
+                                or not isinstance(proof, dict) or not (proof.get("status") == "verified" or draft_allowed)
                                 or proof.get("text") != candidate):
                             raise RuntimeError("Thiếu xác minh cho lời đọc đã rút gọn.")
                         if pacing_candidate_key(candidate) in seen_candidates:
@@ -240,7 +253,7 @@ def synthesize_natural_speech(*, text, source, duration, output_path, engine, al
                         logger.warning("PACING_REJECTED run_id=%s speech_id=%s attempt=%d proposal=%d reason=%s",
                                        execution.run_id, speech_id, attempt + 1, review_attempt + 1, error.code)
                         seen_candidates.add(pacing_candidate_key(error.feedback["rejected_candidate"]))
-                        if review_attempt == 2:
+                        if review_attempt == review_attempts - 1:
                             best = min(measured_candidates, key=lambda item: item["measured_seconds"])
                             error.required_dub_duration = best["measured_seconds"] / aligner.max_speed + .012
                             error.candidate_text = best["text"]

@@ -10,6 +10,22 @@ from core.translation_review import AutomaticTranslationReviewer
 from core.video_intelligence import VideoIntelligenceError
 
 
+def test_second_pass_rate_limit_keeps_service_category_retry_after_and_chained_evidence(caplog):
+    from core.engines.translation.opencode_client import OpenCodeRequestError
+    cause = OpenCodeRequestError("provider 429 Authorization: Bearer private-test-token",
+                                code="provider_rate_limited", retryable=True)
+    cause.retry_after = 120
+    try:
+        raise VideoIntelligenceError("semantic review unavailable") from cause
+    except VideoIntelligenceError as error:
+        diagnostic = AutomaticTranslationReviewer._diagnostic(error, "semantic_second_pass", [segment()])
+    assert diagnostic["code"] == "provider_rate_limited"
+    assert diagnostic["retry_after"] == 120
+    assert "hạn mức" in AutomaticTranslationReviewer._diagnostic_message(diagnostic)
+    assert "direct cause" in caplog.text and "OpenCodeRequestError" in caplog.text
+    assert "private-test-token" not in caplog.text
+
+
 def segment(**changes):
     return {"id": 0, "start": 1.0, "end": 3.0, "text_zh": "假的反而会限流",
             "literal_vi": "Sai. Ngược lại còn bị hạn chế lượt tiếp cận.",
@@ -57,6 +73,116 @@ def test_fresh_evidence_and_separate_semantic_audit_can_resolve_prior_flag(revie
     assert progress == [30.0, 75.0, 100.0]
     assert review.client.translate.call_count == 2
     review.screen_ocr.close.assert_called_once()
+
+
+def test_automatic_local_self_review_keeps_source_uncertainty_visible_and_uses_one_batch(monkeypatch):
+    monkeypatch.setattr(settings, "LLM_PROVIDER", "ollama")
+    source = segment(asr_text="假的反而会限流")
+    proposed = {"id": source["id"], "final_vi": "Sai. Ngược lại còn bị hạn chế lượt xem.",
+        "needs_review": False,
+        "review_reason": "", "semantic_verified": True,
+        "verification_reason": "Giữ phủ định và ý ngược lại của 反而."}
+    client = Mock(has_credentials=True, model="qwen3:4b-no-think")
+    client.translate.return_value = json.dumps({"segments": [proposed]}, ensure_ascii=False)
+    reviewer = AutomaticTranslationReviewer(client=client)
+    reviewer._review_client = Mock(return_value=client)
+
+    result = reviewer.review("unused.mp4", [source], [], fast_local=True)
+
+    row = result["segments"][0]
+    assert row["final_vi"] == proposed["final_vi"]
+    assert row["needs_review"] is True
+    assert row["verification"]["status"] == "unresolved"
+    assert row["verification"]["semantic_verified"] is True
+    assert row["verification"]["source_supported"] is False
+    assert result["summary"] == {"checked": 1, "verified": 0, "corrected": 0, "unresolved": 1}
+    client.translate.assert_called_once()
+
+
+def test_local_fast_review_sends_structured_ollama_schema(monkeypatch):
+    from core.engines.translation.ollama_client import OllamaClient
+    monkeypatch.setattr(settings, "LLM_PROVIDER", "ollama")
+    source = segment(asr_text="假的反而会限流")
+    proposed = {"id": source["id"], "needs_review": False, "review_reason": "", "semantic_verified": True,
+                "verification_reason": "Giữ đủ nghĩa.", "final_vi": "Sai, ngược lại còn bị hạn chế."}
+    output = json.dumps({"segments": [proposed]}, ensure_ascii=False)
+    client = OllamaClient("qwen3:4b-no-think", "http://127.0.0.1:11434")
+    reviewer = AutomaticTranslationReviewer(client=client)
+    reviewer._review_client = Mock(return_value=client)
+
+    with pytest.MonkeyPatch.context() as local_patch:
+        call = Mock(return_value=output)
+        local_patch.setattr(OllamaClient, "translate", call)
+        result = reviewer.review("unused.mp4", [source], [], fast_local=True)
+
+    response_schema = call.call_args.kwargs["response_format"]
+    segment_schema = response_schema["properties"]["segments"]["items"]
+    assert "segments" in response_schema["required"]
+    assert set(segment_schema["required"]) == {
+        "id", "final_vi", "needs_review", "review_reason", "semantic_verified", "verification_reason"}
+    assert not {"start", "end", "text_zh"} & set(segment_schema["properties"])
+    assert result["segments"][0]["verification"]["source_supported"] is False
+
+
+def test_local_fast_review_schema_retry_includes_the_invalid_field_path(monkeypatch):
+    monkeypatch.setattr(settings, "LLM_PROVIDER", "ollama")
+    source = segment(asr_text="假的反而会限流")
+    invalid = {"segments": [{"id": source["id"], "final_vi": "Sai, ngược lại còn bị hạn chế.",
+        "needs_review": False, "review_reason": "", "verification_reason": "Giữ ý ngược lại."}]}
+    valid = {"segments": [{"id": source["id"], "final_vi": "Sai, ngược lại còn bị hạn chế.",
+        "needs_review": False, "review_reason": "", "semantic_verified": True,
+        "verification_reason": "Giữ ý ngược lại.", "unexpected": "ignored"}]}
+    client = Mock(has_credentials=True, model="qwen3:4b-no-think")
+    client.translate.side_effect = [json.dumps(invalid, ensure_ascii=False),
+                                    json.dumps(valid, ensure_ascii=False)]
+    reviewer = AutomaticTranslationReviewer(client=client)
+    reviewer._review_client = Mock(return_value=client)
+
+    reviewer.review("unused.mp4", [source], [], fast_local=True)
+
+    retry_prompt = client.translate.call_args_list[1].args[0]
+    assert "$.segments[0].semantic_verified" in retry_prompt
+    assert "missing_field" in retry_prompt
+
+
+def test_automatic_local_self_review_rejects_source_changes_and_asr_disagreement(monkeypatch):
+    monkeypatch.setattr(settings, "LLM_PROVIDER", "ollama")
+    source = segment(asr_text="真的反而会限流", final_vi="Sai. Ngược lại còn bị hạn chế.")
+    proposed = {"id": source["id"], "final_vi": "Đúng. Ngược lại còn bị hạn chế.",
+        "needs_review": False, "review_reason": "", "semantic_verified": True,
+        "verification_reason": "Đã so nghĩa."}
+    client = Mock(has_credentials=True, model="qwen3:4b-no-think")
+    client.translate.return_value = json.dumps({"segments": [proposed]}, ensure_ascii=False)
+    reviewer = AutomaticTranslationReviewer(client=client)
+    reviewer._review_client = Mock(return_value=client)
+
+    row = reviewer.review("unused.mp4", [source], [], fast_local=True)["segments"][0]
+
+    assert row["text_zh"] == source["text_zh"]
+    assert row["final_vi"] == source["final_vi"]
+    assert row["needs_review"] is True
+    assert row["verification"]["source_supported"] is False
+    assert "ASR ban đầu" in row["review_reason"]
+
+
+def test_automatic_local_self_review_ignores_model_source_or_timeline_fields(monkeypatch):
+    monkeypatch.setattr(settings, "LLM_PROVIDER", "ollama")
+    source = segment(asr_text="假的反而会限流")
+    forged = {"id": source["id"], "start": 0.0, "end": 99.0,
+        "text_zh": "假的反而不限流", "final_vi": "Không đúng.", "needs_review": False,
+        "review_reason": "", "semantic_verified": True, "verification_reason": "Đã so nghĩa."}
+    client = Mock(has_credentials=True, model="qwen3:4b-no-think")
+    client.translate.return_value = json.dumps({"segments": [forged]}, ensure_ascii=False)
+    reviewer = AutomaticTranslationReviewer(client=client)
+    reviewer._review_client = Mock(return_value=client)
+
+    row = reviewer.review("unused.mp4", [source], [], fast_local=True)["segments"][0]
+
+    assert client.translate.call_count == 1
+    assert (row["start"], row["end"], row["text_zh"]) == (
+        source["start"], source["end"], source["text_zh"])
+    assert row["needs_review"] is True
+    assert row["verification"]["status"] == "unresolved"
 
 
 @pytest.mark.parametrize("evidence", [[], [ocr(confidence=.85)], [ocr("反而会限流")],
@@ -112,6 +238,52 @@ def test_supported_semantic_correction_is_applied_without_changing_source(review
     result = run(review, source)["segments"][0]
     assert result["final_vi"] == segment()["final_vi"]
     assert result["verification"]["status"] == "corrected"
+
+
+@pytest.mark.parametrize("formatting", ["假的，反而会限流。", "假的 反而会限流"])
+def test_ocr_review_preserves_source_version_when_only_formatting_changes(review, formatting):
+    source = segment()
+    reviewed_context_version = source["text_zh"]
+    review.client.translate.return_value = answer(source, text_zh=formatting)
+    row = run(review, source)["segments"][0]
+    assert row["needs_review"] is False
+    assert row["text_zh"] == reviewed_context_version
+    assert row["verification"]["source_supported"] is True
+
+
+def test_audio_review_preserves_exact_source_version_when_words_are_unchanged(review):
+    source = segment()
+    reviewed_context_version = source["text_zh"]
+    review.audio_evidence = Mock()
+    review.audio_evidence.collect.return_value = {0: {
+        "sensevoice": "假的，反而会限流。", "faster-whisper-small": "假的反而会限流"}}
+    review.client.translate.return_value = answer(source, text_zh="假的，反而会限流。")
+    row = review.resolve_audio_uncertainty("source.mp4", audio_result(source))["segments"][0]
+    assert row["needs_review"] is False
+    assert row["text_zh"] == reviewed_context_version
+    assert row["verification"]["audio_consensus"] is True
+
+
+@pytest.mark.parametrize("route", ["ocr", "audio"])
+def test_known_source_meaning_conflict_survives_repeated_model_approval(review, route):
+    source = segment(verification={"source_ambiguity": {
+        "id": 0, "method": "homophone-context-conflict", "status": "unresolved",
+        "text_zh": segment()["text_zh"], "reason": "Two possible meanings remain unresolved.",
+        "evidence": [{"id": 0, "text_zh": segment()["text_zh"]}]}})
+    if route == "ocr":
+        row = run(review, source)["segments"][0]
+    else:
+        result = audio_result(source)
+        result["segments"][0]["verification"]["source_ambiguity"] = source["verification"]["source_ambiguity"]
+        review.audio_evidence = Mock()
+        review.audio_evidence.collect.return_value = {0: {
+            "sensevoice": source["text_zh"], "faster-whisper-small": source["text_zh"]}}
+        row = review.resolve_audio_uncertainty("source.mp4", result)["segments"][0]
+    assert row["needs_review"] is True
+    assert row["verification"]["status"] == "unresolved"
+    assert row["verification"]["semantic_verified"] is False
+    assert row["verification"]["source_ambiguity"] == source["verification"]["source_ambiguity"]
+    assert row["review_reason"] == "Two possible meanings remain unresolved."
 
 
 def test_clean_sentence_also_gets_independent_semantic_check(review):
@@ -245,6 +417,20 @@ def test_independent_audio_agreement_can_verify_video_with_no_subtitles(review):
     assert row["verification"]["audio_consensus"] is True
     assert result["summary"] == {"checked": 1, "verified": 1, "corrected": 0, "unresolved": 0}
     assert review.client.translate.call_count == 2
+
+
+@pytest.mark.parametrize("model", ["small", "medium", "large-v3"])
+def test_audio_review_prompt_names_actual_native_engines(review, monkeypatch, model):
+    from core.translation_review import _LocalAudioEvidence
+    monkeypatch.setattr(settings, "ASR_REVIEW_WHISPER_MODEL", model)
+    review.audio_evidence = _LocalAudioEvidence()
+    review.audio_evidence.collect = Mock(return_value={0: {
+        "sensevoice": segment()["text_zh"], f"faster-whisper-{model}": segment()["text_zh"]}})
+    result = review.resolve_audio_uncertainty("source.mp4", audio_result())
+    assert result["segments"][0]["needs_review"] is False
+    for call in review.client.translate.call_args_list:
+        assert f"sensevoice và faster-whisper-{model}" in call.args[0]
+        assert "Faster-Whisper-small" not in call.args[0]
 
 
 def test_audio_source_correction_requires_semantic_audit_and_regenerable_text(review):
@@ -412,7 +598,8 @@ def test_second_semantic_pass_failure_never_approves_first_pass(review, invalid,
 
 
 @pytest.mark.parametrize("failed", [False, True])
-def test_evidence_workers_preserve_decoding_and_clean_pcm_even_on_failure(tmp_path, monkeypatch, failed):
+@pytest.mark.parametrize("whisper_engine", ["faster-whisper-small", "faster-whisper-medium", "faster-whisper-large-v3"])
+def test_evidence_workers_preserve_decoding_and_clean_pcm_even_on_failure(tmp_path, monkeypatch, failed, whisper_engine):
     import sys
     from types import SimpleNamespace
     import core.engines.asr.review_evidence_worker as module
@@ -431,6 +618,7 @@ def test_evidence_workers_preserve_decoding_and_clean_pcm_even_on_failure(tmp_pa
         (whisper / name).touch()
     engines = []
     def sense_load(engine):
+        assert engine.language == "zh"
         engines.append(engine)
         stream = SimpleNamespace(result=SimpleNamespace(text="真的。"), accept_waveform=Mock())
         engine.recognizer = SimpleNamespace(create_stream=lambda: stream, decode_stream=Mock())
@@ -463,12 +651,12 @@ def test_evidence_workers_preserve_decoding_and_clean_pcm_even_on_failure(tmp_pa
     module.collect_engine({**request, "engine": "sensevoice"}, readings.append)
     if failed:
         with pytest.raises(RuntimeError, match="inference failure"):
-            module.collect_engine({**request, "engine": "faster-whisper-small"}, readings.append)
+            module.collect_engine({**request, "engine": whisper_engine}, readings.append)
     else:
-        module.collect_engine({**request, "engine": "faster-whisper-small"}, readings.append)
+        module.collect_engine({**request, "engine": whisper_engine}, readings.append)
         assert [row for row in readings if row["event"] == "evidence"] == [
             {"event": "evidence", "id": 0, "engine": "sensevoice", "text": "真的。"},
-            {"event": "evidence", "id": 0, "engine": "faster-whisper-small", "text": "真的"}]
+            {"event": "evidence", "id": 0, "engine": whisper_engine, "text": "真的"}]
     assert all(not path.exists() for path in wav_paths)
     assert engines[0].recognizer is None
 

@@ -1,3 +1,5 @@
+import pytest
+
 from core.dialogue_segments import split_dialogue_segments
 
 
@@ -75,6 +77,28 @@ def test_rounded_word_overlap_keeps_row_instead_of_creating_rejected_intervals()
     rows = split_dialogue_segments([source])
     assert [(item["start"], item["end"], item["text_zh"]) for item in rows] == [(0, 2, "你好。再见。")]
     assert rows[0]["words"] == []
+
+
+@pytest.mark.parametrize("text,start,end,words", [
+    # Actual failing shape at source offset 287.48: splitting the leading dash
+    # produced the illegal interval [13.24, 13.24].
+    ("- 暗杀", 13.24, 13.87,
+     [word("-", 13.24, 13.24), word(" 暗", 13.61, 13.77), word("杀", 13.77, 13.87)]),
+    ("前一句。", 10.0, 13.5,
+     [word("前", 10.2, 10.6), word("一句。", 13.24, 13.24)]),
+    ("你好。再见。", 0., 2.,
+     [word("你好。", .1, .8), word("再见。", 2., 2.)]),
+])
+def test_zero_length_word_keeps_measured_parent_row_instead_of_zero_duration_piece(text, start, end, words):
+    # Whisper can append a token whose start and end are identical at a
+    # segment boundary.  It must not produce a rejected zero-duration line.
+    source = row(text, start, end, words)
+    rows = split_dialogue_segments([source])
+    assert len(rows) == 1
+    assert rows[0]["text_zh"] == source["text_zh"]
+    assert rows[0]["start"] == start and rows[0]["end"] == end
+    assert rows[0]["words"] == []
+    assert rows[0]["source_asr_start"] == start and rows[0]["source_asr_end"] == end
 
 
 def test_incomplete_word_metadata_does_not_drop_source_characters():

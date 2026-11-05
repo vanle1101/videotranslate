@@ -100,7 +100,7 @@ def test_instances_share_single_cpu_model_with_bounded_threads(monkeypatch, tmp_
     assert first is second
     assert len(made) == 1
     assert made[0]["providers"] == ["CPUExecutionProvider"]
-    assert made[0]["sess_options"].intra_op_num_threads == 4
+    assert made[0]["sess_options"].intra_op_num_threads == 2
     assert made[0]["sess_options"].inter_op_num_threads == 1
 
 

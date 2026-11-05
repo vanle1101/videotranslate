@@ -52,7 +52,9 @@ def setup_logging():
 
     # Errors logger
     err_logger = logging.getLogger("errors")
-    err_logger.setLevel(logging.ERROR)
+    # Recoverable source/provider failures are emitted as WARNING with their
+    # retry checkpoint. Keep them in the same diagnostic file as hard failures.
+    err_logger.setLevel(logging.WARNING)
     if not err_logger.handlers:
         err_handler = logging.FileHandler(LOG_DIR / "errors.log", encoding="utf-8")
         err_handler.setFormatter(logging.Formatter(log_format, date_format))
@@ -182,7 +184,12 @@ class ServiceManager:
         update(10, "Checking local hardware...")
         try:
             from core.hardware import detect_hardware
-            hw = detect_hardware()
+            # Startup is an inventory/display pass. Importing PyTorch,
+            # CTranslate2, or ONNX Runtime just to report GPU capability can
+            # fault the desktop process on machines with unstable CUDA
+            # drivers. Selected native engines are probed only when explicitly
+            # prewarmed or used by their isolated workers.
+            hw = detect_hardware(probe_native=False)
             status["gpu"] = bool(hw.get("cuda_available"))
             update(25, f"Hardware ready: {hw.get('gpu_name') or 'CPU'}; processing on {settings.DEVICE}")
         except Exception as exc:

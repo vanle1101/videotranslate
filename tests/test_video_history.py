@@ -97,6 +97,21 @@ def test_active_run_beats_recent_saved_variant_and_retains_exact_progress():
     assert videos[0]["stage"] == "Đang đối chiếu lời nguồn" and videos[0]["can_stop"]
 
 
+def test_newer_empty_preview_does_not_hide_saved_translation_checkpoint():
+    videos = group_video_history([
+        project("full", video_path=r"D:\source.mp4", updated_at=10, status="STOPPED",
+                translation_mode="full", initialized=True, checkpoint_segments=195,
+                processing_completed_segments=191, processed_seconds=320.0),
+        project("empty-preview", video_path=r"D:\source.mp4", updated_at=20, status="STOPPED",
+                translation_mode="preview", initialized=False, checkpoint_segments=0,
+                processed_seconds=0),
+    ])
+    row = videos[0]
+    assert row["session_id"] == "full"
+    assert row["history_resume_hint"]
+    assert "empty-preview" in [version["task_id"] for version in row["versions"]]
+
+
 def test_newest_failed_attempt_is_not_hidden_by_old_success():
     videos = group_video_history([
         project("good", video_path=r"D:\source.mp4", updated_at=1, status="COMPLETED", progress_pct=100),

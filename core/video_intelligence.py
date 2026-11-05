@@ -26,7 +26,7 @@ from core.engines.translation.opencode_client import OpenCodeZenClient, OpenCode
 from core.chinese_text import comparable_chinese
 from core.media_process import run_media
 from core.screen_ocr import ScreenOCR
-from core.translation_context import VIETNAMESE_ADDRESS_POLICY, dialogue_context
+from core.translation_context import VIETNAMESE_ADDRESS_POLICY, dialogue_context, neighbor_context
 from core.semantic_segments import semantic_context, SEMANTIC_TRANSLATION_POLICY, source_speaker_confirmation
 from core.structured_response import (
     StructuredResponseError, parse_object, validate_schema, request_structured,
@@ -126,8 +126,8 @@ class VideoIntelligenceError(StructuredResponseError):
 def validate_visual_provider():
     """Validate provider choice before creating media/cache or starting work."""
     provider = (getattr(settings, "LLM_PROVIDER", "") or "").strip().lower()
-    if provider not in {"gemini", "openrouter-free", "opencode"}:
-        raise VideoIntelligenceError("Đọc chữ trong video hỗ trợ OpenCode, OpenRouter miễn phí hoặc Gemini; hãy chọn trong Cài đặt.")
+    if provider not in {"gemini", "openrouter-free", "opencode", "ollama"}:
+        raise VideoIntelligenceError("Đọc chữ trong video hỗ trợ Ollama local, OpenCode, OpenRouter miễn phí hoặc Gemini; hãy chọn trong Cài đặt.")
     if provider == "gemini" and not (getattr(settings, "GEMINI_API_KEY", "") or os.getenv("GEMINI_API_KEY", "")).strip():
         raise VideoIntelligenceError("Dịch hình ảnh bằng Gemini cần API key Gemini trong Cài đặt.")
     return provider
@@ -141,6 +141,7 @@ class VideoIntelligence:
     MAX_WIDTH = 720
     CHECKPOINT_VERSION = 1
     OPENCODE_SPEECH_BATCH_SIZE = 4
+    MAX_TRANSLATION_TARGETS = 8
     OPENCODE_SCREEN_BATCH_SIZE = 8
     OPENCODE_SOURCE_EVIDENCE_LIMIT = 32
     SOURCE_CONTEXT_FIELDS = ("speaker_id", "speaker", "diarization_speaker", "spk", "speaker_evidence", "speaker_confirmation",
@@ -263,6 +264,7 @@ class VideoIntelligence:
             source = {"path": str(path), "size": stat.st_size, "mtime_ns": stat.st_mtime_ns}
             config = {name: getattr(settings, name, None) for name in (
                 "LLM_PROVIDER", "OPENCODE_MODEL", "OPENROUTER_MODEL", "GEMINI_MODEL",
+                "OLLAMA_MODEL", "OLLAMA_BASE_URL",
                 "ASR_ENGINE", "WHISPER_MODEL_SIZE", "WHISPER_COMPUTE_TYPE")}
             actual_model = getattr(self.client, "model", None)
             if isinstance(actual_model, str):
@@ -397,11 +399,20 @@ class VideoIntelligence:
                 raise VideoIntelligenceError("Điểm tiếp tục thiếu bản dịch OCR.")
         sources = result.get("translation_sources", [])
         if not isinstance(sources, list) or any(
-                not isinstance(item, dict) or item.get("provider") not in {"gemini", "opencode", "openrouter-free"}
+                not isinstance(item, dict) or item.get("provider") not in {"gemini", "opencode", "openrouter-free", "ollama"}
                 or not isinstance(item.get("model"), str) or not item["model"]
                 or item.get("evidence_mode") not in {"audio-video", "asr-ocr-text"} for item in sources):
             raise VideoIntelligenceError("Điểm tiếp tục thiếu nguồn bản dịch.")
         return {**result, "segments": {row["id"]: dict(row) for row in rows.values()}}
+
+    @staticmethod
+    def _aggregate_screen_rows(rows, start, end):
+        # Local OCR IDs restart at o0 for each analyzed chunk. Qualify only
+        # the aggregate's IDs, after per-chunk validation, so distinct regions
+        # remain distinct when a mixed-language owner revalidates the result.
+        # Keep cached rows and provider-facing evidence IDs unchanged.
+        namespace = f"chunk:{float(start)!r}:{float(end)!r}:"
+        return [{**row, "id": namespace + row["id"]} for row in rows]
 
     @staticmethod
     def _get(obj: Any, key: str, default: Any = None) -> Any:
@@ -584,8 +595,8 @@ class VideoIntelligence:
     @staticmethod
     def _with_provenance(result, provider, model):
         """Tag actual request provenance locally, never from model-authored JSON."""
-        evidence = "asr-ocr-text" if provider in {"openrouter-free", "opencode"} else "audio-video"
-        method = "text-ai" if provider in {"openrouter-free", "opencode"} else "video-ai"
+        evidence = "asr-ocr-text" if provider in {"openrouter-free", "opencode", "ollama"} else "audio-video"
+        method = "text-ai" if provider in {"openrouter-free", "opencode", "ollama"} else "video-ai"
         source = {"provider": provider, "model": str(model)[:200], "evidence_mode": evidence}
         for row in result["segments"].values():
             row.update(source_method=method, translation_provider=provider,
@@ -610,6 +621,16 @@ class VideoIntelligence:
         """Repair recognition before translation, with validated evidence IDs."""
         if not payload:
             return {}
+        # A local Ollama runner often has one inference slot. Keep its source
+        # correction responses small from the outset; selected translation
+        # concurrency remains independent and is still persisted per project.
+        if getattr(self, "provider", None) == "ollama" and len(payload) > 2:
+            combined = {}
+            for offset in range(0, len(payload), 2):
+                self._check_cancelled(cancel_check)
+                combined.update(self._correct_source(client, payload[offset:offset + 2],
+                                                     observed, context, cancel_check))
+            return combined
         self._check_cancelled(cancel_check)
         prompt = (
             "You are repairing machine-recognized Chinese, NOT translating yet. ASR is not definitive. "
@@ -624,19 +645,38 @@ class VideoIntelligence:
             f"Requested ASR: {json.dumps(payload, ensure_ascii=False)}\n"
             f"Measured OCR: {json.dumps(observed, ensure_ascii=False)}\nContext: {context}\n"
             + SEMANTIC_TRANSLATION_POLICY)
-        attempts = schema_attempts(1)
+        attempts = schema_attempts(2)
+        from core.engines.translation.ollama_client import OllamaClientError
         for attempt in range(attempts):
             self._check_cancelled(cancel_check)
             try:
                 _, corrections = request_structured(client, prompt,
                     lambda raw: self._validate_source_response(raw, payload, observed),
                     schema_id="source-correction-v1", task_kind="translation", attempt=attempt + 1,
-                    max_tokens=2500 if getattr(self, "provider", None) == "opencode" else 5000)
+                    max_tokens=(2500 if getattr(self, "provider", None) == "opencode" else
+                                512 if getattr(self, "provider", None) == "ollama" else 5000))
                 self._check_cancelled(cancel_check)
                 return corrections
+            except OllamaClientError as error:
+                if error.code != "provider_incomplete":
+                    raise
+                self._check_cancelled(cancel_check)
+                if len(payload) > 1:
+                    midpoint = len(payload) // 2
+                    combined = {}
+                    for subset in (payload[:midpoint], payload[midpoint:]):
+                        combined.update(self._correct_source(client, subset, observed, context, cancel_check))
+                    return combined
+                raise VideoIntelligenceError("Phản hồi sửa nguồn local bị cắt; giữ ASR ở trạng thái cần kiểm tra.") from None
             except VideoIntelligenceError as error:
                 self._check_cancelled(cancel_check)
                 if attempt == attempts - 1:
+                    if len(payload) > 1:
+                        midpoint = len(payload) // 2
+                        combined = {}
+                        for subset in (payload[:midpoint], payload[midpoint:]):
+                            combined.update(self._correct_source(client, subset, observed, context, cancel_check))
+                        return combined
                     raise
                 prompt += ("\nPhản hồi trước sai cấu trúc: " + str(error)
                     + ". Trả lại toàn bộ JSON mới đúng schema, đủ các ID yêu cầu; không đoán lời nguồn "
@@ -866,10 +906,21 @@ class VideoIntelligence:
         return flags
 
     def _request_text_result(self, client, prompt, payload, observed, start, end, cancel_check=None):
-        """One schema-only repair attempt per stage; transport errors never retry."""
+        """Repair syntax twice, then split failing sentence targets to one."""
         request_prompt = prompt
         failed_flags = {"segments": {}, "screen_texts": {}}
-        attempts = schema_attempts(1)
+        stage = {"kind": "structured_translation", "prompt": prompt,
+                 "ids": [row["id"] for row in payload], "screens": [row["id"] for row in observed]}
+        saved = self._read_checkpoint(stage)
+        if isinstance(saved, dict):
+            try:
+                result = self._provider_result(saved, self._fallback_segments(payload), start, end, observed)
+            except VideoIntelligenceError:
+                pass
+            else:
+                self._check_cancelled(cancel_check)
+                return json.dumps(saved, ensure_ascii=False), result
+        attempts = schema_attempts(2)
         for attempt in range(attempts):
             self._check_cancelled(cancel_check)
             # Four speech turns and eight screen regions do not need a 12k
@@ -879,16 +930,47 @@ class VideoIntelligence:
                 raw, result = request_structured(client, request_prompt,
                     lambda raw: self._provider_result(raw, self._fallback_segments(payload), start, end, observed),
                     schema_id="timed-translation-v1", task_kind="translation", attempt=attempt + 1,
-                    max_tokens=6000 if getattr(self, "provider", None) == "opencode" else 12000)
+                    max_tokens=(2048 if getattr(self, "provider", None) == "ollama" else
+                                6000 if getattr(self, "provider", None) == "opencode" else 12000))
                 self._check_cancelled(cancel_check)
             except VideoIntelligenceError as exc:
                 self._check_cancelled(cancel_check)
-                if attempt == attempts - 1:
-                    raise
                 raw = getattr(exc, "raw_response", None)
-                failed_flags = self._failed_review_flags(raw, payload, observed)
+                new_flags = self._failed_review_flags(raw, payload, observed)
+                for field in failed_flags:
+                    failed_flags[field].update(new_flags[field])
+                if attempt == attempts - 1:
+                    if max(len(payload), len(observed)) > 1:
+                        speech_mid = (len(payload) + 1) // 2
+                        screen_mid = (len(observed) + 1) // 2
+                        merged = {"segments": [], "screen_texts": [], "summary": ""}
+                        for speech, screens in ((payload[:speech_mid], observed[:screen_mid]),
+                                                (payload[speech_mid:], observed[screen_mid:])):
+                            if not speech and not screens:
+                                continue
+                            scoped_prompt = prompt + (
+                                "\nPHẠM VI CUỐI CÙNG: Các ID khác phía trên chỉ là ngữ cảnh đọc. "
+                                "Chỉ trả các segment ID sau: " + json.dumps([row["id"] for row in speech])
+                                + "; chỉ trả screen_text ID sau: " + json.dumps([row["id"] for row in screens])
+                                + ". Mỗi ID đúng một lần, giữ nguyên mốc gốc và cờ nguồn chưa chắc chắn.")
+                            child_raw, _ = self._request_text_result(client, scoped_prompt, speech, screens,
+                                start, end, cancel_check)
+                            child = self._parse_json(child_raw)
+                            merged["segments"].extend(child["segments"])
+                            merged["screen_texts"].extend(child["screen_texts"])
+                            merged["summary"] = child["summary"] or merged["summary"]
+                        for field in failed_flags:
+                            for row in merged[field]:
+                                if row["id"] in failed_flags[field]:
+                                    row.update(needs_review=True, review_reason=failed_flags[field][row["id"]])
+                        by_id = {row["id"]: row for row in merged["segments"]}
+                        merged["segments"] = [by_id[row["id"]] for row in payload]
+                        result = self._provider_result(merged, self._fallback_segments(payload), start, end, observed)
+                        self._write_checkpoint(stage, merged, cancel_check)
+                        return json.dumps(merged, ensure_ascii=False), result
+                    raise
                 request_prompt = (prompt + "\nSỬA ĐỊNH DẠNG JSON: lần trả lời trước không đúng hợp đồng. "
-                                  "Chỉ có một lần sửa. Trả lại TOÀN BỘ JSON với đúng mọi ID/thời gian đã cấp; "
+                                  "Trả lại TOÀN BỘ JSON với đúng mọi ID/thời gian đã cấp; "
                                   "không bỏ hàng, không thay thời gian, không tự xóa cờ needs_review=true. "
                                   "Mỗi segment bắt buộc có id (số nguyên), start/end (số), text_zh, literal_vi, "
                                   "natural_vi, final_vi (đều là chuỗi, không null), needs_review (boolean), review_reason (chuỗi). "
@@ -912,7 +994,13 @@ class VideoIntelligence:
                     result["screen_texts"].append(row)
                     screens[sid] = row
                 screens[sid].update(needs_review=True, review_reason=reason)
-            return raw, result
+            preserved = self._parse_json(raw)
+            for field in failed_flags:
+                for row in preserved[field]:
+                    if row["id"] in failed_flags[field]:
+                        row.update(needs_review=True, review_reason=failed_flags[field][row["id"]])
+            self._write_checkpoint(stage, preserved, cancel_check)
+            return json.dumps(preserved, ensure_ascii=False), result
 
     @staticmethod
     def _group_repeated_screens(observed, payload):
@@ -999,12 +1087,22 @@ class VideoIntelligence:
     def _translate_text(self, payload, observed, previous_summary, start, end, cancel_check=None, *, quota_fallback=False):
         """Primary free translation and explicit quota fallback share text checks."""
         self._check_cancelled(cancel_check)
-        provider = "opencode" if getattr(self, "provider", None) == "opencode" and not quota_fallback else "openrouter-free"
-        label = "OpenCode" if provider == "opencode" else "OpenRouter"
-        model_setting = settings.OPENCODE_MODEL if provider == "opencode" else settings.OPENROUTER_MODEL
+        selected_provider = getattr(self, "provider", None)
+        provider = ("openrouter-free" if quota_fallback and selected_provider == "gemini"
+                    else selected_provider if selected_provider in {"opencode", "openrouter-free", "ollama"}
+                    else "openrouter-free")
+        label = {"opencode": "OpenCode", "openrouter-free": "OpenRouter", "ollama": "Ollama local"}[provider]
+        model_setting = {"opencode": settings.OPENCODE_MODEL, "openrouter-free": settings.OPENROUTER_MODEL,
+                         "ollama": settings.OLLAMA_MODEL}[provider]
         try:
-            client = (OpenCodeZenClient(model=model_setting, timeout=90, max_retries=1) if provider == "opencode"
-                      else OpenRouterFreeClient(model=model_setting, timeout=120))
+            if provider == "opencode":
+                client = OpenCodeZenClient(model=model_setting, timeout=90, max_retries=5)
+            elif provider == "ollama":
+                from core.engines.translation.ollama_client import OllamaClient
+                client = OllamaClient(model=model_setting, base_url=settings.OLLAMA_BASE_URL,
+                                      timeout=settings.OLLAMA_TIMEOUT)
+            else:
+                client = OpenRouterFreeClient(model=model_setting, timeout=120)
             if not client.has_credentials:
                 raise VideoIntelligenceError(f"Chưa có thông tin đăng nhập {label}.")
             combined = {"segments": {}, "screen_texts": [], "summary": previous_summary}
@@ -1018,7 +1116,7 @@ class VideoIntelligence:
                     current_execution_context().run_id, len(observed), len(representatives))
             # Bound response size even when rapid subtitle changes produce many
             # local OCR IDs. Every requested ID belongs to exactly one batch.
-            speech_limit = self.OPENCODE_SPEECH_BATCH_SIZE if provider == "opencode" else 12
+            speech_limit = self.OPENCODE_SPEECH_BATCH_SIZE if provider == "opencode" else self.MAX_TRANSLATION_TARGETS
             screen_limit = self.OPENCODE_SCREEN_BATCH_SIZE if provider == "opencode" else 24
             batches = max(1, math.ceil(len(payload) / speech_limit), math.ceil(len(representatives) / screen_limit))
             source_dialogue = [dict(row) for row in (getattr(self, "_source_dialogue", []) or payload)
@@ -1032,7 +1130,7 @@ class VideoIntelligence:
                 context_screens = {row["id"]: row for row in [*source_evidence, *batch_screens]}
                 context_payload = {"speech": [{"start": row["start"], "end": row["end"],
                                                 "asr_text": row.get("asr_text", "")} for row in payload],
-                                   "wider_source_dialogue": dialogue_context(source_dialogue, payload),
+                                   "wider_source_dialogue": dialogue_context(neighbor_context(source_dialogue, batch_payload), batch_payload),
                                    "semantic_context": self._semantic_context(source_dialogue, batch_payload),
                                    "ocr": [{"start": row["start"], "end": row["end"],
                                              "text_zh": row["text_zh"]} for row in context_screens.values()],
@@ -1045,6 +1143,8 @@ class VideoIntelligence:
                                # address cue or corrected source turn.
                                "context": self._text_batch_context_digest(
                                    payload, observed, combined["summary"], context_payload)}
+                if provider == "ollama":
+                    batch_stage["draft_only"] = "fast-local-v1"
                 saved_batch = self._read_checkpoint(batch_stage)
                 if isinstance(saved_batch, dict):
                     try:
@@ -1073,6 +1173,49 @@ class VideoIntelligence:
                         combined["screen_texts"].extend(saved_result["screen_texts"])
                         combined["summary"] = saved_result["summary"] or combined["summary"]
                         continue
+                if provider == "ollama":
+                    # Fast local draft: one bounded generation per batch. ASR
+                    # remains the immutable source; OCR is context only. The
+                    # draft stays review-required without slow source- or
+                    # pronoun-review passes.
+                    reason = "Bản nháp Ollama từ ASR/OCR; chưa đối chiếu nguồn, cần kiểm tra."
+                    corrections = {row["id"]: {
+                        "text_zh": row.get("asr_text", "").strip(), "evidence_ids": [],
+                        "needs_review": True, "review_reason": reason, "source_supported": False,
+                    } for row in batch_payload}
+                    self._report_stage("translate", start, end, batch_index=index + 1, batch_total=batches)
+                    prompt = (
+                        "Dịch nháp lời thoại sang tiếng Việt ngắn gọn, tự nhiên, đủ nghĩa để tạo giọng.\n"
+                        "ASR là nguồn lời nói duy nhất: giữ text_zh nguyên văn, không sửa lời ASR bằng OCR. "
+                        "OCR chỉ để tham khảo tên/chữ cùng thời điểm, không biến chữ trên màn hình thành lời nói. "
+                        "Không dành lượt phân tích quan hệ/chủ thể hay tinh chỉnh xưng hô; dùng cách gọi trung tính "
+                        "nếu quan hệ chưa rõ. Giữ phủ định, hành động, tên và con số; không thêm ý hoặc đánh dấu im lặng. "
+                        "Mốc thời gian và ID là dữ liệu cố định. Nếu câu nguồn mơ hồ, vẫn dịch phần có căn cứ và giữ needs_review=true.\n"
+                        f"Lời ASR cần dịch: {json.dumps(batch_payload, ensure_ascii=False)}\n"
+                        f"OCR đo tại máy (chỉ tham khảo): {json.dumps(batch_screens, ensure_ascii=False)}\n"
+                        "Trả đúng schema JSON hiện hành, đủ ID: segments gồm id/start/end/text_zh/literal_vi/natural_vi/final_vi/needs_review/review_reason; "
+                        "screen_texts gồm id/text_vi/kind/needs_review/review_reason; summary ngắn. "
+                        "Giữ nguyên từng start/end và text_zh. Không thêm ID hoặc lời thoại."
+                    )
+                    _, result = self._request_text_result(
+                        client, prompt, batch_payload, batch_screens, start, end, cancel_check)
+                    result = self._merge_source_review(result, corrections)
+                    for row in result["segments"].values():
+                        row["needs_review"] = True
+                        row["review_reason"] = reason
+                    for row in result["screen_texts"]:
+                        row["needs_review"] = True
+                        row["source_region_verified"] = False
+                        row["review_reason"] = row.get("review_reason") or (
+                            "Bản dịch OCR nháp chưa được đối chiếu trực tiếp với hình ảnh.")
+                    all_corrections.update(corrections)
+                    self._apply_source_corrections_to_context(source_dialogue, corrections)
+                    self._write_checkpoint(batch_stage, {"result": result,
+                        "corrections": {str(key): value for key, value in corrections.items()}}, cancel_check)
+                    combined["segments"].update(result["segments"])
+                    combined["screen_texts"].extend(result["screen_texts"])
+                    combined["summary"] = result["summary"] or combined["summary"]
+                    continue
                 self._report_stage("source", start, end, batch_index=index + 1, batch_total=batches)
                 corrections = self._correct_source(client, batch_payload, source_evidence, context, cancel_check)
                 for sid in truncated_evidence:
@@ -1083,7 +1226,7 @@ class VideoIntelligence:
                 # The translation request must see the corrected current batch
                 # and any prior corrected turns, while the cache key above
                 # remains tied to the pre-correction request inputs.
-                context_payload["wider_source_dialogue"] = dialogue_context(source_dialogue, payload)
+                context_payload["wider_source_dialogue"] = dialogue_context(neighbor_context(source_dialogue, batch_payload), batch_payload)
                 context_payload["semantic_context"] = self._semantic_context(source_dialogue, batch_payload)
                 context = json.dumps(context_payload, ensure_ascii=False)
                 corrected_payload = [{**row, "corrected_text_zh": corrections[row["id"]]["text_zh"],
@@ -1160,7 +1303,7 @@ class VideoIntelligence:
                 combined["screen_texts"].extend(result["screen_texts"])
                 combined["summary"] = result["summary"] or combined["summary"]
             self._check_cancelled(cancel_check)
-            if not quota_fallback:
+            if not quota_fallback and provider != "ollama":
                 combined = self._review_primary_text(combined, payload, observed, all_corrections)
             if quota_fallback:
                 self.used_text_fallback = True
@@ -1192,6 +1335,12 @@ class VideoIntelligence:
             self._check_cancelled(cancel_check)
             prefix = "Gemini hết hạn mức và bộ dịch dự phòng không hoàn tất" if quota_fallback else "Dịch ASR + OCR miễn phí chưa hoàn tất"
             raise VideoIntelligenceError(f"{prefix}: {exc}") from None
+        except Exception as exc:
+            from core.engines.translation.ollama_client import OllamaClientError
+            if isinstance(exc, OllamaClientError):
+                self._check_cancelled(cancel_check)
+                raise
+            raise
 
     @staticmethod
     def _fallback_segments(payload):
@@ -1258,6 +1407,10 @@ class VideoIntelligence:
                       segments: Iterable[Any], previous_summary: str = "", cancel_check=None) -> Dict[str, Any]:
         segments = list(segments)
         self._check_cancelled(cancel_check)
+        if self.provider == "gemini" and len(segments) > self.MAX_TRANSLATION_TARGETS:
+            # Production prepass chooses sentence boundaries before encoding.
+            # Never let a direct caller send an oversized media request.
+            raise VideoIntelligenceError("Đoạn Gemini vượt 8 câu mục tiêu; cần chia theo mốc câu trước khi phân tích.")
         ocr_stage = {"kind": "ocr", "start": start, "end": end}
         observed = self._read_checkpoint(ocr_stage)
         if not self._valid_observed_screens(observed, start, end):
@@ -1272,7 +1425,7 @@ class VideoIntelligence:
                 self._write_checkpoint(ocr_stage, observed, cancel_check)
         payload = [{"id": int(self._get(s, "id")), "start": float(self._get(s, "start")),
                     "end": float(self._get(s, "end")), "asr_text": self._get(s, "text_zh", "")} for s in segments]
-        if self.provider in {"openrouter-free", "opencode"}:
+        if self.provider in {"openrouter-free", "opencode", "ollama"}:
             return self._translate_text(payload, observed, previous_summary, start, end, cancel_check)
         # VAD may split a continuous sentence. Context before/after the output
         # window helps interpret it without duplicating segment IDs or cues.
@@ -1283,6 +1436,7 @@ class VideoIntelligence:
         media = self._encode_chunk(video_path, media_start, media_end, cancel_check)
         evidence = "\nOCR có thời gian/vị trí do máy đọc (không được đổi): " + json.dumps(observed, ensure_ascii=False)
         semantics = self._semantic_context(getattr(self, '_source_dialogue', []) or payload, payload)
+        neighbors = dialogue_context(neighbor_context(getattr(self, '_source_dialogue', []) or payload, payload), payload)
         prompt = (VISUAL_TRANSLATION_PROMPT + "\n"
                   + SEMANTIC_TRANSLATION_POLICY + "\n"
                   f"Clip đính kèm bắt đầu tại {media_start:.3f}, kết thúc {media_end:.3f} giây trong video nguồn. "
@@ -1290,7 +1444,7 @@ class VideoIntelligence:
                   "Phần trước/sau khoảng này chỉ là ngữ cảnh để hiểu câu bị cắt; không thêm lời thoại hoặc vùng chữ ngoài khoảng. "
                   f"Các câu của đoạn này: {json.dumps(payload, ensure_ascii=False)}\n"
                   "Thoại nguồn rộng hơn, chỉ tham khảo ngữ cảnh, có thể còn lỗi ASR: "
-                  f"{json.dumps(dialogue_context(getattr(self, '_source_dialogue', []) or payload, payload), ensure_ascii=False)}\n"
+                  f"{json.dumps(neighbors, ensure_ascii=False)}\n"
                   "Semantic context (reference-only IDs): "
                   f"{json.dumps(semantics, ensure_ascii=False)}\n"
                   f"Tóm tắt đoạn trước: {previous_summary or '(không có)'}" + evidence)
@@ -1323,7 +1477,9 @@ class VideoIntelligence:
                         f"Chỉ xuất câu/vùng chữ trong [{start:.3f}, {end:.3f}], phần dư chỉ để đối chiếu ngữ cảnh. Mốc câu cố định: "
                         f"{json.dumps(payload, ensure_ascii=False)}\nNgữ cảnh trước: {previous_summary or '(không có)'}\n"
                         f"BẢN NHÁP CHƯA XÁC MINH: {raw}" + evidence)
-        verification += ("\n" + SEMANTIC_TRANSLATION_POLICY + "\nSemantic context (reference-only IDs): "
+        verification += ("\nThoại nguồn rộng hơn, chỉ tham khảo ngữ cảnh, có thể còn lỗi ASR: "
+            + json.dumps(neighbors, ensure_ascii=False)
+            + "\n" + SEMANTIC_TRANSLATION_POLICY + "\nSemantic context (reference-only IDs): "
             + json.dumps(semantics, ensure_ascii=False))
         contact_sheet = self._encode_contact_sheet(video_path, media_start, media_end, cancel_check)
         interval = (media_end - media_start) / 4
@@ -1427,7 +1583,7 @@ class VideoIntelligence:
             except (VideoIntelligenceError, KeyError, TypeError, ValueError):
                 break
             output.update(result["segments"])
-            screens.extend(result["screen_texts"])
+            screens.extend(self._aggregate_screen_rows(result["screen_texts"], cursor, end))
             # Restored chunks may contain source corrections accepted by their
             # earlier batch. Rebuild the private wider dialogue before asking
             # the next fresh chunk for context.
@@ -1458,15 +1614,19 @@ class VideoIntelligence:
             crossing = [s for s in segments if self._get(s, "start") < end < self._get(s, "end")]
             if crossing:
                 end = min(float(self._get(s, "start")) for s in crossing)
-            if end_time is not None and self.provider == "opencode":
+            if self.provider == "gemini" or (end_time is not None and self.provider in {"opencode", "ollama"}):
                 # A bounded request alone is insufficient if all of its
                 # neighbours must finish before any audio becomes visible.
                 # Publish each speech batch, with the full known source context
                 # still available to the provider and independent reviewer.
                 candidates = [s for s in segments if cursor <= self._get(s, "start")
                               and self._get(s, "end") <= end]
-                if len(candidates) > self.OPENCODE_SPEECH_BATCH_SIZE:
-                    end = float(self._get(candidates[self.OPENCODE_SPEECH_BATCH_SIZE], "start"))
+                speech_limit = (self.OPENCODE_SPEECH_BATCH_SIZE if self.provider == "opencode"
+                                else self.MAX_TRANSLATION_TARGETS)
+                if len(candidates) > speech_limit:
+                    end = float(self._get(candidates[speech_limit], "start"))
+                    if any(self._get(s, "start") < end < self._get(s, "end") for s in candidates):
+                        raise VideoIntelligenceError("Không thể chia lô câu thoại chồng lấn mà vẫn giữ mốc nguồn.")
             if end <= cursor:
                 raise VideoIntelligenceError("Không thể chia đoạn video mà vẫn giữ mốc câu thoại.")
             chunk_segments = [s for s in segments if self._get(s, "start") >= cursor and self._get(s, "end") <= end]
@@ -1494,7 +1654,7 @@ class VideoIntelligence:
             completed.append({"start": cursor, "end": end, "previous_summary": summary, "result": result})
             self._write_checkpoint({"kind": "chunks"}, completed, cancel_check)
             output.update(result["segments"])
-            screens.extend(result["screen_texts"])
+            screens.extend(self._aggregate_screen_rows(result["screen_texts"], cursor, end))
             for source in result.get("translation_sources", []):
                 if source not in sources:
                     sources.append(source)
@@ -1508,4 +1668,5 @@ class VideoIntelligence:
         self._check_cancelled(cancel_check)
         if set(output) != {self._get(s, "id") for s in segments}:
             raise VideoIntelligenceError("Phân tích hình ảnh chưa bao phủ đủ câu thoại.")
-        return {"segments": output, "screen_texts": screens, "translation_sources": sources}
+        return {"segments": output, "screen_texts": screens, "translation_sources": sources,
+                "summary": summary}

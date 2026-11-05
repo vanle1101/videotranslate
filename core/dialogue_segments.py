@@ -113,7 +113,14 @@ def _valid_words(row: Dict[str, Any]) -> Optional[List[Dict[str, Any]]]:
         left, right = float(left), float(right)
         # Keep an unsplit row when rounded word times overlap or leave its
         # bounds. Otherwise splitting would create rows the pipeline rejects.
-        if left < float(start) or right > float(end) or right < left:
+        # Whisper occasionally emits a zero-length word at the exact end of a
+        # segment (for example ``start == end == 13.24``).  It is not a
+        # measured interval and cannot safely define a subtitle boundary: if
+        # accepted, the first/last piece can become zero duration and the
+        # bounded source validator rejects the entire 32-second checkpoint.
+        # Treat the parent ASR row as unsplittable instead; its measured outer
+        # interval and complete text remain intact.
+        if left < float(start) or right > float(end) or right <= left:
             return None
         if words and left < previous_end:
             return None
@@ -127,7 +134,8 @@ def split_dialogue_segments(rows: Iterable[Dict[str, Any]], pause_threshold: flo
     """Split measured ASR rows into natural dialogue lines.
 
     ``rows`` must contain ``start``, ``end``, and ``text_zh``/``text``.  A row
-    is split only when valid ``words`` with real timestamps are present.  Each
+    is split only when valid ``words`` with positive measured intervals are
+    present; zero-duration word tokens retain the complete parent row.  Each
     source row is handled independently, so adjacent rows from Whisper are
     never merged.  Output IDs are contiguous in display order and all source
     metadata (including ``speaker`` and ``emotion``) is retained.

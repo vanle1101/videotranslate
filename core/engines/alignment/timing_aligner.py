@@ -3,6 +3,7 @@ import time
 import math
 import logging
 import wave
+import tempfile
 from copy import deepcopy
 from pathlib import Path
 from typing import List, Dict, Any, Tuple, Optional
@@ -80,6 +81,24 @@ class TimingBudgetAligner(AlignmentEngine):
     def apply_atempo(self, input_wav: Path, output_wav: Path, speed_factor: float,
                      fit_duration: Optional[float] = None):
         """Fit all speech into its slot without silently cutting the last words."""
+        # A failed fit must not replace previously valid speech with the last
+        # overlong render or a partial FFmpeg file. This also protects direct
+        # callers which do not have natural_speech's outer temporary directory.
+        output_wav = Path(output_wav)
+        with tempfile.TemporaryDirectory(prefix="align-fit-", dir=output_wav.parent) as directory:
+            candidate = Path(directory) / ("speech" + (output_wav.suffix or ".wav"))
+            actual_speed = self._render_atempo(input_wav, candidate, speed_factor, fit_duration)
+            rendered_duration = self.get_audio_duration(candidate)
+            if not math.isfinite(rendered_duration) or rendered_duration <= 0:
+                raise RuntimeError("Không đọc được âm thanh sau khi căn thời lượng.")
+            if fit_duration is not None and rendered_duration > fit_duration + .0001:
+                raise SpeechBudgetError("Lời thoại vẫn vượt thời lượng; giữ nguyên âm thanh trước đó.")
+            candidate.replace(output_wav)
+            return actual_speed
+
+    def _render_atempo(self, input_wav: Path, output_wav: Path, speed_factor: float,
+                       fit_duration: Optional[float] = None):
+        """Render candidates into a caller-owned temporary path."""
         if not math.isfinite(speed_factor) or speed_factor <= 0:
             raise ValueError("Tốc độ giọng đọc không hợp lệ.")
         if fit_duration is not None and (not math.isfinite(fit_duration) or fit_duration <= 0):
@@ -115,7 +134,7 @@ class TimingBudgetAligner(AlignmentEngine):
             if fit_duration is None:
                 return actual_speed
             rendered_duration = self.get_audio_duration(output_wav)
-            if rendered_duration <= 0:
+            if not math.isfinite(rendered_duration) or rendered_duration <= 0:
                 raise RuntimeError("Không đọc được âm thanh sau khi căn thời lượng.")
             if rendered_duration <= fit_duration + 0.0001:
                 return actual_speed

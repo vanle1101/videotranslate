@@ -415,6 +415,72 @@ def test_chunk_boundaries_preserve_ids_and_carry_context(config, monkeypatch):
     assert set(result["segments"]) == {0, 1, 2}
 
 
+def test_ollama_prepass_splits_visual_batches_at_eight_targets(config, monkeypatch):
+    monkeypatch.setattr(settings, "LLM_PROVIDER", "ollama")
+    intelligence = VideoIntelligence()
+    intelligence.TARGET_CHUNK_SECONDS = 30
+    segments = [SegmentItem(i, i * 2., i * 2. + 1., 1.) for i in range(15)]
+    for segment in segments:
+        segment.text_zh = f"源句{segment.id}"
+    calls = []
+
+    def analyze(path, start, end, rows, summary, cancel_check):
+        calls.append((start, end, [segment.id for segment in rows]))
+        return {"segments": {segment.id: {**row(segment), "text_zh": segment.text_zh}
+                             for segment in rows},
+                "screen_texts": [], "summary": summary}
+
+    monkeypatch.setattr(intelligence, "analyze_chunk", analyze)
+    result = intelligence.prepass(config / "video.mp4", segments, total_duration=30,
+                                  start_time=0, end_time=30, context_segments=segments)
+
+    assert [len(ids) for _start, _end, ids in calls] == [8, 7]
+    assert [segment_id for _start, _end, ids in calls for segment_id in ids] == list(range(15))
+    assert set(result["segments"]) == set(range(15))
+
+
+def test_ollama_source_correction_uses_bounded_token_budget(config, monkeypatch):
+    monkeypatch.setattr(settings, "LLM_PROVIDER", "ollama")
+    intelligence = VideoIntelligence()
+    calls = []
+
+    def request(_client, _prompt, _validator, **options):
+        calls.append(options)
+        return "{}", {7: {"text_zh": "你来了", "evidence_ids": [],
+                          "needs_review": False, "review_reason": ""}}
+
+    monkeypatch.setattr("core.video_intelligence.request_structured", request)
+    result = intelligence._correct_source_checked(object(),
+        [{"id": 7, "asr_text": "你来了"}], [], "", lambda: False)
+
+    assert result[7]["text_zh"] == "你来了"
+    assert calls == [{"schema_id": "source-correction-v1", "task_kind": "translation",
+                      "attempt": 1, "max_tokens": 512}]
+
+
+def test_ollama_source_correction_splits_before_requesting_large_batches(config, monkeypatch):
+    monkeypatch.setattr(settings, "LLM_PROVIDER", "ollama")
+    intelligence = VideoIntelligence()
+    sizes = []
+
+    def request(_client, prompt, _validator, **options):
+        import re
+        match = re.search(r"Requested ASR: (\[.*?\])\nMeasured OCR:", prompt, re.S)
+        payload = json.loads(match.group(1))
+        sizes.append((len(payload), options["max_tokens"]))
+        corrections = {row["id"]: {"text_zh": row["asr_text"], "evidence_ids": [],
+                                    "needs_review": False, "review_reason": ""} for row in payload}
+        return "{}", corrections
+
+    import json
+    monkeypatch.setattr("core.video_intelligence.request_structured", request)
+    payload = [{"id": index, "asr_text": f"句子{index}"} for index in range(5)]
+    result = intelligence._correct_source_checked(object(), payload, [], "", lambda: False)
+
+    assert set(result) == set(range(5))
+    assert sizes == [(2, 512), (2, 512), (1, 512)]
+
+
 def test_truncation_reduces_chunk_once_without_provider_fallback(config, monkeypatch):
     intelligence = VideoIntelligence(client=Mock())
     calls = []

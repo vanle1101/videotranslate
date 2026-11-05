@@ -3,11 +3,40 @@ from typing import List, Dict, Any
 from config import settings
 
 
+_cuda_dll_handles = {}
+
+
+def _prepare_windows_cuda_runtime():
+    """Reuse bundled Torch CUDA DLLs within this application process only."""
+    import importlib.util
+    import os
+
+    # A stale launcher-level sentinel should not override DEVICE=cuda in the
+    # Studio's own settings. Never change CUDA visibility for other processes.
+    if os.environ.get("CUDA_VISIBLE_DEVICES", "").strip() == "-1":
+        os.environ.pop("CUDA_VISIBLE_DEVICES", None)
+    if os.name != "nt":
+        return
+    spec = importlib.util.find_spec("torch")
+    if spec is None or not spec.submodule_search_locations:
+        return
+    library_dir = str(Path(next(iter(spec.submodule_search_locations))) / "lib")
+    if not Path(library_dir).is_dir():
+        return
+    search_paths = os.environ.get("PATH", "").split(os.pathsep)
+    if os.path.normcase(library_dir) not in {os.path.normcase(item) for item in search_paths}:
+        os.environ["PATH"] = library_dir + os.pathsep + os.environ.get("PATH", "")
+    if hasattr(os, "add_dll_directory") and library_dir not in _cuda_dll_handles:
+        _cuda_dll_handles[library_dir] = os.add_dll_directory(library_dir)
+
+
 def load_whisper_model(model_size: str, device: str = None):
     """Load the configured CTranslate2 model without requiring PyTorch."""
     from faster_whisper import WhisperModel
 
     device = device or settings.DEVICE
+    if device == "cuda":
+        _prepare_windows_cuda_runtime()
     compute_type = getattr(settings, "WHISPER_COMPUTE_TYPE", "int8")
     threads = max(1, int(getattr(settings, "ASR_CPU_THREADS", 4)))
     local_model = settings.BASE_DIR / "workspace" / "models" / f"faster-whisper-{model_size}"

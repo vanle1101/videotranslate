@@ -363,7 +363,7 @@ def test_export_and_legacy_composer_never_invent_a_blur_strip(tmp_path, monkeypa
         observed.update(kwargs)
         kwargs["output_path"].write_bytes(b"fixture")
     metadata = json.dumps({"format": {"duration": "3"}, "streams": [
-        {"codec_type": "video", "width": 360, "height": 640}, {"codec_type": "audio"},
+        {"codec_type": "video", "width": 360, "height": 640, "start_time": "0", "duration": "3"}, {"codec_type": "audio", "start_time": "0", "duration": "3"},
     ]}).encode()
     with patch("core.streaming.export.run_media", return_value=metadata), \
             patch.object(exporter, "_assemble_voice_timeline"), patch.object(exporter.mixer, "mix"), \
@@ -390,7 +390,7 @@ def test_bottom_preview_export_retains_source_blur_without_moving_captions(tmp_p
     style = {"position": position, "blur_original": True}
     size = (360, 640)
     metadata = json.dumps({"format": {"duration": "3"}, "streams": [
-        {"codec_type": "video", "width": size[0], "height": size[1]}, {"codec_type": "audio"},
+        {"codec_type": "video", "width": size[0], "height": size[1], "start_time": "0", "duration": "3"}, {"codec_type": "audio", "start_time": "0", "duration": "3"},
     ]}).encode()
     with patch("core.streaming.export.run_media", return_value=metadata), \
             patch.object(exporter, "_assemble_voice_timeline"), patch.object(exporter.mixer, "mix"), \

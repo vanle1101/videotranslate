@@ -59,7 +59,7 @@ def test_changed_or_incomplete_preparation_is_never_reused(prepared, monkeypatch
     elif damage == "audio":
         prepared.raw_audio_16k.write_bytes(b"")
     elif damage == "model":
-        monkeypatch.setattr(settings, "WHISPER_MODEL_SIZE", "large-v3")
+        monkeypatch.setattr(settings, "WHISPER_MODEL_SIZE", "small" if settings.WHISPER_MODEL_SIZE != "small" else "large-v3")
     elif damage == "json":
         index.write_text("{", encoding="utf-8")
     elif damage == "missing":

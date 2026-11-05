@@ -98,8 +98,8 @@ def test_concurrent_broadcasts_preserve_each_clients_lifecycle_order(isolated, m
 
 def test_stalled_client_is_bounded_and_does_not_block_healthy_or_export(isolated, monkeypatch):
     monkeypatch.setattr(main, "STREAM_SEND_TIMEOUT_SECONDS", .05)
-    schedule = Mock()
-    monkeypatch.setattr(main, "schedule_reviewed_export", schedule)
+    finalize = AsyncMock()
+    monkeypatch.setattr(main, "finalize_session_output", finalize)
     async def run():
         stalled, healthy_received = asyncio.Event(), asyncio.Event()
         async def stalled_send(payload):
@@ -114,7 +114,7 @@ def test_stalled_client_is_bounded_and_does_not_block_healthy_or_export(isolated
         assert time.monotonic() - started < .2
         assert main.stream_sockets["stalled"] == [healthy]
         slow.close.assert_awaited_once_with(code=1011)
-        schedule.assert_called_once_with("stalled")
+        finalize.assert_awaited_once_with("stalled")
         assert ("stalled", id(slow)) not in main._stream_send_states
         main._remove_stream_socket("stalled", healthy)
         assert not main._stream_send_states
@@ -591,8 +591,16 @@ def test_sentence_percentage_counts_completed_audio_and_failure_never_completes(
     session = StreamingPipelineSession("sentences", isolated / "video.mp4")
     session.initialized = True
     session.is_running = True
+    session.total_duration = 4
     session.segments = {index: SegmentItem(index, index, index + 1, 1) for index in range(4)}
     session.segments[0].status = "READY"
+    session.segments[0].final_vi = "Đã xử lý."
+    audio = session.segments_dir / "seg_0.wav"
+    with wave.open(str(audio), "wb") as output:
+        output.setparams((1, 2, 24000, 0, "NONE", "not compressed"))
+        output.writeframes(b"\x01\x00" * 24000)
+    session.segments[0].audio_path = str(audio)
+    session.segments[0].audio_url = "/api/streaming/audio/sentences/0"
     session.segments[1].status = "TTS"
     asyncio.run(session._segment_progress("tts", "Đang tạo giọng"))
     assert session.get_progress()["progress_pct"] == 25
@@ -620,6 +628,7 @@ def test_diagnostics_rejects_arbitrary_file_category(isolated):
 
 def test_worker_cancellation_does_not_report_false_completion(isolated, monkeypatch):
     session = StreamingPipelineSession("cancel-worker", isolated / "video.mp4")
+    session.translation_mode = "preview"
     session.is_running = True
     session.initialized = True
     session.segments = {0: SegmentItem(0, 0, 1, 1)}
@@ -634,7 +643,7 @@ def test_worker_cancellation_does_not_report_false_completion(isolated, monkeypa
     async def run():
         await session.queue.put((0, 0))
         task = asyncio.create_task(session._worker_loop())
-        await entered.wait()
+        await asyncio.wait_for(entered.wait(), timeout=5)
         task.cancel()
         await asyncio.gather(task, return_exceptions=True)
         assert session.get_progress()["status"] == "STOPPED"

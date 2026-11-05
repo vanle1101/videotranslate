@@ -1,4 +1,5 @@
 import asyncio
+import itertools
 import contextvars
 from contextlib import contextmanager, nullcontext
 import time
@@ -6,6 +7,7 @@ import subprocess
 import functools
 import logging
 import hashlib
+import json
 import math
 import uuid
 import os
@@ -13,13 +15,13 @@ import threading
 import traceback
 import wave
 from bisect import bisect_right
-from concurrent.futures import TimeoutError as FutureTimeoutError
+from concurrent.futures import TimeoutError as FutureTimeoutError, ThreadPoolExecutor
 from copy import deepcopy
 from pathlib import Path
 from typing import Dict, Any, Optional, List, Callable
 from config import settings
 from core.runtime_context import execution_context, current_execution_context
-from core.runtime_errors import redacted_detail
+from core.runtime_errors import redacted_detail, redacted_traceback
 
 from core.streaming.segmenter import AudioSegmenter
 from core.engines.asr.sensevoice_engine import SenseVoiceEngine
@@ -35,6 +37,12 @@ from core.engines.alignment.speech_timing import build_speech_timing, take_tts_w
 from core.streaming.audio_cache import resolve_dub_timing
 from core.streaming.output_gate import final_output_metadata, preview_output_metadata, missing_spoken_output_ids, missing_speech_message
 from core.engines.alignment.dub_timing import available_reflow_duration, plan_reflow, MAX_TAIL_LIMIT_EXTENSION
+from core.streaming.native_recovery import native_language, review_native_rows
+from core.multilingual_translation import is_untranslated_placeholder
+
+
+def _missing_translation_text(text):
+    return not str(text or "").strip() or is_untranslated_placeholder(text)
 
 class SegmentEditConflict(RuntimeError):
     """Editing would conflict with the current session state."""
@@ -52,9 +60,44 @@ REVIEW_FAILURE_WARNINGS = frozenset((
 
 PROJECT_SAVE_FAILURE_WARNING = "Không lưu được dự án xuống đĩa; giữ cửa sổ mở và kiểm tra dung lượng/quyền ghi."
 
+# These are outer recovery rounds, after each provider's own bounded retries.
+# A fresh user-requested run gets a fresh budget; successes are never replayed.
+AUTOMATIC_RECOVERY_DELAYS = (5., 15., 30.)
+RECOVERY_COOLDOWN_SECONDS = 300.
+
+
+def _transient_failure(error):
+    """Use typed failures, never guess retryability from provider message text."""
+    seen = set()
+    while error is not None and id(error) not in seen:
+        seen.add(id(error))
+        if getattr(error, "code", None) == "source_speech_unrecognized":
+            return False
+        if isinstance(error, (SpeechBudgetError, PacingReviewRejected, MemoryError)):
+            return False
+        retryable = getattr(error, "retryable", None)
+        if retryable is not None:
+            return retryable is True
+        if isinstance(error, (TimeoutError, ConnectionError)):
+            return True
+        error = error.__cause__ or error.__context__
+    return False
+
+
+def _retry_after_delay(error):
+    seen, delay = set(), 0.
+    while error is not None and id(error) not in seen:
+        seen.add(id(error))
+        value = getattr(error, "retry_after", None)
+        if type(value) in (int, float) and math.isfinite(value):
+            delay = max(delay, value)
+        error = error.__cause__ or error.__context__
+    return delay
+
 SOURCE_METADATA_FIELDS = ("speaker_id", "speaker_evidence", "speaker_diagnostics", "speaker_confirmation", "utterance_id", "utterance_evidence",
                           "source_asr_row_id", "source_asr_start", "source_asr_end",
-                          "source_piece_index", "source_piece_count")
+                          "source_piece_index", "source_piece_count", "source_language",
+                          "source_language_probability", "source_language_uncertain", "source_audio_evidence", "source_language_review")
 
 
 def preview_source_covered(*, completed_seconds, source_prepared_seconds, chunked_source_started):
@@ -103,6 +146,7 @@ class SegmentItem:
         self.needs_review = False
         self.review_reason: Optional[str] = None
         self.asr_text = ""
+        self.asr_pretranscribed = False
         self.verification: Optional[Dict[str, Any]] = None
         self.confirmed_silence = False
         self.subtitle_cues = []
@@ -200,6 +244,11 @@ class StreamingPipelineSession:
         _restoring: bool = False,
     ):
         self.task_id = task_id
+        self.translation_chunk_workers = (1 if settings.LLM_PROVIDER == "ollama"
+                                          else settings.TRANSLATION_CHUNK_WORKERS)
+        self.run_intent = "idle"
+        self.retry_state = []
+        self._blocking_executor = None
         # Directly constructed test/utility sessions are not silently persisted.
         # The session manager opts real application projects in explicitly.
         self._persistence_enabled = False
@@ -207,6 +256,7 @@ class StreamingPipelineSession:
         self.source_video_url: Optional[str] = None
         self.initialized = False
         self._download_info: Optional[Dict[str, Any]] = None
+        self._download_metrics: Dict[str, Any] = {}
         self.source_url = None
         self._source_downloader = None
         self._startup_failed = False
@@ -214,10 +264,18 @@ class StreamingPipelineSession:
         if translation_mode not in ("preview", "full"):
             raise ValueError("Chế độ dịch phải là preview hoặc full.")
         self.translation_mode = translation_mode
-        self.preview_seconds = self.PREVIEW_SECONDS
+        self.preview_seconds = (settings.FULL_SOURCE_CHUNK_SECONDS if translation_mode == "full"
+                                else self.PREVIEW_SECONDS)
         self._preview_ready = False
         self._chunked_source_started = False
         self._source_prepared_seconds = 0.0
+        self._source_scanned_seconds = 0.0
+        self._source_coverage_intervals = []
+        # Durable diagnosis for native ASR gaps. Spans use global source time.
+        self._source_missing_speech_spans = []
+        self._source_failure_code = None
+        self._source_failure_start = None
+        self._source_preparation_stage = None
         self._visual_result = None
         self._visual_published_ids = set()
         self._visual_completed_seconds = 0.0
@@ -233,13 +291,19 @@ class StreamingPipelineSession:
         # Measured failures belong to this process only. Restored projects use
         # explicit Retry; never infer a speech budget from an error string.
         self._pacing_failures = {}
+        self._transient_speech_failures = {}
         self._run_started_at = None
+        self._run_finished_at = None
         self._run_ready_baseline = 0
+        from core.streaming.profiler import StageProfiler
+        self._stage_profiler = StageProfiler()
         self.progress = {
             "phase": "prepare" if video_path else "resolve",
             "stage": "Đang chuẩn bị video..." if video_path else "Đang nhận diện link video...",
             "progress_pct": None, "status": "RUNNING", "can_pause": False,
         }
+        self.status_history = []
+        self.status_changed_at = None
         self.initial_buffer_seconds = settings.INITIAL_BUFFER_SECONDS if initial_buffer_seconds is None else initial_buffer_seconds
         self.tts_engine_name, self.voice = resolve_voice(voice, tts_engine_name)
         self.asr_engine_name = asr_engine_name or settings.ASR_ENGINE
@@ -254,9 +318,12 @@ class StreamingPipelineSession:
         from core.subtitle_cues import CAPTION_RENDERER_VERSION
         self.caption_renderer_version = CAPTION_RENDERER_VERSION
         self.caption_output_outdated = False
+        self.output_incomplete = False
+        self.output_missing_segment_ids = []
         self.translation_sources: List[Dict[str, str]] = []
         self.review_summary: Dict[str, Any] = {}
         self.review_task: Optional[asyncio.Task] = None
+        self.native_audit_task: Optional[asyncio.Task] = None
         self._review_scope = None
         self._reviewing_segment_ids = []
         if self.visual_translation and not _restoring:
@@ -283,7 +350,7 @@ class StreamingPipelineSession:
             self.video_intelligence = VideoIntelligence()
         self.vieneu = None
         self.edge_tts = EdgeTTSFallbackEngine()
-        self.aligner = TimingBudgetAligner()
+        self.aligner = TimingBudgetAligner(speed_limits=(0.85, 1.35))
         self.vocal_suppressor = RealtimeVocalSuppressor()
         self.bgm_audio_path: Optional[Path] = None
         self.bgm_url: Optional[str] = None
@@ -329,8 +396,9 @@ class StreamingPipelineSession:
                   getattr(self, "export_task", None), getattr(self, "auto_export_task", None))
         failed_speech = (segment.status == "FAILED" and segment.failed_stage in {"TTS", "ALIGNING"}
                          and bool(segment.final_vi.strip()))
-        missing_translation = (segment.status in {"READY", "PLAYED", "NEEDS_REVIEW"}
-                               and not segment.final_vi.strip() and segment.needs_review
+        missing_translation = ((segment.status in {"READY", "PLAYED", "NEEDS_REVIEW"}
+                                or segment.status == "FAILED" and segment.failed_stage == "TRANSLATING")
+                               and _missing_translation_text(segment.final_vi) and segment.needs_review
                                and not segment.confirmed_silence)
         return bool(self.initialized and not self.is_running and not self.is_editing
                     and not getattr(self, "_stop_draining", False)
@@ -529,7 +597,7 @@ class StreamingPipelineSession:
             return bool((self.video_path and self.video_path.is_file())
                         or (self.source_url and self._source_downloader))
         failed = [segment for segment in self.segments.values() if segment.status == "FAILED"]
-        restored_stages = {"TTS", "ALIGNING", "ASR", "TRANSLATING", "WAITING"} if getattr(self, "_restored_can_resume", False) else {"TTS", "ALIGNING"}
+        restored_stages = {"TTS", "ALIGNING", "ASR", "TRANSLATING", "WAITING"} if getattr(self, "_restored_can_resume", False) or not self.visual_translation else {"TTS", "ALIGNING"}
         voice_retry = any(getattr(row, "tts_voice_outdated", False) for row in failed)
         return bool(self.initialized and (not self.is_stopped or voice_retry) and not self.is_running
                     and not self.is_editing and self.error and failed
@@ -542,7 +610,12 @@ class StreamingPipelineSession:
         if (not self.can_retry or (self.worker_task and not self.worker_task.done())
                 or (self.start_task and not self.start_task.done())):
             raise SegmentEditConflict("Chỉ tiếp tục khi tác vụ đã dừng do lỗi và không có thao tác khác đang chạy.")
+        self.run_intent = "running"
         self._run_started_at = time.monotonic()
+        self._run_finished_at = None
+        self._stage_profiler.reset(started_at=self._run_started_at,
+                                   initial_phase="prepare" if self._startup_failed else "retry",
+                                   preserve=True)
         self._run_ready_baseline = sum(row.status in ("READY", "PLAYED") for row in self.segments.values())
         from core.streaming.progress_eta import reset_eta
         reset_eta(self, now=self._run_started_at)
@@ -556,6 +629,7 @@ class StreamingPipelineSession:
                     segment.status = "WAITING"
                     segment.error = None
                     segment._retry_synthesis = True
+            self._requeue_interrupted_source_translations(self.segments.values())
             self._restored_interrupted = False
             self.is_stopped = False
             self.is_running = True
@@ -591,6 +665,9 @@ class StreamingPipelineSession:
             self.queue.get_nowait()
             self.queue.task_done()
         retried = []
+        missing_translation_retry = any(segment.status == "FAILED"
+            and segment.failed_stage == "TRANSLATING" and _missing_translation_text(segment.final_vi)
+            for segment in self.segments.values())
         for segment in self.segments.values():
             if (segment.status in {"READY", "PLAYED"} and segment.error is None
                     and segment.failed_stage is None):
@@ -604,17 +681,19 @@ class StreamingPipelineSession:
             if (segment.status == "WAITING" and (not self._chunked_source_started
                     or self._published_row(segment))):
                 self.queue.put_nowait((segment.start, segment.id))
-        ready = sum(segment.status in ("READY", "PLAYED") for segment in self.segments.values())
+        measured = self._processing_progress_metadata()
+        ready = measured["processing_completed_segments"]
         self.progress = {"phase": "tts", "stage": "Đang thử lại tạo giọng, giữ nguyên các câu đã xong…",
-                         "progress_pct": round(ready * 100 / len(self.segments), 1), "status": "RUNNING",
-                         "completed_segments": ready, "total_segments": len(self.segments)}
+                         "progress_pct": measured["processing_progress_pct"], "status": "RUNNING",
+                         "completed_segments": ready, "total_segments": measured["processing_total_segments"]}
 
         async def resumed_worker():
             try:
                 await self.emit("progress", self.get_progress())
                 for segment in retried:
                     await self.emit("segment_update", segment.to_dict())
-                await self._resume_pending_chunk_reviews(synthesize_pending=True)
+                if not missing_translation_retry:
+                    await self._resume_pending_chunk_reviews(synthesize_pending=True)
                 # Review may replace a playable draft and defer failed speech.
                 # Rebuild the reserved queue before its sole worker starts so
                 # newly missing audio is retried with its accepted audit.
@@ -667,6 +746,7 @@ class StreamingPipelineSession:
             ensure_source_identity(self)
         # Reserve before yielding. Two clicks cannot launch two providers/workers.
         self.translation_mode = "full"
+        self.run_intent = "running"
         self._preview_ready = False
         self.is_running = True
         self.is_paused = False
@@ -694,7 +774,8 @@ class StreamingPipelineSession:
         without_audio = confirm_silence or review_empty
         if (not isinstance(confirm_silence, bool) or not isinstance(text, str)
                 or len(text) > 2000 or "\x00" in text
-                or (confirm_silence and text.strip()) or (not without_audio and not text.strip())):
+                or (confirm_silence and text.strip()) or (not without_audio and not text.strip())
+                or is_untranslated_placeholder(text)):
             raise ValueError("Nội dung tiếng Việt phải có từ 1 đến 2.000 ký tự và không chứa ký tự NUL.")
         seg = self.segments.get(segment_id)
         if seg is None:
@@ -832,6 +913,8 @@ class StreamingPipelineSession:
                     self.error = None
                 if review_result is not None:
                     self._apply_review_metadata(seg, review_result)
+                    from core.streaming.native_audit_retry import bind_published_audit
+                    bind_published_audit(seg, review_result)
                 else:
                     seg.verification = {"status": "manual", "reason": "Người dùng đã lưu lời thoại."}
                 if recovery_edit or self.review_summary.get("status") == "completed":
@@ -934,7 +1017,8 @@ class StreamingPipelineSession:
         owners = {sid: self.segments[sid] for sid in {*plan, segment.id}}
         old_rows = {sid: deepcopy(vars(row)) for sid, row in owners.items()}
         fields = ("screen_texts", "rolling_context", "review_summary", "warnings", "error", "total_processed_duration",
-                  "output_video_url", "output_filename", "output_review_url", "auto_export_signature")
+                  "output_video_url", "output_filename", "output_review_url", "auto_export_signature",
+                  "output_incomplete", "output_missing_segment_ids")
         old_fields = {name: deepcopy(getattr(self, name)) for name in fields if hasattr(self, name)}
         try:
             yield
@@ -967,7 +1051,7 @@ class StreamingPipelineSession:
 
     @staticmethod
     def _apply_review_metadata(segment, row):
-        for field in ("text_zh", "literal_vi", "natural_vi", "final_vi", "needs_review", "review_reason", "verification"):
+        for field in ("text_zh", "asr_text", "literal_vi", "natural_vi", "final_vi", "needs_review", "review_reason", "verification"):
             if field in row:
                 value = row[field]
                 if field == "verification" and isinstance(value, dict):
@@ -996,7 +1080,10 @@ class StreamingPipelineSession:
         try:
             source = Path(self.video_path).resolve(strict=True)
             info = source.stat()
-            return {"provider": settings.LLM_PROVIDER, "model": settings.OPENCODE_MODEL,
+            model = {"ollama": settings.OLLAMA_MODEL, "gemini": settings.GEMINI_MODEL,
+                     "openrouter-free": settings.OPENROUTER_MODEL}.get(
+                         settings.LLM_PROVIDER, settings.OPENCODE_MODEL)
+            return {"provider": settings.LLM_PROVIDER, "model": model,
                 "gate": AutomaticTranslationReviewer.REVIEW_GATE_REVISION,
                 "implementation": loaded_implementation_revision(),
                 "video": {"path": str(source), "bytes": info.st_size,
@@ -1132,6 +1219,8 @@ class StreamingPipelineSession:
         self.output_video_url = ""
         self.output_filename = ""
         self.output_review_url = ""
+        self.output_incomplete = False
+        self.output_missing_segment_ids = []
         self.auto_export_signature = None
 
     async def _invalidate_changed_address_verifications(self):
@@ -1156,7 +1245,7 @@ class StreamingPipelineSession:
             await self.emit("screen_update", {"screen_texts": self.screen_texts})
 
     async def _review_translations(self, *, regenerate_audio=False, force_review=False, segment_ids=None,
-                                   defer_audio=False):
+                                   defer_audio=False, fast_local=False):
         from core.translation_review import AutomaticTranslationReviewer
         self._review_scope = "chunk" if segment_ids is not None else "all"
         self._reviewing_segment_ids = sorted(segment_ids) if segment_ids is not None else sorted(self.segments)
@@ -1189,8 +1278,66 @@ class StreamingPipelineSession:
         eta_review_started = stage_measurement_start(self)
         try:
             with observe_cache_usage() as review_cache_usage:
-                result = await self._run_blocking(
-                    AutomaticTranslationReviewer().review, self.video_path, deepcopy(targets), deepcopy(self.screen_texts), **options)
+                # Retry the same immutable review input before publication.
+                # Newer user revisions still win at the commit guard below.
+                review_targets, review_screen_texts = deepcopy(targets), deepcopy(self.screen_texts)
+                for attempt in itertools.count():
+                    try:
+                        native_targets = [row for row in review_targets if native_language(row)]
+                        ordinary_targets = [row for row in review_targets if not native_language(row)]
+                        if not native_targets:
+                            review_options = deepcopy(options)
+                            if fast_local:
+                                review_options["fast_local"] = True
+                            result = await self._run_blocking(
+                                AutomaticTranslationReviewer().review, self.video_path,
+                                deepcopy(review_targets), deepcopy(review_screen_texts), **review_options)
+                        else:
+                            native_result = await self._run_blocking(review_native_rows,
+                                deepcopy(native_targets), context=deepcopy(list(self.segments.values())),
+                                cancel_check=options["cancel_check"])
+                            result = {**native_result, "screen_texts": deepcopy(review_screen_texts)}
+                            if ordinary_targets:
+                                ordinary_options = deepcopy(options)
+                                if fast_local:
+                                    ordinary_options["fast_local"] = True
+                                if "context_segments" in ordinary_options:
+                                    ordinary_options["context_segments"] = [row for row in ordinary_options["context_segments"]
+                                        if not native_language(row)]
+                                ordinary_result = await self._run_blocking(
+                                    AutomaticTranslationReviewer().review, self.video_path,
+                                    deepcopy(ordinary_targets), deepcopy(review_screen_texts), **ordinary_options)
+                                result["segments"].update(ordinary_result["segments"])
+                                result["screen_texts"] = ordinary_result.get("screen_texts", review_screen_texts)
+                                result["translation_sources"].extend(ordinary_result.get("translation_sources", []))
+                                for key, value in ordinary_result["summary"].items():
+                                    result["summary"][key] = result["summary"].get(key, 0) + value
+                        # The second semantic pass may return an incomplete
+                        # draft instead of raising. Retry only explicit
+                        # transient diagnostics; uncertainty is not an outage.
+                        recoverable_draft = any(
+                            (row.get("verification") or {}).get("status") == "incomplete"
+                            and ((row.get("verification") or {}).get("diagnostic") or {}).get("code")
+                            in {"provider_timeout", "provider_rate_limited", "provider_circuit_open", "provider_queue_full"}
+                            for row in result.get("segments", {}).values())
+                        if recoverable_draft and self.is_running:
+                            delay = self._recovery_delay(attempt + 1)
+                            if delay is not None:
+                                await self._wait_automatic_recovery("AI kiểm tra bản dịch", attempt + 1,
+                                                                    delay)
+                                continue
+                            await self._report_recovery_exhausted("AI kiểm tra bản dịch")
+                        break
+                    except Exception as error:
+                        if (not self.is_running or not _transient_failure(error)
+                                or getattr(self, "_persistence_capacity_failed", False)):
+                            raise
+                        delay = self._recovery_delay(attempt + 1, error)
+                        if delay is None:
+                            await self._report_recovery_exhausted("AI kiểm tra bản dịch")
+                            raise
+                        await self._wait_automatic_recovery("AI kiểm tra bản dịch", attempt + 1,
+                                                            delay)
             successful_rows = sum((row.get("verification") or {}).get("status") in
                                   {"verified", "corrected", "unresolved", "manual"}
                                   for row in result.get("segments", {}).values())
@@ -1224,6 +1371,8 @@ class StreamingPipelineSession:
                             segment.superseded_audio_paths.append(segment.audio_path)
                         self._apply_review_metadata(segment, row)
                         segment.revision += 1
+                        from core.streaming.native_audit_retry import bind_published_audit
+                        bind_published_audit(segment, row)
                         segment.status, segment.failed_stage = "WAITING", "TTS"
                         segment.error = None
                         segment.audio_path = segment.audio_url = None
@@ -1260,6 +1409,8 @@ class StreamingPipelineSession:
                             segment.superseded_audio_paths.append(segment.audio_path)
                         self._apply_review_metadata(segment, row)
                         segment.revision += 1
+                        from core.streaming.native_audit_retry import bind_published_audit
+                        bind_published_audit(segment, row)
                         segment.status, segment.failed_stage = "FAILED", "TTS"
                         segment.error = str(error)
                         segment.audio_path = segment.audio_url = None
@@ -1280,8 +1431,8 @@ class StreamingPipelineSession:
                                 _review_context=review_context))
                     self._invalidate_output()
                     logging.getLogger("errors").error(
-                        "[%s] REVIEW_AUDIO_DEFERRED segment_id=%s error_type=%s",
-                        self.task_id, sid, type(error).__name__)
+                        "[%s] REVIEW_AUDIO_DEFERRED segment_id=%s error_type=%s traceback=%s",
+                        self.task_id, sid, type(error).__name__, redacted_traceback(error))
                     await self.emit("segment_update", segment.to_dict())
                     await self._update_ready()
             else:
@@ -1326,8 +1477,12 @@ class StreamingPipelineSession:
             if self.is_stopped or not self.is_running:
                 raise asyncio.CancelledError
             revision = row.revision
+            content_identity = self._deferred_speech_identity(row)
             try:
-                await self._synthesize_segment(row, allow_pacing=False)
+                if _missing_translation_text(row.final_vi) and (native_language(row) or row.failed_stage == "TRANSLATING"):
+                    await self._process_segment(row)
+                else:
+                    await self._synthesize_segment(row, allow_pacing=False)
             except asyncio.CancelledError:
                 raise
             except SpeechBudgetError:
@@ -1337,7 +1492,7 @@ class StreamingPipelineSession:
                 # Do not publish an overlong WAV or repeat synthesis remotely.
                 row.status, row.error, row.failed_stage = "WAITING", None, "ALIGNING"
                 row._retry_synthesis = True
-                deferred.append((row, revision))
+                deferred.append((row, revision, content_identity))
                 await self.emit("segment_update", row.to_dict())
                 self._persist_if_enabled()
             except Exception as error:
@@ -1351,7 +1506,7 @@ class StreamingPipelineSession:
                     # work is published, rather than retrying here recursively.
                     row.status, row.error, row.failed_stage = "WAITING", str(error), "TTS"
                     row._retry_synthesis = True
-                    deferred.append((row, revision))
+                    deferred.append((row, revision, content_identity))
                     warning = f"Câu {row.id + 1} chưa tạo được giọng; giữ phần đã xong và tiếp tục các câu sau."
                     if warning not in self.warnings:
                         self.warnings.append(warning)
@@ -1367,23 +1522,43 @@ class StreamingPipelineSession:
                 if warning not in self.warnings:
                     self.warnings.append(warning)
                 logging.getLogger("errors").error(
-                    "[%s] RECOVERY_SPEECH_FAILED segment_id=%s stage=%s error_type=%s",
-                    self.task_id, row.id, row.failed_stage, type(error).__name__)
+                    "[%s] RECOVERY_SPEECH_FAILED segment_id=%s stage=%s error_type=%s traceback=%s",
+                    self.task_id, row.id, row.failed_stage, type(error).__name__, redacted_traceback(error))
                 await self.emit("segment_update", row.to_dict())
                 self._persist_if_enabled()
         if not defer_pacing:
             await self._resume_deferred_speech_rows(deferred)
         return deferred
 
-    async def _resume_deferred_speech_rows(self, deferred):
+    @staticmethod
+    def _deferred_speech_identity(row):
+        # Neighbor publication legitimately changes dub times and revision.
+        # Retain the exact speech/source/review/voice identity independently
+        # so a timing-only change cannot strand a still-owned pending row.
+        fields = ('id', 'start', 'end', 'duration', 'text_zh', 'asr_text',
+            'final_vi', 'needs_review', 'confirmed_silence', 'verification',
+            'voice_id', 'translation_provider', 'translation_model',
+            'source_method', *SOURCE_METADATA_FIELDS)
+        value = {key: getattr(row, key, None) for key in fields}
+        return hashlib.sha256(json.dumps(value, sort_keys=True, ensure_ascii=False,
+            separators=(',', ':'), allow_nan=False).encode('utf-8')).hexdigest()
+
+    async def _resume_deferred_speech_rows(self, deferred, *, retry_transient=False):
         """Run bounded pacing only after independent recovery has published."""
         seen = set()
-        for row, revision in deferred:
+        for entry in deferred:
+            row, revision = entry[:2]
+            identity = entry[2] if len(entry) == 3 else None
             if (row.id, revision) in seen:
                 continue
             seen.add((row.id, revision))
-            if row.revision != revision or row.status != "WAITING" or not self._published_row(row):
+            content_changed = (self._deferred_speech_identity(row) != identity
+                if identity is not None else row.revision != revision)
+            if content_changed or row.status != "WAITING" or not self._published_row(row):
                 continue
+            # The next fit must own the current timing revision and revalidate
+            # the complete graph; never reuse the old deferred timing plan.
+            revision = row.revision
             await self.pause_event.wait()
             if self.is_stopped or not self.is_running:
                 raise asyncio.CancelledError
@@ -1404,12 +1579,14 @@ class StreamingPipelineSession:
                     continue
                 row.failed_stage = row.status if row.status in {"TTS", "ALIGNING"} else "TTS"
                 row.status, row.error = "FAILED", str(error)
+                if retry_transient:
+                    self._remember_transient_speech_failure(row, error)
                 warning = f"Câu {row.id + 1} chưa tạo được giọng; giữ phần đã xong và tiếp tục các câu sau."
                 if warning not in self.warnings:
                     self.warnings.append(warning)
                 logging.getLogger("errors").error(
-                    "[%s] RECOVERY_PACING_FAILED segment_id=%s stage=%s error_type=%s",
-                    self.task_id, row.id, row.failed_stage, type(error).__name__)
+                    "[%s] RECOVERY_PACING_FAILED segment_id=%s stage=%s error_type=%s traceback=%s",
+                    self.task_id, row.id, row.failed_stage, type(error).__name__, redacted_traceback(error))
                 await self.emit("segment_update", row.to_dict())
                 self._persist_if_enabled()
 
@@ -1426,9 +1603,25 @@ class StreamingPipelineSession:
         end-of-source pass can request only those rows so it cannot turn an
         unrelated unresolved draft into an unbounded review loop.
         """
+        if settings.LLM_PROVIDER == "ollama":
+            # Local-model output is a usable draft, not a verified translation.
+            # Do not spend another Ollama generation on automatic source,
+            # speaker or pronoun review. Keep explicit user-triggered review
+            # available through start_automatic_review().
+            if synthesize_pending:
+                changed = False
+                for row in self.segments.values():
+                    if row.status == "FAILED" and row.failed_stage in {"TTS", "ALIGNING"}:
+                        row.status, row.error = "WAITING", None
+                        row._retry_synthesis = True
+                        changed = True
+                        await self.emit("segment_update", row.to_dict())
+                if changed:
+                    self._persist_if_enabled()
+            return
         pending_speaker_review = any(row.speaker_review_pending
             and (row.verification or {}).get("status") != "manual" for row in self.segments.values())
-        if (settings.LLM_PROVIDER != "opencode" or
+        if (settings.LLM_PROVIDER not in {"opencode", "ollama"} or
                 (not (self._chunked_source_started and self.visual_translation) and not pending_speaker_review)):
             return
         deferred_speech = []
@@ -1457,12 +1650,18 @@ class StreamingPipelineSession:
                 and bool(audit["address_stale_source_ids"]))
         def needs_obsolete_gate_recheck(row):
             audit = row.verification or {}
-            # Gate/schema fixes cannot repair a historical negative verdict
-            # by flipping a boolean. Re-audit each obsolete unresolved verdict
-            # once, using current evidence; a current negative stays negative.
-            return (audit.get("status") == "unresolved"
-                and audit.get("review_gate_revision") != AutomaticTranslationReviewer.REVIEW_GATE_REVISION
-                and any(key in audit for key in ("address_context", "address_applicable", "audio_evidence")))
+            if audit.get("review_gate_revision") == AutomaticTranslationReviewer.REVIEW_GATE_REVISION:
+                return False
+            # Re-audit obsolete verdicts using current evidence, never repair
+            # them by flipping a boolean or replacing saved words. Earlier
+            # positive gates trusted provider confidence without comparing
+            # the actual pronouns with the independent source-role reading.
+            if audit.get("status") == "unresolved":
+                return any(key in audit for key in ("address_context", "address_applicable", "audio_evidence"))
+            return (audit.get("status") in {"verified", "corrected"}
+                and audit.get("address_applicable") is True
+                and isinstance(audit.get("address_context"), dict)
+                and bool(audit["address_context"]))
         def needs_numeric_audio_recheck(row):
             # New exact spelling equivalence can resolve an old ASR comparison
             # false negative. It is only a reason to perform genuine semantic
@@ -1474,10 +1673,12 @@ class StreamingPipelineSession:
                     or not isinstance(readings, list)):
                 return False
             valid = [item for item in readings if isinstance(item, dict)
-                     and item.get("engine") in {"sensevoice", "faster-whisper-small"}
+                     and item.get("engine") in {"sensevoice", "faster-whisper-small", "faster-whisper-medium", "faster-whisper-large-v3"}
                      and isinstance(item.get("text_zh"), str) and item["text_zh"].strip()]
             keys = {comparable_audio_chinese(item["text_zh"]) for item in valid}
-            return len({item["engine"] for item in valid}) == 2 and len(keys) == 1 and "" not in keys
+            engines = {item["engine"] for item in valid}
+            return (len(engines) == 2 and "sensevoice" in engines
+                    and len(keys) == 1 and "" not in keys)
         def needs_missing_translation_recovery(row):
             audit = row.verification or {}
             return (audit.get("status") == "unresolved"
@@ -1486,6 +1687,7 @@ class StreamingPipelineSession:
                 and audit.get("missing_translation_recovery") !=
                     AutomaticTranslationReviewer.missing_translation_recovery_identity(
                         row, self.segments.values()))
+
         def include(row):
             if stale_address_only:
                 return needs_address_source_recheck(row)
@@ -1496,7 +1698,7 @@ class StreamingPipelineSession:
         pending = sorted((row for row in self.segments.values()
             if (row.speaker_review_pending or
                  (self._chunked_source_started and self.visual_translation and self._published_row(row)
-                  and row.source_method == "text-ai" and row.translation_provider == "opencode"
+                  and row.source_method == "text-ai" and row.translation_provider in {"opencode", "ollama"}
                   and include(row)))),
             key=lambda row: (row.start, row.id))
         self._eta_review_pending_ids = {row.id for row in pending}
@@ -1537,7 +1739,8 @@ class StreamingPipelineSession:
                 if warning not in self.warnings:
                     self.warnings.append(warning)
                 logging.getLogger("errors").error(
-                    "[%s] RESUMED_REVIEW_FAILED error_type=%s", self.task_id, type(error).__name__)
+                    "[%s] RESUMED_REVIEW_FAILED error_type=%s traceback=%s",
+                    self.task_id, type(error).__name__, redacted_traceback(error))
                 for row in group:
                     if row.revision != revisions[row.id]:
                         continue
@@ -1564,7 +1767,7 @@ class StreamingPipelineSession:
                 # queue in the same run. Its siblings continue independently.
                 deferred_speech.extend(await self._resume_speech_rows(group, defer_pacing=True))
         if synthesize_pending:
-            await self._resume_deferred_speech_rows(deferred_speech)
+            await self._resume_deferred_speech_rows(deferred_speech, retry_transient=True)
 
     def _idle_review_targets(self):
         if self.translation_mode == "preview" and self._chunked_source_started:
@@ -1579,12 +1782,16 @@ class StreamingPipelineSession:
     async def start_automatic_review(self):
         targets = self._idle_review_targets()
         preview_scope = self.translation_mode == "preview" and self._chunked_source_started
-        if (not self.initialized or self.is_running or self.is_stopped or self.is_editing or self.error
+        if (not self.initialized or self.is_running or self.is_stopped or self.is_paused or self.is_editing or self.error
+                or self.run_intent in {"paused", "stopped"}
                 or not targets or any(s.status not in ("READY", "PLAYED") for s in targets)):
             raise SegmentEditConflict("Hãy chờ xử lý xong trước khi AI kiểm tra lại.")
-        if settings.LLM_PROVIDER != "opencode":
-            raise SegmentEditConflict("Kiểm tra lại miễn phí hiện dùng OpenCode trong Cài đặt.")
+        if settings.LLM_PROVIDER not in {"opencode", "ollama"}:
+            raise SegmentEditConflict("Kiểm tra lại hiện hỗ trợ Ollama local hoặc OpenCode trong Cài đặt.")
         self._run_started_at = time.monotonic()
+        self._run_finished_at = None
+        self._stage_profiler.reset(started_at=self._run_started_at, initial_phase="review",
+                                   preserve=True)
         self._run_ready_baseline = sum(row.status in ("READY", "PLAYED") for row in self.segments.values())
         from core.streaming.progress_eta import reset_eta
         reset_eta(self, now=self._run_started_at)
@@ -1592,6 +1799,8 @@ class StreamingPipelineSession:
         self.review_summary = {"status": "running"}
         self._invalidate_output()
         self.progress = {"phase": "review", "stage": "AI đang kiểm tra lại từng câu…", "progress_pct": 0, "status": "RUNNING"}
+        automatic_review = getattr(self, "automatic_output", None) == {
+            "status": "pending", "policy": "strict_media", "reason": "review_pending"}
         async def run_review():
             try:
                 await self.emit("result_invalidated", {"reason": "review_started",
@@ -1601,21 +1810,36 @@ class StreamingPipelineSession:
                 pending_ids = {row.id for row in targets
                                if row.speaker_review_pending and (row.verification or {}).get("status") != "manual"}
                 await self._review_translations(regenerate_audio=True, force_review=True,
-                    segment_ids=pending_ids or ({row.id for row in targets} if preview_scope else None))
+                    segment_ids=pending_ids or ({row.id for row in targets} if preview_scope else None),
+                    fast_local=automatic_review and settings.LLM_PROVIDER == "ollama")
             except asyncio.CancelledError:
+                interrupted = getattr(self, "_application_shutdown", False) and self.run_intent == "running"
                 self.is_stopped = True
+                self.review_summary = {**self.review_summary, "status": "incomplete"}
+                if automatic_review:
+                    self.automatic_output = {
+                        "status": "pending" if interrupted else "cancelled", "policy": "strict_media",
+                        "reason": "review_pending" if interrupted else "user_cancelled"}
+                if not interrupted and self.run_intent != "paused":
+                    self.run_intent = "stopped"
                 raise
             except Exception as error:
                 self.review_summary = {"status": "failed"}
                 logging.getLogger("errors").error(
-                    "[%s] REVIEW_FAILED error_type=%s detail=%s",
-                    self.task_id, type(error).__name__, redacted_detail(error))
+                    "[%s] REVIEW_FAILED error_type=%s detail=%s traceback=%s",
+                    self.task_id, type(error).__name__, redacted_detail(error), redacted_traceback(error))
                 warning = "AI kiểm tra lại chưa hoàn tất. Các câu đã lưu và âm thanh sẵn có được giữ; có thể thử lại."
                 if warning not in self.warnings:
                     self.warnings.append(warning)
             finally:
                 self.is_running = False
                 self.review_task = None
+                if (automatic_review and not self.is_stopped and not self.is_paused
+                        and self.run_intent == "running" and self.review_summary.get("status") != "completed"):
+                    self.automatic_output = {"status": "blocked", "policy": "strict_media",
+                                             "reason": "review_incomplete"}
+                    self.run_intent = "idle"
+                self._persist_if_enabled()
                 if not self.is_stopped:
                     failed_audio = [segment.id for segment in targets
                                     if segment.status == "FAILED"
@@ -1632,11 +1856,33 @@ class StreamingPipelineSession:
                     await self.emit("finished", self.get_telemetry())
                 self._release_runtime()
         self.review_task = asyncio.create_task(run_review())
+        self._persist_if_enabled()
         return self.get_progress()
 
     async def emit(self, event_type: str, data: Dict[str, Any], *, checkpoint=True):
+        from core.streaming.status_history import record_snapshot, snapshot_metadata
+        if event_type == "finished" and self._run_started_at is not None:
+            self._run_finished_at = time.monotonic()
+            self._stage_profiler.finish(now=self._run_finished_at)
+        history_changed = False
+        if event_type == "progress":
+            history_changed = record_snapshot(self, data)
+            data = {**data, **snapshot_metadata(self)}
+        elif event_type in {"error", "finished"}:
+            # get_progress is read-only for this journal and cannot save/recurse.
+            history_changed = record_snapshot(self, self.get_progress())
+        if event_type in {"init", "segment_update", "screen_update", "finished", "error",
+                          "review_complete", "result_invalidated", "source_ready", "background_update"}:
+            from core.streaming.progress_activity import mark_activity
+            mark_activity(self)
         if checkpoint and event_type in {"init", "segment_update", "screen_update", "finished", "error", "review_complete", "result_invalidated", "source_ready"}:
+
             self._persist_if_enabled()
+        elif checkpoint and history_changed:
+            self._persist_if_enabled()
+        if event_type == "finished":
+            from core.streaming.native_audit_lifecycle import ensure_native_audit_retry
+            ensure_native_audit_retry(self)
         if event_type == "segment_update":
             data = self.caption_metadata(data)
         elif event_type in {"init", "screen_update", "review_complete"}:
@@ -1673,7 +1919,10 @@ class StreamingPipelineSession:
         return self.caption_metadata(segment.to_dict())
 
     def _has_valid_dub_audio(self, row):
-        if not row.audio_path or not row.audio_url:
+        return bool(row.audio_url and self._has_valid_audio_file(row))
+
+    def _has_valid_audio_file(self, row):
+        if not row.audio_path:
             return False
         try:
             duration = self._cached_dub_audio_duration(row.audio_path)
@@ -1691,6 +1940,21 @@ class StreamingPipelineSession:
             preview_source_covered(completed_seconds=self._visual_completed_seconds,
                 source_prepared_seconds=self._source_prepared_seconds,
                 chunked_source_started=self._chunked_source_started))
+        return result
+
+    def _final_output_metadata(self):
+        source_complete = bool(self.total_duration > 0 and (
+            self._source_prepared_seconds + .001 >= self.total_duration
+            if self._chunked_source_started else self.initialized))
+        if self._source_coverage_intervals:
+            from core.streaming.source_coverage import source_complete as complete_coverage
+            source_complete = complete_coverage(self._source_coverage_intervals, total_duration=self.total_duration)
+        result = final_output_metadata(self.segments.values(),
+            valid_audio=self._has_valid_audio_file, source_complete=source_complete,
+            total_duration=self.total_duration)
+        if self.review_summary.get("status") in {"failed", "incomplete", "running"}:
+            result.update(output_is_draft=True, output_quality_label="Bản nháp — cần kiểm tra",
+                          content_review_state="REVIEW_REQUIRED")
         return result
 
     def _processing_progress_metadata(self):
@@ -1732,10 +1996,7 @@ class StreamingPipelineSession:
         for row in rows:
             if row.status not in {"READY", "PLAYED"}:
                 continue
-            silence = row.confirmed_silence or (
-                row.source_method == "audio" and row.subtitle_timing_source == "empty"
-                and not row.needs_review and not any(
-                    str(value or "").strip() for value in (row.text_zh, row.asr_text, row.final_vi)))
+            silence = row.confirmed_silence
             if silence or row.final_vi.strip() and self._has_valid_dub_audio(row):
                 completed += 1
                 valid_ids.add(row.id)
@@ -1743,14 +2004,22 @@ class StreamingPipelineSession:
         # Later ready branches cannot jump over an unfinished sentence. Reuse
         # the audio validation above rather than probing WAVs a second time.
         ready_seconds = 0.
+        ready_through_segment = None
         for row in sorted(self.segments.values(), key=lambda row: (row.start, row.id)):
             if row.id not in valid_ids:
                 break
             ready_seconds = row.end
+            ready_through_segment = row.id + 1
         ready_seconds = min(ready_seconds, self.total_duration,
             self._source_prepared_seconds if self._chunked_source_started else self.total_duration)
         total = len(rows)
+        translated = [row for row in self.segments.values() if str(row.final_vi or "").strip()]
+        translated_tail = max(translated, key=lambda row: (row.end, row.id), default=None)
         return {"processing_scope": scope, "processing_total_known": total_known,
+                "ready_through_segment": ready_through_segment,
+                "translated_segment_count": len(translated),
+                "translated_furthest_segment": translated_tail.id + 1 if translated_tail else None,
+                "translated_furthest_seconds": translated_tail.end if translated_tail else 0.,
                 "processing_ready_seconds": ready_seconds,
                 "processing_completed_segments": completed, "processing_total_segments": total,
                 "processing_progress_pct": round(completed * 100 / total, 1)
@@ -1758,7 +2027,7 @@ class StreamingPipelineSession:
 
     def get_progress(self) -> Dict[str, Any]:
         snapshot = dict(self.progress)
-        output_gate = final_output_metadata(self.segments.values())
+        output_gate = self._final_output_metadata()
         snapshot.update(output_gate)
         snapshot.update(self._processing_progress_metadata())
         from core.streaming.recovery import segment_state
@@ -1768,21 +2037,49 @@ class StreamingPipelineSession:
         snapshot.update(segment_states=counts, completed_chunks=sum(row["state"] == "COMPLETED" for row in self._chunk_jobs),
                         total_chunks=len(self._chunk_jobs), scanned_seconds=self._visual_scanned_seconds,
                         retry_chunks=sum(row["state"] == "RETRY_PENDING" for row in self._chunk_jobs))
-        snapshot["elapsed_seconds"] = (max(0, time.monotonic() - self._run_started_at)
+        snapshot["elapsed_seconds"] = (max(0, (self._run_finished_at if self._run_finished_at is not None
+                                               else time.monotonic()) - self._run_started_at)
                                        if self._run_started_at is not None else None)
+        end_to_end_started = getattr(self, "start_wall_time", None)
+        if end_to_end_started:
+            end_to_end_finished = getattr(self, "end_to_end_seconds", None)
+            snapshot["end_to_end_seconds"] = (
+                end_to_end_finished if end_to_end_finished is not None else
+                round(max(0., time.time() - end_to_end_started), 1))
+        if self._download_metrics:
+            snapshot["download_metrics"] = dict(self._download_metrics)
+        snapshot["phase_timings_seconds"] = self._stage_profiler.snapshot(
+            now=self._run_finished_at if self._run_finished_at is not None else time.monotonic())
+        snapshot["stage_work_timings"] = self._stage_profiler.work_snapshot()
         if settings.LLM_PROVIDER == "opencode":
             from core.engines.translation.opencode_client import _shared_execution_layer
-            snapshot["ai_queue"] = _shared_execution_layer().snapshot()
+            snapshot["ai_queue"] = _shared_execution_layer().snapshot(scope_id=self.task_id)
+            queue = snapshot["ai_queue"]
+            snapshot["translation_wait_reason"] = (
+                "Đã tạm dừng" if self.is_paused else
+                "Đang chờ hết thời gian nghỉ trước đợt thử lại" if getattr(self, "_automatic_recovery_wait", None) else
+                "Dịch vụ đang giới hạn yêu cầu; đang chờ phục hồi" if queue.get("circuit_retry_after", 0) > 0 else
+                "Đang chờ lượt xử lý AI" if queue.get("queued_requests", 0) else
+                "Đang nhận diện thêm nguồn" if self.is_running and self._source_prepared_seconds < self.total_duration else
+                "Số câu sẵn sàng ít hơn số luồng đã chọn" if self.is_running and queue.get("active_requests", 0) < self.translation_chunk_workers else "")
         snapshot.update(self._review_metadata())
         snapshot["can_retry"] = self.can_retry
         snapshot["can_repair_failed"] = any(self._can_repair_failed_segment(row) for row in self.segments.values())
         snapshot.update(translation_mode=self.translation_mode, preview_seconds=self.preview_seconds,
                         chunk_workers=getattr(self, "_parallel_chunk_workers", 1),
-                        configured_chunk_workers=settings.TRANSLATION_CHUNK_WORKERS,
+                        configured_chunk_workers=self.translation_chunk_workers,
                         chunk_seconds=settings.TRANSLATION_CHUNK_SECONDS,
                         source_prepared_seconds=self._source_prepared_seconds,
+                        source_scanned_seconds=max(self._source_scanned_seconds, self._source_prepared_seconds),
                         processed_seconds=self._visual_completed_seconds,
                         total_seconds=self.total_duration, can_translate_full=self.can_translate_full)
+        snapshot.update(
+            source_missing_speech_spans=[list(span) for span in self._source_missing_speech_spans],
+            source_preparation_stage=(self._source_preparation_stage
+                if getattr(self, "_source_preparation_active", False) or self._source_failure_code else None),
+            source_failure_code=self._source_failure_code,
+            source_failure_start=self._source_failure_start,
+        )
         preview_output = self._preview_output_metadata() if self.translation_mode == "preview" else None
         if preview_output is not None:
             snapshot.update(preview_output)
@@ -1821,17 +2118,62 @@ class StreamingPipelineSession:
             else:
                 snapshot.update(status="FAILED", phase="prepare", progress_pct=None,
                     stage="Bản xem trước chưa nhận diện và dịch được đoạn nguồn; bấm Tiếp tục để thử phần còn thiếu.")
-        elif not self.is_running and self.review_summary.get("status") in {"failed", "incomplete"}:
+        elif (not self.is_running and self.review_summary.get("status") in {"failed", "incomplete"}
+              and not output_gate.get("media_complete")):
             snapshot.update(status="FAILED", phase="review", stage=self._review_message())
         elif (not self.is_running and output_gate["final_output_blocked"]
               and not self._reviewing_segment_ids and not self.is_editing):
             snapshot.update(status="PREPARED", phase="prepared", progress_pct=None,
-                            stage=missing_speech_message(output_gate["missing_speech_ids"]))
+                            stage=(missing_speech_message(output_gate["missing_speech_ids"])
+                                   if output_gate["missing_speech_ids"] else
+                                   "Video còn thiếu nguồn, giọng đọc hoặc timeline chưa hợp lệ; tiếp tục phần còn thiếu."))
+        elif not self.is_running and output_gate.get("media_complete") and output_gate["output_is_draft"]:
+            if (snapshot.get("phase") not in {"prepared", "complete"}
+                    or self.review_summary.get("status") in {"failed", "incomplete"}
+                    and (not getattr(self, "output_filename", "") or self.caption_output_outdated)):
+                snapshot.update(status="PREPARED", phase="prepared", progress_pct=None)
+            snapshot["stage"] = "Bản nháp — cần kiểm tra. " + snapshot.get("stage", "Đủ lời và giọng để xuất video.")
+        if self._source_missing_speech_spans and not self.is_running and not self.is_stopped:
+            ranges = ", ".join(f"{start:.2f}–{end:.2f}s" for start, end in self._source_missing_speech_spans)
+            snapshot["stage"] += f" Chưa nhận diện được lời nói tại {ranges}."
         snapshot["can_resume"] = bool(self.initialized and self.is_running and snapshot["status"] == "PAUSED")
         snapshot["can_stop"] = (snapshot["status"] in {"RUNNING", "PAUSED"}
                                 or bool(self.edit_tasks) and not getattr(self, "_stop_draining", False))
+        audit_active = self.native_audit_task is not None and not self.native_audit_task.done()
+        if audit_active and not self.is_stopped and not self.is_running:
+            from core.streaming.native_audit_lifecycle import pending_rows
+            pending = pending_rows(self)
+            snapshot.update(audit_pending_count=len(pending),
+                audit_next_attempt_at=min((marker["next_attempt_at"] for _, marker in pending), default=None),
+                can_pause=not self.is_paused, can_resume=self.is_paused, can_stop=True)
+            if self.is_paused:
+                snapshot["status"] = "PAUSED"
+        elif not self.is_running and self.run_intent in {"paused", "stopped"}:
+            from core.streaming.native_audit_lifecycle import has_pending
+            if has_pending(self):
+                snapshot["can_resume"] = True
+                if self.run_intent == "paused":
+                    snapshot["status"] = "PAUSED"
         from core.streaming.progress_eta import processing_eta
         snapshot.update(processing_eta(self, snapshot))
+        from core.streaming.progress_activity import progress_activity
+        snapshot.update(progress_activity(self, snapshot))
+        if snapshot["activity_state"] in {"waiting", "stalled"}:
+            snapshot.update(eta_seconds=None, eta_reason="activity_unconfirmed")
+        recovery_wait = getattr(self, "_automatic_recovery_wait", None)
+        if recovery_wait and self.is_running and not self.is_stopped and not self.error:
+            remaining = math.ceil(recovery_wait["remaining"])
+            stage = (f"Tự thử lại {recovery_wait['label']} "
+                     f"(đợt {recovery_wait['attempt']}) sau {remaining} giây; "
+                     "giữ phần đã xong.")
+            snapshot.update(phase="recovery_wait", stage=stage, activity_stage=stage,
+                recovery_remaining_seconds=remaining, recovery_attempt=recovery_wait["attempt"],
+                recovery_max_attempts=recovery_wait["total"], eta_seconds=None,
+                eta_reason="automatic_recovery")
+            if not self.is_paused:
+                snapshot["activity_state"] = "waiting"
+        from core.streaming.status_history import snapshot_metadata
+        snapshot.update(snapshot_metadata(self))
         return snapshot
 
     async def report_progress(self, phase: str, stage: str, progress_pct=None, **details):
@@ -1863,23 +2205,29 @@ class StreamingPipelineSession:
             # but never publish overall 100% for an unvalidated result.
             details["stage_progress_pct"] = progress_pct
             progress_pct = None
-        phase_changed = self.progress.get("phase") != phase
-        self.progress = {
+        progress = {
             "phase": phase, "stage": stage, "progress_pct": progress_pct,
             "status": "COMPLETED" if phase == "complete" else "PREVIEW_READY" if phase == "preview" else "PREPARED" if phase == "prepared" else "RUNNING", **details,
         }
+        self._stage_profiler.advance(phase, now=time.monotonic(),
+                                     source_stage=getattr(self, "_source_preparation_stage", None))
+        if progress != self.progress:
+            from core.streaming.progress_activity import mark_activity
+            mark_activity(self)
+        self.progress = progress
         logging.getLogger("pipeline").info("[%s] %s%s", self.task_id, stage,
                                            "" if progress_pct is None else f" ({progress_pct:g}%)")
-        if phase_changed:
-            self._persist_if_enabled()
+        # emit checkpoints significant journal transitions once, including phase changes.
         await self.emit("progress", self.get_progress())
 
     async def _segment_progress(self, phase: str, stage: str):
-        count = sum(s.status in ("READY", "PLAYED") for s in self.segments.values())
-        total = len(self.segments)
+        measured = self._processing_progress_metadata()
+        count = measured["processing_completed_segments"]
+        total = measured["processing_total_segments"]
+        suffix = "" if measured["processing_total_known"] else " đã nhận diện; chưa biết tổng số câu"
         await self.report_progress(
-            phase, f"{stage} · Đã hoàn tất {count}/{total} câu",
-            round(count * 100 / total, 1) if total else None,
+            phase, f"{stage} · Lời và giọng Việt: {count}/{total} câu{suffix}",
+            measured["processing_progress_pct"],
             completed_segments=count, total_segments=total,
         )
 
@@ -1891,8 +2239,36 @@ class StreamingPipelineSession:
         await self._start_guarded(downloader, url)
 
     async def _start_guarded(self, downloader=None, url=None):
+        self.run_intent = "running"
+        attempt = 0
+        while True:
+            try:
+                return await self._start_once(downloader, url, preserve_timings=attempt > 0)
+            except asyncio.CancelledError:
+                raise
+            except Exception as error:
+                attempt += 1
+                delay = self._recovery_delay(attempt, error)
+                if (not _transient_failure(error) or delay is None or self.is_stopped
+                        or getattr(self, "_persistence_capacity_failed", False)):
+                    if not self.is_stopped:
+                        self.run_intent = "idle"
+                        self._persist_if_enabled()
+                    raise
+                self.start_task = asyncio.current_task()
+                self.is_running = True
+                self.error = None
+                await self._wait_automatic_recovery("chuẩn bị video", attempt, delay)
+
+    async def _start_once(self, downloader=None, url=None, *, preserve_timings=False):
         self.start_task = asyncio.current_task()
         self._run_started_at = time.monotonic()
+        self._run_finished_at = None
+        self._stage_profiler.reset(
+            started_at=self._run_started_at,
+            initial_phase="resolve" if downloader is not None and url else "prepare",
+            preserve=preserve_timings,
+        )
         self._run_ready_baseline = sum(row.status in {"READY", "PLAYED"} for row in self.segments.values())
         from core.streaming.progress_eta import reset_eta
         reset_eta(self, now=self._run_started_at)
@@ -1909,6 +2285,10 @@ class StreamingPipelineSession:
                 def publish_progress(data):
                     if self.is_stopped or self.video_path is not None:
                         return
+                    phase = ("source.download" if data.get("phase") == "download" else
+                             "source.download_verify" if data.get("phase") == "prepare" else
+                             str(data.get("phase") or "resolve"))
+                    self._stage_profiler.advance(phase, now=time.monotonic())
                     self.progress = {**data, "status": "RUNNING", "can_pause": False}
                     asyncio.create_task(self.emit("progress", self.get_progress()))
 
@@ -1921,6 +2301,16 @@ class StreamingPipelineSession:
 
                 await self.report_progress("resolve", "Đang nhận diện link video...")
                 info = await self._run_blocking(download_source)
+                raw_metrics = info.get("download_metrics")
+                if isinstance(raw_metrics, dict):
+                    self._download_metrics = {
+                        key: raw_metrics[key] for key in (
+                            "downloaded_bytes", "file_bytes", "elapsed_seconds", "end_to_end_seconds",
+                            "network_read_seconds", "disk_write_seconds", "ttfb_seconds",
+                            "average_speed", "peak_speed", "retry_count", "http_requests", "strategy",
+                            "connections",
+                        ) if key in raw_metrics
+                    }
                 self.video_path = Path(info["file_path"])
                 self.source_video_url = f"/api/inputs/{self.video_path.name}"
                 await self.emit("source_ready", {"video_url": self.source_video_url})
@@ -2009,6 +2399,7 @@ class StreamingPipelineSession:
                     self.screen_texts.append({**deepcopy(screen), "start": max(screen_start, screen["start"])})
         pending = set()
         review_candidates = set()
+        native_reviewed = set()
         draft_identities = {}
         for sid, data in result.get("segments", {}).items():
             item = self.segments.get(sid)
@@ -2021,7 +2412,9 @@ class StreamingPipelineSession:
                 continue
             draft_identity = VideoIntelligence._checkpoint_digest({
                 "row": data, "start": item.start, "end": item.end,
-                "provider": settings.LLM_PROVIDER, "review_model": settings.OPENCODE_MODEL})
+                "provider": settings.LLM_PROVIDER,
+                "review_model": {"ollama": settings.OLLAMA_MODEL, "gemini": settings.GEMINI_MODEL,
+                    "openrouter-free": settings.OPENROUTER_MODEL}.get(settings.LLM_PROVIDER, settings.OPENCODE_MODEL)})
             draft_identities[sid] = draft_identity
             reviewed = self._visual_reviewed_drafts.get(sid)
             if (reviewed and reviewed["draft"] == draft_identity
@@ -2038,31 +2431,45 @@ class StreamingPipelineSession:
             item.natural_vi = data.get("natural_vi", "").strip()
             item.final_vi = _naturalize_spoken_line(item.text_zh, data.get("final_vi", ""))
             provider = data.get("translation_provider") or self.video_intelligence.provider
-            if provider not in ("gemini", "openrouter-free", "opencode"):
+            if provider not in ("gemini", "openrouter-free", "opencode", "ollama"):
                 raise ValueError("Bản dịch chưa xác định đúng nhà cung cấp đã xử lý.")
             defaults = {"opencode": settings.OPENCODE_MODEL,
-                        "openrouter-free": settings.OPENROUTER_MODEL, "gemini": settings.GEMINI_MODEL}
+                        "openrouter-free": settings.OPENROUTER_MODEL, "gemini": settings.GEMINI_MODEL,
+                        "ollama": settings.OLLAMA_MODEL}
             item.source_method = "video-ai" if provider == "gemini" else "text-ai"
             item.translation_provider = provider
             item.translation_model = str(data.get("translation_model") or defaults[provider])[:200]
-            item.evidence_mode = "audio-video" if provider == "gemini" else "asr-ocr-text"
-            source = {"provider": provider, "model": item.translation_model, "evidence_mode": item.evidence_mode}
+            item.evidence_mode = data.get("evidence_mode") if native_language(data) else (
+                "audio-video" if provider == "gemini" else "asr-ocr-text")
+            source = {"provider": provider, "model": item.translation_model,
+                      "evidence_mode": "asr-ocr-text" if native_language(data) else item.evidence_mode}
             if source not in self.translation_sources:
                 self.translation_sources.append(source)
             item.needs_review = bool(data.get("needs_review", False))
             item.review_reason = data.get("review_reason")
             item.status, item.error, item.failed_stage = "WAITING", None, None
-            if provider == "opencode":
+            if native_language(data):
+                item.verification = deepcopy(data.get("verification") or {"status": "unresolved"})
+                native_reviewed.add(sid)
+            elif provider in {"opencode", "ollama"}:
                 item.needs_review = True
                 item.review_reason = item.review_reason or "Đang chờ AI đối chiếu độc lập với nguồn."
                 item.verification = {"status": "pending", "semantic_verified": False}
             pending.add(sid)
-            review_candidates.add(sid)
+            if not native_language(data):
+                review_candidates.add(sid)
         for source in result.get("translation_sources", []):
             if source not in self.translation_sources:
                 self.translation_sources.append(dict(source))
         await self._invalidate_changed_address_verifications()
         source_context = self._visual_source_context_identity()
+        # Native prepass already performed its source-aware semantic review.
+        # Seed the same checkpoint bookkeeping as the ordinary review path;
+        # otherwise a first native row hits a missing-cache KeyError before
+        # its interval can commit, despite its translation being published.
+        for sid in native_reviewed:
+            self._visual_reviewed_drafts[sid] = {"draft": draft_identities[sid],
+                "state": self._visual_review_state(self.segments[sid]), "context": source_context}
         for sid in pending - review_candidates:
             reviewed = self._visual_reviewed_drafts[sid]
             if (reviewed["context"] != source_context
@@ -2097,7 +2504,20 @@ class StreamingPipelineSession:
             if self.is_stopped:
                 raise asyncio.CancelledError
             targets = review_candidates.intersection(group)
-            if targets and settings.LLM_PROVIDER == "opencode":
+            if targets and settings.LLM_PROVIDER == "ollama":
+                reason = "Bản nháp Ollama chưa qua lượt kiểm chứng tự động; cần kiểm tra."
+                for sid in targets:
+                    item = self.segments[sid]
+                    if (item.verification or {}).get("status") == "manual":
+                        continue
+                    item.needs_review = True
+                    item.review_reason = reason
+                    item.verification = {**(item.verification or {}), "status": "unresolved",
+                                         "semantic_verified": False, "reason": reason,
+                                         "draft_mode": "fast-local"}
+                    await self.emit("segment_update", item.to_dict())
+                self._persist_if_enabled()
+            elif targets and settings.LLM_PROVIDER == "opencode":
                 try:
                     await self._review_translations(segment_ids=targets)
                     for sid in targets:
@@ -2113,7 +2533,8 @@ class StreamingPipelineSession:
                     warning = "AI kiểm tra lại chưa hoàn tất; giữ bản nháp và cho phép thử lại."
                     if warning not in self.warnings:
                         self.warnings.append(warning)
-                    logging.getLogger("errors").error("[%s] REVIEW_FAILED error_type=%s", self.task_id, type(error).__name__)
+                    logging.getLogger("errors").error("[%s] REVIEW_FAILED error_type=%s traceback=%s",
+                        self.task_id, type(error).__name__, redacted_traceback(error))
                     for sid in targets:
                         item = self.segments[sid]
                         item.needs_review = True
@@ -2125,21 +2546,26 @@ class StreamingPipelineSession:
                 if self.is_stopped:
                     raise asyncio.CancelledError
                 segment = self.segments[sid]
+                identity = self._deferred_speech_identity(segment)
                 try:
                     await self._process_segment(segment)
                 except Exception as error:
                     if getattr(self, "_persistence_capacity_failed", False):
                         raise
+                    if self._deferred_speech_identity(segment) != identity:
+                        continue
                     segment.failed_stage, segment.status = segment.status, "FAILED"
                     segment.error = str(error)
+                    self._remember_transient_speech_failure(segment, error)
                     await self.emit("segment_update", segment.to_dict())
+                    self._persist_if_enabled()
                     # A single unfit sentence or transient speech request must
                     # not hide all following chunks of a long video. Keep the
                     # failed row actionable and carry on; final completion is
                     # decided by the worker from all rows, never this callback.
                     logging.getLogger("errors").error(
-                        "[%s] SEGMENT_FAILED_CONTINUING segment_id=%s stage=%s error_type=%s",
-                        self.task_id, sid, segment.failed_stage, type(error).__name__)
+                        "[%s] SEGMENT_FAILED_CONTINUING segment_id=%s stage=%s error_type=%s traceback=%s",
+                        self.task_id, sid, segment.failed_stage, type(error).__name__, redacted_traceback(error))
                     warning = f"Câu {sid + 1} chưa tạo được giọng; giữ phần đã xong và tiếp tục các câu sau."
                     if warning not in self.warnings:
                         self.warnings.append(warning)
@@ -2194,9 +2620,29 @@ class StreamingPipelineSession:
                 await asyncio.gather(drain, return_exceptions=True)
 
     def _published_row(self, row):
+        if self._chunked_source_started and not self.visual_translation:
+            from core.streaming.source_progress import containing_run
+            return containing_run(self, row.start, row.end) is not None
         return (row.end <= self._visual_completed_seconds + .001
                 or (row.source_method in {"text-ai", "video-ai"} and bool(row.translation_provider)
                     and row.end <= self._visual_scanned_seconds + .001))
+
+    def _requeue_interrupted_source_translations(self, rows):
+        """Retry saved translation interruptions only inside verified source runs."""
+        restored = []
+        for row in rows:
+            if (row.status != "FAILED" or row.failed_stage != "TRANSLATING"
+                    or not _missing_translation_text(row.final_vi) or not row.text_zh.strip()
+                    or row.confirmed_silence or (row.verification or {}).get("status") == "manual"
+                    or not self._published_row(row)):
+                continue
+            row.status = "WAITING"
+            row.error = None
+            row._retry_synthesis = False
+            restored.append(row)
+        if restored:
+            self._persist_if_enabled()
+        return restored
 
     async def _start(self):
         """Initializes audio extraction, segmentation, and launches worker loop."""
@@ -2220,17 +2666,28 @@ class StreamingPipelineSession:
             raise ValueError(f"ASR engine không được hỗ trợ: {self.asr_engine_name}")
         self._ensure_tts_engine()
 
+        if (not self.visual_translation and self.translation_mode == "full"
+                and self.asr_engine_name in {"faster-whisper", "whisper"}
+                and not self._prepared and not self.segments and not self._chunked_source_started):
+            # Keep validated whole-source checkpoints resumable, but new
+            # Whisper projects must detect language on bounded source windows
+            # instead of forcing Chinese over the entire video.
+            from core.streaming.preparation_checkpoint import load
+            saved = await self._run_blocking(load, self)
+            if saved:
+                return await self._start_legacy_source(preparation=saved)
+            return await self._start_chunked_visual()
         if (self.translation_mode == "preview" or self._chunked_source_started
                 or (not getattr(self, "_force_legacy_visual", False)
                     and self.visual_translation and not self._prepared and not self.segments)):
             return await self._start_chunked_visual()
         return await self._start_legacy_source()
 
-    async def _start_legacy_source(self):
+    async def _start_legacy_source(self, *, preparation=None):
         """Retain preparation/execution for existing whole-source checkpoints."""
         if not self._prepared:
             from core.streaming.preparation_checkpoint import load
-            saved = await self._run_blocking(load, self)
+            saved = preparation if preparation is not None else await self._run_blocking(load, self)
             if saved:
                 self.raw_audio_16k = Path(saved["assets"]["raw_audio_16k"]["path"])
                 self.bgm_audio_path = Path(saved["assets"]["bgm_audio_path"]["path"])
@@ -2373,7 +2830,7 @@ class StreamingPipelineSession:
                         self.video_path,
                         source_rows,
                         total_duration=self.total_duration,
-                        cancel_check=lambda: self.is_stopped,
+                        cancel_check=self._visual_prepass_cancelled,
                         progress_callback=visual_progress,
                         chunk_callback=visual_chunk,
                         detail_callback=visual_detail,
@@ -2385,11 +2842,11 @@ class StreamingPipelineSession:
                 self._release_visual_runtime()
             for source in visual_result.get("translation_sources", []):
                 provider = source.get("provider") if isinstance(source, dict) else None
-                if provider not in ("gemini", "openrouter-free", "opencode"):
+                if provider not in ("gemini", "openrouter-free", "opencode", "ollama"):
                     raise ValueError("Bản dịch chưa xác định đúng nhà cung cấp đã xử lý.")
-                fallback = provider in ("openrouter-free", "opencode")
+                fallback = provider in ("openrouter-free", "opencode", "ollama")
                 default_model = {"opencode": settings.OPENCODE_MODEL, "openrouter-free": settings.OPENROUTER_MODEL,
-                                 "gemini": settings.GEMINI_MODEL}[provider]
+                                 "gemini": settings.GEMINI_MODEL, "ollama": settings.OLLAMA_MODEL}[provider]
                 normalized_source = {"provider": provider,
                                      "model": str(source.get("model") or default_model)[:200],
                                      "evidence_mode": "asr-ocr-text" if fallback else "audio-video"}
@@ -2417,11 +2874,11 @@ class StreamingPipelineSession:
                 if provider is None:
                     provider = ("openrouter-free" if getattr(self.video_intelligence, "used_text_fallback", False)
                                 else self.video_intelligence.provider)
-                if provider not in ("gemini", "openrouter-free", "opencode"):
+                if provider not in ("gemini", "openrouter-free", "opencode", "ollama"):
                     raise ValueError("Bản dịch chưa xác định đúng nhà cung cấp đã xử lý.")
-                fallback = provider in ("openrouter-free", "opencode")
+                fallback = provider in ("openrouter-free", "opencode", "ollama")
                 default_model = {"opencode": settings.OPENCODE_MODEL, "openrouter-free": settings.OPENROUTER_MODEL,
-                                 "gemini": settings.GEMINI_MODEL}[provider]
+                                 "gemini": settings.GEMINI_MODEL, "ollama": settings.OLLAMA_MODEL}[provider]
                 item.source_method = "text-ai" if fallback else "video-ai"
                 item.translation_provider = provider
                 item.translation_model = str(data.get("translation_model") or default_model)[:200]
@@ -2451,7 +2908,8 @@ class StreamingPipelineSession:
                 raise
             except Exception as error:
                 self.review_summary = {"status": "failed"}
-                logging.getLogger("errors").error("[%s] REVIEW_FAILED error_type=%s", self.task_id, type(error).__name__)
+                logging.getLogger("errors").error("[%s] REVIEW_FAILED error_type=%s traceback=%s",
+                    self.task_id, type(error).__name__, redacted_traceback(error))
                 self.warnings.append("AI kiểm tra lại chưa hoàn tất; giữ bản nháp và cho phép thử lại.")
 
         # 3. Enqueue all segments with initial priority based on time
@@ -2484,21 +2942,96 @@ class StreamingPipelineSession:
             self._chunk_followup_task = None
             self._chunk_followups = None
 
+    async def _wait_automatic_recovery(self, label, attempt, delay):
+        """Remain owned by this worker, pausable and cancellable during backoff."""
+        durable = getattr(self, "_persistence_enabled", False)
+        total = None if durable else len(AUTOMATIC_RECOVERY_DELAYS)
+        if durable:
+            old = next((row for row in self.retry_state if row["label"] == label
+                        and row["source_version"] == getattr(self, "_chunked_source_identity", None)), None)
+            attempt = max(attempt, old["attempt"] + 1) if old else attempt
+            self.retry_state = [row for row in self.retry_state if row["label"] != label]
+            self.retry_state.append({"label": label, "attempt": attempt,
+                "next_attempt_at": time.time() + delay,
+                "source_version": getattr(self, "_chunked_source_identity", None)})
+            self._persist_if_enabled()
+        wait = {"label": label, "attempt": attempt, "total": total, "remaining": delay}
+        waits = getattr(self, "_automatic_recovery_waits", None)
+        if waits is None:
+            waits = self._automatic_recovery_waits = {}
+        owner = object()
+        waits[owner] = wait
+        self._automatic_recovery_wait = wait
+        try:
+            await self.report_progress("recovery_wait",
+                f"Tự thử lại {label} (đợt {attempt}) sau {delay:g} giây; giữ phần đã xong.")
+            while wait["remaining"] > 0:
+                await self.pause_event.wait()
+                if self.is_stopped or not self.is_running:
+                    raise asyncio.CancelledError
+                started = time.monotonic()
+                await asyncio.sleep(min(.25, wait["remaining"]))
+                if not self.is_paused:
+                    wait["remaining"] = max(0., wait["remaining"] - (time.monotonic() - started))
+            await self.pause_event.wait()
+            if self.is_stopped or not self.is_running:
+                raise asyncio.CancelledError
+        finally:
+            waits.pop(owner, None)
+            self._automatic_recovery_wait = next(reversed(waits.values()), None)
+        await self.report_progress("recovery_retry",
+            f"Đang tự thử lại {label} (đợt {attempt}); không cần bấm Tiếp tục.")
+        if durable:
+            self.retry_state = [row for row in self.retry_state if row["label"] != label]
+            self._persist_if_enabled()
+
+    def _recovery_delay(self, attempt, error=None):
+        """Provider owns a bounded transport burst; this owner schedules new bursts."""
+        if getattr(self, "_persistence_enabled", False):
+            current = error
+            seen = set()
+            while current is not None and id(current) not in seen:
+                seen.add(id(current))
+                if type(current).__name__ == "OllamaClientError":
+                    from core.provider_retry import transient_delay
+                    return transient_delay(max(0, attempt - 1), _retry_after_delay(error))
+                current = current.__cause__ or current.__context__
+            return max(RECOVERY_COOLDOWN_SECONDS, _retry_after_delay(error))
+        return AUTOMATIC_RECOVERY_DELAYS[attempt - 1] if 0 < attempt <= len(AUTOMATIC_RECOVERY_DELAYS) else None
+
+    async def _report_recovery_exhausted(self, label):
+        message = (f"Đã hết {len(AUTOMATIC_RECOVERY_DELAYS)} lượt tự thử lại {label}. "
+                   "Phần đã xong được giữ; các phần độc lập tiếp tục xử lý.")
+        if message not in self.warnings:
+            self.warnings.append(message)
+        await self.report_progress("recovery_exhausted", message)
+
     async def _prepare_source_until(self, nominal_end):
         from core.streaming.chunked_source import prepare_interval, publish_background_prefix
+        from core.streaming.source_progress import commit_packet, scan_frontier
         source_blocked = False
-        while self._source_prepared_seconds < nominal_end - .001:
+        recovery_attempt = 0
+        while scan_frontier(self) < nominal_end - .001:
             await self.pause_event.wait()
             if self.is_stopped:
                 raise asyncio.CancelledError
+            source_cursor = scan_frontier(self)
             try:
-                record = await prepare_interval(self, self._source_prepared_seconds,
-                    min(self.total_duration, self._source_prepared_seconds + self.preview_seconds))
+                record = await prepare_interval(self, source_cursor,
+                    min(self.total_duration, source_cursor + self.preview_seconds))
             except asyncio.CancelledError:
                 raise
             except Exception as error:
                 if getattr(self, "_persistence_capacity_failed", False):
                     raise
+                if _transient_failure(error):
+                    label = f"nhận diện đoạn từ {source_cursor:.2f} giây"
+                    delay = self._recovery_delay(recovery_attempt + 1, error)
+                    if delay is not None:
+                        recovery_attempt += 1
+                        await self._wait_automatic_recovery(label, recovery_attempt, delay)
+                        continue
+                    await self._report_recovery_exhausted(label)
                 # A native recognizer/resource failure in the source tail
                 # must not cancel already admitted review/TTS work. Keep
                 # the exact prepared cursor for Resume, drain its healthy
@@ -2506,15 +3039,50 @@ class StreamingPipelineSession:
                 # terminal gate. A failed durable write still propagates.
                 source_blocked = True
                 self._startup_failed = True
-                warning = (f"Chưa nhận diện được đoạn từ {self._source_prepared_seconds:.2f} giây; "
+                warning = (f"Chưa nhận diện được đoạn từ {source_cursor:.2f} giây; "
                            "các đoạn đã nhận diện tiếp tục xử lý. Tiếp tục sẽ thử đúng đoạn còn thiếu.")
+                from core.engines.asr.source_language import SourceLanguageMismatchError
+                if isinstance(error, SourceLanguageMismatchError):
+                    warning = (f"Đoạn từ {source_cursor:.2f} giây: {error} "
+                               "Phần đã lưu được giữ. Bấm Tiếp tục chưa thể sửa sai ngôn ngữ nguồn.")
+                from core.streaming.chunked_source import source_failure_diagnostic
+                source_stage, error_code, local_trace = source_failure_diagnostic(
+                    error, getattr(self, "_source_preparation_stage", "unknown"))
+                self._source_failure_code = error_code
+                self._source_failure_start = source_cursor
+                self._source_preparation_stage = source_stage
+                if error_code == "source_speech_unrecognized":
+                    from core.streaming.chunked_source import merge_source_missing_spans
+                    try:
+                        detected = merge_source_missing_spans(
+                            getattr(error, "spans", ()), offset=source_cursor,
+                            total_duration=self.total_duration,
+                            interval_end=(getattr(self, "_source_preparation_interval", None) or (None, None))[1])
+                        prior = merge_source_missing_spans(
+                            self._source_missing_speech_spans, total_duration=self.total_duration)
+                        self._source_missing_speech_spans = merge_source_missing_spans(
+                            [*prior, *detected], total_duration=self.total_duration)
+                    except (TypeError, ValueError):
+                        detected = []
+                    if detected:
+                        ranges = ", ".join(f"{start:.2f}–{end:.2f}s" for start, end in detected)
+                        warning = (f"Chưa nhận diện được lời nói tại {ranges}; "
+                                   "Tiếp tục sẽ thử lại đúng đoạn nguồn còn thiếu.")
                 if warning not in self.warnings:
                     self.warnings.append(warning)
+                await self.report_progress("source_blocked",
+                    warning if isinstance(error, SourceLanguageMismatchError) or error_code == "source_speech_unrecognized" else
+                    f"Nhận diện nguồn dừng tại {source_cursor:.2f} giây "
+                    f"({source_stage}: {error_code}). Các phần đã nhận diện tiếp tục xử lý.",
+                    source_missing_speech_spans=self._source_missing_speech_spans,
+                    source_preparation_stage=source_stage,
+                    source_failure_code=error_code,
+                    source_failure_start=self._source_failure_start)
                 logging.getLogger("errors").error(
-                    "[%s] SOURCE_RETRY_PENDING source_start=%s error_type=%s detail=%s traceback=%s",
-                    self.task_id, self._source_prepared_seconds, type(error).__name__,
-                    redacted_detail(error),
-                    redacted_detail("".join(traceback.format_tb(error.__traceback__))))
+                    "[%s] SOURCE_RETRY_PENDING source_start=%s error_type=%s detail=%s source_stage=%s error_code=%s traceback=%s missing_speech_spans=%s",
+                    self.task_id, source_cursor, type(error).__name__,
+                    redacted_detail(error), source_stage, error_code, local_trace,
+                    self._source_missing_speech_spans)
                 self._persist_if_enabled()
                 await self.emit("progress", self.get_progress())
                 break
@@ -2534,7 +3102,14 @@ class StreamingPipelineSession:
             self.raw_audio_16k = Path(record["raw_audio"]["path"])
             self.bgm_audio_path = background
             self.suppression_stats = record["suppression_stats"]
-            self._source_prepared_seconds = record["end"]
+            commit_packet(self, record)
+            if any(part["state"] == "unresolved" for part in record.get("source_intervals", [])):
+                await self.report_progress("source_partial",
+                    "Đã lưu đoạn nguồn chưa rõ; tiếp tục nhận diện và dịch phần còn lại.",
+                    source_missing_speech_spans=self._source_missing_speech_spans,
+                    source_scanned_seconds=self._source_scanned_seconds,
+                    source_prepared_seconds=self._source_prepared_seconds)
+            recovery_attempt = 0
             self._prepared = True
             self.bgm_url = f"/api/streaming/bgm/{self.task_id}?coverage={round(record['end'] * 1000)}"
             self._persist_if_enabled()
@@ -2552,6 +3127,7 @@ class StreamingPipelineSession:
     async def _produce_chunked_visual(self):
         """Prepare, translate and publish one source interval at a time."""
         from core.streaming.chunked_source import ensure_source_identity
+        from core.streaming.source_progress import next_run, containing_run, scan_frontier
         from core.streaming.export import HQExporter
         from core.video_intelligence import VideoIntelligence
         self._chunked_source_started = True
@@ -2573,7 +3149,8 @@ class StreamingPipelineSession:
         recover_interrupted(self._chunk_jobs)
         self._visual_scanned_seconds = max(self._visual_scanned_seconds, self._visual_completed_seconds)
         target = min(self.total_duration, self.preview_seconds) if self.translation_mode == "preview" else self.total_duration
-        if self.visual_translation and self.translation_mode == "full" and settings.LLM_PROVIDER == "opencode":
+        if (self.visual_translation and self.translation_mode == "full"
+                and settings.LLM_PROVIDER in {"opencode", "ollama"}):
             workers = self._parallel_chunk_capacity()
             if workers > 1 or self._parallel_chunk_planning:
                 await self._produce_parallel_visual(target, workers)
@@ -2582,6 +3159,7 @@ class StreamingPipelineSession:
         # queue keeps source decoding and provider work from monopolizing RAM.
         retry_intervals = [(row["start"], row["end"]) for row in self._chunk_jobs
                            if row["state"] != "COMPLETED" and row["start"] < target]
+        attempts, retry_delays = {}, {}
         # A stopped parallel wave may have reserved later PENDING owners before
         # any result was published. Falling back to one worker must reuse those
         # exact ranges, rather than inserting new overlapping intervals.
@@ -2601,13 +3179,30 @@ class StreamingPipelineSession:
                 # READY speech then survives publication of the repeated draft.
                 await self._drain_chunk_followups()
                 cursor, nominal_end = retry_intervals.pop(0)
+                recovery = retry_delays.pop((cursor, nominal_end), None)
+                if recovery is not None:
+                    attempt, delay = recovery
+                    await self._wait_automatic_recovery(
+                        f"dịch đoạn {cursor:.1f}–{nominal_end:.1f} giây", attempt, delay)
             if not await self._prepare_source_until(nominal_end):
                 break
-            end = min(nominal_end, self._source_prepared_seconds)
+            island = next_run(self, cursor)
+            while island is None and scan_frontier(self) < target - .001:
+                if not await self._prepare_source_until(min(target, scan_frontier(self) + self.preview_seconds)):
+                    break
+                island = next_run(self, cursor)
+            if island is None or island[0] >= target:
+                self._visual_scanned_seconds = target
+                break
+            if not retry_interval:
+                cursor = island[0]
+                nominal_end = min(target, cursor + self.preview_seconds)
+            end = min(nominal_end, island[1])
             crossing = [row for row in self.segments.values() if row.start < end < row.end]
             if crossing and not retry_interval:
                 end = max(row.end for row in crossing)
-            if end <= cursor or end > self._source_prepared_seconds + .05:
+            if (end <= cursor or containing_run(self, cursor, end) is None
+                    or retry_interval and end != nominal_end):
                 raise ValueError("Không tìm được ranh giới câu thoại trong đoạn đã nhận diện.")
             source_rows = []
             for row in self.segments.values():
@@ -2618,8 +3213,11 @@ class StreamingPipelineSession:
                     for name in SOURCE_METADATA_FIELDS:
                         setattr(source, name, deepcopy(getattr(row, name, None)))
                     source_rows.append(source)
+            model = {"ollama": settings.OLLAMA_MODEL, "gemini": settings.GEMINI_MODEL,
+                     "openrouter-free": settings.OPENROUTER_MODEL}.get(
+                         settings.LLM_PROVIDER, settings.OPENCODE_MODEL)
             configuration = {"source": self._chunked_source_identity, "provider": settings.LLM_PROVIDER,
-                             "model": settings.OPENCODE_MODEL, "visual": self.visual_translation}
+                             "model": model, "visual": self.visual_translation}
             interval = reserve(self._chunk_jobs, cursor, end, input_hash(source_rows, configuration))
             transition(interval, "RUNNING")
             self._persist_if_enabled()
@@ -2630,9 +3228,14 @@ class StreamingPipelineSession:
                 self.asr_engine = self.faster_whisper
                 if not self.initialized:
                     await self._emit_initialization()
+                if self.translation_mode == "full":
+                    from core.streaming.nonvisual_translation import translate_nonvisual_rows
+                    current_rows = [self.segments[source.id] for source in source_rows]
+                    self._requeue_interrupted_source_translations(current_rows)
+                    await translate_nonvisual_rows(self, current_rows)
                 for source in source_rows:
                     row = self.segments[source.id]
-                    if row.status in ("READY", "PLAYED"):
+                    if row.status in ("READY", "PLAYED", "FAILED"):
                         continue
                     await self.pause_event.wait()
                     try:
@@ -2643,12 +3246,12 @@ class StreamingPipelineSession:
                         row.failed_stage, row.status, row.error = row.status, "FAILED", str(error)
                         await self.emit("segment_update", row.to_dict())
                         logging.getLogger("errors").error(
-                            "[%s] SEGMENT_FAILED_CONTINUING segment_id=%s stage=%s error_type=%s",
-                            self.task_id, row.id, row.failed_stage, type(error).__name__)
+                            "[%s] SEGMENT_FAILED_CONTINUING segment_id=%s stage=%s error_type=%s traceback=%s",
+                            self.task_id, row.id, row.failed_stage, type(error).__name__, redacted_traceback(error))
                 self._visual_incremental_started = True
-                self._visual_completed_seconds = end
-                self._visual_scanned_seconds = max(self._visual_scanned_seconds, end)
                 transition(interval, "COMPLETED")
+                self._visual_completed_seconds = contiguous_coverage(self._chunk_jobs, self._legacy_visual_prefix)
+                self._visual_scanned_seconds = max(self._visual_scanned_seconds, end)
                 await self._update_ready()
                 self._persist_if_enabled()
                 continue
@@ -2697,11 +3300,12 @@ class StreamingPipelineSession:
                             "id": row.id, "start": row.start, "end": row.end,
                             "text_zh": row.text_zh or row.asr_text, "asr_text": row.asr_text,
                             "source_needs_review": row.source_method == "audio"}
-                           for row in self.segments.values()]
-                result = await self._run_blocking(self.video_intelligence.prepass, self.video_path, source_rows,
+                           for row in self.segments.values()
+                           if island[0] <= row.start < row.end <= island[1]]
+                result = await self._run_blocking(self._native_aware_prepass, self.video_intelligence, self.video_path, source_rows,
                     total_duration=self.total_duration, start_time=cursor, end_time=end,
                     context_segments=context, previous_summary=getattr(self, "_visual_context_summary", ""),
-                    cancel_check=lambda: self.is_stopped,
+                    cancel_check=self._visual_prepass_cancelled,
                     chunk_callback=chunk_callback, detail_callback=detail_callback)
                 if set(result.get("segments", {})) != {row.id for row in source_rows}:
                     raise ValueError("Đoạn dịch chưa trả đủ các ID nguồn.")
@@ -2717,8 +3321,15 @@ class StreamingPipelineSession:
                 if getattr(self, "_persistence_capacity_failed", False):
                     raise
                 transition(interval, "RETRY_PENDING", type(error).__name__)
-                if interval["attempts"] < 2 and (cursor, end) not in retry_intervals:
+                attempts[interval["id"]] = attempts.get(interval["id"], 0) + 1
+                count = attempts[interval["id"]]
+                transient = _transient_failure(error)
+                if (self._recovery_delay(count) is not None if transient else count < 2) and (cursor, end) not in retry_intervals:
                     retry_intervals.append((cursor, end))
+                    if transient:
+                        retry_delays[(cursor, end)] = (count, self._recovery_delay(count, error))
+                elif transient:
+                    await self._report_recovery_exhausted(f"dịch đoạn {cursor:.1f}–{end:.1f} giây")
                 for source in source_rows:
                     row = self.segments[source.id]
                     if row.status in {"READY", "PLAYED"} or row.source_method in {"text-ai", "video-ai"}:
@@ -2727,8 +3338,8 @@ class StreamingPipelineSession:
                     row.error = "AI chưa trả bản dịch hợp lệ; đoạn này được lưu để thử lại, các đoạn khác tiếp tục."
                     await self.emit("segment_update", row.to_dict())
                 logging.getLogger("errors").warning(
-                    "[%s] CHUNK_RETRY_PENDING chunk_id=%s attempts=%s error_type=%s",
-                    self.task_id, interval["id"], interval["attempts"], type(error).__name__)
+                    "[%s] CHUNK_RETRY_PENDING chunk_id=%s attempts=%s error_type=%s traceback=%s",
+                    self.task_id, interval["id"], interval["attempts"], type(error).__name__, redacted_traceback(error))
             finally:
                 active = False
                 # This source OCR owner is idle after prepass returns. Keeping
@@ -2741,11 +3352,8 @@ class StreamingPipelineSession:
         await self._complete_chunked_source()
 
     def _parallel_chunk_capacity(self):
-        """OCR uses one CPU thread per owner; leave RAM for ASR and review."""
-        import psutil
-        memory_workers = max(1, int((psutil.virtual_memory().available - 2 * 1024**3) // 1024**3))
-        return min(settings.TRANSLATION_CHUNK_WORKERS, settings.OPENCODE_CONCURRENCY,
-                   max(1, (os.cpu_count() or 1) - 1), memory_workers)
+        """AI capacity is per video; ChunkScreenOCR separately caps native owners."""
+        return self.translation_chunk_workers
 
     @staticmethod
     def _new_chunk_intelligence():
@@ -2760,7 +3368,11 @@ class StreamingPipelineSession:
         # not other workers' arriving drafts, to keep retry/cache inputs stable.
         context = []
         owned = []
+        from core.streaming.source_progress import containing_run
+        island = containing_run(self, start, end) if self._source_coverage_intervals else None
         for row in sorted(self.segments.values(), key=lambda item: (item.start, item.id)):
+            if island and not island[0] <= row.start < row.end <= island[1]:
+                continue
             if row.end > min(self.total_duration, end + 8.) + .001:
                 continue
             source = SegmentItem(row.id, row.start, row.end, row.duration)
@@ -2772,16 +3384,47 @@ class StreamingPipelineSession:
                 owned.append(source)
         return owned, context
 
+    def _prepared_parallel_boundary(self, start, nominal_end):
+        """Find useful whole sentences with the normal eight-second lookahead.
+
+        A failed first source wave may have committed rows without reserving a
+        translation owner. Admit those rows through the ordinary ledger instead
+        of requiring the blocked next source interval just to create that owner.
+        """
+        limit = min(nominal_end, self._source_prepared_seconds - 8.)
+        rows = list(self.segments.values())
+        if any(row.start < start < row.end for row in rows):
+            return None
+        candidates = sorted({row.end for row in rows
+            if start <= row.start < row.end <= limit}, reverse=True)
+        return next((end for end in candidates
+                     if not any(row.start < end < row.end for row in rows)), None)
+
     async def _produce_parallel_visual(self, target, workers):
         from core.streaming.parallel_chunks import ChunkWork, OrderedChunkRunner
         from core.streaming.recovery import reserve, input_hash, transition, contiguous_coverage
+        from core.streaming.source_progress import containing_run, next_run, scan_frontier
+        from core.streaming.retry_lifecycle import checkpoint_pending_retry, clear_pending_retry
+        def retry_label(start, end):
+            return f"dịch đoạn {start:.3f}–{end:.3f} giây"
         # Existing ranges are authoritative on Resume, even if the user changes
         # the requested chunk length. Completed owners are never submitted again.
         retry = [(row["start"], row["end"]) for row in self._chunk_jobs
                  if row["state"] != "COMPLETED" and row["start"] < target]
+        # Saved owners whose source and lookahead are already committed can
+        # recover without advancing an unrelated, possibly blocked frontier.
+        # Give each one initial admission only; later failures retain normal
+        # retry/backoff ordering so they cannot starve untouched source.
+        resume_ready = [interval for interval in retry
+                        if min(self.total_duration, interval[1] + 8.)
+                        <= self._source_prepared_seconds + .001]
         cursor = max(self._visual_scanned_seconds, self._legacy_visual_prefix,
                      max((row["end"] for row in self._chunk_jobs), default=0.))
-        attempts = {}
+        # Only the prefix committed before this run needs early admission;
+        # normal fresh source waves retain their configured parallel ranges.
+        prepared_at_entry = self._source_prepared_seconds
+        attempts, retry_delays = {}, {}
+        source_halted = False
         self._parallel_chunk_planning = True
         self._parallel_chunk_workers = workers
         def current():
@@ -2797,35 +3440,90 @@ class StreamingPipelineSession:
                 raise asyncio.CancelledError
             wave = []
             source_blocked = False
-            retry_wave = cursor >= target - .001
+            resuming_ready = bool(resume_ready)
+            if source_halted:
+                retry = [interval for interval in retry
+                         if containing_run(self, *interval) is not None]
+                if not retry:
+                    break
+            retry_wave = source_halted or resuming_ready or cursor >= target - .001
             if retry_wave:
                 await self._drain_chunk_followups()
+                waits = [retry_delays.pop(interval) for interval in retry[:workers] if interval in retry_delays]
+                if waits:
+                    attempt, delay = max(waits, key=lambda value: value[1])
+                    await self._wait_automatic_recovery("các đoạn lỗi kết nối dịch", attempt, delay)
             for _ in range(workers):
+                prepared_boundary = None
                 if retry_wave:
                     if not retry:
                         break
-                    start, end = retry.pop(0)
+                    if resuming_ready:
+                        if not resume_ready:
+                            break
+                        start, end = resume_ready.pop(0)
+                        retry.remove((start, end))
+                    else:
+                        start, end = retry.pop(0)
                 else:
                     if cursor >= target - .001:
                         break
                     start, end = cursor, min(target, cursor + settings.TRANSLATION_CHUNK_SECONDS)
+                    known_end = max([end, *(row.end for row in self.segments.values()
+                        if row.start < end < row.end)])
+                    if (self._source_prepared_seconds == prepared_at_entry
+                            and min(self.total_duration, known_end + 8.) > prepared_at_entry + .001):
+                        prepared_boundary = self._prepared_parallel_boundary(start, end)
+                    if prepared_boundary is not None:
+                        end = prepared_boundary
                 # Recognition alone owns global IDs and speaker evidence. It
                 # stays serial and file-backed; only detached translations fan out.
-                if not await self._prepare_source_until(min(self.total_duration, end + 8.)):
+                if not source_halted and not await self._prepare_source_until(min(self.total_duration, end + 8.)):
                     source_blocked = True
-                    break
+                    source_halted = True
+                    # The first preparation call can commit several source
+                    # packets before a later packet fails. Publish its useful
+                    # prefix in this same run, just as Resume would. Existing
+                    # reserved owners retain their exact ranges on failure.
+                    if retry_wave:
+                        break
+                    prepared_boundary = self._prepared_parallel_boundary(start, end)
+                    if prepared_boundary is None:
+                        break
+                    end = prepared_boundary
+                if self._source_coverage_intervals and not retry_wave:
+                    island = next_run(self, start)
+                    while island is None and scan_frontier(self) < target - .001 and not source_halted:
+                        if not await self._prepare_source_until(min(target, scan_frontier(self) + self.preview_seconds)):
+                            source_blocked = source_halted = True
+                            break
+                        island = next_run(self, start)
+                    if island is None or island[0] >= target:
+                        cursor = target
+                        break
+                    start = island[0]
+                    end = min(target, start + settings.TRANSLATION_CHUNK_SECONDS, island[1])
                 if not retry_wave:
                     crossing = [row for row in self.segments.values() if row.start < end < row.end]
                     end = max([end, *(row.end for row in crossing)])
                     # Lookahead follows the measured end, including a sentence
                     # crossing the nominal boundary. Retry sees the same context.
-                    if not await self._prepare_source_until(min(self.total_duration, end + 8.)):
+                    if not source_halted and not await self._prepare_source_until(min(self.total_duration, end + 8.)):
                         source_blocked = True
-                        break
+                        source_halted = True
+                        prepared_boundary = self._prepared_parallel_boundary(start, end)
+                        if prepared_boundary is None:
+                            break
+                        end = prepared_boundary
                     cursor = end
-                if end <= start or end > self._source_prepared_seconds + .001:
+                if end <= start or containing_run(self, start, end) is None:
                     raise ValueError("Ranh giới đoạn song song nằm ngoài nguồn đã nhận diện.")
                 wave.append((start, end))
+                if prepared_boundary is not None:
+                    # Publish this useful prefix before requesting any new
+                    # source. Filling the rest of the wave first would repeat
+                    # the same frontier failure ahead of the admitted work.
+                    break
             if not wave:
                 break
             # A complete bounded wave is recognized before any translation is
@@ -2833,8 +3531,11 @@ class StreamingPipelineSession:
             jobs, metadata = [], {}
             for start, end in wave:
                 source, context = self._parallel_source_snapshot(start, end)
+                model = {"ollama": settings.OLLAMA_MODEL, "gemini": settings.GEMINI_MODEL,
+                         "openrouter-free": settings.OPENROUTER_MODEL}.get(
+                             settings.LLM_PROVIDER, settings.OPENCODE_MODEL)
                 signature = input_hash(source, {"source": self._chunked_source_identity,
-                    "provider": settings.LLM_PROVIDER, "model": settings.OPENCODE_MODEL,
+                    "provider": settings.LLM_PROVIDER, "model": model,
                     "visual": True, "parallel_context_version": 1})
                 record = reserve(self._chunk_jobs, start, end, signature)
                 if record["state"] == "COMPLETED":
@@ -2848,6 +3549,46 @@ class StreamingPipelineSession:
                     engine = self._new_chunk_intelligence()
                     batches = []
                     batch_cursor, published_ids = record["start"], set()
+                    event_loop = asyncio.get_running_loop()
+                    active = True
+
+                    # The serial visual path exposes provider-stage progress;
+                    # the parallel path must publish the same measured detail
+                    # without letting a worker thread update session state
+                    # directly.  ``active`` is closed over and disabled before
+                    # this owner returns, so late provider callbacks cannot
+                    # resurrect a stale "đang dịch" status after cancellation.
+                    def detail_callback(detail):
+                        if not active or self.is_stopped:
+                            return
+                        value = dict(detail) if isinstance(detail, dict) else {}
+                        labels = {
+                            "decode": "Đang chuẩn bị khung hình",
+                            "ocr": "Đang đọc chữ trong khung hình",
+                            "source": "Đang đối chiếu lời nguồn",
+                            "translate": "Đang chờ Muse dịch đoạn video",
+                            "verify": "Đang chờ Muse kiểm tra bản dịch",
+                        }
+                        stage = labels.get(value.get("visual_step"), "Đang phân tích đoạn video")
+
+                        async def publish_detail():
+                            if (active and self.is_running and not self.is_stopped
+                                    and not self.error):
+                                await self.report_progress(
+                                    "visual", stage,
+                                    round(100 * self._visual_completed_seconds / self.total_duration, 1)
+                                    if self.total_duration else None,
+                                    **{"chunk_start": record["start"], "chunk_end": record["end"],
+                                       "total_seconds": self.total_duration, **value})
+
+                        event_loop.call_soon_threadsafe(
+                            lambda: asyncio.create_task(publish_detail()))
+
+                    await self.report_progress(
+                        "visual", "Đang chờ Muse dịch đoạn video", None,
+                        chunk_start=record["start"], chunk_end=record["end"],
+                        total_seconds=self.total_duration,
+                        visual_step="translate")
                     def collect(result, lo, hi):
                         nonlocal batch_cursor
                         check = current_execution_context().cancel_check
@@ -2868,10 +3609,11 @@ class StreamingPipelineSession:
                         batches.append((deepcopy(result), lo, hi))
                     def invoke():
                         try:
-                            result = engine.prepass(self.video_path, source,
+                            result = self._native_aware_prepass(engine, self.video_path, source,
                                 total_duration=self.total_duration, start_time=record["start"],
                                 end_time=record["end"], context_segments=context, previous_summary="",
-                                cancel_check=current_execution_context().cancel_check, chunk_callback=collect)
+                                cancel_check=current_execution_context().cancel_check,
+                                chunk_callback=collect, detail_callback=detail_callback)
                             if set(result.get("segments", {})) != {row.id for row in source}:
                                 raise ValueError("Đoạn dịch song song chưa trả đủ ID câu thoại.")
                             if (abs(batch_cursor - record["end"]) > .001
@@ -2883,6 +3625,7 @@ class StreamingPipelineSession:
                     try:
                         return await self._run_blocking(invoke)
                     finally:
+                        active = False
                         engine.screen_ocr.close()
                 job = ChunkWork(start, end, tuple(row.id for row in source), execute)
                 jobs.append(job)
@@ -2916,10 +3659,20 @@ class StreamingPipelineSession:
                         attempts[record["id"]] = attempts.get(record["id"], 0) + 1
                         if error is None:
                             transition(record, "COMPLETED")
+                            clear_pending_retry(self, retry_label(record["start"], record["end"]))
                         else:
                             transition(record, "RETRY_PENDING", type(error).__name__)
-                            if attempts[record["id"]] < 2:
+                            count = attempts[record["id"]]
+                            transient = _transient_failure(error)
+                            if (self._recovery_delay(count) is not None if transient else count < 2):
                                 retry.append((record["start"], record["end"]))
+                                if transient:
+                                    retry_delays[(record["start"], record["end"])] = (count, self._recovery_delay(count, error))
+                                    checkpoint_pending_retry(self, retry_label(record["start"], record["end"]),
+                                                             count, self._recovery_delay(count, error))
+                            elif transient:
+                                await self._report_recovery_exhausted(
+                                    f"dịch đoạn {record['start']:.1f}–{record['end']:.1f} giây")
                             for sid in outcome.work.source_ids:
                                 row = self.segments[sid]
                                 if row.status in ("READY", "PLAYED") or row.translation_provider:
@@ -2947,8 +3700,8 @@ class StreamingPipelineSession:
                     if record["state"] == "RUNNING":
                         transition(record, "RETRY_PENDING", "interrupted")
                 self._persist_if_enabled()
-            if source_blocked:
-                break
+            # A hard source failure stops recognition admission only. Existing
+            # independent translation owners keep their durable retry loop.
 
     async def _complete_chunked_source(self):
         if self._chunk_followups is not None:
@@ -2981,6 +3734,40 @@ class StreamingPipelineSession:
             await self._emit_initialization()
         self.worker_task = asyncio.create_task(self._worker_loop())
         self.worker_task.add_done_callback(lambda task: self._release_runtime() if task.cancelled() else None)
+
+    def _native_aware_prepass(self, engine, video_path, source_rows, **options):
+        """Keep Chinese visual processing and measured native translation distinct.
+
+        Mixed intervals publish a single complete interval callback, so existing
+        ownership/revision guards apply equally to both groups of stable IDs.
+        """
+        native = [row for row in source_rows if native_language(row)]
+        if not native:
+            return engine.prepass(video_path, source_rows, **options)
+        ordinary = [row for row in source_rows if not native_language(row)]
+        callback = options.get("chunk_callback")
+        local_options = {**options, "chunk_callback": None}
+        merged = {"segments": {}, "screen_texts": [], "summary": "",
+                  "translation_sources": []}
+        if ordinary:
+            result = engine.prepass(video_path, ordinary, **local_options)
+            merged.update(result)
+            merged["segments"] = dict(result["segments"])
+        from core.streaming.native_recovery import native_ocr_evidence
+        native_with_evidence = native_ocr_evidence(engine, video_path, native,
+            options["start_time"], options["end_time"], cancel_check=options.get("cancel_check"),
+            detail_callback=options.get("detail_callback"))
+        reviewed = review_native_rows(native_with_evidence, context=options.get("context_segments", ()),
+                                      cancel_check=options.get("cancel_check"))
+        for sid, row in reviewed["segments"].items():
+            language = native_language(row)
+            merged["segments"][sid] = {**row, "translation_provider": "opencode",
+                "translation_model": settings.OPENCODE_MODEL, "evidence_mode": "native-recovery-" + language}
+        if set(merged["segments"]) != {row.id for row in source_rows}:
+            raise ValueError("Đoạn dịch đa ngôn ngữ thiếu hoặc thừa ID nguồn.")
+        if callback:
+            callback(merged, options["start_time"], options["end_time"])
+        return merged
 
     def _grounded_visual_segments(self, recognized):
         """Retain ASR sentence boundaries and words instead of fixed VAD slots."""
@@ -3051,7 +3838,7 @@ class StreamingPipelineSession:
             if self.faster_whisper.model is None:
                 raise ValueError("Chưa có model nhận diện để đo mốc từ của câu dài.")
             measured, _ = self.faster_whisper.model.transcribe(
-                str(self.raw_audio_16k), language="zh", beam_size=5,
+                str(self.raw_audio_16k), language=row.get("source_language") or "zh", beam_size=5,
                 word_timestamps=True, vad_filter=False, clip_timestamps=[start, end],
             )
             words = []
@@ -3165,7 +3952,7 @@ class StreamingPipelineSession:
             self.realtime_factor = 0.0
 
     def get_telemetry(self) -> Dict[str, Any]:
-        output_gate = final_output_metadata(self.segments.values())
+        output_gate = self._final_output_metadata()
         return {
             "current_playback_time": round(self.current_playback_time, 2),
             "playable_until": self.playable_until,
@@ -3186,6 +3973,11 @@ class StreamingPipelineSession:
             "preview_seconds": self.preview_seconds,
             "processed_seconds": self._visual_completed_seconds,
             "source_prepared_seconds": self._source_prepared_seconds,
+            "source_missing_speech_spans": [list(span) for span in self._source_missing_speech_spans],
+            "source_failure_code": self._source_failure_code,
+            "source_failure_start": self._source_failure_start,
+            "source_preparation_stage": (self._source_preparation_stage
+                if getattr(self, "_source_preparation_active", False) or self._source_failure_code else None),
             "can_translate_full": self.can_translate_full,
             "vocal_removal_engine": self.vocal_suppressor.name,
             "suppression_level": f"{self.vocal_suppressor.suppression_level_db:.1f} dB",
@@ -3210,11 +4002,20 @@ class StreamingPipelineSession:
         cancellation = threading.Event()
 
         def invoke():
-            with execution_context(self.task_id, lambda: check() or cancellation.is_set()):
+            with execution_context(self.task_id, lambda: check() or cancellation.is_set(),
+                                   ai_concurrency=getattr(self, "translation_chunk_workers", settings.TRANSLATION_CHUNK_WORKERS),
+                                   admission_check=lambda: not getattr(self, "is_paused", False)):
                 return function(*args, **kwargs)
 
+        if getattr(self, "_blocking_executor", None) is None:
+            # Each video's AI owners must be able to reach its selected limit;
+            # asyncio's shared default pool is capped at 32 threads. Native
+            # ASR/OCR/TTS retain their own independent admission controls.
+            self._blocking_executor = ThreadPoolExecutor(
+                max_workers=getattr(self, "translation_chunk_workers", settings.TRANSLATION_CHUNK_WORKERS) + 8,
+                thread_name_prefix=f"video-{self.task_id}")
         work = asyncio.get_running_loop().run_in_executor(
-            None, contextvars.copy_context().run, invoke,
+            self._blocking_executor, contextvars.copy_context().run, invoke,
         )
         cancelled = False
         while True:
@@ -3241,6 +4042,8 @@ class StreamingPipelineSession:
     def _release_runtime(self, *, preserve_media=False):
         if self.edit_tasks or (self.review_task and not self.review_task.done()):
             return
+        if self.native_audit_task and not self.native_audit_task.done():
+            return
         if self.is_stopped:
             try:
                 current = asyncio.current_task()
@@ -3250,6 +4053,10 @@ class StreamingPipelineSession:
                    for task in (self.start_task, self.worker_task, self._chunk_followup_task)):
                 return
         if not self.is_running:
+            executor = getattr(self, "_blocking_executor", None)
+            if executor is not None:
+                executor.shutdown(wait=False)
+                self._blocking_executor = None
             for row in self.segments.values():
                 self._retire_superseded_speech(row)
         # Finished sessions retain media for replay/export, not another copy of
@@ -3319,7 +4126,73 @@ class StreamingPipelineSession:
             })
         await self.emit("telemetry", self.get_telemetry())
 
+    async def _recognize_nonvisual_segment(self, seg):
+        """Own one native recognition job before concurrent text translation."""
+        seg.status = "ASR"
+        await self._segment_progress("asr", f"Đang nhận diện câu {seg.id + 1}")
+        await self.emit("segment_update", seg.to_dict())
+        revision = seg.revision
+        slice_wav = self.cache_dir / f"slice_{seg.id}.wav"
+        try:
+            await self._run_ffmpeg(["ffmpeg", "-y", "-ss", f"{seg.start:.3f}",
+                "-i", str(self.raw_audio_16k), "-t", f"{seg.duration:.3f}",
+                "-c:a", "pcm_s16le", str(slice_wav)])
+            result = await self._run_blocking(self.asr_engine.transcribe, slice_wav, language="zh")
+            await self._wait_for_edit_publication()
+            if self.is_stopped:
+                raise asyncio.CancelledError
+            if self.segments.get(seg.id) is not seg or seg.revision != revision or (seg.verification or {}).get("status") == "manual":
+                raise SegmentEditConflict("Lời thoại đã thay đổi; giữ bản mới.")
+            with self._durable_speaker_review_publication(seg):
+                seg.text_zh = " ".join(part.get("text_zh", part.get("text", "")).strip() for part in result or []).strip()
+                seg.emotion = result[0].get("emotion", "<|NEUTRAL|>") if result else "<|NEUTRAL|>"
+                if result:
+                    for name in SOURCE_METADATA_FIELDS:
+                        if name in result[0]:
+                            setattr(seg, name, deepcopy(result[0][name]))
+                seg.asr_pretranscribed = True
+                seg.status, seg.failed_stage = "WAITING", "TRANSLATING"
+            if not seg.text_zh.strip() and not seg.confirmed_silence:
+                self._raise_missing_source(seg)
+        finally:
+            slice_wav.unlink(missing_ok=True)
+
+    def _raise_missing_source(self, seg):
+        """Keep absent recognition recoverable without authorizing silence."""
+        seg.status = seg.failed_stage = "ASR"
+        seg.asr_pretranscribed = False
+        seg.needs_review = True
+        seg.review_reason = "Chưa nhận diện được lời nguồn; chưa đủ bằng chứng xác nhận im lặng."
+        raise RuntimeError(seg.review_reason)
+
     async def _process_segment(self, seg):
+        if not _missing_translation_text(seg.final_vi) or seg.confirmed_silence or (seg.verification or {}).get("status") == "manual":
+            return await self._synthesize_segment(seg)
+        if native_language(seg):
+            # A recovered source owns its measured transcript. Continue must
+            # never run forced-Chinese ASR over it or erase already saved VI.
+            if not seg.text_zh.strip():
+                self._raise_missing_source(seg)
+            if _missing_translation_text(seg.final_vi) and (seg.verification or {}).get("status") != "manual":
+                revision = seg.revision
+                seg.status = "TRANSLATING"
+                await self._segment_progress("translate", f"Đang dịch câu {seg.id + 1} theo ngôn ngữ nguồn")
+                await self.emit("segment_update", seg.to_dict())
+                reviewed = await self._run_blocking(review_native_rows, [deepcopy(seg)],
+                    context=deepcopy(list(self.segments.values())), cancel_check=lambda: self.is_stopped)
+                await self._wait_for_edit_publication()
+                if self.is_stopped:
+                    raise asyncio.CancelledError
+                if seg.revision != revision or (seg.verification or {}).get("status") == "manual":
+                    raise SegmentEditConflict("Lời thoại đã được sửa trong lúc dịch; giữ bản mới.")
+                with self._durable_speaker_review_publication(seg):
+                    self._apply_review_metadata(seg, reviewed["segments"][seg.id])
+                await self.emit("segment_update", seg.to_dict())
+            return await self._synthesize_segment(seg)
+        if (seg.failed_stage == "TRANSLATING" and _missing_translation_text(seg.final_vi)
+                and not seg.confirmed_silence):
+            await self._recover_missing_translation(seg)
+            return await self._synthesize_segment(seg)
         if self.visual_translation and seg.source_method not in ("video-ai", "text-ai"):
             raise RuntimeError("Thiếu bản dịch hình ảnh đã kiểm tra; không tự chuyển nhà cung cấp hoặc dịch âm thanh.")
         if self.visual_translation and seg.source_method in ("video-ai", "text-ai"):
@@ -3343,6 +4216,15 @@ class StreamingPipelineSession:
                     part.get("text_zh", part.get("text", "")).strip() for part in (asr_res or [])
                 ).strip()
                 seg.emotion = asr_res[0].get("emotion", "<|NEUTRAL|>") if asr_res else "<|NEUTRAL|>"
+                if asr_res:
+                    for name in SOURCE_METADATA_FIELDS:
+                        if name in asr_res[0]:
+                            setattr(seg, name, deepcopy(asr_res[0][name]))
+                seg.asr_pretranscribed = True
+                if not seg.text_zh.strip() and not seg.confirmed_silence:
+                    self._raise_missing_source(seg)
+                if native_language(seg):
+                    return await self._process_segment(seg)
             if seg.text_zh:
                 seg.status = "TRANSLATING"
                 await self._segment_progress("translate", f"Đang dịch câu {seg.id + 1}")
@@ -3368,6 +4250,40 @@ class StreamingPipelineSession:
             await self._synthesize_segment(seg)
         finally:
             slice_wav.unlink(missing_ok=True)
+
+    async def _recover_missing_translation(self, seg):
+        """Fill one saved draft without rewriting its source or healthy peers."""
+        if (seg.verification or {}).get("status") == "manual":
+            raise SegmentEditConflict("Giữ lời do bạn sửa; không tự dịch lại câu này.")
+        source, revision, previous_draft = seg.text_zh, seg.revision, seg.final_vi
+        if not source.strip():
+            raise RuntimeError("Chưa có lời nguồn để khôi phục bản dịch; cần kiểm tra nguồn.")
+        seg.status = "TRANSLATING"
+        await self._segment_progress("translate", f"Đang bổ sung lời Việt còn thiếu cho câu {seg.id + 1}")
+        await self.emit("segment_update", seg.to_dict())
+        result = await self._run_blocking(self.translator.translate_single_segment,
+            text_zh=source, duration=seg.duration,
+            rolling_context=self._dialogue_context_before(seg))
+        await self._wait_for_edit_publication()
+        if self.is_stopped:
+            raise asyncio.CancelledError
+        if (self.segments.get(seg.id) is not seg or seg.revision != revision or seg.text_zh != source
+                or seg.final_vi != previous_draft or (seg.verification or {}).get("status") == "manual"):
+            raise SegmentEditConflict("Lời thoại đã thay đổi trong lúc dịch; giữ bản mới.")
+        draft = result.get("final_vi", "")
+        if not isinstance(draft, str) or _missing_translation_text(draft):
+            raise RuntimeError("Dịch thuật chưa tạo được lời Việt có căn cứ cho câu còn thiếu.")
+        with self._durable_speaker_review_publication(seg):
+            for field in ("literal_vi", "natural_vi", "final_vi"):
+                setattr(seg, field, result.get(field) or draft)
+            # Translating the saved transcript supplies a draft, not new audio
+            # evidence. Never erase source_supported=False or claim verification.
+            seg.needs_review = True
+            seg.review_reason = seg.review_reason or result.get("review_reason") or "Bản nháp bổ sung từ lời nguồn đã lưu; cần đối chiếu nguồn."
+            seg.verification = {**deepcopy(seg.verification or {}),
+                "status": "unresolved", "semantic_verified": False}
+        self._invalidate_output()
+        await self.emit("segment_update", seg.to_dict())
 
     @staticmethod
     def _dub_audio_duration(path):
@@ -3423,13 +4339,16 @@ class StreamingPipelineSession:
         """Stage bounded automatic neighbor repairs; publish nothing here."""
         shadow = deepcopy(rows)
         staged = {}
-        known = self._source_prepared_seconds
+        floor, known = self._dub_source_island(focus)
+        if self._source_coverage_intervals:
+            shadow = [row for row in shadow if floor <= row["start"] < row["end"] <= known]
         ordered = [row["id"] for row in shadow]
         index = ordered.index(focus.id)
         nearby = [ordered[pos] for distance in (1, 2)
                   for pos in (index - distance, index + distance) if 0 <= pos < len(ordered)]
         def capacity():
-            return available_reflow_duration(shadow, focus.id, total_duration=known)
+            options = {"minimum_start": floor} if self._source_coverage_intervals else {}
+            return available_reflow_duration(shadow, focus.id, total_duration=known, **options)
         def eligible(item):
             return (item.status in {"READY", "PLAYED"} and item.audio_path
                     and item.final_vi.strip() and (item.verification or {}).get("status") != "manual")
@@ -3484,11 +4403,25 @@ class StreamingPipelineSession:
                     return shadow, staged
             # At most one nearby translation changes, only after the same
             # independent source/meaning/address check used for focus rewrites.
-            for sid in [ordered[pos] for pos in (index - 1, index - 2) if pos >= 0]:
+            # A following row is admitted only after its measured acoustic
+            # rescue was insufficient; its own source and preceding dialogue
+            # context remain the ownership boundary for the review request.
+            candidate_positions = [index - 1, index - 2, index + 1, index + 2]
+            for pos in candidate_positions:
+                if not 0 <= pos < len(ordered):
+                    continue
+                sid = ordered[pos]
                 item = self.segments[sid]
-                if (sid in staged or not eligible(item)
+                if ((sid in staged and pos <= index) or not eligible(item)
                         or (item.verification or {}).get("status") not in {"verified", "corrected"}):
                     continue
+                # A following item may already have a shorter acoustic draft.
+                # Replace that draft only after the bounded semantic proposal
+                # is independently reviewed; an unsuccessful request restores
+                # the staged acoustic path through the outer cleanup/commit.
+                previous_stage = staged.pop(sid, None)
+                if previous_stage:
+                    Path(previous_stage["audio_path"]).unlink(missing_ok=True)
                 row = next(row for row in shadow if row["id"] == sid)
                 measured = row.get("audio_duration")
                 if not measured:
@@ -3535,11 +4468,23 @@ class StreamingPipelineSession:
                 Path(update["audio_path"]).unlink(missing_ok=True)
             raise
 
+    def _dub_source_island(self, seg):
+        if self._source_coverage_intervals:
+            from core.streaming.source_progress import containing_run
+            island = containing_run(self, seg.start, seg.end)
+            start, end = resolve_dub_timing(seg.to_dict())
+            if island is None or start < island[0] or end > island[1]:
+                raise ValueError("Câu thoại hoặc giọng nằm trong đoạn nguồn chưa rõ.")
+            return island
+        return 0., self._source_prepared_seconds if self._chunked_source_started else self.total_duration
+
     def _dub_fit_window(self, seg, rows):
         """Share the same proven timeline budget between fitting and recovery."""
         start, end = resolve_dub_timing(seg.to_dict())
         duration = end - start
-        known_duration = self._source_prepared_seconds if self._chunked_source_started else self.total_duration
+        floor, known_duration = self._dub_source_island(seg)
+        if self._source_coverage_intervals:
+            rows = [row for row in rows if floor <= row["start"] < row["end"] <= known_duration]
         tail_limit = None
         if self._chunked_source_started and known_duration > seg.end:
             # Only a prepared following dialogue gap may extend the endpoint.
@@ -3553,16 +4498,24 @@ class StreamingPipelineSession:
                 rows = [{**row, "dub_tail_limit": tail_limit} if row["id"] == seg.id else row for row in rows]
             else:
                 tail_limit = None
-        capacity = max(duration, available_reflow_duration(rows, seg.id, total_duration=known_duration))
+        reflow_options = {"minimum_start": floor} if self._source_coverage_intervals else {}
+        capacity = max(duration, available_reflow_duration(rows, seg.id, total_duration=known_duration,
+                                                         **reflow_options))
         capacity = min(capacity, duration + 1.35) if tail_limit is not None else capacity
-        if not self._chunked_source_started:
+        if not self._chunked_source_started and not getattr(self, '_recovery_bidirectional_reflow', False):
             # Existing full-source projects retain their original fitting
             # contract; only the new bounded timeline opts into two-sided fit.
             capacity = min(capacity, duration + .35)
         return rows, duration, capacity, known_duration, tail_limit
 
     async def _fit_dub(self, seg, *, text, source, output_path, translator=None, context=None, on_stage=None, neighbor_rescue=False, pacing_verification=None, preserve_manual_timing=False):
+        if native_language(seg):
+            from core.multilingual_translation import NativePacingTranslator
+            translator = NativePacingTranslator(native_language(seg)) if translator is not None else None
+            neighbor_rescue = False
         rows, duration, capacity, known_duration, tail_limit = self._dub_fit_window(seg, self._dub_rows())
+        source_floor = self._dub_source_island(seg)[0]
+        island_options = {"minimum_start": source_floor} if self._source_coverage_intervals else {}
         fixed_timing_ids = {
             row["id"] for row in rows
             if (row.get("id") != seg.id and
@@ -3573,7 +4526,8 @@ class StreamingPipelineSession:
             # only reduce the usable reflow space; a larger timeline capacity
             # must not bypass the non-chunked +/-350ms speech contract.
             capacity = min(capacity, max(duration, available_reflow_duration(
-                rows, seg.id, total_duration=known_duration, fixed_ids=fixed_timing_ids)))
+                rows, seg.id, total_duration=known_duration, fixed_ids=fixed_timing_ids,
+                **island_options)))
         revision = {row["id"]: (row["revision"], row["dub_start"], row["dub_end"]) for row in rows}
         start, end = resolve_dub_timing(seg.to_dict())
         # The planner bounds both source endpoints to +/-350 ms and can borrow
@@ -3590,16 +4544,18 @@ class StreamingPipelineSession:
                     output_path=output_path, engine=self.tts_engine, aligner=self.aligner,
                     translator=translator, voice=self._segment_voice(seg), ref_audio=self.ref_audio,
                     context=context, on_stage=on_stage,
-                    allow_bidirectional_reflow=self._chunked_source_started,
+                    allow_bidirectional_reflow=(self._chunked_source_started
+                        or getattr(self, '_recovery_bidirectional_reflow', False)),
                     **({"max_duration_limit": capacity} if tail_limit is not None else {}),
                     **({"pacing_verification": pacing_verification} if pacing_verification is not None else {}))
             except (SpeechBudgetError, PacingReviewRejected) as exc:
                 required = getattr(exc, "required_dub_duration", None)
-                if (not neighbor_rescue or not self._chunked_source_started or translator is None
+                if (not neighbor_rescue or not (self._chunked_source_started
+                        or getattr(self, '_recovery_bidirectional_reflow', False)) or translator is None
                         or not isinstance(required, (int, float)) or not math.isfinite(required)):
                     raise
                 rows, staged = await self._prepare_dub_rescue(rows, seg, required)
-                capacity = available_reflow_duration(rows, seg.id, total_duration=known_duration)
+                capacity = available_reflow_duration(rows, seg.id, total_duration=known_duration, **island_options)
                 if capacity < required or not staged:
                     raise
                 # If the failed focus attempt actually measured a shorter,
@@ -3627,7 +4583,7 @@ class StreamingPipelineSession:
             plan = {}
             if measured > duration + 1e-9:
                 plan = plan_reflow(rows, seg.id, measured, total_duration=known_duration,
-                                   fixed_ids=fixed_timing_ids)
+                                   fixed_ids=fixed_timing_ids, **island_options)
                 if plan is None:
                     raise SpeechBudgetError("Không còn khoảng nghỉ phù hợp để căn đủ lời thoại.")
                 if tail_limit is not None:
@@ -3721,7 +4677,10 @@ class StreamingPipelineSession:
                 value = getattr(item, key)
                 if value is not None:
                     setattr(item, key, min(item.dub_end, value + delta))
+            previous_audit_row = item.to_dict()
             item.revision += 1
+            from core.streaming.native_audit_retry import bind_published_audit
+            bind_published_audit(item, previous_audit_row)
             if item.status in ("READY", "PLAYED") and item.audio_path and Path(item.audio_path).is_file():
                 item.audio_url = f"/api/streaming/audio/{self.task_id}/{item.id}?rev={item.revision}"
 
@@ -3807,7 +4766,9 @@ class StreamingPipelineSession:
                 continue
             rows, _, capacity, known, _ = self._dub_fit_window(seg, self._dub_rows())
             following = self._pacing_following_audio_identity(rows, seg.end)
-            plan = plan_reflow(rows, sid, record["required"], total_duration=known)
+            island = self._dub_source_island(seg)
+            plan = plan_reflow(rows, sid, record["required"], total_duration=known,
+                               **({"minimum_start": island[0]} if self._source_coverage_intervals else {}))
             if (not following[0] or following == record["following_audio"] or capacity <= record["capacity"] + .001
                     or capacity + 1e-9 < record["required"] or plan is None
                     or any((self.segments[identity].verification or {}).get("status") == "manual"
@@ -3833,8 +4794,57 @@ class StreamingPipelineSession:
                     seg.failed_stage, seg.status, seg.error = seg.status, "FAILED", str(error)
                     await self.emit("segment_update", seg.to_dict())
                 logging.getLogger("errors").error(
-                    "[%s] PACING_FINAL_RECOVERY_FAILED segment_id=%s error_type=%s",
-                    self.task_id, sid, type(error).__name__)
+                    "[%s] PACING_FINAL_RECOVERY_FAILED segment_id=%s error_type=%s traceback=%s",
+                    self.task_id, sid, type(error).__name__, redacted_traceback(error))
+
+    def _remember_transient_speech_failure(self, seg, error):
+        if (self._chunked_source_started and isinstance(error, EdgeTTSRequestError)
+                and error.retryable and seg.failed_stage in {"TTS", "ALIGNING"}
+                and seg.final_vi.strip() and not seg.audio_path):
+            # Keep FAILED durable until siblings finish. WAITING here would
+            # admit the same sentence to the source/review recovery queue too.
+            self._transient_speech_failures[seg.id] = (
+                seg, self._deferred_speech_identity(seg), self.voice,
+                self.tts_engine_name, self.ref_audio, _retry_after_delay(error))
+
+    async def _recover_transient_speech_after_source(self):
+        """Resume only missing speech after healthy siblings and each cooldown."""
+        for attempt in itertools.count(1):
+            if not self._transient_speech_failures:
+                return
+            delay = self._recovery_delay(attempt)
+            if delay is None:
+                break
+            if self._persistence_enabled:
+                delay = max(delay, *(record[5] for record in self._transient_speech_failures.values()))
+            await self._wait_automatic_recovery("các câu lỗi kết nối giọng đọc", attempt, delay)
+            await self._recover_transient_speech_round()
+        if self._transient_speech_failures:
+            self._transient_speech_failures = {}
+            await self._report_recovery_exhausted("các câu lỗi kết nối giọng đọc")
+
+    async def _recover_transient_speech_round(self):
+        pending = self._transient_speech_failures
+        self._transient_speech_failures = {}
+        for sid, record in sorted(pending.items(), key=lambda item: item[1][0].start):
+            await self.pause_event.wait()
+            if self.is_stopped or not self.is_running:
+                raise asyncio.CancelledError
+            seg, identity, voice, engine, reference, retry_after = record
+            if (self.segments.get(sid) is not seg or seg.status != "FAILED"
+                    or seg.failed_stage not in {"TTS", "ALIGNING"} or seg.audio_path
+                    or (seg.verification or {}).get("status") == "manual"
+                    or self._deferred_speech_identity(seg) != identity
+                    or (self.voice, self.tts_engine_name, self.ref_audio) != (voice, engine, reference)
+                    or not self._published_row(seg)):
+                continue
+            seg.status, seg._retry_synthesis = "WAITING", True
+            await self.emit("segment_update", seg.to_dict())
+            self._persist_if_enabled()
+            # Requeue only a newly classified transient failure. Pacing, edits,
+            # configuration and TLS failures cannot trigger another round.
+            await self._resume_deferred_speech_rows([(seg, seg.revision, identity)],
+                                                    retry_transient=True)
 
     def _retire_speech_failure(self, seg):
         seg.error = None
@@ -3880,6 +4890,10 @@ class StreamingPipelineSession:
 
     async def _synthesize_segment(self, seg, *, pacing_recovery=None, allow_pacing=True):
         """Generate playable audio without approving an uncertain translation."""
+        if native_language(seg):
+            pacing_recovery = None
+        # A review/manual retry supersedes any pending automatic late pass.
+        self._transient_speech_failures.pop(seg.id, None)
         from core.streaming.progress_eta import stage_measurement_start, record_processing_stage
         from core.runtime_context import observe_cache_usage
         eta_speech_started = stage_measurement_start(self)
@@ -3891,11 +4905,16 @@ class StreamingPipelineSession:
         if pacing_recovery is None:
             self._pacing_failures.pop(seg.id, None)
         try:
+            if is_untranslated_placeholder(seg.final_vi):
+                seg.status = "TRANSLATING"
+                raise RuntimeError("Lời Việt chỉ là ghi chú chưa dịch; cần bổ sung bản dịch có căn cứ trước khi tạo giọng.")
             if not seg.final_vi.strip():
-                if seg.text_zh.strip() and not seg.needs_review and not seg.confirmed_silence:
-                    raise RuntimeError("Dịch thuật trả về nội dung trống.")
-                # An empty uncertain draft has nothing defensible to read.
-                # Keep its review flag, but allow playback past its time span.
+                if not seg.confirmed_silence:
+                    if not seg.text_zh.strip():
+                        self._raise_missing_source(seg)
+                    seg.status = seg.failed_stage = "TRANSLATING"
+                    raise RuntimeError("Chưa có lời Việt có căn cứ; cần bổ sung bản dịch trước khi tạo giọng.")
+                # Only an explicit silence verdict can retire existing speech.
                 with self._durable_edit_publication(seg, {}, pending_path):
                     if seg.audio_path and seg.audio_path not in seg.superseded_audio_paths:
                         seg.superseded_audio_paths.append(seg.audio_path)
@@ -3920,6 +4939,18 @@ class StreamingPipelineSession:
             await self._segment_progress("tts", f"Đang tạo giọng đọc câu {seg.id + 1}")
             await self.emit("segment_update", seg.to_dict())
             loop = asyncio.get_running_loop()
+            speech_stage_meter = {"name": "tts", "started": None}
+
+            def finish_speech_stage(now=None):
+                started = speech_stage_meter["started"]
+                if started is None:
+                    return
+                now = time.monotonic() if now is None else now
+                profiler = getattr(self, "_stage_profiler", None)
+                if profiler is not None:
+                    profiler.record_work(speech_stage_meter["name"], max(0., now - started))
+                speech_stage_meter["started"] = None
+
             async def publish_stage(stage):
                 if self.is_stopped:
                     raise asyncio.CancelledError
@@ -3935,7 +4966,13 @@ class StreamingPipelineSession:
                 # synthesis worker. READY, failures and Stop still commit.
                 await self.emit("segment_update", seg.to_dict(), checkpoint=False)
             def speech_stage(stage):
+                now = time.monotonic()
+                finish_speech_stage(now)
                 asyncio.run_coroutine_threadsafe(publish_stage(stage), loop).result()
+                speech_stage_meter["name"] = {
+                    "TTS": "tts", "ALIGNING": "align", "REWRITING": "pacing_review"}.get(
+                        stage, "speech_other")
+                speech_stage_meter["started"] = time.monotonic()
             async with self._tts_lock:
                 context = self._dialogue_context_before(seg)
                 if pacing_recovery and not self._pacing_failure_owned(seg, pacing_recovery):
@@ -3945,15 +4982,24 @@ class StreamingPipelineSession:
                 # reference: seg_ID.wav may still hold the retained prior audio.
                 final_path = self.segments_dir / (f"seg_{seg.id}_{uuid.uuid4().hex}.wav"
                     if self._persistence_enabled or seg.tts_voice_outdated and old_audio_path else f"seg_{seg.id}.wav")
+                speech_stage_meter["name"] = "tts"
+                speech_stage_meter["started"] = time.monotonic()
                 with observe_cache_usage() as speech_cache_usage:
-                    spoken, timing, dub_plan = await self._fit_dub(seg,
-                        text=pacing_recovery["candidate"] if pacing_recovery else seg.final_vi,
-                        source=seg.text_zh, output_path=pending_path,
-                        translator=self.translator if allow_pacing and pacing_recovery is None
-                            and (seg.verification or {}).get("status") != "manual" else None, on_stage=speech_stage,
-                        context=context, neighbor_rescue=allow_pacing and pacing_recovery is None
-                            and (seg.verification or {}).get("status") != "manual",
-                        **({"pacing_verification": pacing_recovery["proof"], "preserve_manual_timing": True} if pacing_recovery else {}))
+                    try:
+                        spoken, timing, dub_plan = await self._fit_dub(seg,
+                            text=pacing_recovery["candidate"] if pacing_recovery else seg.final_vi,
+                            source=seg.text_zh, output_path=pending_path,
+                            translator=self.translator if allow_pacing and pacing_recovery is None
+                                and (seg.verification or {}).get("status") != "manual" else None, on_stage=speech_stage,
+                            context=context, neighbor_rescue=allow_pacing and pacing_recovery is None
+                                and (seg.verification or {}).get("status") != "manual",
+                            **({"pacing_verification": pacing_recovery["proof"], "preserve_manual_timing": True} if pacing_recovery else {}))
+                    finally:
+                        finish_speech_stage()
+                if speech_cache_usage.is_set():
+                    profiler = getattr(self, "_stage_profiler", None)
+                    if profiler is not None:
+                        profiler.record_work("speech_cache_hit", 0., units=1)
             # Fitting already emitted ALIGNING. Publish the complete WAV and
             # every changed timing without yielding to a concurrent edit/Stop.
             tts_dur, ratio, boundaries = spoken["tts_duration"], spoken["speed_ratio"], spoken["boundaries"]
@@ -3975,6 +5021,11 @@ class StreamingPipelineSession:
                     proof = spoken["pacing_verification"]
                     seg.verification = {**(seg.verification or {}), "pacing": proof,
                         "before_pacing": previous, "translation_changed": True}
+                    if proof and proof.get("status") == "unresolved":
+                        seg.needs_review = True
+                        seg.review_reason = proof.get("reason") or "Lời rút gọn cần kiểm tra nghĩa."
+                        seg.verification.update(status="unresolved", semantic_verified=False,
+                                                reason=seg.review_reason)
                     if not seg.needs_review and seg.verification.get("status") == "verified":
                         seg.verification["status"] = "corrected"
                         if self.review_summary.get("status") == "completed":
@@ -4051,32 +5102,48 @@ class StreamingPipelineSession:
         try:
             # Videos with no speech must still become playable.
             await self._update_ready()
+            if not self.visual_translation and self.translation_mode == "full":
+                from core.streaming.nonvisual_translation import translate_nonvisual_rows
+                await translate_nonvisual_rows(self, [row for row in self.segments.values()
+                    if not self._chunked_source_started or self._published_row(row)])
             while self.is_running and not self.queue.empty():
                 await self.pause_event.wait()
                 if not self.is_running:
                     break
                 _, seg_id = await self.queue.get()
                 seg = self.segments.get(seg_id)
+                identity = self._deferred_speech_identity(seg) if seg else None
+                revision = seg.revision if seg else None
+                native_translation_pending = bool(seg and _missing_translation_text(seg.final_vi)
+                    and (native_language(seg) or seg.failed_stage == "TRANSLATING"))
+                speech_only = bool(seg and not native_translation_pending and (seg._retry_synthesis or
+                    (self.visual_translation and seg.source_method in {"video-ai", "text-ai"})))
                 try:
-                    if seg and seg.status not in ("READY", "PLAYED"):
-                        if seg._retry_synthesis:
+                    if seg and seg.status not in ("READY", "PLAYED", "FAILED"):
+                        if seg._retry_synthesis and not native_translation_pending:
                             await self._synthesize_segment(seg)
                         else:
                             await self._process_segment(seg)
                 except Exception as exc:
                     if getattr(self, "_persistence_capacity_failed", False):
                         raise
+                    if seg and (self.segments.get(seg_id) is not seg
+                            or (speech_only
+                                and self._deferred_speech_identity(seg) != identity)
+                            or (not speech_only and seg.revision != revision)):
+                        continue
                     message = str(exc)
                     # SDK exception strings can contain prompts or credentials.
                     # Keep a useful task/stage/type diagnostic without raw text.
                     logging.getLogger("errors").error(
-                        "[%s] Lỗi câu %s ở bước %s (%s)", self.task_id, seg_id + 1,
-                        seg.status if seg else "UNKNOWN", type(exc).__name__,
+                        "[%s] Lỗi câu %s ở bước %s (%s) traceback=%s", self.task_id, seg_id + 1,
+                        seg.status if seg else "UNKNOWN", type(exc).__name__, redacted_traceback(exc),
                     )
                     if seg:
                         seg.failed_stage = seg.status
                         seg.status = "FAILED"
                         seg.error = message
+                        self._remember_transient_speech_failure(seg, exc)
                         await self.emit("segment_update", seg.to_dict())
                     if self._chunked_source_started:
                         # Recovery uses this queue too. A failed earlier row
@@ -4091,6 +5158,7 @@ class StreamingPipelineSession:
                 finally:
                     self.queue.task_done()
             if self.is_running and not self.is_stopped and self.queue.empty():
+                await self._recover_transient_speech_after_source()
                 await self._recover_pacing_after_source()
         except asyncio.CancelledError:
             self.is_stopped = True
@@ -4098,7 +5166,8 @@ class StreamingPipelineSession:
         except Exception as exc:
             self.error = str(exc)
             logging.getLogger("errors").error(
-                "[%s] QUEUE_WORKER_FAILED error_type=%s", self.task_id, type(exc).__name__)
+                "[%s] QUEUE_WORKER_FAILED error_type=%s traceback=%s",
+                self.task_id, type(exc).__name__, redacted_traceback(exc))
             await self.emit("error", {"message": self.error})
         finally:
             self.is_running = False
@@ -4124,7 +5193,10 @@ class StreamingPipelineSession:
             if failed:
                 self.progress["progress_pct"] = round(100 * ready / len(owned), 1)
             if failed and not self.is_stopped and not self.error:
-                self.error = f"{len(failed)} câu chưa tạo được giọng. Phần đã xong được giữ; bấm Tiếp tục để thử lại."
+                self.error = (f"{len(failed)} câu chưa tạo được giọng. Phần đã xong được giữ. "
+                              "Xem lý do ở các câu lỗi; lỗi nguồn hoặc thời lượng cần sửa trước khi thử lại.")
+                if self._chunked_source_started and self._source_prepared_seconds < self.total_duration - .001:
+                    self.error += f" Nhận diện nguồn mới đến {self._source_prepared_seconds:.2f}/{self.total_duration:.2f} giây."
                 await self.emit("error", {"message": self.error, "segment_ids": [s.id for s in failed]})
             if (not self.is_stopped and not self.error and self.translation_mode == "preview"
                     and self._chunked_source_started):
@@ -4154,29 +5226,66 @@ class StreamingPipelineSession:
                                                None, completed_segments=len(owned), total_segments=len(self.segments))
             elif not self.is_stopped and not self.error:
                 if self._chunked_source_started and not self._visual_prepass_complete:
-                    self.error = "Chưa dịch hết video; các đoạn đã hoàn tất được giữ để tiếp tục."
                     self._startup_failed = True
+                    unresolved_source = bool(self._source_missing_speech_spans) or any(
+                        row.get("state") == "unresolved"
+                        for row in (self._source_coverage_intervals or []))
+                    chunks_complete = all(row.get("state") == "COMPLETED" for row in self._chunk_jobs)
+                    rows_renderable = bool(owned) and all(
+                        row.status in {"READY", "PLAYED"} for row in owned)
+                    if unresolved_source and chunks_complete and rows_renderable:
+                        # Use the durable restore marker recognized by the
+                        # auto-output gate: source gaps may yield a labeled
+                        # draft once every materialized dialogue row is ready.
+                        self.error = ("Dịch video chưa xong; các câu đã dịch và giọng đọc được giữ. "
+                                      "Bấm Tiếp tục để xử lý phần còn lại.")
+                    else:
+                        self.error = "Chưa dịch hết video; các đoạn đã hoàn tất được giữ để tiếp tục."
                     await self.emit("progress", self.get_progress())
                 else:
                     stage = self._review_message() if self.review_summary or any(s.needs_review for s in self.segments.values()) else "Dịch và lồng tiếng hoàn tất"
                     await self.report_progress("complete", stage, 100)
             else:
                 await self.emit("progress", self.get_progress())
+            if not self.is_stopped and not self.is_paused and self.run_intent not in {"paused", "stopped"}:
+                from core.streaming.native_audit_lifecycle import has_pending
+                from core.streaming.retry_lifecycle import has_pending_auto_output, has_pending_auto_review, prepare_auto_review
+                prepare_auto_review(self)
+                self.run_intent = "running" if (has_pending(self) or has_pending_auto_output(self)
+                                                 or has_pending_auto_review(self)) else "idle"
+                self.retry_state = []
+                self._persist_if_enabled()
             await self.emit("finished", self.get_telemetry())
 
     def pause(self):
+        from core.streaming.retry_lifecycle import sync_retry_deadlines
+        sync_retry_deadlines(self)
+        self.run_intent = "paused"
         from core.streaming.progress_eta import pause_eta
         pause_eta(self)
         self.is_paused = True
         self.pause_event.clear()
+        from core.streaming.status_history import record_status
+        record_status(self, "PAUSED", self.progress.get("phase", ""), "Đã tạm dừng theo yêu cầu.")
         self._persist_if_enabled()
 
+    def _visual_prepass_cancelled(self):
+        """Stop a visual/provider batch at its next safe boundary when paused."""
+        return bool(self.is_stopped or self.is_paused)
+
     def resume(self):
+        from core.streaming.retry_lifecycle import sync_retry_deadlines
+        sync_retry_deadlines(self, resuming=True)
+        self.run_intent = "running"
         from core.streaming.progress_eta import resume_eta
         resume_eta(self)
         self.is_paused = False
         self.pause_event.set()
+        from core.streaming.status_history import record_status
+        record_status(self, "RUNNING", self.progress.get("phase", ""), "Đang tiếp tục xử lý từ phần đã lưu.")
         self._persist_if_enabled()
+        from core.streaming.native_audit_lifecycle import ensure_native_audit_retry
+        ensure_native_audit_retry(self)
 
     def shutdown(self):
         """Close idle projects without changing their completed/failed outcome.
@@ -4185,54 +5294,76 @@ class StreamingPipelineSession:
         work still owned by a running task; merely closing a completed project
         must not rewrite its durable outcome to STOPPED.
         """
+        from core.streaming.retry_lifecycle import sync_retry_deadlines
+        sync_retry_deadlines(self)
         owners = [self.start_task, self.worker_task, self.review_task, self._chunk_followup_task,
+                  self.native_audit_task,
                   getattr(self, "export_task", None), getattr(self, "auto_export_task", None),
                   *self.edit_tasks]
         if self.is_running or self.is_editing or any(owner is not None and not owner.done() for owner in owners):
-            self.stop()
+            self.stop(_application_shutdown=True)
             return
         self._persist_if_enabled()
         self._release_runtime()
         if not any(task is not None and not task.done() for task in
-                   (self.start_task, self.worker_task, self.review_task, self._chunk_followup_task, *self.edit_tasks)):
+                   (self.start_task, self.worker_task, self.review_task, self._chunk_followup_task, self.native_audit_task,
+                    getattr(self, "export_task", None), getattr(self, "auto_export_task", None), *self.edit_tasks)):
             if active_streaming_sessions.get(self.task_id) is self:
                 active_streaming_sessions.pop(self.task_id, None)
 
-    def stop(self):
+    def stop(self, *, _application_shutdown=False):
         # Desktop shutdown may call from another thread after normal processing
         # has completed, while a transcript edit still owns the backend loop.
+        from core.streaming.native_audit_lifecycle import sync_deadlines
+        sync_deadlines(self)
         owner = next(iter(self.edit_tasks), None)
+        if owner is None:
+            owner = next((task for task in (getattr(self, "export_task", None),
+                                           getattr(self, "auto_export_task", None), self.review_task)
+                          if task is not None and not task.done()), None)
         if owner is not None:
             try:
                 current_loop = asyncio.get_running_loop()
             except RuntimeError:
                 current_loop = None
             if owner.get_loop().is_running() and owner.get_loop() is not current_loop:
-                owner.get_loop().call_soon_threadsafe(self.stop)
+                owner.get_loop().call_soon_threadsafe(
+                    functools.partial(self.stop, _application_shutdown=_application_shutdown))
                 return
-        if self.is_stopped and not self.edit_tasks:
+        if (self.is_stopped and not self.edit_tasks and not any(
+                task is not None and not task.done() for task in (
+                    getattr(self, "export_task", None), getattr(self, "auto_export_task", None)))):
+            if not _application_shutdown:
+                self.run_intent = "stopped"
+                self.retry_state = []
+                self._persist_if_enabled()
             return
         for cancellation, _ in self._edit_cancellations.values():
             cancellation.set()
+        self._application_shutdown = _application_shutdown
+        if not _application_shutdown:
+            self.run_intent = "stopped"
+            self.retry_state = []
         self.is_stopped = True
         self.is_running = False
+        from core.streaming.status_history import record_status
+        record_status(self, "STOPPED", "stopped", "Ứng dụng đóng; sẽ tiếp tục tác vụ đang chạy khi mở lại."
+                      if _application_shutdown else "Đã dừng bởi người dùng; phần đã lưu được giữ.")
         self._persist_if_enabled()
         self.pause_event.set()
-        if self.start_task and not self.start_task.done():
-            self.start_task.cancel()
-        if self.worker_task and not self.worker_task.done():
-            self.worker_task.cancel()
-        if self.review_task and not self.review_task.done():
-            self.review_task.cancel()
-        if self._chunk_followup_task and not self._chunk_followup_task.done():
-            self._chunk_followup_task.cancel()
-        for task in tuple(self.edit_tasks):
-            if not task.done():
-                task.cancel()
-        if not self.start_task and (not self.worker_task or self.worker_task.done()):
+        owners = {task for task in (self.start_task, self.worker_task, self.review_task,
+                  self.native_audit_task, self._chunk_followup_task,
+                  getattr(self, "export_task", None), getattr(self, "auto_export_task", None),
+                  *self.edit_tasks) if task is not None and not task.done()}
+        cancelled_owners = getattr(self, "_stop_cancelled_owners", set()) & owners
+        for task in owners - cancelled_owners:
+            task.cancel()
+        self._stop_cancelled_owners = cancelled_owners | owners
+        if not owners:
             self._release_runtime()
         if not any(task is not None and not task.done() for task in
-                   (self.start_task, self.worker_task, self.review_task, self._chunk_followup_task, *self.edit_tasks)):
+                   (self.start_task, self.worker_task, self.review_task, self._chunk_followup_task, self.native_audit_task,
+                    getattr(self, "export_task", None), getattr(self, "auto_export_task", None), *self.edit_tasks)):
             if active_streaming_sessions.get(self.task_id) is self:
                 active_streaming_sessions.pop(self.task_id, None)
 

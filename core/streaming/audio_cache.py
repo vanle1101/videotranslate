@@ -102,7 +102,8 @@ def _package_version(name):
         return None
 
 
-def build_audio_cache_identity(video_path, segments, duration, mixer, suppressor, cancel_check=None):
+def build_audio_cache_identity(video_path, segments, duration, mixer, suppressor, cancel_check=None,
+                               background_variant=None):
     """Missing/unidentified input disables reuse; it never fabricates valid audio.
 
     Caption text/color/position/blur are absent. Narration bytes, revisions and
@@ -122,16 +123,24 @@ def build_audio_cache_identity(video_path, segments, duration, mixer, suppressor
         rows = []
         for segment in segments:
             dub_start, dub_end = resolve_dub_timing(segment)
+            omit_voice = bool(segment.get("omit_voice", False))
             rows.append({"start": segment["start"], "end": segment["end"],
                          "dub_start": dub_start, "dub_end": dub_end,
                          "revision": segment.get("revision", 0),
-                         "audio": _file_identity(segment["audio_path"], cancel_check)
-                         if segment.get("audio_path") else None,
+                         # Omitted rows do not contribute bytes to the mix.
+                         # Excluding their stale/missing path also prevents a
+                         # partial render from being tied to an unrelated old
+                         # voice file, while the flag keeps it out of the full
+                         # export cache key entirely.
+                         "audio": (_file_identity(segment["audio_path"], cancel_check)
+                                   if segment.get("audio_path") else None) if not omit_voice else None,
+                         "omit_voice": omit_voice,
                          "has_translation": bool(segment.get("final_vi") or segment.get("text_vi"))})
         core_dir = Path(__file__).resolve().parents[1]
         files = [Path(__file__), core_dir / "streaming/export.py", core_dir / "audio_ducking.py",
                  core_dir / "media_process.py", core_dir / "engines/separator/realtime_suppressor.py",
-                 core_dir / "engines/separator/roformer_engine.py"]
+                 core_dir / "engines/separator/roformer_engine.py",
+                 core_dir / "streaming/prepared_background.py", core_dir / "streaming/background_cache.py"]
         runtime = {"ffmpeg": run_media(["ffmpeg", "-version"], cancel_check, capture_output=True).decode("utf-8", "replace"),
                    "numpy": _package_version("numpy")}
         model = None
@@ -150,7 +159,7 @@ def build_audio_cache_identity(video_path, segments, duration, mixer, suppressor
                    "roformer_model": settings.ROFORMER_MODEL, "model": model, "device": settings.DEVICE,
                    "mixer": {name: getattr(mixer, name) for name in
                              ("voice_gain_db", "bgm_gain_db", "duck_amount_db", "attack_ms", "release_ms")},
-                   "suppression_level_db": suppressor.suppression_level_db,
+                   "background_variant": background_variant,
                    "runtime": runtime, "implementation": {str(p.relative_to(core_dir)): _digest(p, cancel_check) for p in files}}
         return AudioCacheIdentity(hashlib.sha256(_json(payload)).hexdigest(), duration)
     except (OSError, ValueError, TypeError, KeyError):
@@ -184,7 +193,18 @@ def _valid_audio(path, duration, cancel_check=None):
 
 
 def _valid_metadata(metadata):
-    return (isinstance(metadata, dict) and set(metadata) == {"separation_engine", "warnings"}
+    required = {"separation_engine", "warnings"}
+    prepared = {"background_source", "background_intervals", "background_interval_digest"}
+    if not isinstance(metadata, dict) or set(metadata) not in (required, required | prepared):
+        return False
+    if prepared & set(metadata):
+        if (metadata["separation_engine"] != "dsp" or metadata["background_source"] != "prepared_intervals"
+                or type(metadata["background_intervals"]) is not int
+                or not 0 < metadata["background_intervals"] <= 100000
+                or not isinstance(metadata["background_interval_digest"], str)
+                or not re.fullmatch(r"[0-9a-f]{64}", metadata["background_interval_digest"])):
+            return False
+    return (isinstance(metadata, dict)
             and isinstance(metadata["separation_engine"], str)
             and metadata["separation_engine"] in {"none", "dsp", "roformer"}
             and isinstance(metadata["warnings"], list)

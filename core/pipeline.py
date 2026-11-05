@@ -82,7 +82,15 @@ class VideoTranslationPipeline:
 
         # Stage 1: Download & Verify Video
         await update_progress(5, "Stage 1/12: Đang tải video gốc / kiểm tra file...", "stage-download")
-        video_info = self.downloader.download(video_input)
+        # The downloader performs blocking DNS/HTTP/file I/O. Keep that work
+        # off the asyncio event loop so CLI callers can still service progress
+        # and cancellation while a large source video is being fetched.
+        download_cancel = (lambda: bool(task_controller and task_controller.is_stopped))
+        video_info = await asyncio.to_thread(
+            self.downloader.download,
+            video_input,
+            cancel_check=download_cancel,
+        )
         task_id = video_info["id"]
         video_path = Path(video_info["file_path"])
 
@@ -112,10 +120,14 @@ class VideoTranslationPipeline:
                 segments = self.sensevoice_asr.transcribe(vocals_path, language="zh")
 
         if not segments:
-            segments = [{
-                "id": 0, "start": 0.0, "end": 5.0, "duration": 5.0,
-                "text_zh": "（背景音）", "text": "（背景音）", "emotion": "<|NEUTRAL|>", "speaker": None
-            }]
+            # An empty ASR result cannot establish whether the source is
+            # silent or speech recognition failed. Keep that uncertainty
+            # visible instead of synthesizing a background-audio transcript.
+            raise RuntimeError(
+                "Thiếu nguồn lời thoại: ASR không trả về đoạn nào; "
+                "chưa xác minh được lời nói hoặc khoảng im lặng. "
+                "Cần kiểm tra nguồn trước khi dịch, tạo giọng và xuất video."
+            )
 
         # Stage 5: VideoLingo Glossary Extraction
         await update_progress(45, "Stage 5/12: VideoLingo đang phân tích ngữ cảnh & trích xuất thuật ngữ...", "stage-glossary")

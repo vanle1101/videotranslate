@@ -161,6 +161,34 @@ def test_typo_inside_target_can_be_corrected_without_importing_the_next_row(monk
     assert not result["needs_review"]
 
 
+@pytest.mark.parametrize("source,neighbor,observed,owned", [
+    (row(4, 7.48, 9.38, "我是你女儿小满"), row(5, 10.09, 10.91, "今年十九"),
+     "我是你女儿小满今年19", "我是你女儿小满"),
+    (row(11, 17.24, 17.78, "陈也"), row(12, 17.78, 19.3, "一九八二年出生"),
+     "陈野1982年出生", "陈野"),
+])
+def test_exact_numeric_neighbor_spelling_scopes_name_without_importing_age_or_year(
+        source, neighbor, observed, owned):
+    evidence = {"start": source["start"], "end": neighbor["end"], "text_zh": observed}
+    result = AutomaticTranslationReviewer._scope_evidence(evidence, source, [source, neighbor])
+    assert result["text_zh"] == owned
+    assert result["full_text_zh"] == observed
+    assert result["source_scope_ids"] == [source["id"], neighbor["id"]]
+    assert result["source_scope_ambiguous"] is False
+
+
+@pytest.mark.parametrize("text,observed", [
+    ("今年十九", "今年18"), ("一九八二年出生", "1983年出生"),
+    ("乔一", "乔1"), ("今年十九岁", "今年19"), ("今年二十五年", "今年25年"),
+    ("一九八二年", "1982年"), ("十九", "19"),
+    ("今年十九", "今年190"), ("今年十九", "今年19.5"),
+    ("一九八二年出生", "21982年出生"),
+])
+def test_numeric_boundary_anchor_does_not_equate_different_facts_or_general_names(text, observed):
+    from core.chinese_text import numeric_boundary_anchor
+    assert numeric_boundary_anchor(text, observed) == text
+
+
 @pytest.mark.parametrize("proposal, supported", [("支持", False), ("不支持", True)])
 def test_scope_alignment_keeps_negation_in_the_measured_target(monkeypatch, proposal, supported):
     source = row(1, 1., 2., "支持")

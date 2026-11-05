@@ -9,10 +9,12 @@ writes credentials into this repository.
 from __future__ import annotations
 
 import json
+from contextlib import contextmanager
 from dataclasses import replace
 import logging
 import math
 import os
+import re
 from pathlib import Path
 import shutil
 import subprocess
@@ -41,6 +43,7 @@ FREE_CHAT_MODELS = frozenset({
 DEFAULT_FREE_MODEL = "muse-spark-1.3-contributor-free"
 _AGENT = "plan"
 _IS_WINDOWS = os.name == "nt"
+_POPEN_TYPE = subprocess.Popen
 _EXECUTION_VERSION = "opencode-cli-isolated-v2"
 _execution_layers = {}
 _execution_layers_lock = threading.Lock()
@@ -50,11 +53,12 @@ def _shared_execution_layer():
     """One provider queue for independently constructed reviewer/translator clients."""
     from config import settings
     policy = AIExecutionPolicy(
-        concurrency=getattr(settings, "OPENCODE_CONCURRENCY", 5),
+        concurrency=getattr(settings, "OPENCODE_CONCURRENCY", 20),
         queue_limit=getattr(settings, "OPENCODE_QUEUE_LIMIT", 24),
         queue_timeout=getattr(settings, "OPENCODE_QUEUE_TIMEOUT", 30.0),
         circuit_failures=getattr(settings, "OPENCODE_CIRCUIT_FAILURES", 4),
         circuit_cooldown=getattr(settings, "OPENCODE_CIRCUIT_COOLDOWN", 30.0),
+        retry_base=2.0, retry_cap=60.0,
     )
     cache_root = Path(settings.WORKSPACE_DIR) / "cache" / "ai_responses"
     # Queue identity needs lexical normalization only. Resolving filesystem
@@ -70,6 +74,9 @@ def _shared_execution_layer():
         layer = _execution_layers[identity]
         layer.set_concurrency(policy.concurrency)
         return layer
+
+def shared_execution_snapshot(run_id=None):
+    return _shared_execution_layer().snapshot(scope_id=run_id)
 
 
 class OpenCodeClientError(RuntimeError):
@@ -92,12 +99,15 @@ class OpenCodeRequestError(OpenCodeClientError):
             "provider_failed", "provider_rate_limited", "provider_authentication",
             "provider_model", "provider_transport", "provider_server",
             "provider_rejected", "provider_queue_full", "provider_queue_timeout",
-            "provider_circuit_open",
+            "provider_circuit_open", "provider_timeout", "provider_invalid_response",
         } else "provider_failed"
 
 
 class OpenCodeTimeoutError(OpenCodeRequestError):
     """The owned CLI exchange exceeded its deadline and was terminated."""
+
+    def __init__(self, message):
+        super().__init__(message, retryable=True, code="provider_timeout")
 
 
 class OpenCodeCancelledError(OpenCodeRequestError):
@@ -106,6 +116,11 @@ class OpenCodeCancelledError(OpenCodeRequestError):
 
 class OpenCodeResponseValidationError(OpenCodeRequestError):
     """A transport response exists but did not pass caller schema validation."""
+
+    def __init__(self, message):
+        # Schema owners can issue a corrective prompt. Replaying the same
+        # transport request is not a repair and must not consume retries here.
+        super().__init__(message, code="provider_invalid_response")
 
 
 def _check_cancelled(context):
@@ -139,7 +154,10 @@ def _communicate(process, request, timeout, context):
         _check_cancelled(context)
         deadline = time.monotonic() + timeout
         if not _IS_WINDOWS:
-            return _poll_communication(process, request, timeout, context, deadline)
+            value = _poll_communication(process, request, timeout, context, deadline)
+            if not _close_owned_process(process):
+                raise OpenCodeRequestError("Không xác nhận được việc đóng phiên OpenCode.")
+            return value
         # Windows Popen.communicate writes stdin synchronously before checking
         # its timeout. A CLI that never reads a large prompt can therefore block
         # forever. One thread owns communicate; the caller independently checks
@@ -167,14 +185,19 @@ def _communicate(process, request, timeout, context):
                 succeeded, value = outcome[0]
                 if not succeeded:
                     raise value
+                if not _close_owned_process(process):
+                    raise OpenCodeRequestError("Không xác nhận được việc đóng phiên OpenCode.")
                 return value
             completed.wait(min(0.05, remaining))
     except OpenCodeCancelledError:
         _terminate_process_tree(process)
         raise
     except subprocess.TimeoutExpired:
-        _terminate_process_tree(process)
-        raise OpenCodeTimeoutError("OpenCode phản hồi quá lâu. Hãy thử lại hoặc chọn model khác.") from None
+        cleaned = _terminate_process_tree(process)
+        error = OpenCodeTimeoutError("OpenCode phản hồi quá lâu. Hãy thử lại hoặc chọn model khác.")
+        if cleaned is False:
+            error.retryable = False
+        raise error from None
     except BaseException:
         # Pipe errors and caller interruptions must also reap the CLI before
         # TemporaryDirectory removes the files still owned by that process.
@@ -182,9 +205,33 @@ def _communicate(process, request, timeout, context):
         raise
     finally:
         if worker is not None:
-            worker.join(timeout=5)
+            if worker.ident is not None and not isinstance(getattr(process, "_opencode_job", None), _WindowsJob):
+                worker.join(timeout=5)
             if not worker.is_alive():
                 del process._opencode_communication_thread
+
+
+@contextmanager
+def _request_directory():
+    directory = tempfile.TemporaryDirectory(prefix="videotranslate-opencode-")
+    primary_failure = False
+    try:
+        yield directory.name
+    except BaseException:
+        primary_failure = True
+        raise
+    finally:
+        try:
+            directory.cleanup()
+        except OSError as error:
+            code = ("permission" if isinstance(error, PermissionError)
+                    else "not_directory" if isinstance(error, NotADirectoryError) else "io")
+            logging.getLogger("errors").warning(
+                "OPENCODE_CLEANUP_FAILED run_id=%s code=%s primary_failure=%s",
+                current_execution_context().run_id, code, primary_failure,
+            )
+            if not primary_failure:
+                raise
 
 
 def _retry_delay(seconds, context):
@@ -284,7 +331,13 @@ def _provider_failure(text: str) -> OpenCodeRequestError:
         code = "provider_server"
     elif any(marker in value for marker in ("econnreset", "econnrefused", "connection", "network", "fetch failed")):
         code = "provider_transport"
-    return OpenCodeRequestError(_safe_failure(text), retryable=retryable, code=code)
+    error = OpenCodeRequestError(_safe_failure(text), retryable=retryable, code=code)
+    retry_after = re.search(r"retry[-_ ]after[\"'\s:=]+(\d+(?:\.\d+)?)", value)
+    if retry_after and retryable:
+        seconds = float(retry_after.group(1))
+        if math.isfinite(seconds):
+            error.retry_after = seconds
+    return error
 
 
 def _managed_configuration_present() -> bool:
@@ -354,8 +407,213 @@ def _blocked_shell(root: Path) -> str:
         raise OpenCodeConfigurationError(failure) from None
 
 
+class _WindowsJob:
+    def __init__(self):
+        import ctypes
+        from ctypes import wintypes
+
+        self.ctypes = ctypes
+        self.api = ctypes.WinDLL("kernel32", use_last_error=True)
+        signatures = {
+            "CreateJobObjectW": ([ctypes.c_void_p, wintypes.LPCWSTR], wintypes.HANDLE),
+            "SetInformationJobObject": ([wintypes.HANDLE, ctypes.c_int, ctypes.c_void_p, wintypes.DWORD], wintypes.BOOL),
+            "AssignProcessToJobObject": ([wintypes.HANDLE, wintypes.HANDLE], wintypes.BOOL),
+            "TerminateJobObject": ([wintypes.HANDLE, wintypes.UINT], wintypes.BOOL),
+            "QueryInformationJobObject": ([wintypes.HANDLE, ctypes.c_int, ctypes.c_void_p, wintypes.DWORD, ctypes.c_void_p], wintypes.BOOL),
+            "CloseHandle": ([wintypes.HANDLE], wintypes.BOOL),
+            "CreateToolhelp32Snapshot": ([wintypes.DWORD, wintypes.DWORD], wintypes.HANDLE),
+            "Thread32First": ([wintypes.HANDLE, ctypes.c_void_p], wintypes.BOOL),
+            "Thread32Next": ([wintypes.HANDLE, ctypes.c_void_p], wintypes.BOOL),
+            "OpenThread": ([wintypes.DWORD, wintypes.BOOL, wintypes.DWORD], wintypes.HANDLE),
+            "GetProcessIdOfThread": ([wintypes.HANDLE], wintypes.DWORD),
+            "ResumeThread": ([wintypes.HANDLE], wintypes.DWORD),
+        }
+        for name, (args, result) in signatures.items():
+            function = getattr(self.api, name)
+            function.argtypes, function.restype = args, result
+
+        class BasicLimit(ctypes.Structure):
+            _fields_ = [("process_time", ctypes.c_longlong), ("job_time", ctypes.c_longlong),
+                        ("flags", wintypes.DWORD), ("min_ws", ctypes.c_size_t),
+                        ("max_ws", ctypes.c_size_t), ("process_limit", wintypes.DWORD),
+                        ("affinity", ctypes.c_size_t), ("priority", wintypes.DWORD),
+                        ("scheduling", wintypes.DWORD)]
+
+        class ExtendedLimit(ctypes.Structure):
+            _fields_ = [("basic", BasicLimit), ("io", ctypes.c_ulonglong * 6),
+                        ("process_memory", ctypes.c_size_t), ("job_memory", ctypes.c_size_t),
+                        ("peak_process_memory", ctypes.c_size_t), ("peak_job_memory", ctypes.c_size_t)]
+
+        class Accounting(ctypes.Structure):
+            _fields_ = [("times", ctypes.c_longlong * 4), ("faults", wintypes.DWORD),
+                        ("total", wintypes.DWORD), ("active", wintypes.DWORD),
+                        ("terminated", wintypes.DWORD)]
+
+        self.accounting_type = Accounting
+        self.handle = self.checked(self.api.CreateJobObjectW(None, None))
+        try:
+            limits = ExtendedLimit()
+            limits.basic.flags = 0x2000
+            self.checked(self.api.SetInformationJobObject(
+                self.handle, 9, ctypes.byref(limits), ctypes.sizeof(limits)))
+        except BaseException:
+            self.close()
+            raise
+
+    def checked(self, result):
+        if not result:
+            raise self.ctypes.WinError(self.ctypes.get_last_error())
+        return result
+
+    def assign(self, process):
+        self.checked(self.api.AssignProcessToJobObject(self.handle, int(process._handle)))
+
+    def resume(self, process):
+        ctypes = self.ctypes
+        from ctypes import wintypes
+
+        class ThreadEntry(ctypes.Structure):
+            _fields_ = [("size", wintypes.DWORD), ("usage", wintypes.DWORD),
+                        ("tid", wintypes.DWORD), ("pid", wintypes.DWORD),
+                        ("base_priority", wintypes.LONG), ("delta_priority", wintypes.LONG),
+                        ("flags", wintypes.DWORD)]
+
+        snapshot = self.api.CreateToolhelp32Snapshot(4, 0)
+        if snapshot == ctypes.c_void_p(-1).value:
+            raise ctypes.WinError(ctypes.get_last_error())
+        try:
+            entry = ThreadEntry()
+            entry.size = ctypes.sizeof(entry)
+            found = self.api.Thread32First(snapshot, ctypes.byref(entry))
+            tids = []
+            while found:
+                if entry.pid == process.pid:
+                    tids.append(entry.tid)
+                found = self.api.Thread32Next(snapshot, ctypes.byref(entry))
+            if len(tids) != 1:
+                raise OSError("Cannot identify suspended CLI thread")
+            thread = self.checked(self.api.OpenThread(0x0802, False, tids[0]))
+            try:
+                if self.api.GetProcessIdOfThread(thread) != process.pid:
+                    raise OSError("Suspended CLI thread identity changed")
+                if self.api.ResumeThread(thread) != 1:
+                    raise OSError("Cannot resume suspended CLI thread")
+            finally:
+                self.checked(self.api.CloseHandle(thread))
+        finally:
+            self.checked(self.api.CloseHandle(snapshot))
+
+    def terminate(self):
+        self.checked(self.api.TerminateJobObject(self.handle, 1))
+
+    def active(self):
+        data = self.accounting_type()
+        self.checked(self.api.QueryInformationJobObject(
+            self.handle, 1, self.ctypes.byref(data), self.ctypes.sizeof(data), None))
+        return data.active
+
+    def close(self):
+        if self.handle is not None:
+            self.checked(self.api.CloseHandle(self.handle))
+            self.handle = None
+
+
+def _start_process(argv, context, **options):
+    if os.name != "nt":
+        return subprocess.Popen(argv, **options)
+    process = None
+    try:
+        _check_cancelled(context)
+        options["creationflags"] = options.get("creationflags", 0) | 0x00000004
+        process = subprocess.Popen(argv, **options)
+        if not isinstance(process, _POPEN_TYPE):
+            return process
+        job = _WindowsJob()
+        process._opencode_job = job
+        job.assign(process)
+        _check_cancelled(context)
+        job.resume(process)
+        return process
+    except BaseException:
+        if process is not None:
+            if isinstance(getattr(process, "_opencode_job", None), _WindowsJob):
+                _close_owned_process(process)
+            else:
+                try:
+                    process.kill()
+                    _reap_windows_process(process, time.monotonic() + 5)
+                except (OSError, subprocess.TimeoutExpired):
+                    pass
+        raise
+
+
+def _close_owned_process(process):
+    job = getattr(process, "_opencode_job", None)
+    if not isinstance(job, _WindowsJob):
+        return True
+    if job.handle is None:
+        return bool(getattr(process, "_opencode_cleanup_complete", False))
+    deadline = time.monotonic() + 5
+    complete = False
+    tree_empty = False
+    try:
+        try:
+            job.terminate()
+            while job.active():
+                if time.monotonic() >= deadline:
+                    raise subprocess.TimeoutExpired("opencode cleanup", 5)
+                time.sleep(0.01)
+            tree_empty = True
+        except (OSError, subprocess.TimeoutExpired):
+            try:
+                job.close()
+            except OSError:
+                pass
+        finally:
+            try:
+                process.kill()
+            except OSError:
+                pass
+        reaped = _reap_windows_process(process, deadline)
+        complete = tree_empty and reaped
+    except (OSError, subprocess.TimeoutExpired):
+        pass
+    finally:
+        try:
+            job.close()
+        except OSError:
+            complete = False
+        process._opencode_cleanup_complete = complete
+    return complete
+
+
+def _reap_windows_process(process, deadline):
+    try:
+        process.wait(timeout=max(0.001, deadline - time.monotonic()))
+        for name in ("_opencode_communication_thread", "stdout_thread", "stderr_thread"):
+            thread = getattr(process, name, None)
+            if isinstance(thread, threading.Thread) and thread.ident is not None:
+                thread.join(timeout=max(0, deadline - time.monotonic()))
+                if thread.is_alive():
+                    return False
+        for pipe in (process.stdin, process.stdout, process.stderr):
+            if pipe is not None:
+                pipe.close()
+        return True
+    finally:
+        process._handle.Close()
+
+
 def _terminate_process_tree(process: subprocess.Popen) -> None:
     """Stop only this invocation and its children, then reap the process."""
+    if isinstance(getattr(process, "_opencode_job", None), _WindowsJob):
+        return _close_owned_process(process)
+    if os.name == "nt" and isinstance(process, _POPEN_TYPE):
+        try:
+            process.kill()
+            return _reap_windows_process(process, time.monotonic() + 5)
+        except (OSError, subprocess.TimeoutExpired):
+            return False
     try:
         import psutil
         parent = psutil.Process(process.pid)
@@ -403,7 +661,7 @@ class OpenCodeZenClient:
         self._api_key = resolve_api_key(api_key)
         self.model = canonical_model_id(model)
         self.timeout = float(timeout)
-        self.max_retries = max(0, min(int(max_retries), 2))
+        self.max_retries = max(0, min(int(max_retries), 5))
         try:
             from config import settings
             self._uses_shared_execution_layer = execution_layer is None
@@ -506,6 +764,17 @@ class OpenCodeZenClient:
                 round(attempt_elapsed * 1000), round((now - request_started) * 1000),
                 round(trace["admission_wait"] * 1000), round(trace["backoff"] * 1000), output_chars, code,
             )
+            if event == "PROVIDER_FAILED" and error is not None and error.__traceback__ is not None:
+                # A successful bounded retry must not erase its failed native
+                # attempt's stack. Provider strings and source lines can carry
+                # private request data; retain every frame/type/cause only.
+                from core.runtime_errors import redacted_traceback
+                logging.getLogger("errors").error(
+                    "OPENCODE_EXCEPTION_TRACE provider=opencode run_id=%s request_id=%s "
+                    "attempt=%s code=%s traceback=%s",
+                    context.run_id, request_id, trace["attempt"], code,
+                    redacted_traceback(error, include_messages=False),
+                )
 
         def wait_retry(delay):
             started = time.monotonic()
@@ -565,12 +834,13 @@ class OpenCodeZenClient:
                           "temperature": temperature, "task_kind": task_kind,
                           "schema_id": schema_id, "adapter_version": _EXECUTION_VERSION},
                 max_retries=self.max_retries, cancel_check=context.cancel_check,
-                retryable=lambda error: isinstance(error, OpenCodeTimeoutError)
-                    or isinstance(error, OpenCodeRequestError) and error.retryable,
+                retryable=lambda error: isinstance(error, OpenCodeRequestError) and error.retryable,
                 wait_retry=wait_retry,
                 validate=validate if response_validator is not None else None, use_cache=use_cache,
                 on_cache_hit=lambda: cache_hit.__setitem__(0, True),
                 cache_allowed=lambda raw: not self._api_key or self._api_key not in raw,
+                scope_id=context.run_id, concurrency_limit=context.ai_concurrency,
+                admission_check=context.admission_check,
             )
             _check_cancelled(context)
             if cache_hit[0]:
@@ -633,7 +903,7 @@ class OpenCodeZenClient:
                               "input": prompt}, ensure_ascii=False)
         # TemporaryDirectory owns only this request's files and cleans them on
         # success/failure. Empty XDG roots keep user plugins/config/session DB out.
-        with tempfile.TemporaryDirectory(prefix="videotranslate-opencode-") as directory:
+        with _request_directory() as directory:
             root = Path(directory)
             work = root / "work"
             work.mkdir()
@@ -647,8 +917,8 @@ class OpenCodeZenClient:
             for attempt in range(1):
                 _check_cancelled(context)
                 try:
-                    process = subprocess.Popen(
-                        argv, cwd=work, env=env, shell=False,
+                    process = _start_process(
+                        argv, context, cwd=work, env=env, shell=False,
                         stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                         text=True, encoding="utf-8", errors="replace",
                         creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),

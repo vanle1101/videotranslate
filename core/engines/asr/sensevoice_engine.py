@@ -4,18 +4,34 @@ from pathlib import Path
 from typing import List, Dict, Any, Optional
 from config import settings
 from core.engines.asr.base import ASREngine
+from core.engines.asr.source_language import SUPPORTED_SOURCE_LANGUAGES
+from core.engines.asr.native_process import ASRProcessError
+
+
+def _detected_language(result):
+    value = getattr(result, "lang", None)
+    if isinstance(value, str):
+        value = value.strip().lower()
+        if value.startswith("<|") and value.endswith("|>"):
+            value = value[2:-2].strip()
+    if not isinstance(value, str) or value not in SUPPORTED_SOURCE_LANGUAGES:
+        error = ASRProcessError("SenseVoice chưa xác định được ngôn ngữ lời nguồn được hỗ trợ; cần nhận diện lại đoạn này.")
+        error.code = "source_language_unrecognized"
+        raise error
+    return value
 
 class SenseVoiceEngine(ASREngine):
     """
     FunAudioLLM/SenseVoice ASR Engine.
-    High-accuracy Chinese speech recognition with emotions, sound events,
-    and automatic punctuation and timestamps.
+    Multilingual speech recognition with emotions and sound events.
+    Sentence times are approximate allocations, not measured alignment.
     """
-    def __init__(self, model_path: Optional[Path] = None):
+    def __init__(self, model_path: Optional[Path] = None, *, language: str = ""):
         self.model_dir = model_path or (settings.BASE_DIR / "workspace" / "models" / "sensevoice_onnx")
         self.model_file = self.model_dir / "model.int8.onnx"
         self.tokens_file = self.model_dir / "tokens.txt"
         self.recognizer = None
+        self.language = language
 
     @property
     def name(self) -> str:
@@ -32,11 +48,16 @@ class SenseVoiceEngine(ASREngine):
             
             print(f"[*] Initializing SenseVoice from {self.model_dir.name}...")
             import sherpa_onnx
+            try:
+                cpu_threads = max(1, min(2, int(settings.ASR_CPU_THREADS)))
+            except (TypeError, ValueError, OverflowError):
+                cpu_threads = 2
             self.recognizer = sherpa_onnx.OfflineRecognizer.from_sense_voice(
                 model=str(self.model_file),
                 tokens=str(self.tokens_file),
-                num_threads=4,
-                use_itn=True
+                num_threads=cpu_threads,
+                use_itn=True,
+                language=self.language,
             )
             print("[+] SenseVoice initialized successfully.")
 
@@ -91,7 +112,7 @@ class SenseVoiceEngine(ASREngine):
             duration = len(samples) / sample_rate
 
             if progress_callback:
-                progress_callback(40, f"SenseVoice: Đang nhận dạng tiếng Trung và cảm xúc...")
+                progress_callback(40, "SenseVoice: Đang nhận dạng lời nói và cảm xúc...")
 
             t0 = time.time()
             stream = self.recognizer.create_stream()
@@ -102,6 +123,10 @@ class SenseVoiceEngine(ASREngine):
 
             raw_text = res.text.strip()
             emotion = getattr(res, "emotion", "<|NEUTRAL|>")
+            # The legacy transcribe(language='zh') argument is not a measured
+            # label. The recognizer is configured by self.language (auto by
+            # default); route the transcript using its actual decode result.
+            detected_language = _detected_language(res) if raw_text else None
         try:
             print(f"[+] SenseVoice decoded in {elapsed:.2f}s: {raw_text} (Emotion: {emotion})")
         except Exception:
@@ -141,6 +166,11 @@ class SenseVoiceEngine(ASREngine):
                 "text_zh": sent_clean,
                 "text": sent_clean, # for backward compatibility
                 "emotion": emotion,
+                "source_language": detected_language,
+                # SenseVoice exposes a label, not a calibrated posterior or
+                # independent verification of this source transcript.
+                "source_language_probability": 0.,
+                "source_language_uncertain": True,
                 "speaker": None
             })
             current_time = seg_end

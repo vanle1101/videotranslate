@@ -8,6 +8,7 @@ from config import settings
 
 def processing_signature():
     names = ("LLM_PROVIDER", "GEMINI_MODEL", "OPENCODE_MODEL", "OPENROUTER_MODEL",
+             "OLLAMA_MODEL", "OLLAMA_BASE_URL",
              "WHISPER_MODEL_SIZE", "WHISPER_COMPUTE_TYPE", "SUPPRESSION_MODE",
              "MUSE_BROWSER_MODE")
     values = {name: getattr(settings, name, None) for name in names}

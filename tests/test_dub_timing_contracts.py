@@ -130,6 +130,33 @@ def test_export_rejects_empty_decoded_audio(tmp_path, decoder):
         HQExporter._assemble_voice_timeline([row], 2, tmp_path / "result.wav")
 
 
+def test_partial_export_omits_missing_voice_before_timing_validation(tmp_path, decoder):
+    """A failed row remains a silent subtitle interval, without fake audio."""
+    make_clip, _ = decoder
+    spoken = {"id": 1, "start": 1., "end": 1.5,
+              "audio_path": make_clip("spoken.wav", 22050), "final_vi": "Có tiếng."}
+    # The omitted row deliberately has no file and malformed bounds.  Partial
+    # rendering must skip it before resolving audio timing; its subtitle is
+    # handled by the caller's subtitle track separately.
+    omitted = {"id": 2, "start": 0.0, "end": 0.0,
+               "audio_path": str(tmp_path / "missing.wav"), "final_vi": "Thiếu tiếng.",
+               "omit_voice": True}
+    destination = tmp_path / "partial.wav"
+    HQExporter._assemble_voice_timeline([omitted, spoken], 2, destination)
+    with wave.open(str(destination)) as track:
+        assert track.getnframes() == 88200
+        # The omitted interval is silent; valid narration still renders.
+        assert track.readframes(44100) == bytes(44100 * 4)
+        assert any(track.readframes(22050))
+
+
+def test_export_without_omit_voice_still_rejects_missing_translated_audio(tmp_path):
+    row = {"id": 3, "start": .2, "end": .8,
+           "audio_path": str(tmp_path / "missing.wav"), "final_vi": "Bắt buộc có tiếng."}
+    with pytest.raises(FileNotFoundError, match="Không tìm thấy âm thanh"):
+        HQExporter._assemble_voice_timeline([row], 1, tmp_path / "strict.wav")
+
+
 def test_audio_cache_identity_tracks_dub_placement_with_identical_audio(tmp_path, monkeypatch):
     source, voice = tmp_path / "source.mp4", tmp_path / "voice.wav"
     source.write_bytes(b"source")
@@ -151,6 +178,21 @@ def test_audio_cache_identity_tracks_dub_placement_with_identical_audio(tmp_path
     assert key() != original
     row.update(dub_start=.1)
     assert key() is None
+
+
+def test_audio_cache_identity_separates_partial_voice_mix(tmp_path, monkeypatch):
+    source, voice = tmp_path / "source.mp4", tmp_path / "voice.wav"
+    source.write_bytes(b"source")
+    voice.write_bytes(b"voice")
+    monkeypatch.setattr(settings, "SEPARATION_ENGINE", "none")
+    monkeypatch.setattr(audio_cache, "run_media", lambda *args, **kwargs: b"test ffmpeg version")
+    exporter = HQExporter()
+    row = {"start": .5, "end": 1., "audio_path": str(voice), "final_vi": "Xin chào."}
+    full = audio_cache.build_audio_cache_identity(source, [row], 2, exporter.mixer, exporter.suppressor)
+    partial_row = dict(row, omit_voice=True, audio_path=str(tmp_path / "stale.wav"))
+    partial = audio_cache.build_audio_cache_identity(source, [partial_row], 2, exporter.mixer, exporter.suppressor)
+    assert full is not None and partial is not None
+    assert full.key != partial.key
 
 
 @pytest.fixture

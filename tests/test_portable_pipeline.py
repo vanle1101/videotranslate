@@ -193,7 +193,8 @@ class PortablePipelineTests(unittest.TestCase):
         (local / "config.json").write_text("{}")
         factory = Mock()
         with patch.dict("sys.modules", {"faster_whisper": SimpleNamespace(WhisperModel=factory)}), \
-                patch.object(settings, "DEVICE", "cpu"):
+                patch.object(settings, "DEVICE", "cpu"), \
+                patch.object(settings, "WHISPER_COMPUTE_TYPE", "int8"):
             load_whisper_model("test")
         self.assertEqual(factory.call_args.args, (str(local),))
         self.assertEqual(factory.call_args.kwargs["device"], "cpu")
@@ -304,7 +305,7 @@ class PortablePipelineTests(unittest.TestCase):
         self.assertFalse(list(self.root.glob("edge_tts_*")))
 
     @unittest.skipUnless(shutil.which("ffmpeg") and shutil.which("ffprobe"), "FFmpeg is required")
-    def test_streaming_keeps_asr_preparation_for_resume_and_cleans_scratch(self):
+    def test_legacy_streaming_keeps_asr_preparation_for_resume_and_cleans_scratch(self):
         audio = self.root / "hội thoại.wav"
         write_wave(audio, 2)
         events = []
@@ -320,7 +321,10 @@ class PortablePipelineTests(unittest.TestCase):
             await session.start()
             await session.worker_task
 
-        with patch.object(settings, "TTS_ENGINE", "edge-tts"), patch.object(settings, "ASR_ENGINE", "faster-whisper"), \
+        # This WAV fixture exercises retained legacy preparation and cleanup.
+        # Fresh video routing/automatic language detection has separate coverage.
+        with patch.object(session, "_start_chunked_visual", session._start_legacy_source), \
+                patch.object(settings, "TTS_ENGINE", "edge-tts"), patch.object(settings, "ASR_ENGINE", "faster-whisper"), \
                 patch.object(settings, "SUPPRESSION_MODE", "DSP_MONO_ADAPTIVE_FORMANT"):
             asyncio.run(run())
         self.assertIsNone(session.error)

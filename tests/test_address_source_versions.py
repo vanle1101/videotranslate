@@ -20,7 +20,8 @@ def address_response(prompt):
     ref = context[-1]
     sources = {item["id"]: item["text_zh"] for item in context}
     return {"address_context": [{"id": sid, "self_address": "con", "listener_address": "mẹ",
-        "uncertain": False, "reason": "Mạch lời gọi phụ huynh.",
+        "uncertain": False, "self_uncertain": False, "listener_uncertain": False,
+        "reason": "Mạch lời gọi phụ huynh.",
         "turn_check": {"ambiguous_roles": [], "reason": "Đã xét câu hiện tại và lời gọi phụ huynh.",
                        "evidence": [{"id": sid, "quote": sources[sid]}]},
         "evidence": [{"id": ref["id"], "quote": ref["text_zh"]}]} for sid in ids]}
@@ -40,6 +41,7 @@ def test_future_citation_invalidates_same_or_previous_batch_only_when_correction
         return {"segments": [{**item, "text_zh": corrected if item["id"] == 1 else item["text_zh"],
             "semantic_verified": True, "verification_reason": "Đã kiểm tra nghĩa.",
             "source_evidence_ids": [f"review{item['id']}"], "address_verified": True,
+            "address_uses": [{"term": "Con", "role": "self"}],
             "address_reason": "Đã đối chiếu ngữ cảnh."} for item in batch], "screen_texts": [], "summary": ""}
     evidence = [{"start": item["start"], "end": item["end"], "text_zh":
         corrected if item["id"] == 1 and accept_correction else item["text_zh"],
@@ -69,6 +71,7 @@ def test_audio_agreement_is_the_source_seen_by_address_reading_not_a_later_inval
             return address_response(prompt)
         return {"segments": [{**original, "text_zh": agreed, "needs_review": False,
             "semantic_verified": True, "verification_reason": "Đối chiếu nguồn thống nhất.",
+            "address_uses": [{"term": "Con", "role": "self"}],
             "address_verified": True, "address_reason": "Người con gọi mẹ trực tiếp."}],
             "screen_texts": [], "summary": ""}
     client = Mock(has_credentials=True, model="offline-version-test", translate=Mock(side_effect=respond))

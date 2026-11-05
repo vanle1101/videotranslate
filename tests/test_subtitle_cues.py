@@ -378,7 +378,7 @@ def test_export_uses_detected_boxes_instead_of_the_old_fixed_mask(tmp_path, monk
         kwargs["output_path"].write_bytes(b"test output")
 
     metadata = json.dumps({"format": {"duration": "3"}, "streams": [
-        {"codec_type": "video", "width": 1920, "height": 1080}, {"codec_type": "audio"},
+        {"codec_type": "video", "width": 1920, "height": 1080, "start_time": "0", "duration": "3"}, {"codec_type": "audio", "start_time": "0", "duration": "3"},
     ]}).encode()
     with patch("core.streaming.export.run_media", return_value=metadata), \
             patch.object(exporter, "_assemble_voice_timeline"), \

@@ -268,6 +268,8 @@ def test_timeout_exhaustion_is_typed_bounded_and_cleans_every_attempt(isolated, 
         with pytest.raises(oc.OpenCodeTimeoutError, match="quá lâu") as caught:
             oc.OpenCodeZenClient(api_key="private-key", timeout=1, max_retries=max_retries).translate("private-prompt")
     assert isinstance(caught.value, oc.OpenCodeRequestError)
+    assert caught.value.code == "provider_timeout"
+    assert caught.value.retryable is True
     assert start.call_count == max_retries + 1
     assert [call.args[0] for call in terminate.call_args_list] == processes
     assert delays == [1, 2][:max_retries]
@@ -650,6 +652,37 @@ def lifecycle_fields(caplog):
             for record in caplog.records if record.name == "ai"]
 
 
+@pytest.mark.parametrize('recovered', [False, True])
+def test_timeout_attempt_keeps_chained_frames_even_when_retry_recovers(isolated, monkeypatch, caplog, recovered):
+    client = oc.OpenCodeZenClient(api_key='fixture-key', max_retries=int(recovered))
+    monkeypatch.setattr(oc, '_retry_delay', lambda *args: None)
+    attempts = []
+    def timed_out_provider(*args):
+        attempts.append(True)
+        if len(attempts) == 1:
+            try:
+                raise RuntimeError('private-body authorization=fixture-key')
+            except RuntimeError as cause:
+                raise oc.OpenCodeTimeoutError('private-provider-timeout') from cause
+        return 'Lời hợp lệ'
+    monkeypatch.setattr(client, '_translate', timed_out_provider)
+    with caplog.at_level(logging.ERROR, logger='errors'), execution_context('timeout-audit'):
+        if recovered:
+            assert client.translate('private-prompt', use_cache=False) == 'Lời hợp lệ'
+        else:
+            with pytest.raises(oc.OpenCodeTimeoutError):
+                client.translate('private-prompt', use_cache=False)
+    traces = [record.getMessage() for record in caplog.records
+              if record.name == 'errors' and 'OPENCODE_EXCEPTION_TRACE' in record.getMessage()]
+    assert len(traces) == 1
+    assert 'run_id=timeout-audit' in traces[0] and 'code=provider_timeout' in traces[0]
+    assert 'timed_out_provider' in traces[0] and 'direct cause' in traces[0]
+    assert 'RuntimeError' in traces[0] and 'OpenCodeTimeoutError' in traces[0]
+    assert all(value not in caplog.text for value in
+               ('private-body', 'private-provider-timeout', 'private-prompt', 'fixture-key', 'authorization='))
+    assert len(attempts) == 1 + int(recovered)
+
+
 def test_provider_attempt_timing_excludes_admission_wait(isolated, monkeypatch, caplog):
     clock = [0.0]
     monkeypatch.setattr(oc.time, "monotonic", lambda: clock[0])
@@ -1028,6 +1061,8 @@ def test_malformed_response_not_cached_and_schema_error_retains_safe_cause(isola
         with pytest.raises(oc.OpenCodeResponseValidationError) as caught:
             client.translate("hello", response_validator=json.loads, schema_id="text-v1")
         assert isinstance(caught.value.__cause__, json.JSONDecodeError)
+        assert caught.value.code == "provider_invalid_response"
+        assert caught.value.retryable is False
         assert "private-output" not in str(caught.value)
     assert start.call_count == 2 and not list((isolated / "cache").glob("*.json"))
 
@@ -1088,3 +1123,23 @@ def test_circuit_breaker_is_shared_across_reconstructed_clients(isolated, monkey
         oc.OpenCodeZenClient(api_key="test").translate("next")
     assert caught.value.code == "provider_circuit_open" and caught.value.retry_after > 0
     start.assert_called_once()
+
+
+def test_server_retry_after_survives_adapter_circuit_error(isolated, monkeypatch):
+    now = [100.0]
+    monkeypatch.setattr(oc.time, "monotonic", lambda: now[0])
+    layer = AIExecutionLayer(AIExecutionPolicy(circuit_failures=1, circuit_cooldown=30),
+                             cache_root=isolated / "cache")
+    monkeypatch.setattr(oc, "_shared_execution_layer", lambda: layer)
+    start = Mock(return_value=make_process("", "HTTP 429 Retry-After: 900", 1))
+    monkeypatch.setattr(oc.subprocess, "Popen", start)
+    with pytest.raises(oc.OpenCodeRequestError) as caught:
+        oc.OpenCodeZenClient(api_key="test", max_retries=5).translate("first")
+    assert caught.value.code == "provider_circuit_open"
+    assert caught.value.retry_after == 900
+    now[0] += 300
+    with pytest.raises(oc.OpenCodeRequestError) as sibling:
+        oc.OpenCodeZenClient(api_key="test", max_retries=5).translate("next")
+    assert sibling.value.retry_after == 600
+    start.assert_called_once()
+    assert layer.snapshot()["active_requests"] == layer.snapshot()["queued_requests"] == 0

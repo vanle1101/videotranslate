@@ -103,7 +103,7 @@ def test_opencode_muse_routes_asr_ocr_only_to_selected_model(free_config, monkey
     segment = SegmentItem(0, 0, 2, 2)
     segment.text_zh = "你来了"
     result = processor.analyze_chunk(free_config / "video.mp4", 0, 2, [segment])
-    constructor.assert_called_once_with(model=settings.OPENCODE_MODEL, timeout=90, max_retries=1)
+    constructor.assert_called_once_with(model=settings.OPENCODE_MODEL, timeout=90, max_retries=5)
     assert result["segments"][0]["translation_provider"] == "opencode"
     assert result["segments"][0]["translation_model"] == settings.OPENCODE_MODEL
     assert result["segments"][0]["evidence_mode"] == "asr-ocr-text"
@@ -289,7 +289,7 @@ def test_schema_retry_requests_complete_response_and_preserves_review(free_confi
 
 
 @pytest.mark.parametrize("invalid", ["missing_field", "missing_id", "changed_time"])
-def test_schema_retry_fails_after_one_invalid_repair(free_config, monkeypatch, invalid):
+def test_schema_retry_fails_after_two_invalid_repairs(free_config, monkeypatch, invalid):
     client, observed = install_responses(monkeypatch)
     replies = list(client.translate.side_effect)
     rejected = json.loads(replies[1])
@@ -299,11 +299,11 @@ def test_schema_retry_fails_after_one_invalid_repair(free_config, monkeypatch, i
         rejected["segments"] = []
     else:
         rejected["segments"][0]["end"] = 3
-    client.translate.side_effect = [replies[0], json.dumps(rejected), json.dumps(rejected)]
+    client.translate.side_effect = [replies[0]] + [json.dumps(rejected)] * 3
     with pytest.raises(VideoIntelligenceError):
         VideoIntelligence()._translate_text(
             [{"id": 0, "start": 0, "end": 2, "asr_text": "你来了"}], observed, "", 0, 2)
-    assert client.translate.call_count == 3
+    assert client.translate.call_count == 4
 
 
 @pytest.mark.parametrize("when", ["before", "first_response", "repair_response"])
@@ -437,9 +437,9 @@ def test_source_repair_contract_error_stays_reviewable_with_original_asr(free_co
         [{"id": 0, "start": 0, "end": 2, "asr_text": "你来了"}], [], "")
     assert result[0]["text_zh"] == "你来了" and result[0]["needs_review"]
     assert result[0]["evidence_ids"] == []
-    # Source repair gets one bounded schema repair attempt, then falls back to
+    # Source repair gets two bounded schema repair attempts, then falls back to
     # the original ASR as an explicit review item.
-    assert client.translate.call_count == 2
+    assert client.translate.call_count == 3
 
 
 def test_source_repair_does_not_swallow_cancellation_or_quota(free_config):

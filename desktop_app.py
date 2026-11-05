@@ -588,6 +588,10 @@ def main():
     splash = StudioSplashScreen()
     if not start_in_tray:
         splash.show()
+        splash.raise_()
+        splash.activateWindow()
+        app.processEvents()
+
 
     # 3. Launch Startup Worker
     worker = StartupWorker()
@@ -595,6 +599,7 @@ def main():
 
     def on_progress(pct, msg):
         splash.set_progress(pct, msg)
+        app.processEvents()
 
     def on_finished(port):
         logger.info(f"Startup completed. Launching main studio window on port {port}...")
@@ -603,6 +608,10 @@ def main():
         splash.close()
         if not start_in_tray:
             main_win.show()
+            main_win.raise_()
+            main_win.activateWindow()
+            app.processEvents()
+
 
         # Listen for secondary instance activations
         def handle_new_connection():

@@ -1,0 +1,94 @@
+/* Compact controls respond to the resized column, not the window width. */
+#studio-middle { container-name: studio-settings; }
+#studio-transcript { container-type: inline-size; container-name: studio-transcript; }
+
+#studio-layout .caption-style-panel { padding: 7px 10px; }
+#studio-layout .caption-style-panel fieldset { margin-top: 6px; }
+#studio-layout .caption-style-grid { gap: 6px 10px; }
+#studio-layout .caption-typography-grid { margin-top: 6px; gap: 6px 10px; }
+#studio-layout .caption-style-grid label { justify-content: flex-start; min-width: 0; }
+#studio-layout .caption-style-grid input[type="color"] { flex-shrink: 0; height: 24px; }
+#studio-layout .caption-style-grid select { flex: 1; }
+#studio-layout .caption-font-control > select { padding: 3px 4px; }
+#studio-layout .caption-size-control { flex-wrap: wrap; gap: 4px; }
+#studio-layout .caption-style-options { gap: 4px 10px; margin-top: 6px; line-height: 1.5; }
+#studio-layout .caption-style-options label { gap: 4px; }
+#studio-layout .caption-style-options button { padding: 3px 5px; }
+#studio-layout #caption-style-availability,
+#studio-layout #caption-style-status { margin-top: 4px; line-height: 1.4; }
+
+#studio-layout .studio-audio-panel { padding: 7px 10px; }
+#studio-layout .studio-audio-panel h3 { padding: 0; gap: 7px; font-size: 12px; }
+#studio-layout .studio-audio-panel h3 > i { font-size: 16px; }
+#studio-layout .audio-mixers { gap: 6px; margin-top: 6px; }
+#studio-layout .audio-mixer {
+  grid-template-columns: 16px auto minmax(40px,1fr) 32px;
+  grid-template-rows: auto;
+  gap: 6px;
+  padding: 6px 7px;
+  border-radius: 7px;
+}
+#studio-layout .audio-mixer > i { grid-column: 1; grid-row: 1; font-size: 16px; }
+#studio-layout .audio-mixer label { grid-column: 2; grid-row: 1; font-size: 11px; white-space: nowrap; }
+#studio-layout .audio-mixer input { grid-column: 3; grid-row: 1; }
+#studio-layout .audio-mixer > span { grid-column: 4; grid-row: 1; font-size: 10px; }
+#studio-layout .audio-suppression {
+  margin-top: 5px;
+  padding: 4px 7px;
+  gap: 4px 7px;
+  font-size: 11px;
+  line-height: 1.4;
+  overflow-wrap: anywhere;
+}
+#studio-layout .audio-suppression > i { font-size: 14px; }
+
+#studio-layout .transcript-heading { padding: 7px 10px; gap: 3px 8px; }
+#studio-layout .transcript-heading h2 { gap: 7px; font-size: 13px; }
+#studio-layout .transcript-heading h2 > i { font-size: 18px; }
+#studio-layout .transcript-heading p { font-size: 11px; line-height: 1.4; }
+#studio-layout .transcript-count { padding: 3px 6px; font-size: 11px; border-radius: 5px; }
+#studio-layout .transcript-toolbar { padding: 5px 10px; gap: 5px 10px; }
+#studio-layout .transcript-follow,
+#studio-layout .transcript-option { gap: 5px; font-size: 11px; }
+#studio-layout .transcript-follow input,
+#studio-layout .transcript-option input { width: 15px; height: 15px; }
+#studio-layout .transcript-list { padding: 6px; scroll-padding: 6px; }
+#studio-layout .transcript-row { padding: 7px 8px; margin-bottom: 6px; border-radius: 7px; }
+#studio-layout .transcript-row-heading { gap: 4px 6px; margin-bottom: 3px; }
+#studio-layout .transcript-time { min-height: 26px; padding: 3px 6px; }
+#studio-layout .transcript-label { margin: 4px 0 2px; font-size: 9px; }
+#studio-layout .transcript-original { line-height: 1.45; }
+#studio-layout .transcript-translation { line-height: 1.45; }
+#studio-layout .transcript-review { margin-top: 5px; padding: 5px 7px; }
+#studio-layout .transcript-status { margin: 0 6px 6px; padding: 5px 7px 5px 26px; line-height: 1.45; font-size: 10px; }
+#studio-layout .transcript-status::before { top: 6px; left: 6px; }
+#studio-layout .transcript-editor { margin-top: 6px; }
+#studio-layout .transcript-editor-actions { gap: 5px; margin-top: 5px; }
+#studio-layout .transcript-editor-actions button { min-height: 28px; padding: 4px 7px; }
+
+@container studio-settings (min-width: 560px) {
+  #studio-layout #caption-style-controls { display: grid; grid-template-columns: 1fr 1fr 1.3fr 1.5fr; gap: 6px 10px; align-items: center; }
+  #studio-layout .caption-style-grid,
+  #studio-layout .caption-typography-grid { display: contents; }
+  #studio-layout .caption-font-control { grid-column: 4; grid-row: 1; }
+  #studio-layout .caption-size-control { grid-column: 1 / 3; grid-row: 2; }
+  #studio-layout .caption-opacity-control { grid-column: 3 / 5; grid-row: 2; }
+  #studio-layout .caption-style-options { grid-column: 1 / -1; margin-top: 0; }
+}
+
+@container studio-settings (max-width: 499px) {
+  #studio-layout .audio-mixers { grid-template-columns: minmax(0,1fr); }
+  #studio-layout .caption-style-grid { grid-template-columns: repeat(2,minmax(0,1fr)); }
+  #studio-layout .caption-style-grid label:last-child { grid-column: 1 / -1; }
+  #studio-layout .caption-typography-grid { grid-template-columns: minmax(0,1fr); }
+}
+
+@container studio-transcript (min-width: 560px) {
+  /* Keep both languages visible side by side without truncating dialogue. */
+  #studio-layout .transcript-row { display: grid; grid-template-columns: minmax(0,1fr) minmax(0,1.4fr); column-gap: 12px; }
+  #studio-layout .transcript-row > * { grid-column: 1 / -1; min-width: 0; }
+  #studio-layout .transcript-row > .transcript-label:first-of-type { grid-column: 1; grid-row: 2; }
+  #studio-layout .transcript-row > .transcript-label:nth-of-type(2) { grid-column: 2; grid-row: 2; }
+  #studio-layout .transcript-row > .transcript-original { grid-column: 1; grid-row: 3; align-self: start; }
+  #studio-layout .transcript-row > .transcript-translation { grid-column: 2; grid-row: 3; align-self: start; }
+}

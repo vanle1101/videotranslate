@@ -202,15 +202,18 @@ def available_dub_duration(rows, focus_id, max_shift=0.35):
     return capacity
 
 
-def _prepare_reflow(rows, focus_id, max_shift, total_duration):
+def _prepare_reflow(rows, focus_id, max_shift, total_duration, minimum_start=0.0):
     total_duration = _number(total_duration)
+    minimum_start = _number(minimum_start)
     prepared = _prepare(rows, focus_id, max_shift, allow_forward=True)
-    if prepared is None or total_duration is None or total_duration <= 0:
+    if (prepared is None or total_duration is None or total_duration <= 0
+            or minimum_start is None or not 0 <= minimum_start < total_duration):
         return None
     records, _, _ = prepared
-    cursor = 0.0
+    cursor = minimum_start
     for index, row in enumerate(records):
         if (row.end > total_duration + _EPSILON or row.dub_end > total_duration + _EPSILON
+                or row.start < minimum_start or row.dub_start < minimum_start
                 or row.dub_start < cursor - _EPSILON):
             return None
         if (row.tail_limit is not None
@@ -225,8 +228,8 @@ def _prepare_reflow(rows, focus_id, max_shift, total_duration):
     return prepared
 
 
-def _limits(row, duration, max_shift, total_duration, *, reserved=False):
-    start_min = max(0.0, row.start - max_shift)
+def _limits(row, duration, max_shift, total_duration, *, reserved=False, minimum_start=0.0):
+    start_min = max(minimum_start, row.start - max_shift)
     end_min = row.end - max_shift
     start_max = row.start + max_shift
     end_max = min(total_duration, row.end + max_shift)
@@ -240,7 +243,7 @@ def _limits(row, duration, max_shift, total_duration, *, reserved=False):
     return start_min, start_max, end_min, end_max
 
 
-def _reflow_bounds(prepared, total_duration, fixed_ids=()):
+def _reflow_bounds(prepared, total_duration, fixed_ids=(), minimum_start=0.0):
     """Earliest focus start and latest focus end from chain constraints.
 
     Predecessors push only to the right in the earliest schedule; successors
@@ -251,7 +254,7 @@ def _reflow_bounds(prepared, total_duration, fixed_ids=()):
     focus = records[focus_index]
     if focus.id in fixed_ids:
         return focus.dub_start, focus.dub_end
-    cursor = 0.0
+    cursor = minimum_start
     for row in records[:focus_index]:
         if row.id in fixed_ids:
             if row.dub_start < cursor - _EPSILON:
@@ -260,13 +263,13 @@ def _reflow_bounds(prepared, total_duration, fixed_ids=()):
             continue
         duration = row.audio_duration or row.dub_end - row.dub_start
         low, high, end_low, end_high = _limits(row, duration, max_shift, total_duration,
-                                               reserved=row.audio_duration is None)
+                                               reserved=row.audio_duration is None, minimum_start=minimum_start)
         start = max(cursor, low)
         end = max(start + duration, end_low)
         if start > high + _EPSILON or end > end_high + _EPSILON:
             return None
         cursor = end
-    earliest = max(cursor, 0.0, focus.start - max_shift)
+    earliest = max(cursor, minimum_start, focus.start - max_shift)
     cursor = total_duration
     for row in reversed(records[focus_index + 1:]):
         if row.id in fixed_ids:
@@ -276,7 +279,7 @@ def _reflow_bounds(prepared, total_duration, fixed_ids=()):
             continue
         duration = row.audio_duration or row.dub_end - row.dub_start
         low, high, end_low, end_high = _limits(row, duration, max_shift, total_duration,
-                                               reserved=row.audio_duration is None)
+                                               reserved=row.audio_duration is None, minimum_start=minimum_start)
         end = min(cursor, end_high)
         start = min(high, end - duration)
         if start < low - _EPSILON or end < end_low - _EPSILON:
@@ -296,8 +299,8 @@ def _reflow_bounds(prepared, total_duration, fixed_ids=()):
     return earliest, latest
 
 
-def _plan_general(prepared, required_duration, total_duration, fixed_ids=()):
-    bounds = _reflow_bounds(prepared, total_duration, fixed_ids=fixed_ids)
+def _plan_general(prepared, required_duration, total_duration, fixed_ids=(), minimum_start=0.0):
+    bounds = _reflow_bounds(prepared, total_duration, fixed_ids=fixed_ids, minimum_start=minimum_start)
     if bounds is None:
         return None
     earliest, latest = bounds
@@ -323,11 +326,11 @@ def _plan_general(prepared, required_duration, total_duration, fixed_ids=()):
         if row.dub_end <= cursor + _EPSILON:
             break
         duration = row.audio_duration or row.dub_end - row.dub_start
-        new_start = min(row.dub_start, cursor - duration)
+        new_start = max(minimum_start, min(row.dub_start, cursor - duration))
         new_end = (new_start + duration if row.audio_duration is None
                    else max(new_start + duration, min(row.dub_end, cursor), row.end - max_shift))
         low, high, end_low, end_high = _limits(row, duration, max_shift, total_duration,
-                                               reserved=row.audio_duration is None)
+                                               reserved=row.audio_duration is None, minimum_start=minimum_start)
         if (new_start < low - _EPSILON or new_start > high + _EPSILON
                 or new_end < end_low - _EPSILON or new_end > min(cursor, end_high) + _EPSILON):
             return None
@@ -344,7 +347,7 @@ def _plan_general(prepared, required_duration, total_duration, fixed_ids=()):
         new_end = (new_start + duration if row.audio_duration is None
                    else max(row.dub_end, new_start + duration, row.end - max_shift))
         low, high, end_low, end_high = _limits(row, duration, max_shift, total_duration,
-                                               reserved=row.audio_duration is None)
+                                               reserved=row.audio_duration is None, minimum_start=minimum_start)
         if (new_start < low - _EPSILON or new_start > high + _EPSILON
                 or new_end < end_low - _EPSILON or new_end > end_high + _EPSILON):
             return None
@@ -373,7 +376,12 @@ def _tail_plan_valid(prepared, plan, total_duration):
     return True
 
 
-def plan_reflow(rows, focus_id, required_duration, max_shift=0.35, *, total_duration, fixed_ids=()):
+def _plan_respects_minimum(prepared, plan, minimum_start):
+    return all(plan.get(row.id, {"dub_start": row.dub_start})["dub_start"] >= minimum_start
+               for row in prepared[0])
+
+
+def plan_reflow(rows, focus_id, required_duration, max_shift=0.35, *, total_duration, fixed_ids=(), minimum_start=0.0):
     """Prefer backward borrowing, then solve bounded bidirectional reflow.
 
     Start AND end stay within ``max_shift`` of their original source timestamps.
@@ -383,13 +391,15 @@ def plan_reflow(rows, focus_id, required_duration, max_shift=0.35, *, total_dura
     or PLAYED audio always retains every sample regardless of semantic flags.
     Rows in ``fixed_ids`` keep their exact current interval. The source
     timeline and all input rows remain unchanged.
+    ``minimum_start`` is the beginning of the verified source island containing
+    these rows. No borrowed time may cross that boundary into unverified source.
     """
     required_duration = _number(required_duration)
     try:
         rows = list(rows)
     except TypeError:
         return None
-    prepared = _prepare_reflow(rows, focus_id, max_shift, total_duration)
+    prepared = _prepare_reflow(rows, focus_id, max_shift, total_duration, minimum_start)
     if prepared is None or required_duration is None or required_duration <= 0:
         return None
     focus = prepared[0][prepared[1]]
@@ -399,21 +409,97 @@ def plan_reflow(rows, focus_id, required_duration, max_shift=0.35, *, total_dura
     if focus.id in fixed_ids:
         return None
     backward = plan_backshift(rows, focus_id, required_duration, max_shift, fixed_ids=fixed_ids)
-    if backward is not None and _tail_plan_valid(prepared, backward, total_duration):
+    if (backward is not None and _plan_respects_minimum(prepared, backward, minimum_start)
+            and _tail_plan_valid(prepared, backward, total_duration)):
         return backward
-    general = _plan_general(prepared, required_duration, total_duration, fixed_ids=fixed_ids)
-    return general if general is not None and _tail_plan_valid(prepared, general, total_duration) else None
+    general = _plan_general(prepared, required_duration, total_duration, fixed_ids=fixed_ids, minimum_start=minimum_start)
+    return general if (general is not None and _plan_respects_minimum(prepared, general, minimum_start)
+                       and _tail_plan_valid(prepared, general, total_duration)) else None
 
 
-def available_reflow_duration(rows, focus_id, max_shift=0.35, *, total_duration, fixed_ids=()):
-    """Maximum budget usable by ``plan_reflow`` without publishing any shifts."""
+def available_reflow_duration(rows, focus_id, max_shift=0.35, *, total_duration, fixed_ids=(), minimum_start=0.0):
+    """Maximum complete WAV budget inside the verified source island.
+
+    ``minimum_start`` and ``total_duration`` bound that island in original
+    source seconds. The default minimum preserves whole-video planning.
+    """
     try:
         rows = list(rows)
     except TypeError:
         return 0.0
-    prepared = _prepare_reflow(rows, focus_id, max_shift, total_duration)
+    prepared = _prepare_reflow(rows, focus_id, max_shift, total_duration, minimum_start)
     if prepared is None:
         return 0.0
     fixed_ids = set(fixed_ids or ())
-    bounds = _reflow_bounds(prepared, total_duration, fixed_ids=fixed_ids)
+    bounds = _reflow_bounds(prepared, total_duration, fixed_ids=fixed_ids, minimum_start=minimum_start)
     return max(0.0, bounds[1] - bounds[0]) if bounds is not None else 0.0
+
+
+def plan_legacy_overlap_recovery(rows, max_shift=0.35, *, total_duration,
+                                 immutable_ids=(), max_repairs=64):
+    """Repair existing collisions before normal bounded reflow can operate.
+
+    Legacy dub intervals can overlap a missing-audio source reservation.
+    Normal reflow correctly rejects that graph. Recovery first solves only
+    the colliding boundaries with the same source endpoint limits, full WAV
+    durations and unknown-audio reservations, then requires the complete
+    resulting graph to pass normal reflow validation. It never edits inputs.
+    ``None`` means the graph cannot be proven safe; ``{}`` means no changes.
+    """
+    total_duration = _number(total_duration)
+    if (total_duration is None or total_duration <= 0 or type(max_repairs) is not int
+            or not 1 <= max_repairs <= 256):
+        return None
+    try:
+        originals = [dict(row) for row in rows]
+        immutable_ids = set(immutable_ids)
+    except (TypeError, ValueError):
+        return None
+    if not originals:
+        return {}
+    first_id = originals[0].get('id')
+    prepared = _prepare(originals, first_id, max_shift, allow_forward=True)
+    if prepared is None:
+        return None
+    records = prepared[0]
+    shadow = [{**row, 'dub_start': record.dub_start, 'dub_end': record.dub_end}
+              for row, record in zip(originals, records)]
+    previous_collision = None
+    for _ in range(max_repairs):
+        collision = next((i for i in range(1, len(shadow))
+            if shadow[i]['dub_start'] < shadow[i - 1]['dub_end'] - _EPSILON), None)
+        if collision is None:
+            break
+        state = (collision, shadow[collision - 1]['dub_end'], shadow[collision]['dub_start'])
+        if state == previous_collision:
+            return None
+        previous_collision = state
+        focus = shadow[collision - 1]
+        prepared = _prepare(shadow, focus['id'], max_shift, allow_forward=True)
+        if prepared is None:
+            return None
+        record = prepared[0][prepared[1]]
+        required = record.audio_duration or record.dub_end - record.dub_start
+        candidate = _plan_general(prepared, required, total_duration)
+        if candidate is None:
+            return None
+        for row in shadow:
+            bounds = candidate.get(row['id'])
+            if bounds is None:
+                continue
+            if row['id'] in immutable_ids and any(
+                    abs(bounds[key] - row[key]) > _EPSILON for key in ('dub_start', 'dub_end')):
+                return None
+            row.update(bounds)
+    # This is the original publication validator, including every remaining
+    # boundary, video tail, endpoint bound and measured complete WAV length.
+    if _prepare_reflow(shadow, first_id, max_shift, total_duration) is None:
+        return None
+    for old, new in zip(records, shadow):
+        required = old.audio_duration or old.dub_end - old.dub_start
+        if new['dub_end'] - new['dub_start'] < required - _EPSILON:
+            return None
+    return {row['id']: {key: row[key] for key in ('dub_start', 'dub_end')}
+            for old, row in zip(records, shadow)
+            if abs(old.dub_start - row['dub_start']) > _EPSILON
+            or abs(old.dub_end - row['dub_end']) > _EPSILON}

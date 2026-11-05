@@ -3,6 +3,7 @@ import asyncio
 import errno
 import io
 import threading
+import wave
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from types import SimpleNamespace
@@ -39,7 +40,11 @@ def session(monkeypatch, tmp_path):
     segment.status = "READY"
     segment.text_zh = "假的"
     segment.final_vi = "Sai."
-    segment.audio_path = "segment.wav"
+    audio_path = tmp_path / "segment.wav"
+    with wave.open(str(audio_path), "wb") as audio:
+        audio.setparams((1, 2, 24000, 0, "NONE", "not compressed"))
+        audio.writeframes(b"\x01\x00" * 24000)
+    segment.audio_path = str(audio_path)
     segment.needs_review = True
     segment.review_reason = "Nguồn chưa đủ rõ."
     segment.verification = {"status": "unresolved"}
@@ -50,6 +55,7 @@ def session(monkeypatch, tmp_path):
         review_summary={"status": "completed", "checked": 1, "verified": 0, "corrected": 0, "unresolved": 1},
         auto_export_result=True, screen_texts=[], visual_translation=True,
         initialized=True, source_video_url="/api/inputs/input.mp4", initial_buffer_seconds=10,
+        output_filename="", output_video_url="",
         get_progress=Mock(return_value={"status": "COMPLETED", "progress_pct": 100}),
         get_telemetry=Mock(return_value={}), segment_snapshot=lambda s: s.to_dict(),
         bgm_url=None, translation_sources=[], warnings=[], source_processing_label=lambda: "OpenCode",
@@ -97,18 +103,22 @@ def test_successful_reexport_stamps_current_caption_renderer_only_after_result(s
     asyncio.run(main.export_hq(main.ExportHQRequest(task_id=item.task_id)))
     assert item.caption_renderer_version == CAPTION_RENDERER_VERSION
     assert item.caption_output_outdated is False
-    item.persist.assert_called_once()
+    assert item.persist.call_count == 2  # Durable export start, then validated output.
+    assert [(row["status"], row["phase"]) for row in item.status_history] == [
+        ("RUNNING", "export"), ("COMPLETED", "export")]
 
 
 @pytest.mark.parametrize("status", [None, "running", "failed", "completed"])
-def test_uncertain_rows_without_a_completed_audit_stay_blocked(session, status):
+def test_uncertain_rows_without_a_completed_audit_export_as_draft(session, status):
     item, exporter = session
     item.review_summary = {"status": status}
     item.segments[0].verification = None
-    with pytest.raises(HTTPException) as error:
-        asyncio.run(main.export_hq(main.ExportHQRequest(task_id=item.task_id)))
-    assert error.value.status_code == 409
-    exporter.export.assert_not_called()
+    if status == "running":
+        with pytest.raises(HTTPException):
+            asyncio.run(main.export_hq(main.ExportHQRequest(task_id=item.task_id)))
+    else:
+        result = asyncio.run(main.export_hq(main.ExportHQRequest(task_id=item.task_id)))
+        assert result["output_is_draft"] and not result["output_incomplete"]
 
 
 @pytest.mark.parametrize("status", ["running", "failed"])
@@ -116,9 +126,13 @@ def test_failed_or_running_review_blocks_even_previously_clear_rows(session, sta
     item, exporter = session
     item.review_summary = {"status": status}
     item.segments[0].needs_review = False
-    with pytest.raises(HTTPException):
-        asyncio.run(main.export_hq(main.ExportHQRequest(task_id=item.task_id)))
-    exporter.export.assert_not_called()
+    if status == "running":
+        with pytest.raises(HTTPException):
+            asyncio.run(main.export_hq(main.ExportHQRequest(task_id=item.task_id)))
+        exporter.export.assert_not_called()
+    else:
+        result = asyncio.run(main.export_hq(main.ExportHQRequest(task_id=item.task_id)))
+        assert result["output_is_draft"] and not result["output_incomplete"]
 
 
 def test_finished_event_automatically_exports_once_per_revision_and_publishes(session):
@@ -148,7 +162,7 @@ def test_finished_event_automatically_exports_once_per_revision_and_publishes(se
     assert ready[-1]["review_warning"]
 
 
-@pytest.mark.parametrize("change", ["legacy", "failed", "running", "stopped", "draining", "synthesis", "busy"])
+@pytest.mark.parametrize("change", ["legacy", "running", "stopped", "draining", "synthesis", "busy"])
 def test_automatic_export_does_not_launch_for_ineligible_session(session, change):
     item, exporter = session
     if change == "legacy":
@@ -359,6 +373,9 @@ def test_automatic_export_preserves_one_classified_error_event(session, failure,
     assert expected in errors[0]["message"]
     assert errors[0]["message"] == main.active_export_tasks[f"export_{item.task_id}"]["stage"]
     assert "secret-token-provider" not in str(errors)
+    assert item.status_history[-1]["status"] == "FAILED"
+    assert item.status_history[-1]["phase"] == "export"
+    assert item.status_history[-1]["message"] == errors[0]["message"]
 
 
 def test_automatic_export_preflight_error_keeps_original_actionable_detail(session, monkeypatch):
@@ -433,7 +450,7 @@ def test_export_report_write_failure_preserves_published_mp4_and_warns(session, 
     task = main.active_export_tasks[f"export_{item.task_id}"]
     assert task["status"] == "COMPLETED" and task["published"] is True
     assert task["review_url"] == "" and task["stage"] == result["metadata_warning"]
-    item.persist.assert_called_once()
+    assert item.persist.call_count == 2  # Durable export start and publication.
     events = [call.args[0] for call in socket.send_json.call_args_list]
     assert not any(event["type"] == "result_error" for event in events)
     ready = next(event for event in events if event["type"] == "result_ready")
@@ -527,9 +544,9 @@ def test_final_output_and_audit_report_survive_snapshot_and_task_poll(session):
         assert task["review_url"] == "/api/outputs/reviewed.review.json"
 
 
-@pytest.mark.parametrize("provider,visual,expected", [("opencode", True, True), ("opencode", False, False), ("gemini", True, False)])
+@pytest.mark.parametrize("provider,visual,expected", [("opencode", True, True), ("opencode", False, True), ("gemini", True, True)])
 @pytest.mark.parametrize("source", ["url", "upload", "local"])
-def test_new_visual_opencode_sessions_opt_into_final_output(session, monkeypatch, provider, visual, expected, source):
+def test_new_sessions_request_automatic_final_output(session, monkeypatch, provider, visual, expected, source):
     item, _ = session
     monkeypatch.setattr(main.settings, "LLM_PROVIDER", provider)
     monkeypatch.setattr(main, "validate_visual_translation", lambda value: None)
@@ -554,6 +571,7 @@ def test_new_visual_opencode_sessions_opt_into_final_output(session, monkeypatch
 
         asyncio.run(run())
     assert item.auto_export_result is expected
+    assert expected is True
 
 
 def test_review_existing_session_enables_automatic_result(session):
@@ -663,6 +681,8 @@ def test_cancelling_export_coroutine_waits_for_its_real_worker(session):
                 await task
         assert item.export_task is None
         assert main.active_export_tasks[f"export_{item.task_id}"]["status"] == "CANCELLED"
+        assert item.status_history[-1]["status"] == "STOPPED"
+        assert item.status_history[-1]["phase"] == "export"
 
     asyncio.run(run())
 

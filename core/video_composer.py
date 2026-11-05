@@ -1,4 +1,5 @@
 import math
+import json
 from pathlib import Path
 from config import settings
 from core.media_process import run_media
@@ -67,10 +68,23 @@ def _normalize_source_masks(source_masks):
     return normalized
 
 
-def _composition_filter(subtitle_path, source_masks=None):
+def _composition_filter(subtitle_path, source_masks=None, video_start_time=0.0):
     """Blur original pixels first, then paint sharp Vietnamese captions."""
     graph = []
     current = "0:v"
+    try:
+        video_start_time = float(video_start_time)
+    except (TypeError, ValueError, OverflowError):
+        video_start_time = 0.0
+    if math.isfinite(video_start_time) and video_start_time > 0.001:
+        # FFmpeg keeps a positive stream PTS offset when composing WebM/MKV.
+        # Normalize the decoded frames, then put that delay back as black
+        # frames so video, narration, subtitles, and the source timeline agree.
+        graph.append(
+            f"[0:v]setpts=PTS-STARTPTS,tpad=start_mode=add:"
+            f"start_duration={video_start_time:.6f}:color=black[timeline0]"
+        )
+        current = "timeline0"
     for index, mask in enumerate(_normalize_source_masks(source_masks)):
         x, y, width, height = mask["bbox"]
         # yuv420p needs even crop coordinates and dimensions. A two-pixel
@@ -122,7 +136,8 @@ class VideoComposer:
         output_path.parent.mkdir(parents=True, exist_ok=True)
         # The legacy flag is accepted for callers, but never invent a full-width
         # subtitle region. A caller must provide actual time-bound source boxes.
-        filters = _composition_filter(subtitle_path, source_masks)
+        video_start_time = self._video_start_time(video_path, cancel_check)
+        filters = _composition_filter(subtitle_path, source_masks, video_start_time)
 
         cmd = [
             "ffmpeg", "-hide_banner", "-loglevel", "error", "-nostdin", "-y",
@@ -132,11 +147,12 @@ class VideoComposer:
             "-map", "[outv]",
             "-map", "1:a",
             "-c:v", "libx264",
-            "-preset", "fast",
-            "-crf", "20",
+            "-preset", settings.VIDEO_ENCODER_PRESET,
+            "-crf", str(settings.VIDEO_CRF),
+            "-threads", str(settings.VIDEO_CPU_THREADS),
             "-pix_fmt", "yuv420p",
             "-c:a", "aac",
-            "-b:a", "192k",
+            "-b:a", settings.EXPORT_AUDIO_BITRATE,
             "-af", "apad",
             "-shortest",
             "-movflags", "+faststart",
@@ -153,3 +169,27 @@ class VideoComposer:
 
         print(f"[+] Final Video Ready: {output_path}")
         return output_path
+
+    @staticmethod
+    def _video_start_time(video_path, cancel_check=None):
+        """Read the first decoded video timestamp without loading media in RAM."""
+        raw = run_media([
+            "ffprobe", "-v", "error", "-select_streams", "v:0",
+            "-show_entries", "stream=start_time:format=duration", "-of", "json", str(video_path),
+        ], cancel_check=cancel_check, capture_output=True)
+        try:
+            metadata = json.loads(raw)
+            stream = next(item for item in metadata.get("streams", [])
+                          if item.get("codec_type") in (None, "video"))
+            start = float(stream.get("start_time", 0.0))
+        except (ValueError, TypeError, KeyError, StopIteration):
+            return 0.0
+        if not math.isfinite(start) or start <= 0.001:
+            return 0.0
+        try:
+            duration = float(metadata.get("format", {}).get("duration"))
+        except (ValueError, TypeError):
+            duration = 0.0
+        if math.isfinite(duration) and duration > 0 and start >= duration:
+            raise ValueError("Video nguồn bắt đầu ngoài timeline của tệp.")
+        return start

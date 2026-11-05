@@ -26,7 +26,9 @@ def caption_session(tmp_path, monkeypatch):
     segment.subtitle_timing_source = "edge-word-boundary"
     segment.subtitle_cues = [{"start": .1, "end": 2.5, "text": segment.final_vi}]
     segment.audio_path = str(session.segments_dir / "seg_0.wav")
-    Path(segment.audio_path).write_bytes(b"existing untouched audio")
+    with wave.open(segment.audio_path, "wb") as audio:
+        audio.setparams((1, 2, 24000, 0, "NONE", "not compressed"))
+        audio.writeframes(b"\x01\x00" * 24000)
     session.segments[0] = segment
     session.screen_texts = [{"start": 0, "end": 3, "bbox": [.3, .8, .4, .05],
         "kind": "subtitle", "source_method": "local-ocr", "confidence": .98,
@@ -175,9 +177,12 @@ def test_style_change_invalidates_completed_export_polling(caption_session):
     assert export_id not in main.active_export_tasks
 
 
-def test_style_disk_failure_is_not_acknowledged_and_retains_previous_result(caption_session, monkeypatch):
+@pytest.mark.parametrize("partial", [False, True])
+def test_style_disk_failure_is_not_acknowledged_and_retains_previous_result(caption_session, monkeypatch, partial):
     session = caption_session
     session.total_duration = 3
+    session.output_incomplete = partial
+    session.output_missing_segment_ids = [0] if partial else []
     manifest = session.persist()
     durable = manifest.read_bytes()
     export_id = f"export_{session.task_id}"
@@ -194,6 +199,8 @@ def test_style_disk_failure_is_not_acknowledged_and_retains_previous_result(capt
     assert session.caption_output_outdated is False
     assert session.output_filename == "old.mp4" and session.output_video_url == "/api/outputs/old.mp4"
     assert session.auto_export_signature == "previous-result-signature"
+    assert session.output_incomplete is partial
+    assert session.output_missing_segment_ids == ([0] if partial else [])
     assert main.active_export_tasks[export_id] is completed
     assert manifest.read_bytes() == durable
 

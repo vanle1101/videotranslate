@@ -391,6 +391,23 @@ class VideoDownloader:
                     if cancel_check and cancel_check():
                         raise VideoDownloadError("Đã hủy tải video.")
                     logger.info("Đã tải video thành công (%s).", task_id[:8])
+                    metrics = result.get("download_metrics") or {}
+                    if metrics:
+                        logger.info("[%s] run_id=%s Download: bytes=%s; seconds=%.3f; avg_MiB_s=%.3f; "
+                                    "disk_seconds=%.3f; retries=%s; requests=%s; strategy=%s; connections=%s.",
+                                    task_id[:8], run_id, metrics.get("file_bytes", 0),
+                                    metrics.get("elapsed_seconds", 0), metrics.get("average_speed", 0) / 1024**2,
+                                    metrics.get("disk_write_seconds", 0), metrics.get("retry_count", 0),
+                                    metrics.get("http_requests", 0), metrics.get("strategy"), metrics.get("connections", 1))
+                        for transport in metrics.get("transport_samples", []):
+                            # No raw response/error headers or signed addresses.
+                            logger.info("[%s] CDN host=%s; IP=%s; protocol=%s; DNS_ms=%s; TCP_ms=%s; TLS_ms=%s; header_TTFB_ms=%s; first_chunk_ms=%s; status=%s; bytes=%s.",
+                                         task_id[:8], urlsplit(transport.get("url", "")).hostname,
+                                         transport.get("peer_ip"), transport.get("protocol"), transport.get("dns_ms"),
+                                         transport.get("tcp_ms"), transport.get("tls_ms"),
+                                         transport.get("header_ttfb_ms", transport.get("ttfb_ms")),
+                                         transport.get("first_chunk_ms", transport.get("first_byte_ms")),
+                                         transport.get("status_code"), transport.get("bytes_received"))
                     return result
                 elif kind == "error":
                     raise VideoDownloadError(event.get("message") or friendly_download_error("", host))

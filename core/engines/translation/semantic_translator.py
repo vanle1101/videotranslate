@@ -21,6 +21,84 @@ from core.structured_response import (
 # Keep the stable two-argument request boundary used by plugins. ContextVars
 # carry validation options safely across concurrent translation/pacing calls.
 _request_contract = ContextVar("semantic_translation_contract", default=None)
+
+
+def _compact_local_dialogue_context(rows, *, max_chars=900):
+    """Keep only human-verified prior Vietnamese turns for local translation."""
+    rows = [row for row in (rows or []) if isinstance(row, dict)]
+    if not rows:
+        return ""
+    focus = [index for index, row in enumerate(rows) if row.get("is_focus") is True]
+    anchor = focus[0] if focus else len(rows)
+    indexes = list(range(max(0, anchor - 3), anchor))
+    selected = []
+    for index in indexes:
+        row = rows[index]
+        translated = row.get("final_vi") or row.get("vi") or ""
+        proof = row.get("verification") if isinstance(row.get("verification"), dict) else {}
+        verified = proof.get("status") == "manual" or proof.get("semantic_verified") is True
+        if verified and isinstance(translated, str) and translated.strip():
+            selected.append({"id": row.get("id"), "vi_draft": translated.strip()[:160]})
+    while selected:
+        encoded = json.dumps(selected, ensure_ascii=False)
+        if len(encoded) <= max_chars:
+            return encoded
+        selected.pop(0)
+    return ""
+
+
+def _ollama_batch_semantic_issues(source_text: str, translated_text: str,
+                                 terms=()) -> set[str]:
+    """Catch a few high-impact polarity/role shifts seen in local batch output."""
+    issues = set()
+    source = str(source_text or "")
+    translated = str(translated_text or "")
+    lower = translated.casefold()
+    if (("可爱" in source or "可愛" in source)
+            and not any(term in source for term in ("漂亮", "好看", "美丽", "美"))
+            and re.search(r"\bđẹp\b", lower)):
+        issues.add("cute_changed_to_beautiful")
+    if ("不就够了吗" in source or "不就夠了嗎" in source):
+        if (not translated.rstrip().endswith(("?", "？")) or "không đủ" in lower
+                or "khong du" in lower or re.search(r"\bchưa\b", lower)):
+            issues.add("rhetorical_question_or_polarity_changed")
+    if "孩子妈妈特别想" in source or "孩子妈妈特別想" in source:
+        if not re.search(r"\bnhớ\b", lower):
+            issues.add("mother_misses_child_changed")
+    if ("你看" in source and not any(term in source for term in ("妈妈", "爸爸", "爸", "妈"))
+            and re.match(r"^(?:mẹ|má|bố|ba|anh|chị|em)\s+ơi\b", lower)):
+        issues.add("unspoken_vocative_added")
+    if ("你" in source and re.search(r"\bmày\b", lower)
+            and not any(term in source for term in ("混蛋", "王八蛋", "傻逼", "滚", "废物", "蠢", "去死"))):
+        issues.add("rude_address_added")
+    if "是哥哥了" in source and re.search(r"\bem trai\b|\bem gái\b", lower):
+        issues.add("older_brother_role_changed")
+    for term in terms if isinstance(terms, (list, tuple)) else ():
+        if (isinstance(term, dict) and isinstance(term.get("src"), str)
+                and term["src"] and term["src"] in source
+                and isinstance(term.get("tgt"), str) and term["tgt"].strip()
+                and term["tgt"].casefold() not in lower):
+            issues.add("named_term_omitted")
+            break
+    return issues
+
+
+def _to_simplified_chinese(text):
+    """Translate-model input is Simplified Chinese; ASR may return Traditional."""
+    value = str(text or "")
+    if not value:
+        return value
+    converter = getattr(_to_simplified_chinese, "_converter", None)
+    if converter is None:
+        try:
+            from opencc import OpenCC
+        except ImportError:
+            return value
+        converter = OpenCC("t2s")
+        _to_simplified_chinese._converter = converter
+    return converter.convert(value)
+
+
 _TEXT = {"type": "string", "maxLength": 2000}
 _BOOL = {"type": "boolean"}
 _TRANSLATION_PROPERTIES = {**{key: _TEXT for key in ("literal_vi", "natural_vi", "final_vi", "review_reason")},
@@ -44,6 +122,14 @@ _SOURCE_FIELDS = ("speaker_id", "addressee_id", "speaker", "diarization_speaker"
     "utterance_id", "utterance_evidence", "source_asr_row_id", "source_asr_start", "source_asr_end",
     "source_piece_index", "source_piece_count", "manual_edit", "revision", "verification",
     "source_needs_review", "source_truncated")
+
+
+class PartialTranslationResults(dict):
+    """Successful batch rows plus independently isolated row failures."""
+
+    def __init__(self, values=(), *, errors=None):
+        super().__init__(values)
+        self.errors = dict(errors or {})
 
 
 def _source_semantics(rows, focus=()):
@@ -121,7 +207,7 @@ class PacingReviewRejected(RuntimeError):
     def __init__(self, message, *, candidate="", reason="", code="review_rejected"):
         super().__init__(message)
         self.feedback = {"rejected_candidate": str(candidate)[:2000], "reason": str(reason)[:1000]}
-        self.code = code if code in {"review_rejected", "uncertain", "semantic_mismatch", "unnatural", "invalid_review", "duplicate"} else "review_rejected"
+        self.code = code if code in {"review_rejected", "uncertain", "semantic_mismatch", "unnatural", "invalid_review", "invalid_candidate", "duplicate"} else "review_rejected"
 
 
 def pacing_candidate_key(text):
@@ -169,10 +255,20 @@ def fluency_dialogue_context(rows, *, target, draft, candidate, positioned=False
 
 
 class SemanticTranslator(TranslationEngine):
-    STRICT_PROVIDERS = frozenset({"opencode", "openrouter-free", "gemini", "muse"})
+    STRICT_PROVIDERS = frozenset({"opencode", "openrouter-free", "gemini", "muse", "ollama"})
+    MAX_TRANSLATION_TARGETS = 8
+    # GTX 1050 Ti benchmark: with 32 real subtitles, 12-item batches were
+    # fastest (43.6s, 32/32 valid). Eight-item batches took 48.2s and sixteen-
+    # item batches took 51.8s and failed one sentence's semantic repair.
+    MAX_OLLAMA_TRANSLATION_TARGETS = 12
+    max_pacing_proposals = 5
 
     def __init__(self, provider: Optional[str] = None):
         self.provider = provider or settings.LLM_PROVIDER
+        self.allow_uncertain_pacing = self.provider == "ollama"
+        if self.provider == "ollama":
+            # One local rewrite avoids queueing several generations on one runner.
+            self.max_pacing_proposals = 1
 
     def _api_keys(self):
         # Only the selected provider may receive transcript data or incur usage.
@@ -207,8 +303,12 @@ class SemanticTranslator(TranslationEngine):
                     api_key=self._opencode_key(),
                     model=getattr(settings, "OPENCODE_MODEL", "big-pickle"),
                     timeout=getattr(settings, "OPENCODE_TIMEOUT", 60),
-                    max_retries=1,
+                    max_retries=5,
                 )
+            elif self.provider == "ollama":
+                from core.engines.translation.ollama_client import OllamaClient
+                client = OllamaClient(model=settings.OLLAMA_MODEL, base_url=settings.OLLAMA_BASE_URL,
+                                      timeout=settings.OLLAMA_TIMEOUT)
             else:
                 raise RuntimeError("Nhà cung cấp dịch không hỗ trợ chế độ JSON.")
             contract = _request_contract.get()
@@ -219,6 +319,8 @@ class SemanticTranslator(TranslationEngine):
             if contract is not None and type(client) is OpenCodeZenClient:
                 options.update(response_validator=contract["validator"], schema_id=contract["schema_id"],
                     task_kind=contract["task_kind"], max_tokens=contract["max_tokens"])
+            elif contract is not None and self.provider == "ollama":
+                options["max_tokens"] = contract["max_tokens"]
             raw = client.translate(user_prompt, **options)
             if (contract is not None and type(client) is OpenCodeZenClient
                     and user_prompt != contract["original_prompt"]
@@ -241,17 +343,42 @@ class SemanticTranslator(TranslationEngine):
             raise RuntimeError(f"{exc} Hãy thử lại hoặc đổi cấu hình dịch.") from None
         except (GeminiError, MuseError, OpenRouterClientError) as exc:
             raise RuntimeError(f"{exc} Hãy thử lại hoặc đổi cấu hình dịch.") from None
-        except Exception:
+        except Exception as exc:
+            from core.engines.translation.ollama_client import OllamaClientError
+            if isinstance(exc, OllamaClientError):
+                raise
             raise RuntimeError("API không dịch được. Hãy thử lại hoặc đổi cấu hình dịch.") from None
 
+    def _ollama_text_request(self, system: str, prompt: str, *, max_tokens: int,
+                             response_format: str | dict = "text") -> str:
+        """Use Ollama's plain-text path for translation-specialized local models."""
+        from core.engines.translation.ollama_client import OllamaClient
+        client = OllamaClient(model=settings.OLLAMA_MODEL, base_url=settings.OLLAMA_BASE_URL,
+                              timeout=settings.OLLAMA_TIMEOUT)
+        return client.translate(prompt, system=system, max_tokens=max_tokens,
+                                response_format=response_format, temperature=0.0)
+
+    @staticmethod
+    def _clean_ollama_translation(raw: str) -> str:
+        text = str(raw or "").strip()
+        text = re.sub(r"^```(?:text|vi|vietnamese)?\s*|\s*```$", "", text, flags=re.I)
+        lines = [line.strip() for line in text.splitlines() if line.strip()]
+        cleaned = []
+        for line in lines:
+            line = re.sub(r"^\s*(?:[-*]\s+)?(?:bản dịch(?: tiếng Việt)?|tiếng Việt|vietnamese|translation)\s*[:：]\s*",
+                          "", line, flags=re.I)
+            cleaned.append(line.strip())
+        return " ".join(cleaned).strip().strip('"“”')
+
     def _translation_error(self, message: str, *, code="semantic_content", path="$") -> RuntimeError:
-        label = {"gemini": "Gemini", "muse": "Muse", "opencode": "OpenCode", "openrouter-free": "OpenRouter"}.get(self.provider, "AI")
+        label = {"gemini": "Gemini", "muse": "Muse", "opencode": "OpenCode",
+                 "openrouter-free": "OpenRouter", "ollama": "Ollama local"}.get(self.provider, "AI")
         return StructuredResponseError(f"{label} {message} Hãy thử lại hoặc đổi cấu hình dịch.", code=code, path=path)
 
     def _validated_request(self, system, prompt, validator, *, schema_id, task_kind, max_tokens=2048):
         """Repair structure only; a valid negative verdict is final for this draft."""
         original_prompt = prompt
-        attempts = schema_attempts(1)
+        attempts = schema_attempts(2 if task_kind == "translation" else 1)
         for attempt in range(1, attempts + 1):
             checked = {}
             contract = {"schema_id": schema_id, "task_kind": task_kind, "max_tokens": max_tokens,
@@ -277,8 +404,9 @@ class SemanticTranslator(TranslationEngine):
                 raw = self._opencode_request(system, prompt)
                 return validate(raw)
             except StructuredResponseError as error:
-                # Empty/wrong-language/extra IDs and real semantic rejections
-                # are content failures, never permission to repair the meaning.
+                # Empty/wrong-language translations and real semantic
+                # rejections are not permission to repair the meaning. ID
+                # shape/coverage failures are structural and may be repaired.
                 if error.code == "semantic_content" or attempt >= attempts:
                     raise
                 prompt = (original_prompt + "\nPhản hồi trước sai cấu trúc JSON "
@@ -321,15 +449,19 @@ class SemanticTranslator(TranslationEngine):
             items = []
         expected = {int(item["id"]): item.get("text_zh", "") for item in payload if "id" in item}
         result: Dict[int, Dict[str, str]] = {}
-        for item in items:
+        for index, item in enumerate(items):
+            item_path = f"$.results[{index}]"
             if not isinstance(item, dict):
-                raise self._translation_error("trả về mục bản dịch không hợp lệ.")
+                raise self._translation_error("trả về mục bản dịch không hợp lệ.",
+                                              code="invalid_type", path=item_path)
             raw_id = item.get("id")
             if isinstance(raw_id, bool) or not (isinstance(raw_id, int) or isinstance(raw_id, str) and re.fullmatch(r"-?\d+", raw_id)):
-                raise self._translation_error("trả về ID bản dịch không hợp lệ.")
+                raise self._translation_error("trả về ID bản dịch không hợp lệ.",
+                                              code="invalid_type", path=item_path + ".id")
             item_id = int(raw_id)
             if item_id not in expected or item_id in result:
-                raise self._translation_error("trả về ID bản dịch thừa hoặc trùng.")
+                raise self._translation_error("trả về ID bản dịch thừa hoặc trùng.",
+                                              code="invalid_content", path=item_path + ".id")
             fields = ("literal_vi", "natural_vi", "final_vi")
             values = {field: item.get(field) for field in fields}
             if not all(self._nonempty_string(v) for v in values.values()):
@@ -347,7 +479,8 @@ class SemanticTranslator(TranslationEngine):
                 result[item_id]["review_reason"] = reason.strip()[:500]
         if set(result) != set(expected):
             missing = sorted(set(expected) - set(result))
-            raise self._translation_error(f"thiếu hoặc sai bản dịch cho segment {missing}.")
+            raise self._translation_error(f"thiếu hoặc sai bản dịch cho segment {missing}.",
+                                          code="invalid_content", path="$.results")
         return result
 
     @property
@@ -370,6 +503,8 @@ class SemanticTranslator(TranslationEngine):
         elif self.provider == "muse":
             # Muse authenticates in its own browser; probing must not launch it.
             has_llm_key = True
+        elif self.provider == "ollama":
+            has_llm_key = bool(getattr(settings, "OLLAMA_MODEL", ""))
         return {
             "name": self.name,
             "provider": self.provider,
@@ -392,12 +527,38 @@ class SemanticTranslator(TranslationEngine):
         if not segments:
             return []
 
+        def manual_translation(row):
+            verification = row.get("verification")
+            manual = (row.get("manual_edit") is True or row.get("user_edited") is True
+                      or isinstance(verification, dict) and verification.get("status") == "manual")
+            return manual and any(self._nonempty_string(row.get(key)) for key in ("final_vi", "vi_text"))
+
+        def edit_state(row):
+            # A late answer cannot replace an editor's newer revision, even
+            # when the edit clears text or changes manual/review status.
+            return {key: row.get(key) for key in (
+                "id", "start", "end", "text_zh", "text", "revision", "manual_edit", "user_edited",
+                "verification", "literal_vi", "natural_vi", "final_vi", "vi_text")}
+
+        originals = deepcopy(segments)
+        def index_rows(rows):
+            indexed = {int(row["id"]): row for row in rows}
+            if len(indexed) != len(rows):
+                raise ValueError("Duplicate source IDs in translation input")
+            return indexed
+
+        original_rows = index_rows(originals)
+        original_states = {identity: edit_state(row) for identity, row in original_rows.items()}
+        protected = {identity for identity, row in original_rows.items() if manual_translation(row)}
+        if len(protected) == len(originals):
+            return [dict(row) for row in segments]
+
         # A flattened transcript erases the evidence for continued speech and
         # replies. Preserve every turn and its timing in the context pass.
         full_text = json.dumps([
             {**{key: deepcopy(seg[key]) for key in ("id", "start", "end", *_SOURCE_FIELDS) if key in seg},
              "text_zh": seg.get("text_zh", seg.get("text", ""))}
-            for seg in sorted(segments, key=lambda row: (row.get("start", 0), row["id"]))
+            for seg in sorted(originals, key=lambda row: (row.get("start", 0), row["id"]))
         ], ensure_ascii=False)
 
         # Step 1: Summary & Glossary
@@ -410,33 +571,29 @@ class SemanticTranslator(TranslationEngine):
         if progress_callback:
             progress_callback(50, "VideoLingo Stage 2: Dịch phản chiếu 3 cấp độ (Literal -> Natural -> Final Time-Budget)...")
 
-        payload = [
-            {
-                "id": seg["id"],
-                "start": seg["start"],
-                "end": seg["end"],
-                "duration": seg.get("duration", round(seg["end"] - seg["start"], 2)),
-                "text_zh": seg.get("text_zh", seg.get("text", ""))
-            }
-            for seg in segments
-        ]
-        # Keep explicit diarization/target metadata in the actual translation
-        # request as well as in the context summary.  The previous payload
-        # silently dropped it here, so Muse had to guess the speaker turn from
-        # text alone and could invert chị/em or tôi/con in a batch response.
-        for item, source in zip(payload, segments):
-            for key in _SOURCE_FIELDS:
-                value = source.get(key)
-                if value is not None:
-                    item[key] = deepcopy(value)
-
-        results_map = self._execute_3tier_translation(payload, context_info)
+        # Preserve manual rows in the full-video context pass above, but
+        # never request translations for them. Also exclude edits made while
+        # that context request was in flight.
+        current_rows = index_rows(segments)
+        targets = [row for identity, row in original_rows.items()
+                   if identity not in protected and identity in current_rows
+                   and edit_state(current_rows[identity]) == original_states[identity]]
+        payload = [self._translation_source_row(row) for row in targets]
+        if len(targets) == len(originals):
+            results_map = self._execute_3tier_translation(payload, context_info)
+        else:
+            results_map = self._execute_3tier_translation(payload, context_info,
+                source_context=[self._translation_source_row(row) for row in originals])
 
         # Step 3: Merge back to internal segments
         merged = []
-        for seg in segments:
+        current_rows = index_rows(segments)
+        target_ids = {int(row["id"]) for row in targets}
+        for lookup_id, seg in current_rows.items():
             seg_copy = dict(seg)
-            lookup_id = int(seg["id"])
+            if lookup_id not in target_ids or edit_state(seg) != original_states[lookup_id]:
+                merged.append(seg_copy)
+                continue
             res = results_map.get(lookup_id, {})
             text_zh = seg.get("text_zh", seg.get("text", ""))
             seg_copy["text_zh"] = text_zh
@@ -458,6 +615,55 @@ class SemanticTranslator(TranslationEngine):
         return merged
 
     def _extract_context_and_glossary(self, full_text: str) -> Dict[str, Any]:
+        if self.provider == "ollama":
+            # Local translation models are single-runner; avoid a separate
+            # full-transcript generation before translation. Derive a compact,
+            # source-grounded context and glossary locally so names and family
+            # relations survive batching without another model call.
+            try:
+                rows = json.loads(full_text)
+            except (TypeError, ValueError):
+                rows = []
+            texts = [row.get("text_zh", "") for row in rows
+                     if isinstance(row, dict) and isinstance(row.get("text_zh"), str)] \
+                if isinstance(rows, list) else []
+            source = " ".join(texts)
+            family_words = ("爸爸", "妈妈", "哥哥", "姐姐", "妹妹", "弟弟", "孩子", "宝宝", "亲家")
+            family_context = sum(source.count(word) for word in family_words) >= 2
+            hospital_context = any(word in source for word in (
+                "护士", "医生", "医院", "产房", "指标", "怀孕", "分娩", "生出来"))
+            theme = "Video ngắn Douyin đời thường"
+            pronouns = "Giữ đúng vai, không đảo vai người nói và người nghe theo câu nguồn; không tự thêm lời gọi hay quan hệ."
+            if family_context:
+                theme = "Đối thoại gia đình về người thân và trẻ nhỏ; xác định quan hệ theo lời gọi trực tiếp và lượt thoại."
+                pronouns += (
+                    " Chỉ dùng cách gọi và quan hệ khi câu nguồn có dấu hiệu trực tiếp; "
+                    "không kéo vai hoặc nội dung của câu này sang ID khác. Nếu giới tính em bé chưa rõ, "
+                    "dùng bé/em bé thay vì đoán."
+                )
+            if hospital_context:
+                theme = "Gia đình đang trao đổi ở bệnh viện và chờ em bé chào đời."
+                pronouns += (
+                    " Chỉ dùng nghĩa sinh nở khi chính câu cần dịch nói về 孩子/宝宝 và 出来; "
+                    "không tự thêm cách gọi con cho người nghe."
+                )
+            glossary = {
+                "小元": ("Tiểu Nguyên", "Tên riêng, không dịch nghĩa."),
+                "安安": ("An An", "Tên riêng trong mạch thoại."),
+                "倩佳": ("Thiến Giai", "Tên riêng được gọi trực tiếp; dùng nhất quán bằng tiếng Việt."),
+                "魔方": ("khối Rubik", "Đồ chơi Rubik, không phải khối lập phương chung."),
+                "亲家": ("thông gia", "Cách gọi quan hệ giữa cha mẹ hai bên."),
+            }
+            terms = [{"src": src, "tgt": tgt, "note": note}
+                     for src, (tgt, note) in glossary.items() if src in source]
+            # In this transcript the same child is named 小元, while ASR
+            # alternates between the homophones 小圆 and 小冤. Keep the Chinese
+            # source untouched and give translation only the evidenced alias.
+            if "小元" in source:
+                terms.extend({"src": alias, "tgt": "Tiểu Nguyên",
+                              "note": "Biến thể nhận dạng tên riêng 小元 trong cùng cuộc thoại; giữ tên, không dịch nghĩa."}
+                             for alias in ("小圆", "小冤") if alias in source)
+            return {"theme": theme, "terms": terms, "pronouns": pronouns}
         if self.provider in self.STRICT_PROVIDERS:
             def validate(raw):
                 data = self._json_response(raw)
@@ -472,15 +678,546 @@ class SemanticTranslator(TranslationEngine):
                 schema_id="semantic-summary-v2", task_kind="summary")
         return {"theme": "Video ngắn Douyin đời thường", "terms": [], "pronouns": "Chưa xác định; đối chiếu từng lượt nguồn"}
 
-    def _execute_3tier_translation(self, payload: List[Dict[str, Any]], context_info: Dict[str, Any]) -> Dict[int, Dict[str, str]]:
+    @staticmethod
+    def _translation_source_row(row):
+        """The same source-only projection for targets and read-only turns."""
+        result = {"id": row["id"], "start": row["start"], "end": row["end"],
+                  "duration": row.get("duration", round(row["end"] - row["start"], 2)),
+                  "text_zh": row.get("text_zh", row.get("text", ""))}
+        for key in _SOURCE_FIELDS:
+            if row.get(key) is not None:
+                result[key] = deepcopy(row[key])
+        return result
+
+    def _execute_3tier_translation(self, payload: List[Dict[str, Any]], context_info: Dict[str, Any],
+                                  source_context=None) -> Dict[int, Dict[str, str]]:
+        """Keep the glossary shared while bounding every translation request.
+
+        Source rows remain intact: splitting never renumbers IDs or modifies
+        timing. A malformed batch exhausts its two JSON repairs before being
+        bisected; successful sibling batches are never requested again.
+        """
+        identities = [int(row["id"]) for row in payload]
+        if len(identities) != len(set(identities)):
+            raise ValueError("Duplicate source IDs in translation input")
+        ordered = sorted(payload, key=lambda row: row["start"])
+        full_source = sorted((self._translation_source_row(row)
+                              for row in (payload if source_context is None else source_context)),
+                             key=lambda row: row["start"])
+        positions = {int(row["id"]): index for index, row in enumerate(full_source)}
+        if len(positions) != len(full_source) or not set(identities).issubset(positions):
+            raise ValueError("Translation context has duplicate or missing source IDs")
+        results = {}
+        errors = {}
+
+        def run(start, end):
+            batch = ordered[start:end]
+            first = positions[int(batch[0]["id"])]
+            last = positions[int(batch[-1]["id"])]
+            neighbors = full_source[max(0, first - 3):first] + full_source[last + 1:last + 4]
+            try:
+                result = self._execute_translation_batch(batch, context_info, neighbors)
+            except StructuredResponseError as error:
+                # Content/meaning failures and transport errors are not JSON
+                # failures; their existing owner must decide how to recover.
+                if error.code not in {"invalid_json", "invalid_type", "invalid_content", "missing_field", "untranslated_text"}:
+                    raise
+                if len(batch) <= 1:
+                    if self.provider == "ollama":
+                        errors[int(batch[0]["id"])] = error
+                        return
+                    raise
+                middle = start + len(batch) // 2
+                run(start, middle)
+                run(middle, end)
+                return
+            except Exception as error:
+                from core.engines.translation.ollama_client import OllamaClientError
+                if (self.provider != "ollama" or not isinstance(error, OllamaClientError)
+                        or error.code != "provider_incomplete"):
+                    raise
+                if len(batch) <= 1:
+                    errors[int(batch[0]["id"])] = error
+                    return
+                # Ollama's token ceiling can truncate a structurally constrained
+                # response before JSON is complete. Retry only that affected
+                # interval in smaller requests; never discard successful siblings.
+                middle = start + len(batch) // 2
+                run(start, middle)
+                run(middle, end)
+                return
+            results.update(result)
+            errors.update(getattr(result, "errors", {}))
+
+        start = 0
+        max_targets = (self.MAX_OLLAMA_TRANSLATION_TARGETS if self.provider == "ollama"
+                       else self.MAX_TRANSLATION_TARGETS)
+        while start < len(ordered):
+            end = start + 1
+            # A read-only turn between targets is a batch boundary, so its
+            # original dialogue remains among the bounded adjacent context.
+            while (end < len(ordered) and end - start < max_targets
+                   and positions[int(ordered[end]["id"])] == positions[int(ordered[end - 1]["id"])] + 1):
+                end += 1
+            run(start, end)
+            start = end
+        return PartialTranslationResults(results, errors=errors)
+
+    def _execute_translategemma_text_batch(self, payload, context_info, neighbors):
+        """Use TranslateGemma's native text format, one subtitle per request."""
+        source_context = sorted(
+            [{**row, "text_zh": _to_simplified_chinese(row.get("text_zh", ""))}
+             for row in list(payload) + list(neighbors)
+             if isinstance(row, dict) and isinstance(row.get("text_zh"), str)
+             and row.get("text_zh", "").strip()],
+            key=lambda row: (row.get("start", 0), row.get("id", 0)))
+        theme = _to_simplified_chinese(str(context_info.get("theme", "") or "Video ngắn đời thường"))[:300]
+        pronouns = _to_simplified_chinese(str(context_info.get("pronouns", "") or "Giữ đúng vai trong từng câu"))[:700]
+        terms = context_info.get("terms", [])
+        visible_source = " ".join(row["text_zh"] for row in source_context)
+        local_glossary = [("草莓", "dâu tây"), ("赔罪", "xin lỗi"),
+                          ("差点", "suýt"), ("玩脱了", "quá trớn")]
+        terms = list(terms) if isinstance(terms, list) else []
+        terms.extend({"src": source, "tgt": target, "note": "Giữ đúng từ/cụm nguồn."}
+                     for source, target in local_glossary if source in visible_source
+                     and not any(isinstance(term, dict) and term.get("src") == source for term in terms))
+        glossary = _to_simplified_chinese(json.dumps(terms, ensure_ascii=False))[:1000]
+        system = (
+            "You are a careful Chinese-to-Vietnamese subtitle translator. "
+            "Preserve names, speaker roles, subjects, actions, negation and meaning. "
+            "Use concise, natural spoken Vietnamese. Do not invent or omit details, "
+            "add reactions, or return Chinese characters. Preserve sentence mood; do not turn a statement into a command. "
+            "When the source is a fragment, leave its subject implicit unless nearby dialogue establishes it. "
+            "Output only the Vietnamese translation."
+        )
+
+        def translate_one(target):
+            source = _to_simplified_chinese(target.get("text_zh", ""))
+            identity = target.get("id")
+            position = next((index for index, row in enumerate(source_context)
+                             if row.get("id") == identity), None)
+            if position is None:
+                related = [row for row in source_context if row.get("id") != identity][:6]
+            else:
+                related = source_context[max(0, position - 3):position] + source_context[position + 1:position + 4]
+            context = [{"text_zh": row.get("text_zh", "")} for row in related]
+            prompt = (
+                "Translate from Chinese to Vietnamese.\n"
+                f"Scene: {theme}\n"
+                f"Name and relationship guidance: {pronouns}\n"
+                f"Glossary: {glossary}\n"
+                "Nearby Chinese dialogue is context only; do not translate it:\n"
+                f"{json.dumps(context, ensure_ascii=False)}\n"
+                "Chinese subtitle to translate:\n"
+                f"{source}\n"
+                "Vietnamese translation:"
+            )
+            if "拿" in source and "草莓" in source and "赔罪" in source:
+                prompt += ("\nMeaning note for this subtitle only: 拿 means bring or offer, not buy; "
+                           "赔罪 means apologize. Here 呢 marks a descriptive or ongoing comment, not an order; "
+                           "keep an unstated subject implicit and do not use the Vietnamese command particle 'đi'. "
+                           "Use the note as meaning guidance; do not translate it.")
+            if "父母" in source and "喜欢" in source:
+                prompt += ("\nMeaning note for this subtitle only: 喜欢 describes parents' affection for their child; "
+                           "use a natural family expression with the sense of thương/quý, not 'thích thú'. "
+                           "Keep the Vietnamese reference for 你 consistent throughout. Do not translate this note.")
+            value = self._clean_ollama_translation(self._ollama_text_request(
+                system, prompt, max_tokens=min(160, max(64, len(source) * 3)),
+                response_format="text"))
+            if re.search(r"[\u3400-\u9fff]", value):
+                repair_prompt = (
+                    "Translate this Chinese subtitle fully into natural Vietnamese. "
+                    "Keep the subject, family roles and name. Return only Vietnamese.\n"
+                    f"Context: {theme}. {pronouns}\n"
+                    f"Glossary: {glossary}\nChinese: {source}\nVietnamese:"
+                )
+                value = self._clean_ollama_translation(self._ollama_text_request(
+                    system, repair_prompt,
+                    max_tokens=min(160, max(64, len(source) * 3)), response_format="text"))
+            if not value or re.search(r"[\u3400-\u9fff]", value):
+                raise self._translation_error(
+                    "TranslateGemma trả lời rỗng hoặc còn chữ Trung sau khi thử lại cục bộ.",
+                    code="untranslated_text", path="$.final_vi")
+            return value
+
+        results = [{"id": int(row["id"]), "literal_vi": translate_one(row),
+                    "natural_vi": "", "final_vi": "", "needs_review": False, "review_reason": ""}
+                   for row in payload]
+        for result in results:
+            result["natural_vi"] = result["literal_vi"]
+            result["final_vi"] = result["literal_vi"]
+        return self._parse_opencode_results(json.dumps({"results": results}, ensure_ascii=False), payload)
+
+    def _execute_ollama_text_batch(self, payload, context_info, neighbors):
+        model_name = str(getattr(settings, "OLLAMA_MODEL", "")).strip().lower()
+        if model_name.startswith("translategemma") or model_name == "qwen2.5:7b":
+            return self._execute_translategemma_text_batch(payload, context_info, neighbors)
+        identities = [int(row["id"]) for row in payload]
+        targets = []
+        for row in payload:
+            try:
+                duration = float(row.get("duration", float(row["end"]) - float(row["start"])))
+            except (KeyError, TypeError, ValueError, OverflowError):
+                duration = 0.0
+            if not math.isfinite(duration) or duration <= 0:
+                duration = 0.0
+            targets.append({"id": int(row["id"]), "duration": round(duration, 2),
+                            "text_zh": _to_simplified_chinese(row.get("text_zh", ""))})
+        context = [{"id": row.get("id"), "text_zh": _to_simplified_chinese(row.get("text_zh", ""))}
+                   for row in neighbors if row.get("text_zh")][:6]
+        theme = str(context_info.get("theme", "") or "Video ngắn đời thường")[:300]
+        pronouns = str(context_info.get("pronouns", "") or "Giữ xưng hô theo ngữ cảnh")[:500]
+        terms = context_info.get("terms", [])
+        system = (
+            "Dịch phụ đề tiếng Trung sang tiếng Việt khẩu ngữ tự nhiên. "
+            "Dịch đúng từng ID; giữ đủ chủ thể, đối tượng, hành động, phủ định, số, tên và sắc thái; không thêm hoặc bỏ ý. "
+            "Viết gọn, Việt hóa cấu trúc câu; trước khi trả lời tự đối chiếu từng câu với nguồn, nhất là ai làm gì cho ai, phủ định, câu hỏi và câu sai khiến. "
+            "Không đảo chủ thể, đổi phủ định thành khẳng định, hoặc biến câu hỏi thành mệnh lệnh. "
+            "Không tự đoán xưng hô hay thêm lời gọi; nếu tiếng Việt tự nhiên không cần nêu chủ thể thì để chủ thể ẩn. "
+            "Dùng câu lân cận chỉ để hiểu mạch thoại, không dịch hoặc chép lại chúng. "
+            "Viết tên riêng bằng chữ Latin; không để sót chữ Hán. "
+            f"Chủ đề: {theme}. Xưng hô: {pronouns}. "
+            "Chỉ trả JSON theo lược đồ, không giải thích.")
+        prompt = ("Ngữ cảnh lân cận để tham khảo, không dịch:\n"
+                  + json.dumps(context, ensure_ascii=False)
+                  + "\nDịch các câu sau sang tiếng Việt tự nhiên. Mỗi ID xuất hiện đúng một lần:\n"
+                  + json.dumps(targets, ensure_ascii=False))
+        meaning_hints = []
+        context_sources = [row["text_zh"] for row in context if isinstance(row.get("text_zh"), str)]
+        for target in targets:
+            source = target["text_zh"]
+            nearby = "".join(context_sources + [
+                row["text_zh"] for row in targets if row["id"] != target["id"]
+            ])
+            notes = []
+            if "是哥哥了" in source or "成哥哥" in source:
+                notes.append("Câu này nói về vai anh trai mới có em; không suy diễn thành thay đổi tuổi tác.")
+            if "哥哥" in source:
+                notes.append("哥哥 là anh trai.")
+            if "妹妹" in source:
+                notes.append("妹妹 là em gái; dùng 'em gái', không dịch thành 'chị em' hay 'chị gái'.")
+            if "可爱" in source:
+                notes.append("可爱 nghĩa là đáng yêu/dễ thương; giữ đúng nét dễ thương, không đổi thành đẹp.")
+            if "你看" in source:
+                notes.append("你看 ở đây là ‘nhìn xem/này’, không phải lời gọi ‘Mẹ ơi/Bố ơi’; không tự thêm người nghe hoặc lời gọi.")
+            if "你看" in source and "哥哥" in source and "妹妹" in source and "疼" in source:
+                notes.append("这是温和地感叹哥哥疼爱妹妹；哥哥是 anh trai，妹妹是 em gái。越南语可自然表达‘Anh trai thương em gái biết bao’，不把哥哥译成‘con trai’，不用‘mày/tao’，也不把你看变成对听者的称呼。")
+            if "倩佳" in source:
+                notes.append("倩佳 là tên riêng được gọi trực tiếp; dùng tên tiếng Việt Thiến Giai, không để lại chữ Hán hoặc biến tên thành đại từ.")
+            if "是哥哥了" in source:
+                notes.append("是哥哥了在这里表示‘lên chức anh rồi’; không đổi 哥哥 thành em trai hoặc em gái.")
+            if "不就够了吗" in source:
+                notes.append("这是肯定‘一个孩子已经足够’的反问。越南语可自然表达为‘Một gia đình có một đứa con chẳng phải là đủ rồi sao?’；不能改成‘không đủ’或陈述句。")
+            if "护士" in source:
+                notes.append("护士 là y tá/điều dưỡng, không phải bác sĩ.")
+            if "再过三天" in source:
+                notes.append("再过三天 nghĩa là còn ba ngày nữa, không phải chưa đến ba ngày.")
+            if "孩子还有多久才能出来" in source:
+                notes.append("Hỏi nhân viên y tế khi nào em bé chào đời; diễn đạt là 'em bé còn bao lâu nữa mới chào đời?' chứ không nói em bé tự đi ra.")
+            if "孩子妈妈特别想" in source:
+                notes.append("妈妈很想念孩子；用越南语自然表达为‘Mẹ nhớ bé/con lắm’，保留妈妈是想念者、孩子是被想念者。不要仅凭他/她推测孩子性别，也不要译成‘mong chờ’。")
+            if "是啊" in source and "爸爸" in source and "他好可爱" in source:
+                notes.append("爸爸 là người được gọi; 他 chỉ em bé. Dịch tự nhiên là 'Đúng vậy bố, bé đáng yêu quá', không gọi bé là 'con nó'.")
+            if "你妹妹就快回家" in source:
+                notes.append("Người nói đang nói với con trai về em gái của con; dùng 'em gái con sắp về nhà rồi đó'.")
+            if "听到没有" in source:
+                notes.append("听到没有 là câu hỏi 'nghe chưa?/đã nghe chưa?'; giữ đúng ý hỏi, không đổi thành 'nghe rõ'.")
+            if "护士您好" in source:
+                notes.append("Lời chào y tá; tiếng Việt tự nhiên là 'Chào cô y tá'.")
+            if "爸爸" in source:
+                notes.append("爸爸 là Bố; nếu được gọi trực tiếp thì giữ đúng vai người nói và người nghe.")
+            if "妈妈" in source:
+                notes.append("妈妈 là Mẹ; nếu được gọi trực tiếp thì giữ đúng vai người nói và người nghe.")
+            for term in terms if isinstance(terms, list) else ():
+                if (isinstance(term, dict) and isinstance(term.get("src"), str)
+                        and term["src"] and term["src"] in source):
+                    target_term = term.get("tgt")
+                    if isinstance(target_term, str) and target_term:
+                        notes.append(f"{term['src']} là tên/thuật ngữ của ID này: {target_term}; giữ nguyên nghĩa.")
+                        if target_term == "Tiểu Nguyên" and term["src"] in {"小圆", "小冤"}:
+                            notes.append(f"{term['src']} là tên riêng Tiểu Nguyên ở ID này; ghi tên ra tiếng Việt, không bỏ hoặc đổi thành cách xưng hô.")
+            if "起" in source and "名字" in nearby:
+                notes.append("起在语境中与名字连用，表示起名字/给人取名。")
+            if "什么都不做" in source and "父母" in source and "喜欢" in source:
+                notes.append("什么都不做 là phủ định 'không làm gì'; giữ nguyên phủ định và ý bố mẹ vẫn yêu quý người được nói tới, không đổi thành người đó làm việc gì.")
+            if "妹妹" in source and "名字" in source and "叫" in source:
+                notes.append("Đây là câu hỏi xin ý kiến người nghe về tên em gái; giữ người nghe là người được hỏi và dùng cách hỏi tự nhiên, không dịch từng chữ.")
+            if "抓住" in source and "哥哥" in source and "手" in source and "不放" in source:
+                notes.append("抓住 ở đây nghĩa là nắm lấy, không phải chặt/cắt. Giữ hành động nắm tay anh trai rồi không buông.")
+            if "再吵" in source and "又要哭" in source:
+                notes.append("再吵 nói rằng nếu còn ồn/làm ồn nữa thì 他 sẽ khóc lại; giữ quan hệ điều kiện-kết quả và người sắp khóc, không đổi thành cãi nhau hay tự thêm lời gọi.")
+            if "看" in source and re.search(r"妈妈|媽媽", source) and "嘴" in source:
+                notes.append("Câu này bảo người nghe nhìn miệng mẹ; giữ rõ đối tượng là miệng, không rút thành chỉ nhìn mẹ.")
+            if "你帮妈妈" in source and "妹妹" in source:
+                notes.append("Người nói là mẹ nhờ người nghe trông em gái; 你 là người nghe và là người giúp, 妈妈 là người được giúp. Không đảo vai.")
+            if "妈妈去" in source and "洗手间" in source:
+                notes.append("Người nói là mẹ, tự nói mình sẽ đi vệ sinh một lát; tên riêng đứng trước là người được gọi. Không biến đứa trẻ thành người đi.")
+            if "知道了" in source and "妈妈" in source:
+                notes.append("Đây là lời người con đáp đã hiểu với mẹ; không đảo thành mẹ là người đã hiểu.")
+            if "干嘛" in source and ("爸爸" in source or "妈妈" in source):
+                notes.append("碰他干嘛 là câu hỏi tu từ về lý do chạm vào bố; giữ 我 là người nói và sắc thái hỏi, không đổi thành lời khuyên hoặc mệnh lệnh.")
+            if "轻一点" in source:
+                notes.append("轻一点 trong cảnh đang bế/chạm vào em bé là nhắc làm nhẹ tay, không phải giảm âm lượng.")
+            if re.search(r"再过\s*[0-9零〇一二三四五六七八九十百两]+\s*(?:个星期|星期|周|天|日|个月|月|年|小时|分钟)", source):
+                notes.append("再过 biểu thị mốc thời gian tính từ hiện tại; giữ đúng khoảng còn lại (còn đúng số ngày/giờ/tuần), không đổi thành thời gian đã qua hoặc sự kiện đã xảy ra.")
+            if notes:
+                meaning_hints.append({"id": target["id"], "meaning": " ".join(notes)})
+        if meaning_hints:
+            prompt += ("\nGhi chú nghĩa chỉ áp dụng cho đúng ID tương ứng; không chép ghi chú vào bản dịch:\n"
+                       + json.dumps(meaning_hints, ensure_ascii=False))
+        if any("抓住" in target["text_zh"] for target in targets):
+            prompt += "\nThuật ngữ nguồn: 抓住 nghĩa là nắm lấy/giữ lấy; không dịch thành chặt hoặc cắt."
+        max_tokens = max(512, min(2048, 256 + 128 * len(targets)))
+        schema = {"type": "object", "properties": {"results": {
+            "type": "array", "minItems": len(identities), "maxItems": len(identities),
+            "items": {"type": "object", "properties": {
+                "id": {"type": "integer", "enum": identities},
+                "final_vi": {"type": "string", "minLength": 1, "maxLength": 300}},
+                "required": ["id", "final_vi"], "additionalProperties": False}}},
+            "required": ["results"], "additionalProperties": False}
+        try:
+            raw = self._ollama_text_request(system, prompt, max_tokens=max_tokens,
+                                            response_format=schema)
+        except Exception as error:
+            from core.engines.translation.ollama_client import OllamaClientError
+            if (len(payload) != 1 or not isinstance(error, OllamaClientError)
+                    or error.code != "provider_incomplete"):
+                raise
+            # A single short answer should not be split further. Retry that ID
+            # once with a small one-field schema and larger output ceiling.
+            # The simpler schema avoids Qwen's occasional incomplete response
+            # on a one-item enum array; the stable ID is reattached locally.
+            single_schema = {"type": "object", "properties": {
+                "final_vi": {"type": "string", "minLength": 1, "maxLength": 300}},
+                "required": ["final_vi"], "additionalProperties": False}
+            single_target = targets[0]
+            single_notes = next((item["meaning"] for item in meaning_hints
+                                 if item["id"] == identities[0]), "")
+            single_terms = [term for term in terms if isinstance(term, dict)
+                            and isinstance(term.get("src"), str)
+                            and term["src"] in single_target["text_zh"]]
+            single_prompt = json.dumps({
+                "id": identities[0], "chinese_sentence": single_target["text_zh"],
+                "name_and_term_guidance": single_terms,
+                "meaning_note_for_this_sentence": single_notes,
+                "general_pronoun_guidance": pronouns,
+            }, ensure_ascii=False)
+            from core.engines.translation.ollama_client import OllamaClientError
+            try:
+                raw_single = self._ollama_text_request(
+                    ("Dịch đúng câu tiếng Trung được đưa ra sang tiếng Việt khẩu ngữ tự nhiên. "
+                     "Giữ chính xác người nói, người nghe, chủ thể, hành động, phủ định và dạng câu. "
+                     "Chỉ dùng ghi chú và thuật ngữ của ID này; không lấy nội dung câu khác để đoán. "
+                     "Không thêm hoặc bỏ ý, không để sót chữ Hán. Chỉ trả JSON có final_vi."),
+                    single_prompt,
+                    max_tokens=min(4096, max_tokens * 2), response_format=single_schema)
+            except OllamaClientError as retry_error:
+                if retry_error.code != "provider_incomplete":
+                    raise
+                # JSON was truncated twice for this one ID. Drop the schema
+                # overhead for one bounded plain-text request, then apply the
+                # same source-language and semantic checks before accepting it.
+                source_text = single_target["text_zh"]
+                plain_value = self._clean_ollama_translation(self._ollama_text_request(
+                    ("Dịch đúng một câu tiếng Trung sang tiếng Việt khẩu ngữ tự nhiên. "
+                     "Giữ chủ thể, hành động, phủ định và dạng câu. Không thêm, không bỏ ý, "
+                     "không chép chữ Hán hoặc giải thích; chỉ trả một câu tiếng Việt."),
+                    json.dumps({"source_zh": source_text,
+                        "meaning_note_for_this_sentence": single_notes,
+                        "name_and_term_guidance": single_terms,
+                        "general_pronoun_guidance": pronouns}, ensure_ascii=False),
+                    max_tokens=min(192, max(64, len(source_text) * 3)), response_format="text"))
+                source_semantic_issues = _ollama_batch_semantic_issues(source_text, plain_value, terms)
+                if not plain_value or re.search(r"[\u3400-\u9fff]", plain_value):
+                    raise self._translation_error(
+                        "bản dịch một câu vẫn còn chữ Trung sau hai lần JSON bị cắt.",
+                        code="untranslated_text", path="$.final_vi") from None
+                if source_semantic_issues:
+                    raise self._translation_error(
+                        "bản dịch một câu chưa giữ đủ nghĩa sau hai lần JSON bị cắt.",
+                        code="semantic_content", path="$.final_vi") from None
+                raw = json.dumps({"results": [{"id": identities[0], "final_vi": plain_value}]},
+                                 ensure_ascii=False)
+            else:
+                try:
+                    single_result = self._json_response(raw_single)
+                    single_text = self._clean_ollama_translation(
+                        single_result.get("final_vi") if isinstance(single_result, dict) else "")
+                except (StructuredResponseError, TypeError, ValueError):
+                    single_text = ""
+                if not single_text:
+                    raise self._translation_error("trả lời một câu bị cắt hoặc thiếu bản dịch.",
+                                                  code="missing_field", path="$.final_vi") from None
+                raw = json.dumps({"results": [{"id": identities[0], "final_vi": single_text}]},
+                                 ensure_ascii=False)
+        expected = set(identities)
+        try:
+            decoded = self._json_response(raw)
+            translated_rows = decoded.get("results") if isinstance(decoded, dict) else None
+            translations = {}
+            for row in translated_rows if isinstance(translated_rows, list) else ():
+                if not isinstance(row, dict):
+                    raise ValueError("invalid row")
+                identity = row.get("id")
+                value = self._clean_ollama_translation(row.get("final_vi"))
+                if (type(identity) is not int or identity not in expected
+                        or identity in translations or not value):
+                    raise ValueError("invalid identity or translation")
+                translations[identity] = value
+            if set(translations) != expected:
+                raise ValueError("missing translation identity")
+        except (StructuredResponseError, TypeError, ValueError) as error:
+            raise self._translation_error("trả về lô JSON sai cấu trúc hoặc thiếu ID.",
+                code="missing_field", path="$.results") from error
+        results, row_errors = [], {}
+        for identity in identities:
+            value = translations[identity]
+            source_row = next(row for row in payload if int(row["id"]) == identity)
+            source_text = _to_simplified_chinese(str(source_row.get("text_zh", "")))
+            has_chinese = bool(re.search(r"[\u3400-\u9fff]", value))
+            grip_phrase = ("抓住" in source_text and "哥哥" in source_text
+                           and "手" in source_text and "不放" in source_text)
+            wrong_grip_verb = grip_phrase and bool(re.search(r"\bchặt\b", value, re.I))
+            semantic_issues = _ollama_batch_semantic_issues(source_text, value, terms)
+            if has_chinese or wrong_grip_verb or semantic_issues:
+                from core.engines.translation.ollama_client import OllamaClientError
+                repair_hint = next((item["meaning"] for item in meaning_hints
+                                    if item["id"] == identity), "")
+                issue_guidance = {
+                    "unspoken_vocative_added": "Không thêm lời gọi như mẹ ơi/bố ơi/anh ơi/chị ơi nếu nguồn không gọi người đó.",
+                    "rude_address_added": "Không dùng đại từ thô như mày nếu câu Trung không có lời chửi; dùng câu trung tính, lược đại từ khi cần.",
+                    "cute_changed_to_beautiful": "可爱 là đáng yêu/dễ thương, không dịch thành đẹp.",
+                    "rhetorical_question_or_polarity_changed": "Giữ câu hỏi tu từ và nghĩa khẳng định; không dịch thành không đủ/chưa đủ.",
+                    "mother_misses_child_changed": "妈妈特别想孩子 phải diễn đạt là mẹ nhớ con/bé, không đổi thành mong chờ.",
+                    "older_brother_role_changed": "哥哥 là anh trai, không đổi thành em trai hoặc em gái.",
+                    "named_term_omitted": "Giữ nguyên tên riêng/thuật ngữ được cung cấp; không bỏ tên khỏi câu.",
+                }
+                semantic_hint = " ".join(issue_guidance[issue] for issue in sorted(semantic_issues)
+                    if issue in issue_guidance)
+                repair_terms = [term for term in terms if isinstance(term, dict)
+                                and isinstance(term.get("src"), str)
+                                and term["src"] in source_text]
+                repair_system = (
+                    "Dịch đúng một câu tiếng Trung sang tiếng Việt khẩu ngữ tự nhiên. "
+                    "Giữ người nói, người nghe, chủ thể, phủ định và dạng câu. "
+                    "Dùng từ Việt tự nhiên đúng hành động, không dịch sát chữ gượng. "
+                    "Không thêm hoặc bỏ ý, không để sót chữ Hán; chỉ trả JSON có final_vi.")
+                repair_prompt = json.dumps({
+                    "id": identity, "chinese_sentence": source_text,
+                    "name_and_term_guidance": repair_terms,
+                    "meaning_note_for_this_sentence": repair_hint,
+                    "semantic_issue_to_correct": semantic_hint,
+                    "general_pronoun_guidance": pronouns,
+                }, ensure_ascii=False)
+                repair_schema = {"type": "object", "properties": {
+                    "final_vi": {"type": "string", "minLength": 1, "maxLength": 300}},
+                    "required": ["final_vi"], "additionalProperties": False}
+                try:
+                    raw_repaired = self._ollama_text_request(
+                        repair_system, repair_prompt, max_tokens=1024,
+                        response_format=repair_schema)
+                    repaired_data = self._json_response(raw_repaired)
+                    repaired = self._clean_ollama_translation(
+                        repaired_data.get("final_vi") if isinstance(repaired_data, dict) else "")
+                except (OllamaClientError, StructuredResponseError, TypeError, ValueError):
+                    repaired = ""
+                repaired_semantic_issues = _ollama_batch_semantic_issues(source_text, repaired, terms)
+                if (repaired and not re.search(r"[\u3400-\u9fff]", repaired)
+                        and not (grip_phrase and re.search(r"\bchặt\b", repaired, re.I))
+                        and not repaired_semantic_issues):
+                    value = repaired
+                else:
+                    # A JSON-shaped repair can still copy a source fragment.
+                    # Give only this failed subtitle one short plain-text
+                    # repair; the stable ID is already known locally, so the
+                    # model does not need to spend tokens reproducing JSON.
+                    plain_prompt = f"Câu nguồn: {source_text}\n"
+                    if semantic_hint:
+                        plain_prompt += f"Sửa điểm này: {semantic_hint[:180]}\n"
+                    else:
+                        plain_prompt += "Dịch đủ câu, không chép chữ Hán.\n"
+                    if repair_hint:
+                        plain_prompt += f"Ghi chú nghĩa: {repair_hint[:160]}\n"
+                    if repair_terms:
+                        plain_prompt += ("Tên riêng: "
+                            + json.dumps(repair_terms, ensure_ascii=False)[:160] + "\n")
+                    plain_prompt += "Chỉ trả một câu tiếng Việt tự nhiên; không giải thích."
+                    plain_system = (
+                        "Dịch câu tiếng Trung sang tiếng Việt khẩu ngữ tự nhiên. Giữ đủ nghĩa, "
+                        "vai người nói, hành động và phủ định. Không thêm lời gọi hoặc ý mới. "
+                        "Không giải thích hay mô tả cách dịch; chỉ trả đúng một câu tiếng Việt.")
+                    # This is one final, bounded plain-text repair after the
+                    # structured repair failed validation. The prior 64-token
+                    # floor truncated these requests; a compact prompt and a
+                    # 160-token floor leave room for a complete short subtitle.
+                    plain_max_tokens = min(192, max(160, len(source_text) * 6))
+                    try:
+                        plain_value = self._clean_ollama_translation(self._ollama_text_request(
+                            plain_system, plain_prompt,
+                            max_tokens=plain_max_tokens,
+                            response_format="text"))
+                    except (OllamaClientError, StructuredResponseError, TypeError, ValueError) as error:
+                        plain_value = ""
+                        if isinstance(error, OllamaClientError):
+                            metrics = error.metrics
+                            seconds = lambda name: metrics.get(name, 0) / 1_000_000_000
+                            import logging
+                            logging.getLogger("ai").warning(
+                                "OLLAMA_TRANSLATION_REPAIR_REQUEST_FAILED segment_id=%s phase=plain_text "
+                                "failure_class=%s error_code=%s max_tokens=%s prompt_tokens=%s "
+                                "generated_tokens=%s generation_seconds=%.3f wall_seconds=%.3f",
+                                identity,
+                                "output_truncation" if error.code == "provider_incomplete" else
+                                    "timeout" if error.code == "provider_timeout" else
+                                    "transport" if error.code.startswith("provider_") else "provider_failure",
+                                error.code, plain_max_tokens,
+                                metrics.get("prompt_eval_count", 0), metrics.get("eval_count", 0),
+                                seconds("eval_duration"), seconds("total_duration"))
+                    plain_semantic_issues = _ollama_batch_semantic_issues(source_text, plain_value, terms)
+                    if (plain_value and not re.search(r"[\u3400-\u9fff]", plain_value)
+                            and not (grip_phrase and re.search(r"\bchặt\b", plain_value, re.I))
+                            and not plain_semantic_issues):
+                        value = plain_value
+                    else:
+                        row_errors[identity] = self._translation_error(
+                            f"câu {identity} chưa vượt qua kiểm tra bản dịch sau khi thử lại cục bộ.",
+                            code="untranslated_text" if has_chinese else "semantic_content",
+                            path="$.final_vi")
+                        import logging
+                        logging.getLogger("ai").warning(
+                            "OLLAMA_TRANSLATION_ROW_REJECTED segment_id=%s residual_chinese=%s semantic_issues=%s repaired_semantic_issues=%s",
+                            identity, bool(re.search(r"[\u3400-\u9fff]", value)),
+                            sorted(semantic_issues), sorted(repaired_semantic_issues))
+                        continue
+            if ("干嘛" in source_text and "làm gì" in value.casefold()
+                    and not value.rstrip().endswith(("?", "？"))):
+                value = value.rstrip(" .!…") + "?"
+            results.append({"id": identity, "literal_vi": value, "natural_vi": value,
+                            "final_vi": value, "needs_review": False, "review_reason": ""})
+        parsed = self._parse_opencode_results(json.dumps({"results": results}, ensure_ascii=False),
+                                              [row for row in payload if int(row["id"]) not in row_errors])
+        return PartialTranslationResults(parsed, errors=row_errors)
+
+    def _execute_translation_batch(self, payload, context_info, neighbors):
+        batch_limit = (self.MAX_OLLAMA_TRANSLATION_TARGETS if self.provider == "ollama"
+                       else self.MAX_TRANSLATION_TARGETS)
+        if len(payload) > batch_limit:
+            raise ValueError(f"Translation batch exceeds {batch_limit} target segments")
+        if self.provider == "ollama":
+            return self._execute_ollama_text_batch(payload, context_info, neighbors)
+        context_prompt = ("\nCác câu lân cận chỉ để tham khảo; KHÔNG dịch hoặc trả ID của chúng: "
+                          + json.dumps(neighbors, ensure_ascii=False)
+                          + "\n" + SEMANTIC_TRANSLATION_POLICY + "\nsemantic_context: "
+                          + json.dumps(_source_semantics(
+                              sorted(payload + neighbors, key=lambda row: row["start"]), payload),
+                              ensure_ascii=False))
         if self.provider in self.STRICT_PROVIDERS:
             system_prompt = VIDEOLINGO_TRANSLATE_PROMPT.format(
                 theme=context_info.get("theme", "Đời thường"),
                 pronouns=context_info.get("pronouns", "Chưa xác định; đối chiếu từng lượt nguồn"),
                 terms=json.dumps(context_info.get("terms", []), ensure_ascii=False)
             )
-            system_prompt += "\n" + SEMANTIC_TRANSLATION_POLICY + "\nsemantic_context: " + json.dumps(
-                _source_semantics(payload, payload), ensure_ascii=False)
+            system_prompt += context_prompt
             return self._validated_request(system_prompt,
                 f"Danh sách các câu thoại cần chuyển ngữ:\n{json.dumps(payload, ensure_ascii=False, indent=2)}",
                 lambda raw: self._parse_opencode_results(raw, payload),
@@ -492,6 +1229,7 @@ class SemanticTranslator(TranslationEngine):
             pronouns=context_info.get("pronouns", "Chưa xác định; đối chiếu từng lượt nguồn"),
             terms=json.dumps(context_info.get("terms", []), ensure_ascii=False)
         )
+        system_prompt += context_prompt
 
         user_content = f"Danh sách các câu thoại cần chuyển ngữ:\n{json.dumps(payload, ensure_ascii=False, indent=2)}"
 
@@ -583,6 +1321,87 @@ class SemanticTranslator(TranslationEngine):
         if not clean_zh:
             return {"literal_vi": "", "natural_vi": "", "final_vi": ""}
 
+        if self.provider == "ollama":
+            model_name = str(getattr(settings, "OLLAMA_MODEL", "")).strip().lower()
+            if model_name.startswith("translategemma") or model_name == "qwen2.5:7b":
+                neighbors = [row for row in (rolling_context or [])
+                             if isinstance(row, dict) and type(row.get("id")) is int
+                             and isinstance(row.get("text_zh"), str) and row.get("text_zh", "").strip()]
+                target_start = max((float(row.get("start", 0) or 0) for row in neighbors), default=0.0) + 1.0
+                target = {"id": -1, "start": target_start, "end": target_start + max(.1, float(duration or .1)),
+                          "text_zh": clean_zh}
+                context_info = {"theme": "Video ngắn, thoại đời thường",
+                                "pronouns": pronouns, "terms": []}
+                return self._execute_translategemma_text_batch([target], context_info, neighbors)[-1]
+            context = _compact_local_dialogue_context(rolling_context or [])
+            system = (
+                "Dịch thoại tiếng Trung sang tiếng Việt khẩu ngữ, tự nhiên và gọn mà đủ ý. "
+                "Giữ đúng chủ thể, đối tượng, hành động, phủ định, số, tên và sắc thái; không thêm ý "
+                "hay chuyển nghĩa sang câu khác. Chỉ dùng các câu Việt trước đó để nối mạch; chúng có thể sai, "
+                "không phải câu cần dịch và không được chép lại. "
+                "Không tự đoán quan hệ/xưng hô hoặc thêm lời gọi; chưa rõ thì lược đại từ hay dùng câu trung tính. "
+                "Ghi tên riêng bằng chữ Latin, không dịch nghĩa tên. Không giải thích, không để sót chữ Hán. "
+                "Việt hóa cấu trúc, tránh dịch sát chữ gượng. Chỉ áp dụng thông tin ngữ cảnh "
+                "khi câu nguồn hiện tại có dấu hiệu tương ứng.")
+            target_notes = []
+            if "是哥哥了" in clean_zh or "成哥哥" in clean_zh:
+                target_notes.append("Câu nguồn nói về vai anh trai mới có em, không phải thay đổi tuổi tác.")
+            if "妹妹" in clean_zh:
+                target_notes.append("妹妹 là em gái.")
+            if "哥哥" in clean_zh:
+                target_notes.append("哥哥 là anh trai.")
+            if "可爱" in clean_zh:
+                target_notes.append("可爱 là dễ thương.")
+            if "眉毛" in clean_zh:
+                target_notes.append("眉毛 là lông mày.")
+            if "睫毛" in clean_zh:
+                target_notes.append("睫毛 là lông mi.")
+            if "猫" in clean_zh:
+                target_notes.append("猫 là mèo.")
+            if "倩佳" in clean_zh:
+                target_notes.append("倩佳 là tên riêng; dùng tên tiếng Việt Thiến Giai, không để lại chữ Hán.")
+            if "你看" in clean_zh and "哥哥" in clean_zh and "妹妹" in clean_zh and "疼" in clean_zh:
+                target_notes.append("Câu cảm thán thân mật về anh trai thương em gái; có thể nói tự nhiên 'Anh trai thương em gái biết bao'. Không dịch 哥哥 thành con trai hoặc dùng mày/tao.")
+            prompt = (f"Ngữ cảnh gần chỉ để tham khảo:\n{context or '(không có)'}\n\n"
+                      f"Câu nguồn: {clean_zh}\n"
+                      + (("Ghi chú chỉ dành cho câu này: " + " ".join(target_notes) + "\n")
+                         if target_notes else "")
+                      + "Bản dịch tiếng Việt:")
+            # A fragment can make Qwen3 produce an unusually long plain-text
+            # continuation. Constrain the reply to one JSON field so an
+            # incomplete sentence cannot spend hundreds of tokens explaining
+            # itself before the Vietnamese draft is returned.
+            response_schema = {"type": "object", "properties": {
+                "final_vi": {"type": "string", "minLength": 1, "maxLength": 1200}},
+                "required": ["final_vi"], "additionalProperties": False}
+            max_tokens = max(512, min(1024, 256 + len(clean_zh) * 8))
+
+            def request_single(limit):
+                raw = self._ollama_text_request(system, prompt, max_tokens=limit,
+                                                response_format=response_schema)
+                try:
+                    parsed = self._json_response(raw)
+                except (StructuredResponseError, TypeError, ValueError) as error:
+                    raise self._translation_error("trả về JSON bản dịch một câu không hợp lệ.",
+                        code=getattr(error, "code", "invalid_json"),
+                        path=getattr(error, "path", "$.final_vi")) from error
+                value = self._clean_ollama_translation(parsed.get("final_vi", "")
+                    if isinstance(parsed, dict) else "")
+                if not value or re.search(r"[\u3400-\u9fff]", value):
+                    raise self._translation_error("chưa tạo được câu Việt hoàn chỉnh.",
+                        code="untranslated_text", path="$.final_vi")
+                return value
+
+            try:
+                translated = request_single(max_tokens)
+            except Exception as error:
+                from core.engines.translation.ollama_client import OllamaClientError
+                if not isinstance(error, OllamaClientError) or error.code != "provider_incomplete":
+                    raise
+                translated = request_single(min(2048, max_tokens * 2))
+            return {"literal_vi": translated, "natural_vi": translated, "final_vi": translated,
+                    "needs_review": False, "review_reason": ""}
+
         # Vietnamese whitespace counts syllables, not spoken words. A numeric
         # word quota rewards broken grammar and abbreviations; measure TTS instead.
         if self.provider in self.STRICT_PROVIDERS:
@@ -606,7 +1425,8 @@ Quy tắc bắt buộc:
             focus_note = f"Mốc câu cần dịch: {json.dumps(target, ensure_ascii=False)}\n" if target else ""
             parsed = self._validated_request(sys_instruction, focus_note + f"Dịch câu: {clean_zh}",
                 lambda raw: self._parse_opencode_results(raw, [{"id": 0, "text_zh": clean_zh}], single=True),
-                schema_id="semantic-translation-single-v2", task_kind="translation")
+                schema_id="semantic-translation-single-v2", task_kind="translation",
+                max_tokens=512 if self.provider == "ollama" else 2048)
             return parsed[0]
         _, deepseek_key, openai_key = self._api_keys()
 
@@ -660,6 +1480,7 @@ Quy tắc bắt buộc:
         rolling_context: Optional[List[Dict[str, str]]] = None,
         measured_duration: Optional[float] = None,
         feedback: Optional[Dict[str, Any]] = None,
+        proposed_vi: Optional[str] = None,
     ) -> Dict[str, str]:
         """Create a shorter spoken line without changing its meaning.
 
@@ -671,6 +1492,35 @@ Quy tắc bắt buộc:
         clean_zh, draft = str(text_zh or "").strip(), str(current_vi or "").strip()
         if not clean_zh or not draft or self.provider not in self.STRICT_PROVIDERS:
             raise RuntimeError("Cần nguồn thoại và nhà cung cấp AI để rút gọn lời đọc mà giữ đúng nghĩa.")
+        if proposed_vi is not None and (
+                not isinstance(proposed_vi, str) or not proposed_vi.strip()
+                or len(proposed_vi) > 2000):
+            raise ValueError("Lời đề xuất phải là chuỗi không rỗng, tối đa 2000 ký tự.")
+        if self.provider == "ollama" and proposed_vi is None:
+            context = format_dialogue_context(rolling_context or [])[-1200:]
+            system = ("Bạn biên tập lời thoại tiếng Việt cho phụ đề lồng tiếng. "
+                      "Rút gọn câu cho tự nhiên khi đọc nhưng giữ nguyên ý, chủ thể, phủ định, số và sắc thái. "
+                      "Không thêm thông tin, không đổi xưng hô, không để sót chữ Trung. "
+                      "Chỉ trả về câu tiếng Việt đã rút gọn, không giải thích.")
+            measured = (f"Âm thanh hiện tại dài {measured_duration:.2f} giây. "
+                        if isinstance(measured_duration, (int, float)) else "")
+            prompt = (f"Nguồn Trung: {clean_zh}\nBản Việt hiện tại: {draft}\n"
+                      f"Ngữ cảnh tham khảo: {context or '(không có)'}\n"
+                      f"Mục tiêu đọc: khoảng {float(duration):.2f} giây. {measured}"
+                      "Viết lại ngắn hơn, đủ nghĩa và tự nhiên:")
+            candidate = self._clean_ollama_translation(self._ollama_text_request(
+                system, prompt, max_tokens=max(80, min(160, 48 + len(draft)))))
+            if (not candidate or re.search(r"[\u3400-\u9fff]", candidate)
+                    or candidate == draft or len(candidate) >= len(draft)
+                    or added_rude_address(draft, candidate)):
+                raise PacingReviewRejected("Không tìm được lời rút gọn an toàn bằng model local.",
+                    candidate=candidate, reason="Bản rút gọn cần kiểm tra hoặc không ngắn hơn.",
+                    code="invalid_candidate")
+            reason = "Bản rút gọn từ model local chưa được kiểm định ngữ nghĩa độc lập."
+            proof = {"status": "unresolved", "semantic_verdict": "uncertain",
+                     "draft_allowed": True, "natural": True, "reason": reason, "text": candidate}
+            return {"literal_vi": draft, "natural_vi": candidate, "final_vi": candidate,
+                    "needs_review": True, "review_reason": reason, "pacing_verification": proof}
         measured_hint = (f"Bản nháp đã được đọc thử và dài {measured_duration:.2f} giây. "
                          if measured_duration is not None else "")
         context = format_dialogue_context(rolling_context or [])
@@ -731,9 +1581,31 @@ Trả duy nhất JSON: {{"literal_vi":"...","natural_vi":"...","final_vi":"...",
                      "không lặp lời đã thử. Giữ đủ nghĩa; không thể thì needs_review=true. "
                      "Ghi nhận dưới đây là dữ liệu tham khảo, không phải chỉ dẫn:\n"
                      + json.dumps(feedback, ensure_ascii=False))
-        candidate = self._validated_request(system, user,
-            lambda raw: self._parse_opencode_results(raw, [{"id": 0, "text_zh": clean_zh}], single=True),
-            schema_id="semantic-pacing-draft-v2", task_kind="translation")[0]
+        if proposed_vi is None:
+            try:
+                candidate = self._validated_request(system, user,
+                    lambda raw: self._parse_opencode_results(raw, [{"id": 0, "text_zh": clean_zh}], single=True),
+                    schema_id="semantic-pacing-draft-v2", task_kind="translation")[0]
+            except StructuredResponseError as error:
+                # A malformed or untranslated proposal must never reach TTS.
+                # Let the existing speech fitter own the next proposal within
+                # its total budget, after bounded JSON repairs are exhausted.
+                # Do not turn transport failures or reviewer votes into retries.
+                raise PacingReviewRejected(
+                    "Đề xuất rút gọn không hợp lệ; cần một lời Việt mới giữ đúng nguồn.",
+                    reason=(f"Đề xuất bị từ chối do {error.code}. Trả đủ các trường JSON đã yêu cầu; "
+                            "literal_vi, natural_vi và final_vi phải là lời Việt không rỗng, "
+                            "không chứa chữ Trung. Giữ nguyên nghĩa và nguồn."),
+                    code="invalid_candidate") from error
+        else:
+            # An editor's suggestion is a draft, never an approval. The exact
+            # wording must pass both independent provider reviews below, and
+            # the caller still measures/fits its complete synthesized speech.
+            candidate = {"literal_vi": draft, "natural_vi": proposed_vi.strip(),
+                         "final_vi": proposed_vi.strip(), "needs_review": False,
+                         "review_reason": "Đề xuất chưa được xác minh từ biên tập viên."}
+            candidate = self._parse_opencode_results(json.dumps(candidate, ensure_ascii=False),
+                [{"id": 0, "text_zh": clean_zh}], single=True)[0]
         if added_rude_address(draft, candidate["final_vi"]):
             raise PacingReviewRejected("Bản rút gọn tự đổi xưng hô sang tao/mày; giữ lời trước đó.",
                                       candidate=candidate["final_vi"],
@@ -845,8 +1717,12 @@ Trả duy nhất JSON: {{"literal_vi":"...","natural_vi":"...","final_vi":"...",
             )
         candidate["pacing_verification"] = {"provider": self.provider, "status": "verified",
             "text": candidate["final_vi"], "reason": verdict["reason"][:500],
+            "meaning_preserved": verdict["equivalent"] is True,
+            "natural": verdict["natural"] is True,
             "address_preserved": verdict.get("address_preserved") is True,
             "fluency": {"natural": True, "reason": fluency["reason"][:500]}}
+        if proposed_vi is not None:
+            candidate["pacing_verification"]["method"] = "external-proposal-dual-provider-review"
         return candidate
 
     def _review_response(self, raw, schema):

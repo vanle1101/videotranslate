@@ -7,8 +7,9 @@
   <script src="https://cdn.tailwindcss.com"></script>
   <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
   <link rel="stylesheet" href="/static/style.css?v={{ settings.BASE_DIR.joinpath('static', 'style.css').stat().st_mtime_ns }}">
+  <link rel="stylesheet" href="/static/studio-compact-panels.css?v={{ settings.BASE_DIR.joinpath('static', 'studio-compact-panels.css').stat().st_mtime_ns }}">
 </head>
-<body data-asr-engine="{{ settings.ASR_ENGINE }}" data-tts-engine="{{ settings.TTS_ENGINE }}" class="bg-[#0b0d13] text-gray-100 min-h-screen font-sans antialiased selection:bg-pink-500 selection:text-white">
+<body data-asr-engine="{{ settings.ASR_ENGINE }}" data-tts-engine="{{ settings.TTS_ENGINE }}" data-whisper-model="{{ settings.WHISPER_MODEL_SIZE }}" class="bg-[#0b0d13] text-gray-100 min-h-screen font-sans antialiased selection:bg-pink-500 selection:text-white">
   
   <header class="app-header">
     <div class="app-brand">
@@ -40,10 +41,14 @@
       </div>
       <div class="telemetry-workers"><span>Workers:</span><span id="worker-asr-badge">ASR: Idle</span><span id="worker-trans-badge">Dịch: Idle</span><span id="worker-tts-badge">TTS: Idle</span></div>
     </section>
-    <p id="pipeline-warning" role="status" class="hidden pipeline-warning"></p>
-    <main class="studio-workspace">
-      <aside class="studio-controls" aria-label="Nguồn video và cấu hình">
-        <section class="studio-source-card studio-card" aria-labelledby="source-heading">
+    <div class="studio-layout-toolbar">
+      <span id="studio-layout-hint">Kéo đường chia giữa các cột hoặc các khối để đổi kích thước.</span>
+      <button id="btn-reset-layout" type="button"><i class="fa-solid fa-up-right-and-down-left-from-center" aria-hidden="true"></i> Khôi phục bố cục</button>
+      <span id="studio-layout-status" class="sr-only" role="status" aria-live="polite"></span>
+    </div>
+    <main id="studio-layout" class="studio-workspace" data-layout-group="columns" aria-describedby="studio-layout-hint">
+      <aside id="studio-left" class="studio-controls studio-column" data-layout-group="left" aria-label="Nguồn video và giọng lồng tiếng">
+        <section id="studio-source" class="studio-source-card studio-card" aria-labelledby="source-heading">
           <h2 id="source-heading" class="studio-card-heading"><span class="step-number" aria-hidden="true">1</span>Video nguồn <small>(Douyin / URL / File)</small></h2>
           <p class="panel-description">Dán nội dung chia sẻ hoặc tải video từ máy.</p>
           <div class="source-tabs" role="group" aria-label="Kiểu nguồn video">
@@ -71,38 +76,22 @@
             <span>Hoặc bấm để chọn file từ máy tính<br>MP4, MOV, WebM, MKV</span>
           </div>
         </section>
-        <section class="studio-action-card studio-card" aria-labelledby="action-heading">
-          <h2 id="action-heading" class="studio-card-heading"><i class="fa-solid fa-microphone-lines" aria-hidden="true"></i>2. Dịch và lồng tiếng</h2>
-          <p class="panel-description">Đối chiếu nguồn, dịch và căn nhịp lời đọc.</p>
-          <label class="visual-translation-option" title="Đối chiếu lời nói với chữ trên video, rồi tự rà và sửa bản dịch trước khi tạo giọng."><input id="visual-translation" type="checkbox" aria-describedby="visual-translation-help" {% if settings.LLM_PROVIDER in ('gemini', 'openrouter-free', 'opencode') %}checked{% endif %}><span>AI kiểm tra bản dịch</span></label>
-          <span id="visual-translation-help" class="sr-only">Đối chiếu lời nói với chữ trên video, rồi tự rà và sửa bản dịch trước khi tạo giọng.</span>
-          <div id="task-progress" class="hidden task-progress" aria-label="Tiến độ xử lý video">
-            <div class="task-progress-heading" role="status" aria-live="polite"><span id="task-progress-stage">Đang gửi yêu cầu…</span><span class="flex flex-wrap items-baseline justify-end gap-x-2"><span id="task-progress-value">Chưa có %</span><span id="task-progress-eta" class="hidden text-gray-400"></span></span></div>
-            <div id="task-progress-track" class="task-progress-track" role="progressbar" aria-label="Tiến độ bước hiện tại" aria-valuemin="0" aria-valuemax="100"><div id="task-progress-bar" class="task-progress-bar"></div></div>
-            <p id="task-progress-detail" class="task-progress-detail">Phần trăm được tính riêng cho từng bước.</p>
-            <p id="task-connection-status" role="status" class="hidden task-connection-status"></p>
-          </div>
-          <button id="btn-start" class="studio-start-button"><i class="fa-solid fa-play" aria-hidden="true"></i>Bắt đầu dịch</button>
-          <button id="btn-translate-full" class="studio-start-button hidden" type="button"><i class="fa-solid fa-forward-step" aria-hidden="true"></i>Dịch toàn bộ</button>
-          <div class="worker-actions">
-            <button id="btn-review-worker" class="hidden"><i class="fa-solid fa-check-double" aria-hidden="true"></i> AI kiểm tra lại</button>
-            <button id="btn-retry-worker" class="hidden"><i class="fa-solid fa-rotate-right" aria-hidden="true"></i> Tiếp tục tác vụ</button>
-            <button id="btn-pause-worker" class="hidden"><i class="fa-solid fa-pause" aria-hidden="true"></i> Tạm dừng</button>
-            <button id="btn-resume-worker" class="hidden"><i class="fa-solid fa-play" aria-hidden="true"></i> Tiếp tục</button>
-            <button id="btn-stop-worker" class="hidden"><i class="fa-solid fa-stop" aria-hidden="true"></i> Dừng hẳn</button>
-          </div>
-          <button id="btn-export-hq" disabled title="Hoàn tất các câu dịch trước khi xuất video" class="studio-export-button"><i class="fa-solid fa-arrow-up-from-bracket" aria-hidden="true"></i>Xuất video MP4</button>
-          <button id="btn-save-result" class="studio-export-button" disabled title="Có thể lưu sau khi xuất xong toàn bộ video"><i class="fa-solid fa-download" aria-hidden="true"></i>Tải video đầy đủ đã dịch</button>
-          <div id="task-result" class="hidden" role="status">
-            <p id="task-result-status" class="task-progress-detail"></p>
-            <a id="task-result-link" class="studio-export-button hidden">Xem trước kết quả</a>
-          </div>
-          <div class="buffer-setting"><label for="buffer-select">Đệm trước khi phát</label><select id="buffer-select"><option value="5">5 giây (Nhanh nhất)</option><option value="10" selected>10 giây (Khuyên dùng)</option><option value="15">15 giây (Ổn định)</option><option value="30">30 giây (An toàn)</option></select></div>
+        <div class="studio-splitter" data-layout-axis="y" data-layout-index="0" role="separator" tabindex="0" aria-orientation="horizontal" aria-controls="studio-source studio-voice" aria-label="Chiều cao nguồn video và giọng lồng tiếng" title="Kéo để đổi kích thước; dùng phím mũi tên khi chọn đường chia"></div>
+        <section id="studio-voice" class="voice-panel studio-card" aria-labelledby="voice-list-title">
+          <div class="voice-list-heading"><h3 id="voice-list-title"><i class="fa-solid fa-microphone-lines" aria-hidden="true"></i>2. Giọng lồng tiếng</h3><span id="voice-count" class="voice-count" role="status" aria-live="polite"></span></div>
+          <p id="voice-source" class="voice-source" aria-live="polite">Đang tải danh sách giọng…</p>
+          <input type="hidden" id="voice-select" value="{{ settings.EDGE_VOICE if settings.TTS_ENGINE in ['edge', 'edge-tts'] else 'Trúc Ly' }}">
+          <label for="voice-search" class="sr-only">Tìm theo tên, vùng miền hoặc nguồn</label>
+          <div class="voice-search-controls"><div class="voice-search-field"><i class="fa-solid fa-magnifying-glass" aria-hidden="true"></i><input id="voice-search" type="search" placeholder="Tìm theo tên, vùng miền hoặc nguồn" autocomplete="off" class="voice-search" aria-controls="voice-list"></div><button id="voice-filter" type="button" aria-label="Lọc giọng theo nguồn" title="Lọc giọng theo nguồn"><i class="fa-solid fa-filter" aria-hidden="true"></i><span>Tất cả</span></button></div>
+          <div id="voice-list" class="voice-list" role="group" aria-labelledby="voice-list-title" tabindex="0"></div>
+          <p id="voice-empty" class="hidden voice-source">Không tìm thấy giọng phù hợp. Thử tên hoặc nguồn khác.</p>
+          <p id="voice-catalog-status" class="voice-source" role="status"></p>
+          <div class="voice-preview-panel"><div class="voice-preview-controls"><audio id="voice-preview-audio" class="hidden" controls preload="none" aria-label="Mẫu giọng lồng tiếng"></audio></div><p id="voice-preview-status" class="voice-preview-status" role="status" aria-live="polite" aria-atomic="true"></p></div>
         </section>
       </aside>
-
-      <section class="studio-preview" aria-label="Video và điều chỉnh âm thanh">
-        <div class="studio-player-card studio-card">
+        <div class="studio-splitter" data-layout-axis="x" data-layout-index="0" role="separator" tabindex="0" aria-orientation="vertical" aria-controls="studio-left studio-middle" aria-label="Chiều rộng cột nguồn và cột video" title="Kéo để đổi kích thước; dùng phím mũi tên khi chọn đường chia"></div>
+      <section id="studio-middle" class="studio-preview studio-column" data-layout-group="middle" aria-label="Video, phụ đề và âm thanh">
+        <div id="studio-player" class="studio-player-card studio-card">
           <div class="studio-player-heading">
             <h2 class="studio-card-heading"><i class="fa-solid fa-video" aria-hidden="true"></i>Xem trước video</h2>
             <div class="player-options">
@@ -133,7 +122,9 @@
             <div class="player-transport">
               <div id="segments-timeline-track" role="slider" tabindex="0" aria-label="Vị trí phát video" aria-valuemin="0" aria-valuemax="0" aria-valuenow="0"><div id="playback-head-marker" style="left: 0%;"></div></div>
               <div class="player-transport-row">
+                <button id="player-seek-backward" class="player-seek" type="button" aria-label="Lùi 5 giây" title="Lùi 5 giây"><i class="fa-solid fa-rotate-left" aria-hidden="true"></i><span aria-hidden="true">5</span></button>
                 <button id="player-play-toggle" type="button" aria-label="Phát video" title="Phát / tạm dừng"><i class="fa-solid fa-play" aria-hidden="true"></i></button>
+                <button id="player-seek-forward" class="player-seek" type="button" aria-label="Tiến 5 giây" title="Tiến 5 giây"><i class="fa-solid fa-rotate-right" aria-hidden="true"></i><span aria-hidden="true">5</span></button>
                 <span class="player-time"><span id="bar-current-time">00:00</span><span class="player-time-divider">/</span><span id="bar-total-time">00:00</span></span>
                 <span id="bar-buffer-info" class="player-buffer-info">Buffer: 0.0s</span>
                 <button id="player-mute-toggle" type="button" aria-label="Tắt tiếng video" title="Bật / tắt tiếng"><i class="fa-solid fa-volume-high" aria-hidden="true"></i></button>
@@ -144,9 +135,10 @@
             </div>
           </div>
         </div>
-        <details id="caption-style-panel" class="caption-style-panel hidden" open>
+        <div class="studio-splitter" data-layout-axis="y" data-layout-index="0" role="separator" tabindex="0" aria-orientation="horizontal" aria-controls="studio-player caption-style-panel" aria-label="Chiều cao video và chỉnh phụ đề" title="Kéo để đổi kích thước; dùng phím mũi tên khi chọn đường chia"></div>
+        <details id="caption-style-panel" class="caption-style-panel" open>
           <summary>Chỉnh phụ đề <span>Nền · font · cỡ chữ · vị trí</span></summary>
-          <fieldset id="caption-style-controls" disabled>
+          <fieldset id="caption-style-controls" disabled aria-describedby="caption-style-availability caption-style-status">
             <div class="caption-style-grid">
               <label>Màu chữ<input id="caption-text-color" type="color" value="#000000" aria-label="Màu chữ phụ đề"></label>
               <label>Màu nền<input id="caption-background-color" type="color" value="#FFE500" aria-label="Màu nền phụ đề"></label>
@@ -167,9 +159,11 @@
               <button id="caption-style-reset" type="button">Mặc định</button>
             </div>
           </fieldset>
+          <p id="caption-style-availability" class="mt-2 text-[10px] leading-relaxed text-slate-300" role="status" aria-live="polite">Mở dự án đã dịch hoặc tạo bản xem trước có giọng Việt để chỉnh phụ đề.</p>
           <p id="caption-style-status" role="status" aria-live="polite">Kiểu phụ đề được lưu cho bản xem trước và video xuất.</p>
         </details>
-        <section class="studio-audio-panel" aria-labelledby="audio-heading">
+        <div class="studio-splitter" data-layout-axis="y" data-layout-index="1" role="separator" tabindex="0" aria-orientation="horizontal" aria-controls="caption-style-panel studio-audio" aria-label="Chiều cao phụ đề và âm thanh" title="Kéo để đổi kích thước; dùng phím mũi tên khi chọn đường chia"></div>
+        <section id="studio-audio" class="studio-audio-panel" aria-labelledby="audio-heading">
           <h3 id="audio-heading"><i class="fa-solid fa-headphones" aria-hidden="true"></i>Điều chỉnh âm thanh</h3>
           <div class="audio-mixers">
             <div class="audio-mixer"><i class="fa-solid fa-microphone-lines" aria-hidden="true"></i><label for="vol-dub">Giọng Việt</label><input type="range" id="vol-dub" min="0" max="1" step="0.05" value="1.0"><span id="vol-dub-val">100%</span></div>
@@ -178,24 +172,55 @@
           <div class="audio-suppression"><i class="fa-solid fa-wave-square" aria-hidden="true"></i><span>Lọc thoại Trung:</span><strong id="player-suppression-badge" title="Mức giảm ước tính của bộ lọc">--</strong><span class="audio-divider">|</span><span class="audio-bgm-label"><i class="fa-solid fa-music" aria-hidden="true"></i> BGM:</span><span id="player-bgm-status">Chưa có</span></div>
         </section>
       </section>
-
-      <aside class="studio-sidebar" aria-label="Transcript và giọng lồng tiếng">
-        <section class="transcript-panel studio-card" aria-labelledby="transcript-heading">
+        <div class="studio-splitter" data-layout-axis="x" data-layout-index="1" role="separator" tabindex="0" aria-orientation="vertical" aria-controls="studio-middle studio-right" aria-label="Chiều rộng cột video và cột transcript" title="Kéo để đổi kích thước; dùng phím mũi tên khi chọn đường chia"></div>
+      <aside id="studio-right" class="studio-sidebar studio-column" data-layout-group="right" aria-label="Transcript, dịch và trạng thái xử lý">
+        <section id="studio-transcript" class="transcript-panel studio-card" aria-labelledby="transcript-heading">
           <div class="transcript-heading"><h2 id="transcript-heading"><i class="fa-regular fa-file-lines" aria-hidden="true"></i>Transcript</h2><span id="segments-count-badge" class="transcript-count">0 câu</span><p>Bấm vào câu để tua video. Bấm bản dịch để sửa từng chữ.</p></div>
           <div class="transcript-toolbar"><label class="transcript-follow"><input id="transcript-follow" type="checkbox" checked> Theo vị trí phát</label><label class="transcript-option"><input id="transcript-show-time" type="checkbox" checked> Hiện thời gian</label><span class="transcript-time-note">Theo câu</span></div>
           <div id="segments-list" class="transcript-list" aria-label="Câu thoại gốc và bản dịch" tabindex="0"><div class="transcript-empty"><i class="fa-regular fa-file-lines" aria-hidden="true"></i><p>Chưa có nội dung transcript</p><span>Nạp video và bắt đầu dịch để xem, sửa và nghe lại cạnh khung hình.</span></div></div>
           <p id="transcript-status" class="transcript-status" role="status" aria-live="polite">Bản sửa sẽ cập nhật phụ đề và tạo lại giọng đọc, giữ nguyên mốc thời gian.</p>
         </section>
-        <section class="voice-panel studio-card" aria-labelledby="voice-list-title">
-          <div class="voice-list-heading"><h3 id="voice-list-title"><i class="fa-solid fa-microphone-lines" aria-hidden="true"></i>Giọng lồng tiếng</h3><span id="voice-count" class="voice-count" role="status" aria-live="polite"></span></div>
-          <p id="voice-source" class="voice-source" aria-live="polite">Đang tải danh sách giọng…</p>
-          <input type="hidden" id="voice-select" value="{{ settings.EDGE_VOICE if settings.TTS_ENGINE in ['edge', 'edge-tts'] else 'Trúc Ly' }}">
-          <label for="voice-search" class="sr-only">Tìm theo tên, vùng miền hoặc nguồn</label>
-          <div class="voice-search-controls"><div class="voice-search-field"><i class="fa-solid fa-magnifying-glass" aria-hidden="true"></i><input id="voice-search" type="search" placeholder="Tìm theo tên, vùng miền hoặc nguồn" autocomplete="off" class="voice-search" aria-controls="voice-list"></div><button id="voice-filter" type="button" aria-label="Lọc giọng theo nguồn" title="Lọc giọng theo nguồn"><i class="fa-solid fa-filter" aria-hidden="true"></i><span>Tất cả</span></button></div>
-          <div id="voice-list" class="voice-list" role="group" aria-labelledby="voice-list-title" tabindex="0"></div>
-          <p id="voice-empty" class="hidden voice-source">Không tìm thấy giọng phù hợp. Thử tên hoặc nguồn khác.</p>
-          <p id="voice-catalog-status" class="voice-source" role="status"></p>
-          <div class="voice-preview-panel"><div class="voice-preview-controls"><audio id="voice-preview-audio" class="hidden" controls preload="none" aria-label="Mẫu giọng lồng tiếng"></audio></div><p id="voice-preview-status" class="voice-preview-status" role="status" aria-live="polite" aria-atomic="true"></p></div>
+        <div class="studio-splitter" data-layout-axis="y" data-layout-index="0" role="separator" tabindex="0" aria-orientation="horizontal" aria-controls="studio-transcript studio-action" aria-label="Chiều cao transcript và phần dịch" title="Kéo để đổi kích thước; dùng phím mũi tên khi chọn đường chia"></div>
+        <section id="studio-action" class="studio-action-card studio-card" aria-labelledby="action-heading">
+          <h2 id="action-heading" class="studio-card-heading"><i class="fa-solid fa-microphone-lines" aria-hidden="true"></i>3. Dịch và lồng tiếng</h2>
+          <div class="buffer-setting"><label for="start-translation-workers">Luồng dịch video này</label><select id="start-translation-workers" aria-describedby="start-translation-workers-help">
+            {% for workers in [1, 3, 5, 10, 15, 20, 30, 40, 50] %}<option value="{{ workers }}" {% if workers == 20 %}selected{% endif %}>{{ workers }} luồng</option>{% endfor %}
+          </select></div>
+          <p id="start-translation-workers-help" class="task-progress-detail">Mặc định 20. Áp dụng khi bắt đầu video mới; dự án mở lại giữ số luồng đã lưu.</p>
+          <div class="studio-primary-actions" role="group" aria-label="Dịch và lưu video">
+            <button id="btn-start" class="studio-start-button"><i class="fa-solid fa-play" aria-hidden="true"></i>Bắt đầu dịch</button>
+            <button id="btn-retry-worker" class="hidden" title="Tiếp tục tác vụ từ phần đã lưu" aria-label="Tiếp tục tác vụ"><i class="fa-solid fa-rotate-right" aria-hidden="true"></i> Tiếp tục</button>
+            <button id="btn-export-hq" aria-label="Xuất video MP4" disabled title="Xuất video từ lời và giọng hiện đã lưu" class="studio-export-button"><i class="fa-solid fa-arrow-up-from-bracket" aria-hidden="true"></i>Xuất MP4</button>
+            <button id="btn-save-result" class="studio-export-button" disabled title="Có thể lưu sau khi xuất xong toàn bộ video"><i class="fa-solid fa-download" aria-hidden="true"></i>Tải video</button>
+            <button id="btn-pause-worker" class="hidden"><i class="fa-solid fa-pause" aria-hidden="true"></i> Tạm dừng</button>
+            <button id="btn-resume-worker" class="hidden"><i class="fa-solid fa-play" aria-hidden="true"></i> Tiếp tục</button>
+            <button id="btn-stop-worker" class="hidden"><i class="fa-solid fa-stop" aria-hidden="true"></i> Dừng hẳn</button>
+          <button id="btn-translate-full" class="studio-start-button hidden" type="button"><i class="fa-solid fa-forward-step" aria-hidden="true"></i>Dịch toàn bộ</button>
+            <button id="btn-review-worker" class="hidden"><i class="fa-solid fa-check-double" aria-hidden="true"></i> AI kiểm tra lại</button>
+          </div>
+          <div class="studio-action-options">
+          <label class="visual-translation-option" title="Đối chiếu lời nói với chữ trên video, rồi tự rà và sửa bản dịch trước khi tạo giọng."><input id="visual-translation" type="checkbox" aria-describedby="visual-translation-help" {% if settings.LLM_PROVIDER in ('gemini', 'openrouter-free', 'opencode') %}checked{% endif %}><span>AI kiểm tra bản dịch</span></label>
+          <span id="visual-translation-help" class="sr-only">Đối chiếu lời nói với chữ trên video, rồi tự rà và sửa bản dịch trước khi tạo giọng.</span>
+          <div class="buffer-setting"><label for="buffer-select">Đệm trước khi phát</label><select id="buffer-select"><option value="5">5 giây (Nhanh nhất)</option><option value="10" selected>10 giây (Khuyên dùng)</option><option value="15">15 giây (Ổn định)</option><option value="30">30 giây (An toàn)</option></select></div>
+          </div>
+          <div id="task-progress" class="hidden task-progress" aria-label="Tiến độ xử lý video">
+            <p id="task-activity" class="task-activity" role="status" aria-live="polite">Đang kiểm tra trạng thái xử lý</p>
+            <p id="task-activity-age" class="hidden task-activity-age"></p>
+            <p id="task-countdown" class="task-countdown" role="timer">Thời gian còn lại: chưa đủ dữ liệu</p>
+            <div class="task-progress-heading" role="status" aria-live="polite"><span id="task-progress-stage">Đang gửi yêu cầu…</span><span class="flex flex-wrap items-baseline justify-end gap-x-2"><span id="task-progress-value">Chưa có %</span><span id="task-progress-eta" class="hidden text-gray-400"></span></span></div>
+            <div id="task-progress-track" class="task-progress-track" role="progressbar" aria-label="Tiến độ bước hiện tại" aria-valuemin="0" aria-valuemax="100"><div id="task-progress-bar" class="task-progress-bar"></div></div>
+            <p id="task-media-progress" class="hidden task-media-progress"></p>
+            <p id="task-progress-detail" class="task-progress-detail">Phần trăm được tính riêng cho từng bước.</p>
+            <p id="task-connection-status" role="status" class="hidden task-connection-status"></p>
+            <details class="task-status-history" open>
+              <summary>Lịch sử trạng thái</summary>
+              <ol id="task-status-history"><li>Chưa có hoạt động được ghi nhận.</li></ol>
+            </details>
+          </div>
+          <div id="task-result" class="hidden" role="status">
+            <p id="task-result-status" class="task-progress-detail"></p>
+            <a id="task-result-link" class="studio-export-button hidden">Xem trước kết quả</a>
+          </div>
         </section>
       </aside>
     </main>
@@ -210,7 +235,7 @@
         <h2 class="text-base font-bold text-white flex items-center gap-2">
           <i class="fa-solid fa-list-check text-teal-400"></i> Lịch sử video
         </h2>
-        <p class="text-xs text-gray-400">Mỗi video hiện một lần cùng tiến độ mới nhất. Các bản dịch đã lưu vẫn mở lại được để chỉnh và xuất tiếp.</p>
+        <p class="text-xs text-gray-400">Mỗi video hiện một lần cùng tiến độ mới nhất. Khi có nhiều bản, hệ thống tự mở bản có dữ liệu đã lưu; bản xem trước rỗng vẫn nằm trong “Các bản đã lưu”.</p>
       </div>
       <button id="btn-refresh-tasks" class="px-3 py-1.5 rounded-lg border border-gray-700 bg-gray-800 hover:bg-gray-700 text-xs text-gray-200 flex items-center gap-1.5">
         <i class="fa-solid fa-rotate-right"></i> Làm mới
@@ -301,6 +326,7 @@
 
     <!-- Log Category Tabs -->
     <div class="flex items-center gap-2 border-b border-gray-800 pb-2">
+      <button id="diag-warnings-tab" data-cat="warnings" class="diag-cat-btn px-3 py-1 rounded-lg text-xs font-mono text-gray-400 hover:text-white">Thông báo tác vụ</button>
       <button data-cat="pipeline" class="diag-cat-btn px-3 py-1 rounded-lg text-xs font-mono font-bold bg-pink-600/80 text-white">Tác vụ</button>
       <button data-cat="ai" class="diag-cat-btn px-3 py-1 rounded-lg text-xs font-mono text-gray-400 hover:text-white">AI</button>
       <button data-cat="errors" class="diag-cat-btn px-3 py-1 rounded-lg text-xs font-mono text-gray-400 hover:text-white">Lỗi</button>
@@ -316,6 +342,11 @@
       </div>
     </div>
 
+    <section id="diagnostics-warnings-panel" aria-labelledby="diag-warnings-tab" class="hidden">
+      <p class="text-xs text-gray-400 mb-3">Thông báo của video đang mở trong Studio, tự cập nhật theo tác vụ.</p>
+      <p id="diagnostics-warnings-empty" class="text-sm text-gray-400">Chưa có thông báo cho video đang mở.</p>
+      <p id="pipeline-warning" role="status" class="hidden pipeline-warning"></p>
+    </section>
     <div class="flex flex-wrap items-center justify-between gap-2 text-xs text-gray-400">
       <p id="log-summary" role="status">Chọn danh mục để xem nhật ký.</p>
       <p id="log-copy-status" role="status" aria-live="polite"></p>
@@ -374,6 +405,7 @@
           <label class="text-xs text-gray-300 block mb-1">Nhà cung cấp (LLM Provider):</label>
           <select id="settings-llm-provider" class="w-full bg-[#08090d] border border-gray-700 rounded-xl px-3 py-2 text-xs text-gray-100 focus:outline-none focus:border-pink-500">
             <option value="openrouter-free" {% if settings.LLM_PROVIDER == 'openrouter-free' %}selected{% endif %}>OpenRouter Free (miễn phí)</option>
+            <option value="ollama" {% if settings.LLM_PROVIDER == 'ollama' %}selected{% endif %}>Ollama local · Qwen2.5 7B</option>
             <option value="gemini" {% if settings.LLM_PROVIDER == 'gemini' %}selected{% endif %}>Google Gemini (tùy chọn, cần key)</option>
             <option value="deepseek">DeepSeek AI (Văn phong kịch tính)</option>
             <option value="openai">OpenAI Compatible API</option>
@@ -442,11 +474,11 @@
         <div>
           <label for="settings-translation-workers" class="text-xs text-gray-300 block mb-1">Luồng dịch song song</label>
           <select id="settings-translation-workers" aria-describedby="settings-translation-workers-help" class="w-full bg-[#08090d] border border-gray-700 rounded-xl px-3 py-2 text-xs text-gray-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-pink-500">
-            {% for workers in [1, 3, 5, 10, 15, 20] %}
+            {% for workers in [1, 3, 5, 10, 15, 20, 30, 40, 50] %}
             <option value="{{ workers }}" {% if settings.TRANSLATION_CHUNK_WORKERS == workers %}selected{% endif %}>{{ workers }} luồng</option>
             {% endfor %}
           </select>
-          <p id="settings-translation-workers-help" class="text-[11px] text-gray-400 mt-1">Số đoạn dịch đồng thời tối đa khi Dịch toàn bộ; tự giảm theo CPU/RAM. Các đoạn chạy song song dài khoảng 1 phút. Bản xem trước vẫn dịch đoạn ngắn.</p>
+          <p id="settings-translation-workers-help" class="text-[11px] text-gray-400 mt-1">Số yêu cầu dịch và kiểm tra AI đồng thời tối đa cho mỗi video. Mặc định 20; có thể chọn 30, 40 hoặc 50. Nhận giọng, tạo giọng và dựng video dùng giới hạn riêng.</p>
         </div>
 
         <div class="border-t border-gray-800 pt-3">
@@ -532,7 +564,7 @@
     <div class="bg-[#161922] border border-gray-800 rounded-2xl max-w-md w-full p-6 space-y-4 shadow-2xl">
       <div class="flex items-center justify-between pb-3 border-b border-gray-800">
         <h3 id="export-modal-title" class="text-sm font-bold text-white flex items-center gap-2">
-          <i class="fa-solid fa-film text-pink-500"></i> Xuất Video Hoàn Chỉnh (HQ Export)
+          <i class="fa-solid fa-film text-pink-500"></i> Xuất video MP4
         </h3>
         <button id="btn-close-export-modal" aria-label="Đóng hộp thoại xuất video" class="text-gray-400 hover:text-white">
           <i class="fa-solid fa-xmark text-lg"></i>
@@ -540,8 +572,9 @@
       </div>
 
       <div id="export-modal-body" class="space-y-4 text-xs text-gray-300">
-        <p>Xuất MP4 với giọng Việt và phụ đề, giữ tỉ lệ video gốc. Chế độ DSP giảm giọng gốc có thể ảnh hưởng nhạc nền; mức tách giọng tùy từng video.</p>
+        <p>Xuất MP4 với giọng Việt và phụ đề, giữ tỉ lệ video gốc. Dùng lại âm thanh nền đã xử lý khi phù hợp với chế độ {{ settings.SEPARATION_ENGINE }} đang chọn. Lần đầu tách nền bằng RoFormer có thể mất nhiều thời gian; những lần sửa lời sau sẽ dùng lại nền đã lưu.</p>
         <p id="export-screen-text-summary" class="export-screen-text-summary" role="status"></p>
+        <p id="export-incomplete-warning" class="hidden p-3 rounded-xl bg-amber-950/60 border border-amber-700 text-amber-200" role="status"></p>
         
         <div id="export-status-box" class="hidden bg-[#08090d] p-3.5 rounded-xl border border-gray-800 space-y-3">
           <div class="flex items-center justify-between text-xs">
@@ -565,6 +598,7 @@
             <i class="fa-solid fa-circle-check text-lg"></i>
             <span>Xuất video hoàn tất thành công!</span>
           </div>
+          <p id="export-result-warning" class="hidden text-amber-200" role="status"></p>
           <button id="btn-save-as-native" class="w-full py-2.5 bg-pink-600 hover:bg-pink-500 text-white font-bold rounded-xl transition flex items-center justify-center gap-2">
             <i class="fa-solid fa-floppy-disk"></i> Lưu Video Về Máy (Save Video As...)
           </button>
@@ -591,6 +625,7 @@
     </div>
   </div>
 
+  <script src="/static/studio-layout.js?v={{ settings.BASE_DIR.joinpath('static', 'studio-layout.js').stat().st_mtime_ns }}"></script>
   <script src="/qtwebchannel.js"></script>
   <script src="/static/app.js?v={{ settings.BASE_DIR.joinpath('static', 'app.js').stat().st_mtime_ns }}"></script>
 </body>

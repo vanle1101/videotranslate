@@ -184,9 +184,10 @@ def route(session, segment_id=0):
 
 
 async def wait_until(predicate):
-    async with asyncio.timeout(3):
+    async def poll():
         while not predicate():
             await asyncio.sleep(0.005)
+    await asyncio.wait_for(poll(), 3)
 
 
 def test_edit_completed_segment_publishes_text_and_fitted_audio_with_new_revision(session):
@@ -355,6 +356,8 @@ def test_editing_one_draft_keeps_other_drafts_playable_and_does_not_fail_the_ses
     second.needs_review = True
     second.review_reason = "Câu sau cần nghe lại"
     second.final_vi = "Bản nháp câu sau"
+    second.audio_path = first.audio_path
+    second.audio_url = "/api/streaming/audio/transcript-test/1"
     session.segments[1] = second
     session.total_processed_duration = first.duration + second.duration
 
@@ -446,6 +449,7 @@ def test_retry_synthesis_preserves_ready_audio_and_translation_and_resumes_waiti
 
 @pytest.mark.parametrize("blocked", ["ASR", "TRANSLATING", "active", "stopped", "uninitialized", "editing", "export"])
 def test_retry_refuses_non_synthesis_failures_and_conflicting_lifecycle(session, blocked):
+    session.visual_translation = True
     segment = session.segments[0]
     segment.status = "FAILED"
     segment.failed_stage = blocked if blocked in {"ASR", "TRANSLATING"} else "TTS"
@@ -1082,6 +1086,9 @@ def test_inflight_edit_blocks_other_edits_and_export_but_keeps_existing_audio(se
 @pytest.mark.parametrize("visual_translation", [False, True])
 def test_export_screen_text_choice_keeps_spoken_captions_and_original_evidence(
         session, monkeypatch, show_screen_text, visual_translation):
+    with wave.open(session.segments[0].audio_path, "wb") as audio:
+        audio.setparams((1, 2, 24000, 0, "NONE", "not compressed"))
+        audio.writeframes(b"\x01\x00" * 72000)
     session.visual_translation = visual_translation
     session.screen_texts = [{"id": "o0", "start": 2, "end": 5, "kind": "title",
                              "text_vi": "Tiêu đề", "bbox": [.1, .1, .8, .1], "needs_review": False}]
@@ -1113,6 +1120,12 @@ def test_export_screen_text_choice_keeps_spoken_captions_and_original_evidence(
 def test_export_uses_revised_text_and_audio_and_blocks_edits_until_done(session, monkeypatch):
     entered, release = threading.Event(), threading.Event()
     seen = {}
+    def write_pcm(*, text, output_path, **kwargs):
+        with wave.open(str(output_path), "wb") as audio:
+            audio.setparams((1, 2, 24000, 0, "NONE", "not compressed"))
+            audio.writeframes(b"\x01\x00" * 72000)
+    session.tts_engine.synthesize.side_effect = write_pcm
+    session.aligner.get_audio_duration.return_value = 3.
 
     def export(**kwargs):
         segment = kwargs["segments"][0]
@@ -1138,7 +1151,10 @@ def test_export_uses_revised_text_and_audio_and_blocks_edits_until_done(session,
                 result = await exporting
             assert result.status_code == 200
     asyncio.run(run())
-    assert seen["final_vi"] == "Bản xuất" and seen["bytes"] == "Bản xuất aligned".encode()
+    assert seen["final_vi"] == "Bản xuất"
+    assert seen["bytes"] == Path(session.segments[0].audio_path).read_bytes()
+    with wave.open(session.segments[0].audio_path) as audio:
+        assert audio.getnframes() == 72000
     assert (seen["start"], seen["end"]) == (2, 5)
 
 
@@ -1487,7 +1503,7 @@ def test_review_progress_tracks_speech_stages_until_timing_commits_and_clears_on
     assert review_complete["warnings"] == [unrelated]
 
 
-def test_failed_review_retry_keeps_warning_without_duplicates_and_never_reports_100_percent(session, monkeypatch):
+def test_failed_review_retry_keeps_warning_and_media_complete_draft_without_duplicate_warnings(session, monkeypatch):
     from core.translation_review import AutomaticTranslationReviewer
     monkeypatch.setattr(settings, "LLM_PROVIDER", "opencode")
     warning = "AI kiểm tra lại chưa hoàn tất. Các câu đã lưu và âm thanh sẵn có được giữ; có thể thử lại."
@@ -1497,8 +1513,12 @@ def test_failed_review_retry_keeps_warning_without_duplicates_and_never_reports_
         for _ in range(2):
             await session.start_automatic_review()
             await session.review_task
-            assert session.get_progress()["status"] == "FAILED"
-            assert session.get_progress()["progress_pct"] is None
+            progress = session.get_progress()
+            assert progress["status"] == "PREPARED"
+            assert progress["output_is_draft"] and progress["media_complete"]
+            assert progress["content_review_state"] == "REVIEW_REQUIRED"
+            assert progress["review_summary"]["status"] == "failed"
+            assert progress["progress_pct"] is None
     asyncio.run(run())
     assert session.warnings == [warning, "Giữ cảnh báo khác."]
     assert not any(data.get("progress_pct") == 100 for kind, data in session.events if kind == "progress")
@@ -1606,9 +1626,15 @@ def test_failed_edit_preserves_current_result_reference(session):
     assert not any(event == "result_invalidated" for event, _ in session.events)
 
 
-def test_incomplete_second_review_is_not_completed_and_blocks_export(session, monkeypatch):
+def test_incomplete_second_review_keeps_review_pending_and_exports_media_complete_draft(session, monkeypatch):
     from core.translation_review import AutomaticTranslationReviewer
     monkeypatch.setattr(settings, "LLM_PROVIDER", "opencode")
+    with wave.open(session.segments[0].audio_path, "wb") as audio:
+        audio.setparams((1, 2, 24000, 0, "NONE", "not compressed"))
+        audio.writeframes(b"\x01\x00" * 72000)
+    monkeypatch.setattr(settings, "OUTPUT_DIR", session.segments_dir)
+    exporter = Mock(return_value={"output_filename": "draft.mp4", "elapsed_seconds": .1})
+    monkeypatch.setattr(main, "HQExporter", lambda: SimpleNamespace(export=exporter))
     row = dict(session.segments[0].to_dict(), needs_review=True,
                verification={"status": "incomplete"}, review_reason="Second pass unavailable")
     monkeypatch.setattr(AutomaticTranslationReviewer, "review", lambda *a, **kw: {
@@ -1619,10 +1645,13 @@ def test_incomplete_second_review_is_not_completed_and_blocks_export(session, mo
         await session.review_task
         progress = session.get_progress()
         assert progress["review_summary"]["status"] == "incomplete"
-        assert progress["status"] == "FAILED" and progress["can_review"]
+        assert progress["status"] == "PREPARED" and progress["can_review"]
+        assert progress["output_is_draft"] and progress["media_complete"]
         async with client() as api:
             result = await api.post('/api/streaming/export-hq', json={"task_id": session.task_id})
-            assert result.status_code == 409
+            assert result.status_code == 200, result.text
+            assert result.json()["output_is_draft"] and not result.json()["output_incomplete"]
+            assert result.json()["output_review_segment_ids"] == [0]
     asyncio.run(run())
 
 
@@ -1699,3 +1728,18 @@ def test_manual_speech_repair_makes_preview_available_without_touching_future_so
         assert not any(data.get("status") == "COMPLETED" for kind, data in session.events if kind == "progress")
 
     asyncio.run(run())
+
+def test_inline_review_audio_publication_preserves_pending_audit_revision(session):
+    from core.streaming.native_audit_retry import make_pending_audit, pending_native_audit
+    from core.engines.translation.opencode_client import OpenCodeTimeoutError
+    from core.multilingual_translation import VERSION
+    row=session.segments[0]
+    row.source_language='ko'
+    row.text_zh='우리 친구잖아?'
+    draft={**row.to_dict(),'literal_vi':'Chúng ta là bạn mà?', 'natural_vi':'Chúng ta là bạn mà?',
+           'final_vi':'Chúng ta là bạn mà?', 'needs_review':True,'review_reason':'Audit timeout'}
+    marker=make_pending_audit(draft,draft,[],version=VERSION,model='test',error=OpenCodeTimeoutError('timeout'))
+    draft['verification']={'status':'unresolved','source_supported':False,'multilingual_review':{'pending_audit':marker}}
+    asyncio.run(session.edit_segment(0,draft['final_vi'],_review_result=draft))
+    assert row.status=='READY' and row.revision>marker['revision']
+    assert pending_native_audit(row)['revision']==row.revision

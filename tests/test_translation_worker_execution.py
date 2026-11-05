@@ -70,22 +70,22 @@ def test_explicit_execution_layer_keeps_its_own_test_policy(monkeypatch):
     assert client.execution_layer is isolated and isolated.policy.concurrency == 1
 
 
-@pytest.mark.parametrize("selected", [1, 3, 5, 10, 15, 20])
+@pytest.mark.parametrize("selected", [1, 3, 5, 10, 15, 20, 30, 40, 50])
 def test_requested_capacity_is_not_capped_at_eight_on_sufficient_resources(monkeypatch, selected):
     monkeypatch.setattr(settings, "TRANSLATION_CHUNK_WORKERS", selected)
     monkeypatch.setattr(settings, "OPENCODE_CONCURRENCY", selected)
     monkeypatch.setattr("core.streaming.pipeline.os.cpu_count", lambda: 48)
     monkeypatch.setattr(psutil, "virtual_memory", lambda: SimpleNamespace(available=64 * 1024**3))
-    assert StreamingPipelineSession._parallel_chunk_capacity(object()) == selected
+    assert StreamingPipelineSession._parallel_chunk_capacity(SimpleNamespace(translation_chunk_workers=selected)) == selected
 
 
-@pytest.mark.parametrize("cpus,available_gib,provider,expected", [(8, 64, 20, 7), (48, 5, 20, 3), (48, 64, 5, 5), (1, 1, 20, 1)])
-def test_selected_capacity_remains_bounded_by_resources_and_provider(monkeypatch, cpus, available_gib, provider, expected):
+@pytest.mark.parametrize("cpus,available_gib,provider", [(8, 64, 20), (48, 5, 20), (48, 64, 5), (1, 1, 20)])
+def test_ai_capacity_is_independent_of_native_resources_and_new_defaults(monkeypatch, cpus, available_gib, provider):
     monkeypatch.setattr(settings, "TRANSLATION_CHUNK_WORKERS", 20)
     monkeypatch.setattr(settings, "OPENCODE_CONCURRENCY", provider)
     monkeypatch.setattr("core.streaming.pipeline.os.cpu_count", lambda: cpus)
     monkeypatch.setattr(psutil, "virtual_memory", lambda: SimpleNamespace(available=available_gib * 1024**3))
-    assert StreamingPipelineSession._parallel_chunk_capacity(object()) == expected
+    assert StreamingPipelineSession._parallel_chunk_capacity(SimpleNamespace(translation_chunk_workers=20)) == 20
 
 
 def test_twenty_isolated_requests_can_be_admitted_together_without_duplicate_calls():
@@ -121,7 +121,7 @@ def test_selected_twenty_reaches_pipeline_executor_and_ordered_chunk_runner(monk
     monkeypatch.setattr(settings, "OPENCODE_CONCURRENCY", 20)
     monkeypatch.setattr("core.streaming.pipeline.os.cpu_count", lambda: 48)
     monkeypatch.setattr(psutil, "virtual_memory", lambda: SimpleNamespace(available=64 * 1024**3))
-    session = SimpleNamespace(task_id="isolated-worker-preset", is_stopped=False)
+    session = SimpleNamespace(task_id="isolated-worker-preset", is_stopped=False, translation_chunk_workers=20)
     limit = StreamingPipelineSession._parallel_chunk_capacity(session)
     layer = AIExecutionLayer(AIExecutionPolicy(concurrency=limit, queue_timeout=5))
     release, entered = threading.Event(), threading.Event()
@@ -167,7 +167,11 @@ def test_selected_twenty_reaches_pipeline_executor_and_ordered_chunk_runner(monk
                 outputs = await asyncio.wait_for(consumer, 5)
             assert outputs == list(range(23))
 
-    asyncio.run(scenario())
+    try:
+        asyncio.run(scenario())
+    finally:
+        if getattr(session, "_blocking_executor", None):
+            session._blocking_executor.shutdown(wait=True)
     assert sorted(seen) == list(range(23))
     assert observed == [session.task_id] * 23
     assert layer.snapshot()["active_requests"] == layer.snapshot()["queued_requests"] == 0

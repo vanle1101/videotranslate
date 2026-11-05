@@ -238,6 +238,76 @@ def test_fitted_audio_uses_export_sample_tolerance_not_four_sample_slack(session
         assert audio.getnframes() <= slot_frames + 1
 
 
+@pytest.mark.parametrize("recovery_enabled", [False, True])
+def test_full_source_neighbor_rescue_requires_recovery_opt_in(session, monkeypatch, recovery_enabled):
+    from core.engines.alignment.timing_aligner import SpeechBudgetError
+    session._chunked_source_started = False
+    session._source_prepared_seconds = 0.
+    session._recovery_bidirectional_reflow = recovery_enabled
+    focus, neighbor = session.segments[6], session.segments[5]
+    before = snapshot(session)
+    calls, rescues = [], []
+    staged_path = session.segments_dir / "neighbor-staged.wav"
+    write_pcm(staged_path, .8)
+    staged_spoken = {"text": neighbor.final_vi, "tts_duration": .878,
+                    "speed_ratio": 1.0975, "boundaries": []}
+    async def rescue(rows, item, required):
+        rescues.append((item.id, required))
+        shadow = deepcopy(rows)
+        next(row for row in shadow if row["id"] == neighbor.id)["audio_duration"] = .8
+        return shadow, {neighbor.id: {"audio_path": str(staged_path), "spoken": staged_spoken}}
+    def synthesis(**options):
+        calls.append(options)
+        if len(calls) == 1:
+            error = SpeechBudgetError("Neighbor pacing needs bounded recovery")
+            error.required_dub_duration = .8563
+            raise error
+        return synthesize_fixture(**options)
+    monkeypatch.setattr(session, "_prepare_dub_rescue", rescue)
+    monkeypatch.setattr(pipeline, "synthesize_natural_speech", synthesis)
+    pending = session.segments_dir / "full-source-rescue.wav"
+    async def run():
+        return await session._fit_dub(focus, text="Mười chín.", source="十九", output_path=pending,
+                                      translator=object(), neighbor_rescue=True)
+    if recovery_enabled:
+        _, _, plan = asyncio.run(run())
+        assert rescues == [(focus.id, .8563)] and len(calls) == 2
+        assert plan[neighbor.id]["_audio_update"]["audio_path"] == str(staged_path)
+        assert calls[1]["allow_bidirectional_reflow"] is True
+        for sid, bounds in plan.items():
+            row = session.segments[sid]
+            assert abs(bounds["dub_start"] - row.start) <= .350001
+            assert abs(bounds["dub_end"] - row.end) <= .350001
+    else:
+        with pytest.raises(SpeechBudgetError):
+            asyncio.run(run())
+        assert not rescues and len(calls) == 1
+    assert snapshot(session) == before, "Staged recovery published before atomic commit"
+
+
+def test_full_source_neighbor_rescue_uses_existing_total_duration(session, monkeypatch):
+    session._chunked_source_started = False
+    session._source_prepared_seconds = 0.
+    neighbor = session.segments[5]
+    neighbor.tts_duration, neighbor.speed_ratio = .878, 1.
+    limits = []
+    def capacity(rows, focus_id, *, total_duration):
+        limits.append(total_duration)
+        return 1.2 if total_duration == session.total_duration else 0.
+    def compress(aligner, source, destination, ratio, **options):
+        write_pcm(destination, .8)
+        return 1.0975
+    monkeypatch.setattr(pipeline, "available_reflow_duration", capacity)
+    monkeypatch.setattr(pipeline.TimingBudgetAligner, "apply_atempo", compress)
+    before = snapshot(session)
+    shadow, staged = asyncio.run(session._prepare_dub_rescue(session._dub_rows(), session.segments[6], 1.))
+    assert limits == [session.total_duration]
+    assert set(staged) == {neighbor.id}
+    assert next(row for row in shadow if row["id"] == neighbor.id)["audio_duration"] == .8
+    assert staged[neighbor.id]["spoken"]["speed_ratio"] <= session.aligner.max_speed
+    assert snapshot(session) == before
+
+
 def prepare_tail_session(session):
     """Actual failed row 26 and saved neighbouring measured WAV lengths."""
     session.total_duration = 48.
@@ -461,7 +531,18 @@ def prepare_dense_rescue(session, focus_id=7):
     return rows[focus_id]
 
 
-def test_dense_failure_can_stage_verified_neighbor_without_exceeding_bounds(session, monkeypatch):
+@pytest.fixture
+def semantic_neighbor_only(monkeypatch):
+    # These cases specifically exercise verified neighbor rewrites. Real FFmpeg
+    # atempo can now free enough space from the periodic PCM without a rewrite;
+    # its acoustic success path is covered separately. Force the bounded
+    # acoustic attempt to fail so these assertions actually reach semantic rescue.
+    def no_acoustic_space(*args, **kwargs):
+        raise pipeline.SpeechBudgetError("Fixture has no remaining acoustic allowance")
+    monkeypatch.setattr(pipeline.TimingBudgetAligner, "apply_atempo", no_acoustic_space)
+
+
+def test_dense_failure_can_stage_verified_neighbor_without_exceeding_bounds(session, monkeypatch, semantic_neighbor_only):
     focus = prepare_dense_rescue(session)
     before = snapshot(session)
     shorter = "Năm nay mười chín."
@@ -500,7 +581,36 @@ def test_dense_failure_can_stage_verified_neighbor_without_exceeding_bounds(sess
     assert not list(session.segments_dir.glob("pending_*.wav"))
 
 
-def test_dense_rescue_retries_shortest_verified_focus_candidate_without_rewrite(session, monkeypatch):
+def test_forward_neighbor_semantic_rescue_is_bounded_and_publishes_proof(session, monkeypatch, semantic_neighbor_only):
+    """A following row may be shortened only after its own dual review."""
+    focus = prepare_dense_rescue(session)
+    # Make the preceding candidates ineligible so this exercises the new
+    # forward branch rather than the long-standing backward path.
+    for sid in (5, 6):
+        session.segments[sid].verification = {"status": "unresolved"}
+    neighbor = session.segments[8]
+    shorter = "Câu ngắn."
+    proof = {"status": "verified", "text": shorter, "provider": "opencode",
+             "address_preserved": True, "reason": "Giữ nghĩa câu nguồn."}
+    session.translator.rewrite_for_pacing.return_value = {
+        "final_vi": shorter, "pacing_verification": proof}
+    def synthesize(**kwargs):
+        assert kwargs["text"] == shorter
+        write_pcm(kwargs["output_path"], 1.05)
+        return {"text": shorter, "tts_duration": 1.15, "speed_ratio": 1.15,
+                "boundaries": [], "pacing_verification": None}
+    monkeypatch.setattr(pipeline, "synthesize_natural_speech", synthesize)
+    shadow, staged = asyncio.run(session._prepare_dub_rescue(session._dub_rows(), focus, 1.48))
+    assert set(staged) == {neighbor.id}
+    assert staged[neighbor.id]["spoken"]["text"] == shorter
+    assert staged[neighbor.id]["spoken"]["pacing_verification"] == proof
+    assert session.translator.rewrite_for_pacing.call_count == 1
+    assert next(row for row in shadow if row["id"] == neighbor.id)["audio_duration"] == 1.05
+    for update in staged.values():
+        Path(update["audio_path"]).unlink(missing_ok=True)
+
+
+def test_dense_rescue_retries_shortest_verified_focus_candidate_without_rewrite(session, monkeypatch, semantic_neighbor_only):
     focus = prepare_dense_rescue(session)
     shorter = "Năm nay mười chín."
     proof = {"status": "verified", "text": shorter, "provider": "opencode",
@@ -538,7 +648,7 @@ def test_dense_rescue_retries_shortest_verified_focus_candidate_without_rewrite(
 
 
 @pytest.mark.parametrize("failure", ["manual", "rejected", "cancelled", "stale"])
-def test_uncommitted_dense_rescue_preserves_neighbors(session, monkeypatch, failure):
+def test_uncommitted_dense_rescue_preserves_neighbors(session, monkeypatch, failure, semantic_neighbor_only):
     focus = prepare_dense_rescue(session)
     if failure == "manual":
         session.segments[6].verification["status"] = "manual"

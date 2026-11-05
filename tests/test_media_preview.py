@@ -288,7 +288,7 @@ def test_output_preview_rejects_missing_or_redirected_file(tmp_path, monkeypatch
     if kind == 'symlink':
         monkeypatch.setattr(Path, 'is_symlink', lambda path: path == source)
     elif kind == 'junction':
-        monkeypatch.setattr(Path, 'is_junction', lambda path: path == source)
+        monkeypatch.setattr(Path, 'is_junction', lambda path: path == source, raising=False)
     elif kind == 'reparse':
         original_lstat = Path.lstat
         monkeypatch.setattr(Path, 'lstat', lambda path: SimpleNamespace(

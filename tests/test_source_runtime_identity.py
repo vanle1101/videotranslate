@@ -24,7 +24,7 @@ def test_source_identity_survives_first_asr_result_retaining_emotion_constant():
 
     assert retained_rows[0]["emotion"] == "<|NEUTRAL|>"
     assert source_runtime_identity(session) == before
-    assert before["revision"] == 2
+    assert before["revision"] == 3
 
 
 def test_source_identity_survives_retained_speaker_progress(monkeypatch):
@@ -78,6 +78,18 @@ def test_code_identity_changes_for_changed_loaded_implementation():
     assert _code(original) != _code(changed)
     assert _code(original) == _code(loaded("def candidate():\n    return 'original source'\n"))
     assert _code(object()) is None
+
+
+def test_source_identity_tracks_loaded_partial_coverage_validator(monkeypatch):
+    from core.engines.asr import partial_coverage
+    session = SimpleNamespace(faster_whisper=FasterWhisperFallbackEngine())
+    before = source_runtime_identity(session)
+    def replacement(value, duration, rows=()):
+        raise ValueError("changed validation")
+    monkeypatch.setattr(partial_coverage, "validate_coverage", replacement)
+    after = source_runtime_identity(session)
+    assert before["loaded_code"]["partial_coverage"] != after["loaded_code"]["partial_coverage"]
+    assert before["loaded_code"]["partial_input"] == after["loaded_code"]["partial_input"]
 
 
 def test_code_identity_survives_restart_and_hash_randomization():

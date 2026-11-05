@@ -79,7 +79,7 @@ def test_schema_repair_exhaustion_is_typed_and_never_becomes_a_translation(monke
     monkeypatch.setattr(translator, "_opencode_request", request)
     with pytest.raises(StructuredResponseError) as caught:
         translator.translate_single_segment("妈妈", 1)
-    assert caught.value.code == code and request.call_count == 2
+    assert caught.value.code == code and request.call_count == 3
 
 
 def test_zero_repairs_means_one_request_and_no_retry_for_transport_errors(monkeypatch):

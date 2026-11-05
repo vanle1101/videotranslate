@@ -129,7 +129,7 @@ class PiperEngine(TTSEngine):
 
             config = json.loads((root / (PIPER_MODEL_FILENAME + ".json")).read_text(encoding="utf-8"))
             options = ort.SessionOptions()
-            options.intra_op_num_threads = 4
+            options.intra_op_num_threads = 2
             options.inter_op_num_threads = 1
             options.execution_mode = ort.ExecutionMode.ORT_SEQUENTIAL
             session = ort.InferenceSession(

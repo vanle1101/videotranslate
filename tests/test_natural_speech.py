@@ -651,6 +651,11 @@ def test_rewrite_verifies_exact_candidate_in_a_separate_provider_request(monkeyp
     assert "Làm chưa?" in review_input["context"]
     assert result["pacing_verification"]["text"] == review_input["candidate"]
     assert result["pacing_verification"]["status"] == "verified"
+    # Export validates this durable flag rather than guessing fidelity from
+    # a status string. It can only be published after both real review gates.
+    assert result["pacing_verification"]["meaning_preserved"] is True
+    assert result["pacing_verification"]["natural"] is True
+    assert result["pacing_verification"]["fluency"]["natural"] is True
 
 
 def test_blind_vietnamese_fluency_gate_rejects_keyword_like_candidate(monkeypatch):

@@ -95,10 +95,13 @@ def main():
         else:
             print(f'OK translation: OpenCode CLI, {settings.OPENCODE_MODEL}, local key detected')
     model = settings.WORKSPACE_DIR / 'models' / f'faster-whisper-{settings.WHISPER_MODEL_SIZE}'
-    for name in ('model.bin', 'config.json', 'tokenizer.json', 'vocabulary.txt'):
+    for name in ('model.bin', 'config.json', 'tokenizer.json'):
         path = model / name
         if not path.is_file() or path.stat().st_size <= 0:
             failures.append(f'Missing Whisper file: {name}. Run setup.bat.')
+    if not any((model / name).is_file() and (model / name).stat().st_size > 0
+               for name in ('vocabulary.txt', 'vocabulary.json')):
+        failures.append('Missing Whisper file: vocabulary.txt or vocabulary.json. Run setup.bat.')
     print(f'Profile: {settings.WHISPER_MODEL_SIZE}, {settings.DEVICE}, '
           f'{settings.WHISPER_COMPUTE_TYPE}, {settings.ASR_CPU_THREADS} CPU threads, '
           f'{settings.TTS_ENGINE}')

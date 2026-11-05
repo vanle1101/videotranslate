@@ -42,8 +42,8 @@ class VoicePreviewManager:
     max_samples = 8
     lifetime_seconds = 300
     cache_schema = 1
-    max_cached_samples = 32
-    max_cache_bytes = 64 * 1024 * 1024
+    max_cached_samples = 64
+    max_cache_bytes = 128 * 1024 * 1024
     max_sample_bytes = 8 * 1024 * 1024
     _cache_lock = threading.RLock()
 

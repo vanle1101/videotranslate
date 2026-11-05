@@ -156,7 +156,7 @@ def synthesis_cache_identity(*, source, text, duration, voice, engine, aligner,
         return None
     provider = getattr(translator, "provider", None) if translator is not None else None
     models = {"opencode": settings.OPENCODE_MODEL, "gemini": settings.GEMINI_MODEL,
-              "openrouter-free": settings.OPENROUTER_MODEL}
+              "openrouter-free": settings.OPENROUTER_MODEL, "ollama": settings.OLLAMA_MODEL}
     if translator is not None and provider not in models:
         # Browser-selected/unknown model identity cannot prove an exact hit.
         return None

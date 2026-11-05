@@ -96,7 +96,7 @@ class CloudTranslationTests(unittest.TestCase):
             translator = SemanticTranslator(provider)
             for data in invalid:
                 with self.subTest(provider=provider, data=data), \
-                        patch.object(translator, "_opencode_request", side_effect=[json.dumps(self.context), json.dumps(data)]), \
+                        patch.object(translator, "_opencode_request", side_effect=[json.dumps(self.context)] + [json.dumps(data)] * 3), \
                         patch.object(translator, "_fallback_translate", side_effect=AssertionError("Fallback forbidden")):
                     with self.assertRaisesRegex(RuntimeError, "Hãy thử lại"):
                         translator.translate([self.segment])

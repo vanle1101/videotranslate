@@ -10,8 +10,17 @@ from config import settings
 
 
 def digest(path):
+    if hasattr(hashlib, "file_digest"):
+        with path.open("rb") as stream:
+            return hashlib.file_digest(stream, "sha256").hexdigest()
+    h = hashlib.sha256()
     with path.open("rb") as stream:
-        return hashlib.file_digest(stream, "sha256").hexdigest()
+        while True:
+            chunk = stream.read(65536)
+            if not chunk:
+                break
+            h.update(chunk)
+    return h.hexdigest()
 
 
 def identity(session):

@@ -136,6 +136,59 @@ def test_context_does_not_assign_relationships_from_a_kinship_keyword():
     assert context[0]["text_zh"] == "他说他妈妈今天没来"
 
 
+def test_distant_vocative_retains_question_answer_and_reaction_without_assigning_roles():
+    rows = [source(i, "这是普通的句子") for i in range(150)]
+    for index, text in enumerate(("谁呀", "听她说是我女儿", "那肯定不是你的", "妈",
+                                  "你自己照照镜子", "怎么了", "没事"), start=2):
+        rows[index] = source(index, text)
+    context = dialogue_context(rows, [rows[-1]], max_rows=24)
+    ids = {row["id"] for row in context}
+    assert set(range(2, 9)) <= ids
+    assert len(context) <= 24
+    assert all("speaker_id" not in row and "addressee_id" not in row for row in context)
+    # A later subrequest must retain the same source-only exchange; wrong
+    # Vietnamese pronouns must never become proof for either direction.
+    prompt = address_reading_prompt([rows[-1]], context)
+    payload = json.loads(prompt.split("Nguồn thoại theo thời gian: ", 1)[1])
+    assert set(range(2, 9)) <= {row["id"] for row in payload}
+    assert all("final_vi" not in row for row in payload)
+
+
+@pytest.mark.parametrize("relation", ["我是你儿子", "我是你女兒", "这是我的孩子"])
+def test_context_preserves_child_relationship_source_outside_nearby_rows(relation):
+    rows = [source(i, "这是普通的句子") for i in range(150)]
+    rows[2] = source(2, relation)
+    context = dialogue_context(rows, [rows[-1]], max_rows=24)
+    assert next(row for row in context if row["id"] == 2)["text_zh"] == relation
+    assert all("speaker_confirmation" not in row for row in context)
+
+
+def test_reciprocal_parent_child_reading_checks_possessive_roles_in_both_directions():
+    rows = [source(65, "谁呀"), source(66, "听她说是我女儿"),
+            source(67, "那肯定不是你的"), source(68, "妈"), source(69, "你自己照照镜子")]
+    citations = [{"id": row["id"], "quote": row["text_zh"]} for row in rows]
+    data = {"address_context": [{
+        "id": sid, "self_address": self_address, "listener_address": listener,
+        "self_uncertain": False, "listener_uncertain": False, "uncertain": False,
+        "reason": "Lời hỏi, đáp và phủ nhận nối với lời người con gọi mẹ ở ID68.",
+        "evidence": citations,
+        "turn_check": {"ambiguous_roles": [],
+            "reason": "Đổi người ở lời phủ nhận và lời gọi mẹ đáp lại, không phải một người tự phủ nhận.",
+            "evidence": citations},
+    } for sid, self_address, listener in ((66, "con", "mẹ"), (67, "mẹ", "con"))]}
+    reading = validate_address_reading(data, rows[1:3], rows, require_turn_check=True)
+    for sid, role, candidate, wrong in (
+            (66, "self", "Nghe cô ấy nói là con gái của con.", "Nghe cô ấy nói là con gái của tôi."),
+            (67, "listener", "Chắc chắn không phải của con đâu.", "Chắc chắn không phải của bạn đâu.")):
+        audit = {"semantic_verified": True, "address_applicable": True, "address_verified": True,
+            "address_reason": "Giữ người sở hữu và chiều mẹ–con theo lượt hỏi đáp.",
+            "address_uses": [{"term": "con", "role": role}]}
+        text_zh = next(row["text_zh"] for row in rows if row["id"] == sid)
+        assert not AutomaticTranslationReviewer._address_gate(reading, sid, audit, text_zh, candidate)
+        assert AutomaticTranslationReviewer._address_gate(reading, sid, audit, text_zh, wrong)
+        assert AutomaticTranslationReviewer._address_cites_changed_source(reading, sid, {68})
+
+
 def test_independent_address_reading_keeps_source_proof_without_a_translated_draft():
     row = source(12, "我真的不是回来", "Bản nháp Việt không phải bằng chứng.")
     row.update(speaker_id="voice-a", addressee_id="voice-b", utterance_id="utterance-a",
@@ -304,12 +357,15 @@ def test_actual_reviewer_keeps_ocr_and_address_decisions_separate(monkeypatch, a
         if "ID cần kiểm định: " in prompt:
             assert "Con đói rồi." not in prompt
             return {"address_context": [{"id": row["id"], "self_address": "con", "listener_address": "mẹ",
+                "self_uncertain": False, "listener_uncertain": False,
                 "uncertain": False, "reason": "Cùng mạch về nhà rồi nói đói với mẹ.",
                 "turn_check": {"ambiguous_roles": [], "reason": "Lượt hiện tại tiếp tục lời gọi mẹ.",
                     "evidence": [{"id": row["id"], "quote": row["text_zh"]}]},
                 "evidence": [{"id": 0, "quote": "妈妈我回来了"}, {"id": 1, "quote": "我饿了"}]} for row in rows]}
         return {"segments": [{**row, "semantic_verified": True, "verification_reason": "OCR xác nhận lời nguồn.",
             "source_evidence_ids": [f"review{row['id']}"], "address_applicable": True, "address_verified": address_verified,
+            "address_uses": ([{"term": "Mẹ", "role": "listener"}, {"term": "con", "role": "self"}]
+                if row["id"] == 0 else [{"term": "Con", "role": "self"}]),
             "address_reason": "Lượt nói tiếp tục cùng người con."} for row in rows], "screen_texts": [], "summary": ""}
     client = Mock(has_credentials=True, model="offline-context-probe", translate=Mock(side_effect=respond))
     scanner = Mock(extract=Mock(return_value=[{"start": row["start"], "end": row["end"],
@@ -376,6 +432,14 @@ def test_source_turn_policy_compares_parses_without_assuming_real_world_chronolo
     payload = json.loads(prompt.split("Nguồn thoại theo thời gian: ", 1)[1])
     assert payload[1]["speaker_id"] == "A"
     assert all("final_vi" not in row for row in payload)
+
+
+def test_family_policy_preserves_deliberate_temporary_role_jokes():
+    rows = [source(0, "我是你爸"), source(1, "我十九"),
+            source(2, "你十八"), source(3, "那你叫哥")]
+    prompt = address_reading_prompt(rows, dialogue_context(rows, rows))
+    assert "cố ý đùa đổi vai" in prompt
+    assert "không lan vai đùa sang cảnh khác" in prompt
 
 
 def turn_reading(rows, *, roles=("self",)):
@@ -461,7 +525,7 @@ def test_fresh_address_reading_cannot_skip_turn_analysis_but_legacy_remains_read
     client = Mock(translate=Mock(return_value=legacy))
     with pytest.raises(VideoIntelligenceError):
         AutomaticTranslationReviewer._address_reading(client, rows, rows, lambda: None)
-    assert client.translate.call_count == 2
+    assert client.translate.call_count == 3
 
 
 def test_invalid_source_citation_retry_explains_rejection_without_loosening_the_gate(caplog):
@@ -520,14 +584,14 @@ def test_exhausted_subread_never_returns_partial_success_and_resume_reuses_only_
     checkpoint = Mock()
     checkpoint.load.side_effect = lambda stage: deepcopy(saved.get(json.dumps(stage, sort_keys=True)))
     checkpoint.store.side_effect = lambda stage, data: saved.update({json.dumps(stage, sort_keys=True): deepcopy(data)})
-    client = Mock(translate=Mock(side_effect=[address_reply(range(4), rows), '{bad', '{bad']))
+    client = Mock(translate=Mock(side_effect=[address_reply(range(4), rows)] + ['{bad'] * 9))
     with pytest.raises(VideoIntelligenceError):
         AutomaticTranslationReviewer._address_reading(client, rows, rows, lambda: None, checkpoint)
-    assert client.translate.call_count == 3 and len(saved) == 1
+    assert client.translate.call_count == 10 and len(saved) == 1
     assert set(next(iter(saved.values()))['address_context'][i]['id'] for i in range(4)) == set(range(4))
     client.translate.side_effect = lambda prompt, **kwargs: address_reply(address_prompt_ids(prompt), rows)
     result = AutomaticTranslationReviewer._address_reading(client, rows, rows, lambda: None, checkpoint)
-    assert set(result) == set(range(9)) and client.translate.call_count == 5
+    assert set(result) == set(range(9)) and client.translate.call_count == 12
     assert len(saved) == 3
 
 
@@ -540,6 +604,28 @@ def test_address_syntax_retry_has_location_and_nesting_guidance_without_raw_resp
     assert 'dòng 1, cột' in retry and 'BÊN TRONG đối tượng turn_check' in retry
     assert 'code=invalid_json' in caplog.text and 'line=1' in caplog.text
     assert 'secret-do-not-log' not in retry + caplog.text
+
+
+@pytest.mark.parametrize('candidate,uses,blocked', [
+    ('Vì chính mẹ bảo con về,', [{'term': 'con', 'role': 'self'}], True),
+    ('Vì chính mẹ của con bảo con về,',
+     [{'term': 'con', 'role': 'self'}, {'term': 'con', 'role': 'self'}], False),
+    ('Vì chính mẹ của con bảo con về,', [{'term': 'con', 'role': 'self'}], True),
+    ('Mẹ bảo con về.',
+     [{'term': 'Mẹ', 'role': 'listener'}, {'term': 'con', 'role': 'self'}], True),
+])
+def test_source_owned_parent_requires_explicit_possession_when_listener_unknown(candidate, uses, blocked):
+    # Production ID66: source self=con has independent support, listener does
+    # not. A bare "mẹ" is ambiguous; an explicit owner preserves 我妈 while
+    # the existing gate verifies each occurrence of the supported self role.
+    reading = {66: {'self_address': 'con', 'listener_address': '',
+        'self_uncertain': False, 'listener_uncertain': True, 'uncertain': True,
+        'evidence': [{'id': 66, 'quote': '因为就是我妈让我回来。'}]}}
+    audit = {'semantic_verified': True, 'address_applicable': True,
+        'address_verified': True, 'address_reason': '我妈 chỉ mẹ của người nói; self đã có căn cứ.',
+        'address_uses': uses}
+    assert AutomaticTranslationReviewer._address_gate(
+        reading, 66, audit, '因为就是我妈让我回来。', candidate) is blocked
 
 
 def test_cancellation_between_address_subbatches_prevents_next_request():

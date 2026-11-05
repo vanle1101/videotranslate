@@ -71,8 +71,8 @@ def assert_worker_page(client, expected_selected):
     markup = WorkerSettingsMarkup(response.text)
     assert markup.select_attributes["aria-describedby"] == "settings-translation-workers-help"
     assert markup.label.strip() == "Luồng dịch song song"
-    assert "1 phút" in markup.help and "CPU/RAM" in markup.help
-    assert [item["attributes"]["value"] for item in markup.options] == ["1", "3", "5", "10", "15", "20"]
+    assert "mỗi video" in markup.help and "giới hạn riêng" in markup.help
+    assert [item["attributes"]["value"] for item in markup.options] == ["1", "3", "5", "10", "15", "20", "30", "40", "50"]
     assert [item["label"].strip() for item in markup.options] == [f"{value} luồng" for value in TRANSLATION_CHUNK_WORKER_OPTIONS]
     assert [item["attributes"]["value"] for item in markup.options if "selected" in item["attributes"]] == [str(expected_selected)]
 
@@ -104,7 +104,7 @@ def test_settings_returns_selected_workers_and_exact_presets(worker_api):
     result = client.get("/api/settings")
     assert result.status_code == 200
     assert result.json()["translation_chunk_workers"] == 5
-    assert result.json()["translation_chunk_worker_options"] == [1, 3, 5, 10, 15, 20]
+    assert result.json()["translation_chunk_worker_options"] == [1, 3, 5, 10, 15, 20, 30, 40, 50]
     assert env_file.read_bytes() == original
 
 
@@ -154,12 +154,13 @@ def test_worker_setting_rejected_while_processing_without_mutation(worker_api, m
     client, env_file = worker_api
     original = env_file.read_bytes()
     monkeypatch.setattr(main, "active_streaming_sessions", {
-        "active": SimpleNamespace(is_running=consumer == "running", is_editing=consumer == "editing")})
+        "active": SimpleNamespace(is_running=consumer == "running", is_editing=consumer == "editing", translation_chunk_workers=5)})
     monkeypatch.setattr(main, "active_export_tasks", {
         "export": {"status": {"exporting": "RUNNING", "cancelling": "CANCELLING"}.get(consumer, "COMPLETED")}})
     result = client.post("/api/settings", json={"translation_chunk_workers": 20})
     assert result.status_code == 409
     assert main.settings.TRANSLATION_CHUNK_WORKERS == main.settings.OPENCODE_CONCURRENCY == 5
+    assert main.active_streaming_sessions["active"].translation_chunk_workers == 5
     assert env_file.read_bytes() == original
 
 
@@ -192,8 +193,8 @@ def test_failed_atomic_persistence_preserves_file_and_active_limits(worker_api, 
 
 
 @pytest.mark.parametrize("field", ["TRANSLATION_CHUNK_WORKERS", "OPENCODE_CONCURRENCY"])
-def test_environment_rejects_worker_capacity_above_twenty(worker_api, field):
+def test_environment_rejects_worker_capacity_above_fifty(worker_api, field):
     _, env_file = worker_api
-    env_file.write_text(f"{field}=21\n", encoding="utf-8")
+    env_file.write_text(f"{field}=51\n", encoding="utf-8")
     with pytest.raises(ValidationError):
         Settings(_env_file=env_file)

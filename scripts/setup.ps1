@@ -23,7 +23,7 @@ if (-not (Test-Path -LiteralPath '.env')) {
     Copy-Item -LiteralPath '.env.example' -Destination '.env'
 }
 if (-not $SkipModel) {
-    & $pythonExe -B -c "from faster_whisper.utils import download_model; from config import settings; p=settings.WORKSPACE_DIR/'models'/('faster-whisper-'+settings.WHISPER_MODEL_SIZE); ready=all((p/n).is_file() and (p/n).stat().st_size>0 for n in ('model.bin','config.json','tokenizer.json','vocabulary.txt')); print(p if ready else download_model(settings.WHISPER_MODEL_SIZE, output_dir=str(p)))"
+    & $pythonExe -B -c "from faster_whisper.utils import download_model; from config import settings; p=settings.WORKSPACE_DIR/'models'/('faster-whisper-'+settings.WHISPER_MODEL_SIZE); ready=all((p/n).is_file() and (p/n).stat().st_size>0 for n in ('model.bin','config.json','tokenizer.json')) and any((p/n).is_file() and (p/n).stat().st_size>0 for n in ('vocabulary.txt','vocabulary.json')); print(p if ready else download_model(settings.WHISPER_MODEL_SIZE, output_dir=str(p)))"
     if ($LASTEXITCODE -ne 0) { throw 'Whisper download failed. Check Internet connectivity and rerun setup.bat.' }
 }
 & $pythonExe -B (Join-Path $PSScriptRoot 'check_runtime.py')

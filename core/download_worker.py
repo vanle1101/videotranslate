@@ -10,6 +10,7 @@ import shutil
 import subprocess
 import sys
 import time
+from collections import deque
 from pathlib import Path
 from email.utils import parsedate_to_datetime
 from urllib.parse import urlsplit
@@ -17,7 +18,8 @@ from urllib.parse import urlsplit
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from core.downloader import friendly_download_error
 from core.douyin_cookies import DouyinCookieError, cookie_policy, is_douyin_url, load_douyin_cookiejar
-from core.douyin_resolver import DouyinResolveError, open_public_media, resolve_douyin
+from core.douyin_resolver import DouyinResolveError, open_public_media, resolve_douyin, _retry_after_seconds, _video_id
+from core.download_ranges import adaptive_chunks, RangeTransferError
 
 
 class MediaDownloadError(RuntimeError):
@@ -43,8 +45,11 @@ _SAFE_ERROR_TYPES = {"TimeoutError", "ConnectionResetError", "IncompleteRead", "
 
 
 class _TransferIssue(Exception):
-    def __init__(self, code, status_code=None):
+    def __init__(self, code, status_code=None, *, retry_after=None):
         self.code, self.status_code = code, status_code
+        # Keep only the resolver's already-sanitized value.  A raw
+        # Retry-After header must never reach the worker's sleep loop.
+        self.retry_after = _retry_after_seconds(retry_after)
 
 
 def _disk_error(error):
@@ -70,6 +75,10 @@ def _diagnostic(send, error, attempt, downloaded_bytes=0):
              "downloaded_bytes": downloaded_bytes if type(downloaded_bytes) is int and downloaded_bytes >= 0 else 0}
     if isinstance(status, int) and not isinstance(status, bool) and 100 <= status <= 599:
         event["status_code"] = status
+    retry_after = getattr(error, "retry_after", None)
+    if (isinstance(retry_after, (int, float)) and not isinstance(retry_after, bool)
+            and 0 <= retry_after <= 3601):
+        event["retry_after_seconds"] = retry_after
     send(event)
     return code, event.get("status_code")
 
@@ -80,6 +89,10 @@ def _positive_int(value):
         return number if number > 0 else None
     except (ValueError, TypeError, OverflowError):
         return None
+
+
+def _bounded_retry_after(value):
+    return _retry_after_seconds(value)
 
 
 def _validators(headers):
@@ -220,18 +233,51 @@ def download_resolved_video(info, prefix, send):
     started = last_emit = time.monotonic()
     starting_bytes = downloaded
     checkpoint_bytes, checkpoint_time = downloaded, time.monotonic()
+    transfer_started = time.monotonic()
+    transfer_bytes = 0
+    network_seconds = disk_seconds = 0.0
+    first_byte_seconds = None
+    peak_speed = 0.0
+    retry_count = 0
+    strategy, connections = "single-stream", 1
+    range_enabled = True
+    samples = deque([(transfer_started, 0)])
+    requests = []
+    transports = []
+
+    def open_media(url, headers=None):
+        requests.append(1)
+        opened = open_public_media(url, headers=headers) if headers else open_public_media(url)
+        telemetry = getattr(opened, "telemetry", None)
+        if isinstance(telemetry, dict):
+            transports.append(telemetry)
+        return opened
+
+    def observe_ranges(selected, count, probing):
+        nonlocal strategy, connections
+        strategy, connections = selected, count
+        report("Đang đo tốc độ tải Range…" if probing else None)
     stage_base = "Đang tải bản gốc Douyin" if chosen.get("original") else "Đang tải video Douyin"
     if chosen.get("height"):
         stage_base += f" {chosen['height']}p"
 
     def report(stage=None, *, waiting=False):
-        elapsed = max(time.monotonic() - started, 0.01)
-        speed = None if waiting else max(0, downloaded - starting_bytes) / elapsed
+        nonlocal peak_speed
+        now = time.monotonic()
+        elapsed = max(now - transfer_started, .01)
+        average = transfer_bytes / elapsed
+        samples.append((now, transfer_bytes))
+        while len(samples) > 2 and samples[1][0] < now - 3:
+            samples.popleft()
+        speed = None if waiting else (transfer_bytes - samples[0][1]) / max(now - samples[0][0], .01)
+        peak_speed = max(peak_speed, speed or 0)
         message = stage or stage_base + (f" ({total / 1024**2:,.0f} MB)" if total else "")
         send({"kind": "progress", "source": "douyin-public", "phase": "download", "stage": message,
               "progress_pct": round(min(100, downloaded * 100 / total), 1) if total else None,
               "downloaded_bytes": downloaded, "total_bytes": total, "speed": speed,
-              "eta": (total - downloaded) / speed if total and speed else None})
+              "average_speed": average, "strategy": strategy, "connections": connections,
+              "retry_count": retry_count,
+              "eta": (total - downloaded) / average if total and average and not waiting else None})
 
     def restart(reason):
         nonlocal downloaded, total, validators, digest, starting_bytes
@@ -249,20 +295,32 @@ def download_resolved_video(info, prefix, send):
     elif checkpoint:
         report(f"Đã khôi phục {downloaded / 1024**2:,.1f} MB; đang tiếp tục tải bản đã chọn…", waiting=True)
 
-    retry_errors = (DouyinResolveError, OSError, http.client.HTTPException, _TransferIssue)
+    retry_errors = (DouyinResolveError, OSError, http.client.HTTPException, _TransferIssue, RangeTransferError)
     last_code, last_status = "transport_error", None
+    # A rate-limited CDN endpoint remains the same entity/candidate. Rotating
+    # to another signed URL on every 429 can turn a temporary server decision
+    # into a burst against all mirrors and also discard a useful Retry-After.
+    retry_url_index = None
     for attempt in range(MAX_MEDIA_RETRIES + 1):
+        retry_count = attempt
         if total and downloaded == total:
             break
         response = None
+        sleep_after = None
         try:
             can_resume = downloaded > 0 and any(validators.values())
             request_headers = {"Range": f"bytes={downloaded}-", "If-Range": validators["etag"] or validators["last_modified"]} if can_resume else None
-            url = urls[attempt % len(urls)]
-            response = open_public_media(url, headers=request_headers) if request_headers else open_public_media(url)
+            current_url_index = retry_url_index if retry_url_index is not None else attempt % len(urls)
+            retry_url_index = None
+            url = urls[current_url_index]
+            response = open_media(url, headers=request_headers)
             content_type = response.headers.get("Content-Type", "").split(";", 1)[0].strip().lower()
             if response.status not in (200, 206):
-                raise _TransferIssue("http_error", response.status)
+                retry_after = getattr(response, "retry_after", None)
+                if retry_after is None and response.status == 429:
+                    retry_after = _bounded_retry_after(response.headers.get("Retry-After"))
+                raise _TransferIssue("http_error", response.status,
+                                     retry_after=retry_after)
             if content_type not in _MEDIA_TYPES:
                 raise _TransferIssue("content_type", response.status)
             length = _positive_int(response.headers.get("Content-Length"))
@@ -292,7 +350,10 @@ def download_resolved_video(info, prefix, send):
                     raise _TransferIssue("resource_changed", 200)
                 total = length if length is not None else (total if downloaded else None)
                 response_end = total
-            chunks = iter(response.iter_content(256 * 1024))
+            chunks = iter(adaptive_chunks(response, total=total, offset=downloaded,
+                                         etag=validators.get("etag") if downloaded else _validators(response.headers)["etag"],
+                                         opener=open_media, observe=observe_ranges)
+                          if range_enabled and response.status == 200 and not downloaded else response.iter_content(256 * 1024))
             prefix_tail = b""
             if downloaded and response.status == 200:
                 # With no trusted HTTP validator (or an ignored Range), prove
@@ -342,7 +403,11 @@ def download_resolved_video(info, prefix, send):
                             if prefix_tail:
                                 chunk, prefix_tail = prefix_tail, b""
                             else:
-                                chunk = next(chunks)
+                                read_started = time.monotonic()
+                                try:
+                                    chunk = next(chunks)
+                                finally:
+                                    network_seconds += time.monotonic() - read_started
                         except StopIteration:
                             break
                         except retry_errors as error:
@@ -350,25 +415,35 @@ def download_resolved_video(info, prefix, send):
                             break
                         if not chunk:
                             continue
+                        if first_byte_seconds is None:
+                            first_byte_seconds = time.monotonic() - transfer_started
                         if response_end and downloaded + len(chunk) > response_end:
                             network_error = _TransferIssue("length_mismatch", response.status)
                             break
+                        write_started = time.monotonic()
                         written = target.write(chunk)
+                        disk_seconds += time.monotonic() - write_started
                         if written != len(chunk):
                             raise OSError(errno.EIO, "Incomplete local write")
                         digest.update(chunk)
                         downloaded += written
+                        transfer_bytes += written
                         if (downloaded - checkpoint_bytes >= 4 * 1024 * 1024
                                 or time.monotonic() - checkpoint_time >= 1
                                 or not checkpoint_bytes):
+                            write_started = time.monotonic()
                             target.flush()
                             _save_checkpoint(checkpoint_path, partial, video_id=info["id"],
                                              format_identity=format_identity, total=total, downloaded=downloaded,
                                              validators=validators, digest=digest)
                             checkpoint_bytes, checkpoint_time = downloaded, time.monotonic()
+                            disk_seconds += time.monotonic() - write_started
                         if time.monotonic() - last_emit >= 0.2:
                             report()
                             last_emit = time.monotonic()
+                    write_started = time.monotonic()
+                    target.flush()
+                    disk_seconds += time.monotonic() - write_started
             except OSError as error:
                 raise _disk_error(error) from None
             if network_error:
@@ -381,10 +456,33 @@ def download_resolved_video(info, prefix, send):
             error.downloaded_bytes = downloaded
             raise
         except retry_errors as error:
+            status_code = getattr(error, "status_code", None)
+            # HTTP 403 is an access/authentication decision. Retrying the same
+            # signed URL (or falling through to yt-dlp) cannot repair it and
+            # may repeatedly trigger service-side protection.
+            if status_code == 403:
+                _diagnostic(send, error, attempt, downloaded)
+                resumable = _save_checkpoint(checkpoint_path, partial, video_id=info["id"],
+                                            format_identity=format_identity, total=total, downloaded=downloaded,
+                                            validators=validators, digest=digest)
+                raise MediaDownloadError(
+                    "Máy chủ Douyin từ chối truy cập video (HTTP 403). Hãy kiểm tra quyền truy cập hoặc cookie rồi thử lại.",
+                    resumable=resumable, code="http_error") from None
+            if status_code == 429:
+                retry_url_index = current_url_index
+            if isinstance(error, RangeTransferError) or strategy == "parallel-range":
+                range_enabled = False
+                strategy, connections = "single-stream", 1
             last_code, last_status = _diagnostic(send, error, attempt, downloaded)
+            if last_status == 429:
+                sleep_after = getattr(error, "retry_after", None)
             resumable = _save_checkpoint(checkpoint_path, partial, video_id=info["id"],
                                         format_identity=format_identity, total=total, downloaded=downloaded,
                                         validators=validators, digest=digest)
+            if sleep_after is not None and sleep_after > 60:
+                raise MediaDownloadError(
+                    "Máy chủ yêu cầu chờ trước khi tải tiếp (HTTP 429). Đã dừng kết nối; hãy thử lại sau thời gian máy chủ quy định.",
+                    resumable=resumable, code="http_error") from None
             if attempt == MAX_MEDIA_RETRIES:
                 if last_code in {"read_timeout", "connection_timeout"}:
                     message = "Máy chủ video phản hồi quá chậm sau nhiều lần kết nối lại."
@@ -406,7 +504,11 @@ def download_resolved_video(info, prefix, send):
                 response.close()
         # This worker runs in a killable child process. Short bounded backoff
         # never delays the parent's explicit Stop/cancellation signal.
-        time.sleep(min(0.5 * 2**attempt, 4.0))
+        # Long server restrictions were deferred above. Short valid waits
+        # take precedence over the normal bounded exponential backoff.
+        delay = max(sleep_after, min(0.5 * 2**attempt, 4.0)) if sleep_after is not None else min(0.5 * 2**attempt, 4.0)
+        time.sleep(delay)
+    transfer_elapsed = max(time.monotonic() - transfer_started, .01)
     send({"kind": "progress", "source": "douyin-public", "phase": "prepare",
           "stage": "Đã tải xong; đang kiểm tra tệp video…", "progress_pct": None})
     duration = verify_video(partial)
@@ -418,8 +520,18 @@ def download_resolved_video(info, prefix, send):
         checkpoint_path.unlink(missing_ok=True)
     except OSError as error:
         raise _disk_error(error) from None
+    elapsed = max(time.monotonic() - transfer_started, .01)
     return {"file_path": str(output), "title": info.get("title") or f"Douyin {info['id']}",
-            "duration": duration, "source": "douyin-public"}
+            "duration": duration, "source": "douyin-public",
+            "download_metrics": {"downloaded_bytes": transfer_bytes, "file_bytes": downloaded,
+                                 "elapsed_seconds": transfer_elapsed, "end_to_end_seconds": elapsed,
+                                 "network_read_seconds": network_seconds,
+                                 "disk_write_seconds": disk_seconds, "ttfb_seconds": first_byte_seconds,
+                                 "average_speed": transfer_bytes / transfer_elapsed, "peak_speed": peak_speed,
+                                 "retry_count": retry_count, "http_requests": len(requests),
+                                 "strategy": strategy, "connections": connections,
+                                 "wire_bytes": sum(item.get("bytes_received", 0) for item in transports),
+                                 "transport_samples": transports}}
 
 
 def progress_payload(data):
@@ -526,11 +638,20 @@ def main():
                     downloaded = checkpoint["downloaded_bytes"] if checkpoint else 0
                     _diagnostic(send, error, 0, downloaded)
                     if checkpoint:
+                        restriction = (f"Douyin chưa cho phép truy cập video (HTTP {error.status_code}). "
+                                       if error.status_code in {403, 429} else "Chưa lấy lại được thông tin bản video đã chọn. ")
                         raise MediaDownloadError(
-                            f"Chưa lấy lại được thông tin bản video đã chọn. Đã giữ {downloaded / 1024**2:,.1f} MB; bấm Bắt đầu dịch để thử tải tiếp.",
+                            restriction + f"Đã giữ {downloaded / 1024**2:,.1f} MB; hãy thử lại khi nguồn cho phép tải tiếp.",
                             resumable=True,
                         ) from None
                     raise MediaDownloadError("Chưa lấy lại được nguồn và phần tải cũ không đủ điều kiện nối tiếp. Hãy thử lại để tải từ đầu.") from None
+                # Respect feed-level access/rate decisions without losing
+                # the storage-validated resume state checked above.
+                if error.status_code in {403, 429}:
+                    _diagnostic(send, error, 0)
+                    raise MediaDownloadError(
+                        f"Douyin chưa cho phép truy cập video (HTTP {error.status_code}). Hãy chờ và kiểm tra quyền truy cập rồi thử lại.",
+                        code="http_error") from None
                 _diagnostic(send, error, 0)
                 send({"kind": "progress", "phase": "resolve", "source": "yt-dlp",
                       "stage": "API công khai chưa lấy được video; đang thử trình tải dự phòng…", "progress_pct": None})
@@ -538,8 +659,10 @@ def main():
                 result = download_resolved_video(info, prefix, send)
                 send({"kind": "result", "result": result})
                 return 0
-        with single_video_downloader(options, url) as ydl:
-            info = ydl.extract_info(url, download=True)
+        video_id = _video_id(url) if is_douyin_url(url) else None
+        fallback_url = f"https://www.douyin.com/video/{video_id}" if video_id else url
+        with single_video_downloader(options, fallback_url) as ydl:
+            info = ydl.extract_info(fallback_url, download=True)
             if not info or info.get("_type") in {"playlist", "multi_video"}:
                 raise ValueError("unsupported url")
             output = Path(ydl.prepare_filename(info))

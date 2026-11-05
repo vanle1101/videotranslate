@@ -375,3 +375,41 @@ def test_stale_probe_cannot_clear_replacement_at_same_output_name(saved_project,
             await checking
 
     asyncio.run(run())
+
+
+def test_live_output_details_run_once_off_loop_with_detached_snapshot(saved_project, monkeypatch):
+    session = saved_project
+    active_streaming_sessions[session.task_id] = session
+    entered, release = threading.Event(), threading.Event()
+    original = main.session_output_details
+    calls = []
+    loop_thread = threading.get_ident()
+    def details(snapshot):
+        calls.append(threading.get_ident())
+        assert snapshot is not session
+        assert snapshot.segments[0] is not session.segments[0]
+        entered.set()
+        assert release.wait(3)
+        assert snapshot.segments[0].final_vi == "Lời đã sửa."
+        return original(snapshot)
+    monkeypatch.setattr(main, "session_output_details", details)
+    monkeypatch.setattr(main, "list_saved_sessions", lambda **kwargs: [])
+    async def run():
+        pending = asyncio.create_task(main.list_tasks())
+        try:
+            for _ in range(100):
+                if entered.is_set():
+                    break
+                await asyncio.sleep(.005)
+            assert entered.is_set()
+            session.segments[0].final_vi = ""
+            session.segments[0].verification["status"] = "changed"
+            release.set()
+            result = await pending
+            live = next(row for row in result["tasks"] if row["task_id"] == session.task_id)
+            assert not live["final_output_blocked"]
+            assert calls and calls[0] != loop_thread and len(calls) == 1
+        finally:
+            release.set()
+            await pending
+    asyncio.run(run())

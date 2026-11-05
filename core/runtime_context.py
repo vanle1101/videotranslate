@@ -11,6 +11,8 @@ from typing import Callable, Optional
 class ExecutionContext:
     run_id: str = "unscoped"
     cancel_check: Optional[Callable[[], bool]] = field(default=None, repr=False, compare=False)
+    ai_concurrency: Optional[int] = None
+    admission_check: Optional[Callable[[], bool]] = field(default=None, repr=False, compare=False)
 
 
 _execution: ContextVar[ExecutionContext] = ContextVar("studio_execution", default=ExecutionContext())
@@ -44,7 +46,7 @@ def current_execution_context() -> ExecutionContext:
 
 
 @contextmanager
-def execution_context(run_id: str, cancel_check=None):
+def execution_context(run_id: str, cancel_check=None, *, ai_concurrency=None, admission_check=None):
     """Use around asyncio.to_thread or inside its callable; reset after work.
 
     asyncio.to_thread copies ContextVars. For run_in_executor, explicitly use
@@ -53,7 +55,11 @@ def execution_context(run_id: str, cancel_check=None):
     safe_id = run_id if isinstance(run_id, str) and re.fullmatch(r"[A-Za-z0-9_-]{1,64}", run_id) else "unscoped"
     if cancel_check is not None and not callable(cancel_check):
         raise TypeError("cancel_check must be callable")
-    token = _execution.set(ExecutionContext(safe_id, cancel_check))
+    if ai_concurrency is not None and (type(ai_concurrency) is not int or not 1 <= ai_concurrency <= 50):
+        raise ValueError("ai_concurrency must be between 1 and 50")
+    if admission_check is not None and not callable(admission_check):
+        raise TypeError("admission_check must be callable")
+    token = _execution.set(ExecutionContext(safe_id, cancel_check, ai_concurrency, admission_check))
     try:
         yield _execution.get()
     finally:

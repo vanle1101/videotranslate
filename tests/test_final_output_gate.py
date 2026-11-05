@@ -134,9 +134,9 @@ def test_durable_history_and_reload_preserve_uncertain_rows_without_false_full_r
     assert "2 câu" in listed["missing_media"]
     main.active_streaming_sessions.clear()
     restored = store.restore_saved_session(sess.task_id)
-    assert restored.get_progress()["status"] == "PREPARED"
+    assert restored.get_progress()["status"] == "FAILED" and restored.can_retry
     assert restored.get_progress()["content_review_state"] == "REVIEW_REQUIRED"
-    assert all(row.status == "READY" and row.needs_review and row.audio_path is None
+    assert all(row.status == "FAILED" and row.failed_stage == "TRANSLATING" and row.needs_review and row.audio_path is None
                and row.confirmed_silence is False for row in restored.segments.values())
     assert [row.text_zh for row in restored.segments.values()] == ["那你呢", "我"]
     assert all(row.verification == {"status": "unresolved", "semantic_verified": False}
@@ -163,9 +163,10 @@ def test_saved_preview_with_only_empty_unresolved_source_speech_is_review_requir
     assert sess.get_progress()["content_review_state"] == "REVIEW_REQUIRED"
     main.active_streaming_sessions.clear()
     restored = store.restore_saved_session(sess.task_id)
-    assert restored.get_progress()["status"] == "PREPARED" and not restored.can_translate_full
-    assert not restored.error and not restored._startup_failed
-    assert restored.get_progress()["can_review"]
+    assert restored.get_progress()["status"] == "FAILED" and not restored.can_translate_full
+    assert restored.error and restored.can_retry and not restored._startup_failed
+    assert not restored.get_progress()["can_review"]
+    assert all(row.status == "FAILED" and row.failed_stage == "TRANSLATING" for row in restored.segments.values())
     assert all(row.needs_review and not row.confirmed_silence for row in restored.segments.values())
 
 
@@ -183,10 +184,18 @@ def test_unresolved_preview_restore_keeps_future_lookahead_and_review_scopes_to_
     sess.persist()
     main.active_streaming_sessions.clear()
     restored = store.restore_saved_session(sess.task_id)
-    assert restored.get_progress()["status"] == "PREPARED"
-    assert restored.get_progress()["can_review"]
+    assert restored.get_progress()["status"] == "FAILED" and restored.can_retry
+    assert not restored.get_progress()["can_review"]
     assert not restored.can_translate_full
     assert restored.segments[2].to_dict() == before
+
+    assert [row.id for row in restored._idle_review_targets()] == [0, 1]
+    # Retry now owns the missing drafts. Once it has restored the prefix, a
+    # later explicit review must still exclude untouched lookahead rows.
+    for row in restored._idle_review_targets():
+        assert row.status == "FAILED" and row.failed_stage == "TRANSLATING"
+        row.status, row.failed_stage, row.error = "READY", None, None
+    restored.error = None
 
     options_seen = []
 
@@ -201,7 +210,8 @@ def test_unresolved_preview_restore_keeps_future_lookahead_and_review_scopes_to_
         await restored.review_task
 
     asyncio.run(run())
-    assert options_seen == [{"regenerate_audio": True, "force_review": True, "segment_ids": {0, 1}}]
+    assert options_seen == [{"regenerate_audio": True, "force_review": True,
+                             "segment_ids": {0, 1}, "fast_local": False}]
     assert restored.segments[2].to_dict() == before
     assert restored.get_progress()["status"] == "PREPARED" and not restored.can_translate_full
 

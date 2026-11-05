@@ -210,8 +210,10 @@ def check_minimum_layout(window):
     return results
 
 
-def check_original_segment_playback(page):
+def check_original_segment_playback(page, folder):
     """Listen to a review row through real Qt media, isolating task creation only."""
+    source_file = Path(folder) / 'video thử H264 & AAC.mp4'
+    javascript(page, 'window.__auditionFilePath = ' + json.dumps(str(source_file)) + ';')
     javascript(page, '''
         window.__auditionFetch = window.fetch;
         window.__auditionSocket = window.WebSocket;
@@ -232,6 +234,14 @@ def check_original_segment_playback(page):
             }
             if (url === '/api/tasks') return new Response(JSON.stringify({tasks: []}));
             if (url === '/api/tasks/qt-source-audition/stop') return new Response(JSON.stringify({status: 'ok'}));
+            if (url === '/api/preview' && JSON.parse(options.body).task_id === 'qt-source-audition') {
+                // The task itself is synthetic; compatibility seeks still use
+                // the real preview endpoint against the generated source.
+                const body = JSON.parse(options.body);
+                delete body.task_id;
+                body.file_path = window.__auditionFilePath;
+                return window.__auditionFetch(url, {...options, body: JSON.stringify(body)});
+            }
             return window.__auditionFetch(url, options);
         };
         window.WebSocket = class {
@@ -402,7 +412,11 @@ def check_progress_and_logs(page):
                 return new Response(JSON.stringify({task_id: 'qt-progress-fixture', video_url: null}));
             }
             if (url === '/api/tasks') return new Response(JSON.stringify({tasks: [window.__progressTask]}));
-            if (url === '/api/tasks/qt-progress-fixture/stop') return new Response(JSON.stringify({status: 'ok'}));
+            if (url === '/api/tasks/qt-progress-fixture/stop') {
+                window.__progressTask = {...window.__progressTask, phase: 'stopped', status: 'STOPPED',
+                    stage: 'Đã dừng tác vụ', can_pause: false, can_stop: false};
+                return new Response(JSON.stringify({status: 'ok'}));
+            }
             if (url.startsWith('/api/diagnostics/logs?')) return new Response(JSON.stringify({logs: window.__logFixture}));
             return window.__progressFetch(url, options);
         };
@@ -680,9 +694,22 @@ def check_voice_catalog_and_preview(page, folder):
         ''')
 
 
-def check_transcript_editor(window, screenshot_path=None):
+def check_transcript_editor(window, folder, screenshot_path=None):
     """Exercise actual Qt DOM caret placement, drafts, revision save and wide layouts."""
+    import wave
+    from urllib.parse import quote
+
+    # A ready speech row has generated audio. Rows without audio are now
+    # correctly inspected as original source, with translated captions hidden.
+    fixture_audio = Path(folder) / 'transcript-fixture.wav'
+    with wave.open(str(fixture_audio), 'wb') as sample:
+        sample.setnchannels(1)
+        sample.setsampwidth(2)
+        sample.setframerate(16000)
+        sample.writeframes(b'\x00\x00' * 16000 * 10)
+    audio_url = '/api/local-file?path=' + quote(fixture_audio.as_posix(), safe='')
     page = window.web_view.page()
+    javascript(page, 'window.__transcriptAudioUrl = ' + json.dumps(audio_url) + ';')
     javascript(page, """
         window.__transcriptFetch = window.fetch;
         window.__transcriptSocket = window.WebSocket;
@@ -691,7 +718,8 @@ def check_transcript_editor(window, screenshot_path=None):
         window.__transcriptErrorHandler = event => window.__transcriptErrors.push({message:event.message, file:event.filename, line:event.lineno, stack:event.error?.stack});
         window.addEventListener('error', window.__transcriptErrorHandler);
         window.__transcriptSegment = {id: 0, start: 0, end: 10, duration: 10,
-            status: 'READY', text_zh: '字幕测试', final_vi: 'Bấm vào chữ cần sửa trong câu này.', audio_url: null, revision: 0};
+            status: 'READY', text_zh: '字幕测试', final_vi: 'Bấm vào chữ cần sửa trong câu này.',
+            audio_url: window.__transcriptAudioUrl, revision: 0};
         window.fetch = async (url, options) => {
             if (url === '/api/streaming/start-url') return new Response(JSON.stringify({task_id: 'qt-transcript'}));
             if (url === '/api/tasks') return new Response(JSON.stringify({tasks: []}));
@@ -924,10 +952,10 @@ def main():
         assert upload['requests'][0]['voice_id'] == result['voice'], upload
         assert not upload['alerts'] and upload['error'] == 'SMOKE_EXPECTED' and upload['status'] == 'FAILED', upload
         progress_logs = check_progress_and_logs(window.web_view.page())
-        transcript_smoke = check_transcript_editor(window)
+        transcript_smoke = check_transcript_editor(window, media_folder.name)
         layout = check_minimum_layout(window)
         playback = check_media_playback(window.web_view.page(), media_folder.name)
-        original_playback = check_original_segment_playback(window.web_view.page())
+        original_playback = check_original_segment_playback(window.web_view.page(), media_folder.name)
         bgm = check_bgm_playback(window.web_view.page(), media_folder.name, Path(media_folder.name).name)
         javascript(window.web_view.page(), "document.getElementById('tab-models').click()")
         wait(300)

@@ -16,6 +16,7 @@ from core.audio_ducking import PremiumAudioMixer
 from core.engines.alignment.timing_aligner import TimingBudgetAligner
 from core.engines.tts.edge_fallback import EdgeTTSFallbackEngine
 from core.streaming.segmenter import AudioSegmenter
+from core.streaming.export import HQExporter
 from core.subtitle import SubtitleGenerator
 from core.video_composer import VideoComposer
 
@@ -86,8 +87,30 @@ def test_compose_unicode_paths_burns_subtitles_and_keeps_video_length(media, mas
     assert {stream["codec_name"] for stream in metadata["streams"]} == {"h264", "aac"}
     assert float(metadata["format"]["duration"]) == pytest.approx(1.2, abs=0.12)
     frame = ffmpeg("-ss", "0.4", "-i", output, "-frames:v", "1", "-f", "rawvideo", "-pix_fmt", "rgb24", "pipe:1").stdout
-    # The source is black; the compact white panel proves captions burned in.
-    assert sum(min(r, g, b) > 180 for r, g, b in zip(frame[::3], frame[1::3], frame[2::3])) > 10
+    # The source is black; the explicitly white fixture panel proves captions burned in.
+    assert sum(r > 180 and g > 180 and b > 180
+               for r, g, b in zip(frame[::3], frame[1::3], frame[2::3])) > 10
+
+
+def test_compose_restores_positive_source_video_timestamp_offset(media):
+    folder, _, bgm, _, subtitles = media
+    source = folder / "video delayed from audio.mp4"
+    ffmpeg("-f", "lavfi", "-i", "color=c=black:s=180x320:r=15:d=1.2",
+           "-f", "lavfi", "-i", "sine=frequency=440:duration=1.6",
+           "-filter_complex", "[0:v]setpts=PTS+0.4/TB[v]", "-map", "[v]", "-map", "1:a",
+           "-c:v", "libx264", "-threads", "1", "-pix_fmt", "yuv420p", "-c:a", "aac",
+           "-shortest", source)
+    source_metadata = probe(source)
+    source_video = next(row for row in source_metadata["streams"] if row["codec_type"] == "video")
+    assert float(source_video["start_time"]) == pytest.approx(.4, abs=.02)
+
+    output = folder / "restored timeline.mp4"
+    VideoComposer().compose(source, bgm, subtitles, output)
+    output_metadata = probe(output)
+    output_video = next(row for row in output_metadata["streams"] if row["codec_type"] == "video")
+    assert float(output_video["start_time"]) == pytest.approx(0, abs=.02)
+    assert float(output_metadata["format"]["duration"]) == pytest.approx(1.6, abs=.12)
+    HQExporter.validate_output(output, 1.6)
 
 
 def test_missing_subtitles_reports_failure_instead_of_silent_fallback(media):

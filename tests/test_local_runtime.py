@@ -7,9 +7,10 @@ import subprocess
 import sys
 import tempfile
 import threading
+import wave
 from types import SimpleNamespace
 import unittest
-from unittest.mock import Mock, patch
+from unittest.mock import AsyncMock, Mock, patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
@@ -113,10 +114,11 @@ class ServiceStartupTests(unittest.TestCase):
         )}
         progress = []
         with patch.object(services, "settings", self.config), patch.dict(sys.modules, blocked), \
-                patch.object(hardware, "detect_hardware", return_value={"cuda_available": False}), \
+                patch.object(hardware, "detect_hardware", return_value={"cuda_available": None}) as detect, \
                 patch.object(services.subprocess, "run", return_value=SimpleNamespace(returncode=0)) as run, \
                 patch.object(services.urllib.request, "urlopen", side_effect=AssertionError("Unexpected network call")):
             status = self.manager.prewarm_components(lambda pct, msg: progress.append(pct))
+        detect.assert_called_once_with(probe_native=False)
         self.assertTrue(status["ffmpeg"] and status["ffprobe"])
         self.assertFalse(status["prewarm_enabled"])
         self.assertTrue(status["translation_configured"])
@@ -243,13 +245,17 @@ class ServiceStartupTests(unittest.TestCase):
             self.assertTrue(ready.wait(2))
             with tempfile.TemporaryDirectory(prefix="shutdown_export_") as temporary:
                 audio = Path(temporary) / "seg_0.wav"
-                audio.write_bytes(b"voice still owned by export")
+                with wave.open(str(audio), "wb") as wav:
+                    wav.setparams((1, 2, 24000, 0, "NONE", "not compressed"))
+                    wav.writeframes(b"\x01\x00" * 24000)
+                audio_before = audio.read_bytes()
                 segment = SegmentItem(0, 0, 1, 1)
                 segment.status = "READY"
                 segment.final_vi = "Xin chào"
                 segment.audio_path = str(audio)
                 session = SimpleNamespace(task_id="shutdown-fixture", segments={0: segment},
-                    video_path=Path(temporary) / "input.mp4", total_duration=1,
+                    video_path=Path(temporary) / "input.mp4", total_duration=1, initialized=True,
+                    warnings=[], report_progress=AsyncMock(),
                     is_running=False, error=None, visual_translation=False, screen_texts=[])
 
                 def stop():
@@ -265,7 +271,7 @@ class ServiceStartupTests(unittest.TestCase):
                         if kwargs["cancel_check"]() or emergency_exit.wait(.01):
                             break
                     self.assertTrue(kwargs["cancel_check"]())
-                    self.assertEqual(audio.read_bytes(), b"voice still owned by export")
+                    self.assertEqual(audio.read_bytes(), audio_before)
                     events.append("read_after_cancel")
                     events.append("export_finished")
                     raise RuntimeError("cancel acknowledged")

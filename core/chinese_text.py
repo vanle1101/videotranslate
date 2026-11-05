@@ -72,6 +72,34 @@ def _small_chinese_integer(text):
     return None
 
 
+def numeric_boundary_anchor(text, observed):
+    """Match exact year/age spellings only to locate a neighbouring row.
+
+    This is not OCR source approval or ASR consensus. The two bounded forms
+    were observed in spanning subtitles: 今年十九/今年19 and
+    一九八二年出生/1982年出生. Names, signs, other units and unequal values
+    remain untouched; the original evidence string is never normalized.
+    """
+    if text in observed:
+        return text
+    number = None
+    if text.startswith("今年"):
+        number = _small_chinese_integer(text[2:])
+        alternative = "今年" + number if number is not None else None
+    elif re.fullmatch(r"[零〇一二三四五六七八九]{4}年出生", text):
+        digits = {char: str(index) for index, char in enumerate("零一二三四五六七八九")}
+        digits["〇"] = "0"
+        alternative = "".join(digits[char] for char in text[:4]) + "年出生"
+    else:
+        alternative = None
+    numeric = "0-9零〇一二三四五六七八九十百千万亿两点"
+    if alternative is not None and re.search(
+            r"(?<![" + numeric + r".+\-/%])" + re.escape(alternative)
+            + r"(?![" + numeric + r".%])", observed):
+        return alternative
+    return text
+
+
 def _standalone_audio_percentage(raw):
     """Match an entire ordinary whole 0–100 percentage, never a name/token suffix."""
     match = re.fullmatch(

@@ -8,15 +8,20 @@ See THIRD_PARTY_NOTICES.md for the upstream notice. No upstream code is executed
 import http.client
 import ipaddress
 import json
+import math
 import re
 import socket
 import ssl
 import time
+from email.utils import parsedate_to_datetime
 from urllib.parse import parse_qs, urlencode, urljoin, urlsplit, urlunsplit
 
 
 TIMEOUT = 6
 MEDIA_READ_TIMEOUT = 30
+# DNS can return many CDN addresses. Give the whole address set a bounded
+# budget instead of paying the connect timeout once per address.
+ADDRESS_FALLBACK_BUDGET = TIMEOUT * 2
 MAX_JSON_BYTES = 2 * 1024 * 1024
 MAX_REDIRECTS = 4
 SHARE_HOSTS = frozenset({"douyin.com", "www.douyin.com", "v.douyin.com",
@@ -39,7 +44,7 @@ class DouyinResolveError(RuntimeError):
     """A sanitized message that can be shown in Studio."""
 
     def __init__(self, message, *, code="resolve_failed", status_code=None,
-                 error_type=None, stage=None):
+                 error_type=None, stage=None, retry_after=None):
         super().__init__(message)
         # Only fixed diagnostic labels are supplied here, never a raw upstream
         # exception, response body, or signed media URL.
@@ -47,6 +52,50 @@ class DouyinResolveError(RuntimeError):
         self.status_code = status_code
         self.error_type = error_type
         self.stage = stage
+        # Keep restrictions numeric and bounded. The worker honors short
+        # waits and defers long waits rather than sleeping beyond its watchdog.
+        self.retry_after = _retry_after_seconds(retry_after)
+
+
+def _retry_after_seconds(value):
+    """Return seconds, with a sentinel for waits longer than one hour.
+
+    Never discard a valid long restriction and retry immediately. The worker
+    defers such a request instead of sleeping beyond its watchdog budget.
+    """
+    try:
+        if isinstance(value, bool):
+            return None
+        raw = str(value).strip()
+        if len(raw) > 128:
+            return None
+        if re.fullmatch(r"\d+", raw):
+            seconds = int(raw)
+        else:
+            date = parsedate_to_datetime(raw)
+            if date.tzinfo is None:
+                return None
+            seconds = max(0, math.ceil(date.timestamp() - time.time()))
+    except (TypeError, ValueError, OverflowError):
+        return None
+    return min(seconds, 3601) if seconds >= 0 else None
+
+
+def _safe_url(url):
+    """Keep endpoint identity for diagnostics while removing signed queries."""
+    try:
+        parsed = urlsplit(url)
+        # Signed CDN paths can contain short opaque identifiers as well as
+        # long tokens. Host identity is sufficient for diagnostics; never
+        # persist or emit a path that could be replayed.
+        return urlunsplit((parsed.scheme.lower(), (parsed.hostname or "").lower(), "", "", ""))
+    except (TypeError, ValueError):
+        return ""
+
+
+def _http_protocol(response):
+    version = getattr(response, "version", None)
+    return {9: "HTTP/0.9", 10: "HTTP/1.0", 11: "HTTP/1.1", 20: "HTTP/2"}.get(version)
 
 
 def _transport_error(error, stage):
@@ -77,16 +126,34 @@ def _transport_error(error, stage):
 class PublicResponse:
     """Streaming response owning its connection, without an ambient cookie jar."""
 
-    def __init__(self, response, connection, url):
+    def __init__(self, response, connection, url, *, telemetry=None):
         self._response = response
         self._connection = connection
         self.status = self.status_code = response.status
         self.headers = response.headers
-        self.url = url
+        self._request_url = url  # In-memory only; ranged requests need the intact signature.
+        self.url = _safe_url(url)
+        self.telemetry = telemetry if isinstance(telemetry, dict) else {}
+        self.telemetry.setdefault("url", self.url)
+        self.telemetry.setdefault("status_code", self.status)
+        self.telemetry.setdefault("protocol", _http_protocol(response))
+        self.telemetry.setdefault("bytes_received", 0)
+        self._response_started = time.monotonic()
+        self._first_byte_seen = False
 
     def read(self, size=-1):
         try:
-            return self._response.read(size)
+            data = self._response.read(size)
+            if data:
+                if not self._first_byte_seen:
+                    self._first_byte_seen = True
+                    # read(size) returns a complete requested block, so this
+                    # measures the first block after headers, not one byte.
+                    self.telemetry.setdefault("first_chunk_ms", round(
+                        max(0.0, (time.monotonic() - self._response_started) * 1000), 3))
+                    self.telemetry.setdefault("first_byte_ms", self.telemetry["first_chunk_ms"])
+                self.telemetry["bytes_received"] = self.telemetry.get("bytes_received", 0) + len(data)
+            return data
         except (OSError, http.client.HTTPException) as error:
             raise _transport_error(error, "read") from None
 
@@ -153,22 +220,67 @@ def _public_addresses(host):
 def _request_once(url, headers):
     """Pin a validated public DNS answer while retaining HTTPS hostname checks."""
     parsed = urlsplit(url)
+    dns_started = time.monotonic()
     addresses = _public_addresses(parsed.hostname)
-    connection = http.client.HTTPSConnection(parsed.hostname, timeout=TIMEOUT,
-                                             context=ssl.create_default_context())
-    # HTTPSConnection still uses its original hostname for TLS SNI and certificate
-    # verification; only the TCP destination is pinned, preventing DNS rebinding.
-    address = addresses[0]
-    connection._create_connection = lambda destination, timeout, source_address=None: socket.create_connection(
-        (address, 443), timeout, source_address
-    )
-    try:
-        target = urlunsplit(("", "", parsed.path or "/", parsed.query, ""))
-        connection.request("GET", target, headers={**headers, "Connection": "close", "Accept-Encoding": "identity"})
-        return PublicResponse(connection.getresponse(), connection, url)
-    except (OSError, http.client.HTTPException, UnicodeError, ValueError) as error:
-        connection.close()
-        raise _transport_error(error, "connect") from None
+    dns_ms = round(max(0.0, (time.monotonic() - dns_started) * 1000), 3)
+    last_error = None
+    deadline = time.monotonic() + ADDRESS_FALLBACK_BUDGET
+    # HTTPSConnection still uses the original hostname for TLS SNI and
+    # certificate verification; only the TCP destination is pinned. If one
+    # CDN address is unhealthy, try the next public answer before surfacing a
+    # transport error to the bounded retry loop.
+    for address in addresses:
+        remaining = max(0.05, deadline - time.monotonic())
+        connection = http.client.HTTPSConnection(parsed.hostname, timeout=min(TIMEOUT, remaining),
+                                                 context=ssl.create_default_context())
+        timing = {"dns_ms": dns_ms, "peer_ip": address,
+                  "url": _safe_url(url), "bytes_received": 0}
+        tcp_ms = [None]
+        original_connect = getattr(connection, "connect", None)
+
+        def pinned_create(destination, timeout, source_address=None, *, bound_address=address):
+            started = time.monotonic()
+            try:
+                bounded_timeout = min(timeout, max(0.05, deadline - time.monotonic()))
+                return socket.create_connection((bound_address, 443), bounded_timeout, source_address)
+            finally:
+                tcp_ms[0] = round(max(0.0, (time.monotonic() - started) * 1000), 3)
+
+        connection._create_connection = pinned_create
+
+        if callable(original_connect):
+            def timed_connect():
+                started = time.monotonic()
+                try:
+                    return original_connect()
+                finally:
+                    connect_ms = max(0.0, (time.monotonic() - started) * 1000)
+                    timing["tcp_ms"] = tcp_ms[0]
+                    # HTTPSConnection.connect includes TLS wrapping after the
+                    # pinned socket is established. This is the TLS portion;
+                    # tiny clock noise is clamped to zero.
+                    timing["tls_ms"] = round(max(0.0, connect_ms - (tcp_ms[0] or 0.0)), 3)
+            connection.connect = timed_connect
+
+        try:
+            target = urlunsplit(("", "", parsed.path or "/", parsed.query, ""))
+            request_started = time.monotonic()
+            connection.request("GET", target,
+                               headers={**headers, "Connection": "close", "Accept-Encoding": "identity"})
+            response = connection.getresponse()
+            timing.setdefault("tcp_ms", tcp_ms[0])
+            timing.setdefault("tls_ms", None)
+            timing["header_ttfb_ms"] = round(max(0.0, (time.monotonic() - request_started) * 1000), 3)
+            timing["ttfb_ms"] = timing["header_ttfb_ms"]  # Backwards-compatible alias.
+            timing["protocol"] = _http_protocol(response)
+            timing["status_code"] = response.status
+            return PublicResponse(response, connection, url, telemetry=timing)
+        except (OSError, http.client.HTTPException, UnicodeError, ValueError) as error:
+            last_error = error
+            connection.close()
+        if time.monotonic() >= deadline:
+            break
+    raise _transport_error(last_error or OSError("connection failed"), "connect") from None
 
 
 def _open_url(url, allowed_hosts, allowed_roots=(), headers=None, follow_redirects=True):
@@ -178,13 +290,17 @@ def _open_url(url, allowed_hosts, allowed_roots=(), headers=None, follow_redirec
                 or not isinstance(value, str) or re.search(r"[\r\n\x00]", value)):
             raise DouyinResolveError("Header tải Douyin không được hỗ trợ.")
         safe_headers[name] = value
+    redirect_chain = []
     for hop in range(MAX_REDIRECTS + 1):
         url = _validated_url(url, allowed_hosts, allowed_roots)
+        redirect_chain.append(_safe_url(url))
         try:
             response = _request_once(url, safe_headers)
         except (OSError, http.client.HTTPException) as error:
             raise _transport_error(error, "connect") from None
         if response.status not in (301, 302, 303, 307, 308) or not follow_redirects:
+            if isinstance(response, PublicResponse):
+                response.telemetry.setdefault("redirect_chain", list(redirect_chain))
             return response
         location = response.headers.get("Location")
         response.close()
@@ -203,10 +319,12 @@ def open_public_media(url, headers=None):
     """Open an allowed media stream. Callers must close it and bound disk writes."""
     response = _open_url(url, MEDIA_HOSTS, MEDIA_ROOTS, headers=headers)
     if response.status not in (200, 206):
+        retry_after = _retry_after_seconds(response.headers.get("Retry-After"))
         response.close()
         raise DouyinResolveError(
             f"Máy chủ video Douyin trả HTTP {response.status}, chưa tải được tệp. Hãy thử lại.",
-            code="http_error", status_code=response.status, error_type="HTTPError", stage="http")
+            code="http_error", status_code=response.status, error_type="HTTPError", stage="http",
+            retry_after=retry_after)
     if isinstance(response, PublicResponse):
         try:
             response.set_read_timeout(MEDIA_READ_TIMEOUT)
@@ -219,7 +337,10 @@ def open_public_media(url, headers=None):
 def _read_json(response):
     try:
         if response.status != 200:
-            raise DouyinResolveError("Douyin chưa trả dữ liệu video. Hãy thử lại sau.")
+            raise DouyinResolveError(
+                "Douyin chưa trả dữ liệu video. Hãy thử lại sau.", code="http_error",
+                status_code=response.status, error_type="HTTPError", stage="http",
+                retry_after=_retry_after_seconds(response.headers.get("Retry-After")))
         raw_length = response.headers.get("Content-Length")
         if raw_length and int(raw_length) > MAX_JSON_BYTES:
             raise DouyinResolveError("Dữ liệu Douyin vượt giới hạn xử lý.")
@@ -334,6 +455,7 @@ def resolve_douyin(url, progress=None):
     video_id = _resolve_id(url)
     if progress:
         progress({"phase": "resolve", "stage": "Đang lấy thông tin video Douyin…", "progress_pct": None})
+    last_error = None
     for endpoint in FEED_ENDPOINTS:
         try:
             response = _open_url(endpoint + "?" + urlencode({"aweme_id": video_id, "aid": "1128"}),
@@ -354,6 +476,14 @@ def resolve_douyin(url, progress=None):
             return {"id": video_id, "title": str(item.get("desc") or "Video Douyin")[:2000],
                     "duration": _number(item["video"].get("duration") or item.get("duration")) / 1000,
                     "formats": formats}
-        except DouyinResolveError:
+        except DouyinResolveError as error:
+            last_error = error
+            # A forbidden response is an access decision, not a transient
+            # endpoint failure. Do not immediately repeat the same request on
+            # another feed host (which can trigger additional rate limiting).
+            if error.status_code in {403, 429}:
+                break
             continue
+    if last_error is not None and last_error.status_code in {403, 429, 503}:
+        raise last_error
     raise DouyinResolveError("Douyin chưa cung cấp video công khai cho link này. Hãy thử lại sau hoặc chọn tệp trên máy.")
