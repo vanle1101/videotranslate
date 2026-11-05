@@ -587,17 +587,59 @@ class StreamingPipelineSession:
             raise ValueError(f"TTS engine không được hỗ trợ: {self.tts_engine_name}")
         self._tts_init_failed = False
 
+    def _source_recovery_exhausted(self):
+        """Whether a saved source gap has already had its only focused retry.
+
+        A checkpointed UNCERTAIN repair is deliberately not replayed by the
+        same ASR method: repeating it cannot add evidence. Keep Retry available
+        while any source chunk or speech row still has actionable work, but do
+        not advertise another Continue when the only remaining item is the
+        exact gap that the focused repair has already left unresolved.
+        """
+        if not self._chunked_source_started or self.visual_translation:
+            return False
+        unresolved = [row for row in (self._source_coverage_intervals or [])
+                      if row.get("state") == "unresolved"]
+        if not unresolved:
+            return False
+        if any(row.get("state") != "COMPLETED" for row in self._chunk_jobs):
+            return False
+        if any(row.status == "FAILED" for row in self.segments.values()):
+            return False
+        repairs = getattr(self, "_source_gap_repair_history", [])
+        for interval in unresolved:
+            proof = None
+            for item in repairs:
+                if not isinstance(item, dict):
+                    continue
+                try:
+                    same_interval = (abs(float(item.get("start", -1)) - interval["start"]) <= .001
+                                     and abs(float(item.get("end", -1)) - interval["end"]) <= .001)
+                except (TypeError, ValueError, OverflowError):
+                    continue
+                if same_interval:
+                    proof = item
+                    break
+            # Missing or malformed proof remains retryable; only an explicit,
+            # persisted uncertain result closes this automatic retry frontier.
+            if (not proof or proof.get("status") != "uncertain"
+                    or type(proof.get("attempts")) is not int or proof["attempts"] < 1):
+                return False
+        return True
+
     @property
     def can_retry(self):
         if getattr(self, "_persistence_capacity_failed", False):
             return False
         if getattr(self, "_restored_source_missing", False):
             return False
+        failed = [segment for segment in self.segments.values() if segment.status == "FAILED"]
         if (self._startup_failed and not self.is_running
                 and not self.is_stopped and not self.is_editing and self.error):
+            if not failed and self._source_recovery_exhausted():
+                return False
             return bool((self.video_path and self.video_path.is_file())
                         or (self.source_url and self._source_downloader))
-        failed = [segment for segment in self.segments.values() if segment.status == "FAILED"]
         restored_stages = {"TTS", "ALIGNING", "ASR", "TRANSLATING", "WAITING"} if getattr(self, "_restored_can_resume", False) or not self.visual_translation else {"TTS", "ALIGNING"}
         voice_retry = any(getattr(row, "tts_voice_outdated", False) for row in failed)
         return bool(self.initialized and (not self.is_stopped or voice_retry) and not self.is_running
@@ -2143,7 +2185,13 @@ class StreamingPipelineSession:
                                      "chưa có MP4. Có thể xuất bản nháp.")
         if self._source_missing_speech_spans and not self.is_running and not self.is_stopped:
             ranges = ", ".join(f"{start:.2f}–{end:.2f}s" for start, end in self._source_missing_speech_spans)
-            snapshot["stage"] += f" Chưa nhận diện được lời nói tại {ranges}."
+            if self._source_recovery_exhausted():
+                preserved = ("MP4 bản nháp vẫn được giữ." if self.output_filename and not self.caption_output_outdated
+                             else "Dữ liệu đã xử lý được giữ; hiện chưa có MP4.")
+                snapshot["stage"] = (f"Đã thử phục hồi nguồn có giới hạn nhưng chưa đủ bằng chứng tại {ranges}; "
+                                     f"không đánh dấu im lặng và không lặp lại cùng lượt ASR. {preserved}")
+            else:
+                snapshot["stage"] += f" Chưa nhận diện được lời nói tại {ranges}."
         snapshot["can_resume"] = bool(self.initialized and self.is_running and snapshot["status"] == "PAUSED")
         snapshot["can_stop"] = (snapshot["status"] in {"RUNNING", "PAUSED"}
                                 or bool(self.edit_tasks) and not getattr(self, "_stop_draining", False))
