@@ -84,6 +84,7 @@ SESSION_FIELDS = frozenset((
     " _source_coverage_intervals _source_scanned_seconds"
     " _chunked_source_identity _visual_context_summary"
     " _source_missing_speech_spans _source_preparation_stage _source_failure_code _source_failure_start"
+    " _source_gap_repair_history"
     " _chunk_jobs _visual_scanned_seconds _legacy_visual_prefix _parallel_chunk_planning"
     " _source_file_signature _processing_signature output_incomplete output_missing_segment_ids"
     " status_history status_changed_at translation_chunk_workers run_intent retry_state"
@@ -655,7 +656,7 @@ def _save_session(session):
         if signature:
             session._source_file_signature = signature
     fields = {key: _clean(getattr(session, key)) for key in SESSION_FIELDS
-              if hasattr(session, key) and key not in {"status_history", "automatic_output", "_auto_export_attempts", "_source_coverage_intervals"}}
+              if hasattr(session, key) and key not in {"status_history", "automatic_output", "_auto_export_attempts", "_source_coverage_intervals", "_source_gap_repair_history"}}
     automatic_output = getattr(session, "automatic_output", None)
     if automatic_output is not None:
         fields["automatic_output"] = {key: _clean(value)
@@ -690,6 +691,9 @@ def _save_session(session):
     if hasattr(session, "_source_coverage_intervals"):
         fields["_source_coverage_intervals"] = _clean_source_intervals(
             session._source_coverage_intervals, fields.get("total_duration", 0))
+    if hasattr(session, "_source_gap_repair_history"):
+        fields["_source_gap_repair_history"] = _clean_source_gap_repair_history(
+            session._source_gap_repair_history, fields.get("total_duration", 0), session.task_id)
     payload = {"version": VERSION, "task_id": session.task_id, "updated_at": time.time(),
                "state": "STOPPED" if session.is_stopped or getattr(session, "_restored_interrupted", False) else "FAILED" if session.error else
                "RUNNING" if session.is_running or session.is_editing else "READY",
@@ -755,6 +759,73 @@ def _clean_source_intervals(value, duration):
              "error_code": record["error_code"],
              **({"verification": record["verification"]} if "verification" in record else {})}
             for record in records]
+
+
+def _clean_source_gap_repair_history(value, duration, task_id=None):
+    from core.streaming.source_coverage import validate_source_gap_repair_history
+    try:
+        records = validate_source_gap_repair_history(value, total_duration=duration)
+    except ValueError:
+        # A writer from the previous checkpoint schema could persist only the
+        # compact status summary while the immutable source packet retained the
+        # audio clip, hash, transcript candidates and VAD evidence. Recover that
+        # summary only by finding an exact, fully validated match in this task's
+        # packet. Never manufacture SPEECH/NON_SPEECH or accept an unproven gap.
+        records = _restore_source_gap_repair_evidence(value, duration, task_id)
+    cache_root = (settings.WORKSPACE_DIR / "cache").resolve()
+    for record in records:
+        path = settings.WORKSPACE_DIR.joinpath(*record["audio_path"].split("/"))
+        if path.is_symlink() or not path.resolve().is_relative_to(cache_root) or not path.is_file():
+            raise ValueError("Source repair audio evidence is missing or outside the project cache")
+        digest = hashlib.sha256()
+        with path.open("rb") as handle:
+            for block in iter(lambda: handle.read(1024 * 1024), b""):
+                digest.update(block)
+        if digest.hexdigest() != record["audio_sha256"]:
+            raise ValueError("Source repair audio evidence changed after ASR")
+    return records
+
+
+def _restore_source_gap_repair_evidence(value, duration, task_id):
+    from core.streaming.source_coverage import validate_source_gap_repair_history
+    summary_keys = {"start", "end", "status", "attempts", "reason", "updated_at"}
+    if (not isinstance(value, (list, tuple)) or not value
+            or any(not isinstance(row, dict) or set(row) != summary_keys for row in value)
+            or not isinstance(task_id, str) or not re.fullmatch(r"[A-Za-z0-9_-]{1,80}", task_id)):
+        raise ValueError("Source repair history is incomplete and has no verifiable packet summary")
+    root = settings.WORKSPACE_DIR / "cache" / task_id / "source_preparation"
+    if root.is_symlink() or not root.is_dir():
+        raise ValueError("Source repair packet directory is missing")
+    packets = []
+    paths = sorted(root.glob("[0-9]" * 12 + ".json"))
+    if len(paths) > 512:
+        raise ValueError("Source repair packet count exceeds the recovery bound")
+    for path in paths:
+        if path.is_symlink() or path.stat().st_size > 16 * 1024 * 1024:
+            raise ValueError("Source repair packet is linked or exceeds the size limit")
+        try:
+            packet = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError, TypeError) as error:
+            raise ValueError("Source repair packet cannot be read") from error
+        repairs = packet.get("source_gap_repairs", []) if isinstance(packet, dict) else []
+        if not isinstance(repairs, list) or len(repairs) > 2:
+            raise ValueError("Source repair packet history exceeds the attempt limit")
+        packets.extend(repairs)
+
+    recovered = []
+    for summary in value:
+        matches = [record for record in packets
+            if isinstance(record, dict)
+            and record.get("start") == summary["start"]
+            and record.get("end") == summary["end"]
+            and record.get("status") == summary["status"]
+            and record.get("attempts") == summary["attempts"]
+            and record.get("reason") == summary["reason"]
+            and record.get("updated_at") == summary["updated_at"]]
+        if len(matches) != 1:
+            raise ValueError("Source repair summary does not exactly match one durable audio packet")
+        recovered.extend(validate_source_gap_repair_history(matches, total_duration=duration))
+    return validate_source_gap_repair_history(recovered, total_duration=duration)
 
 
 def _source_coverage_state(fields):
@@ -845,6 +916,9 @@ def _validate_project(data, task_id):
         # A scan cursor alone has no authority to advance a legacy manifest.
         # Default in memory only; _read never rewrites the saved checkpoint.
         fields["_source_scanned_seconds"] = fields.get("_source_prepared_seconds", 0)
+    if "_source_gap_repair_history" in fields:
+        fields["_source_gap_repair_history"] = _clean_source_gap_repair_history(
+            fields["_source_gap_repair_history"], duration, task_id)
     spans = fields.get("_source_missing_speech_spans", [])
     if (not isinstance(spans, list) or len(spans) > 1024
             or any(not isinstance(span, list) or len(span) != 2
@@ -1275,7 +1349,10 @@ def _availability(data):
         and (preview_ready or any(row["status"] in {"READY", "PLAYED"} for row in rows
                                  if row["end"] <= fields.get("_visual_completed_seconds", 0) + .001)))
     if fields.get("review_summary", {}).get("status") in {"failed", "incomplete", "running"}:
-        output_gate.update(output_is_draft=True, output_quality_label="Bản nháp — cần kiểm tra",
+        output_gate.update(output_is_draft=True,
+                           output_quality_label=("Bản nháp — source coverage chưa hoàn tất"
+                               if output_gate.get("source_coverage_unverified")
+                               else "Bản nháp — cần kiểm tra"),
                            content_review_state="REVIEW_REQUIRED")
     unresolved_speech = bool(ready and output_gate["final_output_blocked"])
     if output_gate["final_output_blocked"]:
@@ -1333,12 +1410,54 @@ def _availability(data):
     # rows to ready or allowing stale legacy output links through the gate.
     published_incomplete = bool(valid_output and fields.get("output_incomplete"))
     output_missing_ids = list(fields.get("output_missing_segment_ids", [])) if published_incomplete else []
+    output_filename = output if valid_output and (ready or published_incomplete) else ""
+    if valid_output and (output_gate["output_is_draft"] or published_incomplete
+                         or output_gate["media_complete"] is not True) and status == "COMPLETED":
+        # Translation readiness and a validated MP4 are separate outcomes.
+        # An unresolved review/source gap must never inherit COMPLETED merely
+        # because all materialized rows happen to have WAVs.
+        status = "PREPARED"
+    elif status == "COMPLETED" and not valid_output:
+        status = "PREPARED"
     if published_incomplete:
-        output_warning = (f"Video đã xuất còn {len(output_missing_ids)} câu chưa có giọng Việt; "
-                          "giữ phụ đề đã có và âm thanh nền." if output_missing_ids else
-                          "Video đã xuất từ phần hiện có; bản dịch hoặc lượt kiểm tra chưa hoàn tất.")
+        if output_missing_ids:
+            output_warning = (f"Bản nháp đã xuất còn {len(output_missing_ids)} câu chưa có giọng Việt; "
+                              "giữ phụ đề đã có và âm thanh nền.")
+        elif output_gate.get("source_coverage_unverified"):
+            spans = fields.get("_source_missing_speech_spans", []) or []
+            if not spans:
+                spans = [span for interval in fields.get("_source_coverage_intervals", []) or []
+                         if interval.get("state") == "unresolved"
+                         for span in interval.get("missing_speech_spans", [])]
+            ranges = ", ".join(f"{float(span[0]):.3f}–{float(span[1]):.3f}s"
+                                for span in spans[:3] if isinstance(span, (list, tuple)) and len(span) == 2)
+            output_warning = (f"Bản nháp đã xuất; source coverage chưa xác minh{': ' + ranges if ranges else ''}. "
+                              "Không coi đoạn chưa rõ là im lặng.")
+        else:
+            output_warning = "Bản nháp đã xuất từ phần hiện có; bản dịch hoặc lượt kiểm tra chưa hoàn tất."
         message = " ".join(filter(None, (message, output_warning)))
+    elif valid_output and output_gate["output_is_draft"] and not output_warning:
+        if output_gate.get("source_coverage_unverified"):
+            spans = fields.get("_source_missing_speech_spans", []) or []
+            ranges = ", ".join(f"{float(span[0]):.3f}–{float(span[1]):.3f}s"
+                                for span in spans[:3] if isinstance(span, (list, tuple)) and len(span) == 2)
+            output_warning = (f"Bản nháp — source coverage chưa xác minh{': ' + ranges if ranges else ''}. "
+                              "Không coi đoạn chưa rõ là im lặng.")
+        else:
+            output_warning = (f"Bản nháp — còn {len(output_gate['output_review_segment_ids'])} câu cần kiểm tra; "
+                              "không đánh dấu là hoàn chỉnh.")
+        message = " ".join(filter(None, (message, output_warning)))
+    if output_filename:
+        result_status = ("DRAFT" if output_gate["output_is_draft"] or published_incomplete
+                         or output_gate["media_complete"] is not True else "COMPLETED")
+    elif status == "FAILED" and not fields.get("initialized"):
+        result_status = "FAILED"
+    elif status in {"FAILED", "STOPPED", "PREPARED"} or fields.get("initialized"):
+        result_status = "RECOVERABLE"
+    else:
+        result_status = "FAILED"
     return {"status": status, "missing_media": message, "ready": ready, "preview_ready": preview_ready,
+            "result_status": result_status,
             **output_gate,
             **preview_output,
             "preview_speech_unresolved": preview_speech_unresolved,
@@ -1347,7 +1466,7 @@ def _availability(data):
             "pending_download": pending_download, "output_warning": output_warning,
             "output_incomplete": published_incomplete, "output_missing_segment_ids": output_missing_ids,
             "caption_render_stale": legacy_default_caption,
-            "missing_audio_ids": output_gate["missing_audio_ids"], "output_filename": output if valid_output and (ready or published_incomplete) else ""}
+            "missing_audio_ids": output_gate["missing_audio_ids"], "output_filename": output_filename}
 
 
 def list_saved_sessions(*, excluded_task_ids=()):
@@ -1377,6 +1496,7 @@ def list_saved_sessions(*, excluded_task_ids=()):
                 "video_path": fields.get("video_path") or "", "source_url": fields.get("source_url") or "",
                 "source_video_url": f"/api/local-file?path={quote(fields['video_path'], safe='')}" if available["source_exists"] else "",
                 "status": available["status"], "can_open": available["source_exists"] or available["pending_download"], "duration": fields.get("total_duration", 0),
+                "result_status": available["result_status"],
                 "saved": True, "task_type": "Phiên đã lưu", "progress_pct": 100 if available["status"] == "COMPLETED" else None,
                 "checkpoint_initialized": bool(fields.get("initialized")),
                 "checkpoint_segments": checkpoint_segments,

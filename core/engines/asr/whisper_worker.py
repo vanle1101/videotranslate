@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import contextlib
 import json
+import math
 from pathlib import Path
 import sys
 
@@ -52,8 +53,16 @@ def run(request_path, result_path):
             for segment in segments:
                 record = {"event": "segment", "segment": {"start": float(segment.start),
                     "end": float(segment.end), "text": segment.text,
-                    "words": [{"word": word.word, "start": float(word.start), "end": float(word.end)}
+                    "words": [{"word": word.word, "start": float(word.start), "end": float(word.end),
+                               **({"probability": float(word.probability)}
+                                  if type(getattr(word, "probability", None)) in (int, float)
+                                  and math.isfinite(word.probability)
+                                  else {})}
                               for word in (segment.words or [])]}}
+                for name in ("avg_logprob", "no_speech_prob"):
+                    value = getattr(segment, name, None)
+                    if type(value) in (int, float) and math.isfinite(value):
+                        record["segment"][name] = float(value)
                 if getattr(segment, "source_language", None) is not None:
                     record["segment"].update(source_language=segment.source_language,
                         source_language_probability=segment.source_language_probability)

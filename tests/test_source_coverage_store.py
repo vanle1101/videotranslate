@@ -77,6 +77,7 @@ def test_stale_ready_output_and_completed_scan_never_hide_unresolved_source(pers
     assert not available["source_coverage_complete"]
     assert not available["media_complete"] and not available["ready"]
     assert available["status"] != "COMPLETED" and not available["output_filename"]
+    assert available["result_status"] == "RECOVERABLE"
     row = store.list_saved_sessions()[0]
     assert row["checkpoint_source_prepared_seconds"] == 32
     assert row["source_scanned_seconds"] == 100
@@ -85,6 +86,8 @@ def test_stale_ready_output_and_completed_scan_never_hide_unresolved_source(pers
     partial = store._availability(data)
     assert partial["output_incomplete"] and partial["output_filename"] == "result.mp4"
     assert not partial["source_coverage_complete"] and not partial["media_complete"]
+    assert partial["result_status"] == "DRAFT"
+    assert partial["output_is_draft"] and "46.070–46.890s" in partial["output_warning"]
 
 
 @pytest.mark.parametrize("completed,ready", [(24., True), (32., True), (32.000000001, False), (80., False)])

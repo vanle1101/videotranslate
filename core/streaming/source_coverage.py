@@ -190,6 +190,119 @@ def record_interval(intervals, *, start, end, state, total_duration,
     return validate_intervals(records, total_duration=total_duration)
 
 
+def replace_unresolved_interval(intervals, *, start, end, replacements, total_duration):
+    """Replace one exact unresolved packet with a measured, gap-free partition.
+
+    Repairs may prove some speech windows while leaving a smaller window
+    unresolved. Requiring an exact tiling prevents a repair from erasing source
+    time, overlapping a neighboring packet, or treating an unmeasured tail as
+    silence.
+    """
+    records = validate_intervals(intervals, total_duration=total_duration)
+    target = next((row for row in records
+                   if row["start"] == start and row["end"] == end), None)
+    if target is None or target["state"] != "unresolved":
+        raise SourceCoverageError("source repair must replace one exact unresolved interval")
+    parts = validate_intervals(replacements, total_duration=total_duration)
+    if (not parts or parts[0]["start"] != start or parts[-1]["end"] != end
+            or any(left["end"] != right["start"] for left, right in zip(parts, parts[1:]))):
+        raise SourceCoverageError("source repair parts must exactly tile the unresolved interval")
+    return validate_intervals([
+        *(row for row in records if row is not target), *parts
+    ], total_duration=total_duration)
+
+
+def validate_source_gap_repair_history(value, *, total_duration):
+    """Validate bounded ASR repair attempts kept alongside a project checkpoint."""
+    if not isinstance(value, (list, tuple)) or len(value) > 256:
+        raise SourceCoverageError("source gap repair history must be a bounded list")
+    result = []
+    for row in value:
+        if not isinstance(row, Mapping) or set(row) != {
+                "start", "end", "classification", "status", "attempts", "reason",
+                "context_start", "context_end", "audio_path", "audio_sha256",
+                "candidate_rows", "vad_regions", "updated_at"}:
+            raise SourceCoverageError("source gap repair record has an invalid shape")
+        start, end = _range(row["start"], row["end"], duration=total_duration,
+                            label="source gap repair")
+        classification, status = row["classification"], row["status"]
+        if ((classification, status) not in {("SPEECH", "resolved"), ("UNCERTAIN", "uncertain")}
+                or type(row["attempts"]) is not int or not 1 <= row["attempts"] <= 2):
+            raise SourceCoverageError("source gap repair classification is invalid")
+        reason = row["reason"]
+        if not isinstance(reason, str) or not reason.strip() or len(reason) > 1000 or "\x00" in reason:
+            raise SourceCoverageError("source gap repair reason is invalid")
+        context_start, context_end = row["context_start"], row["context_end"]
+        if (type(context_start) not in (int, float) or type(context_end) not in (int, float)
+                or not math.isfinite(context_start) or not math.isfinite(context_end)
+                or context_start < 0 or context_start > start or context_end < end
+                or context_end > total_duration):
+            raise SourceCoverageError("source gap repair context timing is invalid")
+        path, digest = row["audio_path"], row["audio_sha256"]
+        if (not isinstance(path, str) or len(path) > 240 or "\\" in path
+                or PurePosixPath(path).is_absolute()
+                or PurePosixPath(path).parts[:1] != ("cache",)
+                or any(part in {"", ".", ".."} for part in PurePosixPath(path).parts)
+                or not isinstance(digest, str) or not re.fullmatch(r"[0-9a-f]{64}", digest)):
+            raise SourceCoverageError("source gap repair audio evidence path or digest is invalid")
+        updated = row["updated_at"]
+        if type(updated) not in (int, float) or not math.isfinite(updated) or updated <= 0:
+            raise SourceCoverageError("source gap repair timestamp is invalid")
+        candidates = row["candidate_rows"]
+        if not isinstance(candidates, (list, tuple)) or len(candidates) > 64:
+            raise SourceCoverageError("source gap repair candidates exceed limit")
+        clean_candidates = []
+        for candidate in candidates:
+            if not isinstance(candidate, Mapping) or set(candidate) != {"start", "end", "text_zh", "words"}:
+                raise SourceCoverageError("source gap repair candidate has an invalid shape")
+            left, right = candidate["start"], candidate["end"]
+            text = candidate["text_zh"]
+            words = candidate["words"]
+            if (type(left) not in (int, float) or type(right) not in (int, float)
+                    or not math.isfinite(left) or not math.isfinite(right)
+                    or not start - .001 <= left < right <= end + .001
+                    or not isinstance(text, str) or not text.strip() or len(text) > 2000
+                    or not isinstance(words, (list, tuple)) or len(words) > 512):
+                raise SourceCoverageError("source gap repair candidate is invalid")
+            clean_words = []
+            for word in words:
+                if not isinstance(word, Mapping) or set(word) != {"word", "start", "end", "probability"}:
+                    raise SourceCoverageError("source gap repair word has an invalid shape")
+                token, word_start, word_end, probability = (
+                    word["word"], word["start"], word["end"], word["probability"])
+                if (not isinstance(token, str) or len(token) > 200
+                        or type(word_start) not in (int, float) or type(word_end) not in (int, float)
+                        or not math.isfinite(word_start) or not math.isfinite(word_end)
+                        or not left - .001 <= word_start <= word_end <= right + .001
+                        or probability is not None and (type(probability) not in (int, float)
+                            or not math.isfinite(probability) or not 0 <= probability <= 1)):
+                    raise SourceCoverageError("source gap repair word timing is invalid")
+                clean_words.append({"word": token, "start": float(word_start), "end": float(word_end),
+                                    "probability": probability})
+            clean_candidates.append({"start": float(left), "end": float(right),
+                                     "text_zh": text.strip(), "words": clean_words})
+        regions = row["vad_regions"]
+        if not isinstance(regions, (list, tuple)) or len(regions) > 256:
+            raise SourceCoverageError("source gap repair VAD evidence exceeds limit")
+        clean_regions = []
+        for region in regions:
+            if (not isinstance(region, (list, tuple)) or len(region) != 2
+                    or type(region[0]) not in (int, float) or type(region[1]) not in (int, float)
+                    or not math.isfinite(region[0]) or not math.isfinite(region[1])
+                    or not start <= region[0] < region[1] <= end):
+                raise SourceCoverageError("source gap repair VAD timing is invalid")
+            clean_regions.append([float(region[0]), float(region[1])])
+        result.append({"start": start, "end": end, "classification": classification,
+            "status": status, "attempts": row["attempts"], "reason": reason.strip(),
+            "context_start": float(context_start), "context_end": float(context_end),
+            "audio_path": path, "audio_sha256": digest, "candidate_rows": clean_candidates,
+            "vad_regions": clean_regions, "updated_at": float(updated)})
+    result.sort(key=lambda item: (item["start"], item["end"]))
+    if len({(item["start"], item["end"]) for item in result}) != len(result):
+        raise SourceCoverageError("source gap repair intervals must be unique")
+    return result
+
+
 def _with_legacy_prefix(intervals, *, total_duration, legacy_prefix):
     records = validate_intervals(intervals, total_duration=total_duration)
     prefix = _seconds(legacy_prefix, "legacy_prefix")

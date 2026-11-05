@@ -236,7 +236,18 @@ def _decode_segment(record):
                        for key in ("start", "end"))
                 or not 0 <= word["start"] <= word["end"]):
             raise ASRProcessError("Bộ nhận giọng trả mốc từ không hợp lệ.")
+        probability = word.get("probability")
+        if (probability is not None and (type(probability) not in (int, float)
+                or not math.isfinite(probability) or not 0 <= probability <= 1)):
+            raise ASRProcessError("Bộ nhận giọng trả độ tin cậy từ không hợp lệ.")
         words.append(SimpleNamespace(**word))
+    scores = {}
+    for name in ("avg_logprob", "no_speech_prob"):
+        score = values.get(name)
+        if score is not None:
+            if type(score) not in (int, float) or not math.isfinite(score):
+                raise ASRProcessError("Bộ nhận giọng trả điểm câu không hợp lệ.")
+            scores[name] = score
     language = {}
     if "source_language" in values or "source_language_probability" in values:
         from core.engines.asr.source_language import require_supported_source
@@ -255,7 +266,7 @@ def _decode_segment(record):
         except (ValueError, TypeError) as error:
             raise ASRProcessError("Bằng chứng bất đồng ngôn ngữ không hợp lệ.") from error
     return SimpleNamespace(start=values["start"], end=values["end"], text=values["text"],
-                           words=words, speaker=None, **language)
+                           words=words, speaker=None, **scores, **language)
 
 
 class SubprocessWhisperModel:
@@ -265,20 +276,29 @@ class SubprocessWhisperModel:
         self.model_size = str(model_size)
         self.device = device or settings.DEVICE
 
-    def transcribe(self, audio_path, *, status_callback=None, metadata_callback=None, coverage_callback=None, **options):
+    def transcribe(self, audio_path, *, status_callback=None, metadata_callback=None,
+                   coverage_callback=None, timeout_seconds=None, **options):
         # Match Whisper's lazy iterator contract. The child is acquired when
         # iteration begins and reaped before this iterator finishes or closes.
         if coverage_callback is not None and (not callable(coverage_callback)
                 or not options.get("utterance_language_detection") or options.get("language") is not None):
             raise ValueError("Partial source coverage requires local automatic language detection")
-        return self._segments(audio_path, options, status_callback, metadata_callback, coverage_callback), None
+        return self._segments(audio_path, options, status_callback, metadata_callback,
+                              coverage_callback, timeout_seconds=timeout_seconds), None
 
-    def _segments(self, audio_path, options, status_callback=None, metadata_callback=None, coverage_callback=None):
+    def _segments(self, audio_path, options, status_callback=None, metadata_callback=None,
+                  coverage_callback=None, *, timeout_seconds=None):
         context = current_execution_context()
         check = context.cancel_check
         check_cancelled(check)
         source = Path(audio_path).resolve(strict=True)
-        timeout = positive_deadline("ASR_PROCESS_TIMEOUT", 600)
+        if timeout_seconds is None:
+            timeout = positive_deadline("ASR_PROCESS_TIMEOUT", 600)
+        elif (type(timeout_seconds) not in (int, float) or not math.isfinite(timeout_seconds)
+                or not 1 <= timeout_seconds <= 600):
+            raise ValueError("Focused ASR timeout must be between 1 and 600 seconds")
+        else:
+            timeout = float(timeout_seconds)
         with native_worker_slot(check):
             local_detection = options.get("utterance_language_detection") and options.get("language") is None
             strategy = str(getattr(settings, "ASR_VOCAL_EVIDENCE_STRATEGY", "always"))

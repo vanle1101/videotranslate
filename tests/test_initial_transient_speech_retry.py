@@ -18,6 +18,9 @@ def session(tmp_path, monkeypatch):
     current.initialized = current.is_running = current._chunked_source_started = True
     current.total_duration = current._visual_completed_seconds = 12.
     current._visual_prepass_complete = True
+    current._source_coverage_intervals = [{"start": 0., "end": 12., "state": "prepared",
+        "missing_speech_spans": [], "error_code": None}]
+    current._source_prepared_seconds = current._source_scanned_seconds = 12.
     for sid in range(3):
         row = SegmentItem(sid, sid * 4., (sid + 1) * 4., 4.)
         row.text_zh, row.final_vi = f"源{sid}", f"Lời đã dịch {sid}."

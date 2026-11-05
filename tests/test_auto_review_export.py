@@ -105,7 +105,7 @@ def test_successful_reexport_stamps_current_caption_renderer_only_after_result(s
     assert item.caption_output_outdated is False
     assert item.persist.call_count == 2  # Durable export start, then validated output.
     assert [(row["status"], row["phase"]) for row in item.status_history] == [
-        ("RUNNING", "export"), ("COMPLETED", "export")]
+        ("RUNNING", "export"), ("PREPARED", "export")]
 
 
 @pytest.mark.parametrize("status", [None, "running", "failed", "completed"])

@@ -105,13 +105,19 @@ def final_output_metadata(rows, *, valid_audio=None, source_complete=None, total
                    or source_complete is False or invalid_duration)
     checked = valid_audio is not None and source_complete is not None and total_duration is not None
     pending_review = bool(missing or review_ids)
+    source_unverified = source_complete is False
+    output_is_draft = pending_review or source_unverified
+    quality_label = ("Bản nháp — source coverage chưa hoàn tất" if source_unverified else
+                     "Bản nháp — cần kiểm tra" if pending_review else
+                     "Không còn mục chờ kiểm tra")
     return {"missing_speech_ids": missing, "final_output_blocked": blocked,
             "missing_audio_ids": missing_audio, "invalid_timing_ids": invalid_timing,
             "source_coverage_complete": source_complete,
             "media_complete": not blocked if checked else None,
-            "output_is_draft": pending_review,
-            "output_quality_label": "Bản nháp — cần kiểm tra" if pending_review else "Không còn mục chờ kiểm tra",
+            "output_is_draft": output_is_draft,
+            "output_quality_label": quality_label,
             "output_review_segment_ids": list(dict.fromkeys([*missing, *review_ids])),
+            "source_coverage_unverified": source_unverified,
             # This is an editorial state, never a claim of certain semantic truth.
             "content_review_state": "REVIEW_REQUIRED" if pending_review else "NO_PENDING_REVIEW"}
 

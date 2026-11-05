@@ -285,7 +285,7 @@ def test_active_chunked_save_failure_blocks_runtime_and_keeps_durable_checkpoint
     assert failing_save.call_count == 1
 
 
-def test_persistent_edit_survives_restart_with_its_own_wav_and_retires_only_old_audio(persisted, monkeypatch):
+def test_persistent_edit_survives_restart_with_its_own_wav_and_retires_only_old_audio(persisted, monkeypatch, synthetic_piper):
     import core.streaming.session_store as store
     before = Path(persisted.segments[0].audio_path)
     old_content = before.read_bytes()
@@ -310,7 +310,7 @@ def test_persistent_edit_survives_restart_with_its_own_wav_and_retires_only_old_
     assert restored.segments[0].status == "READY"
 
 
-def test_real_manifest_replace_failure_rolls_back_edit_and_retry_can_commit(persisted, monkeypatch):
+def test_real_manifest_replace_failure_rolls_back_edit_and_retry_can_commit(persisted, monkeypatch, synthetic_piper):
     import core.streaming.session_store as store
     from core.streaming.pipeline import ProjectEditSaveError
     from copy import deepcopy
@@ -371,6 +371,47 @@ def persisted(tmp_path, monkeypatch):
     yield session
     active_streaming_sessions.clear()
     active_streaming_sessions.update(old)
+
+
+def test_unresolved_review_never_reports_completed_after_all_media_is_ready(persisted):
+    persisted.segments[0].needs_review = True
+    persisted.segments[0].verification = {"status": "unresolved", "semantic_verified": False}
+    persisted.review_summary = {"status": "completed", "checked": 1, "verified": 0, "unresolved": 1}
+    persisted.persist()
+
+    asyncio.run(persisted.report_progress("complete", "Xử lý xong", 100))
+    progress = persisted.get_progress()
+    assert progress["media_complete"] is True
+    assert progress["output_is_draft"] is True
+    assert progress["status"] == "PREPARED"
+    assert progress["result_status"] == "RECOVERABLE"
+    assert progress["progress_pct"] is None
+
+
+def test_saved_validated_draft_keeps_mp4_link_but_is_never_completed(persisted, monkeypatch):
+    import core.streaming.session_store as store
+    persisted.segments[0].needs_review = True
+    persisted.segments[0].verification = {"status": "unresolved", "semantic_verified": False}
+    persisted.review_summary = {"status": "completed", "checked": 1, "verified": 0, "unresolved": 1}
+    persisted.output_filename = "review-draft.mp4"
+    (settings.OUTPUT_DIR / persisted.output_filename).write_bytes(b"validated output fixture")
+    monkeypatch.setattr(store, "_valid_output", lambda *_: True)
+    persisted.persist()
+
+    available = store._availability(store._read(persisted.task_id))
+    assert available["status"] == "PREPARED"
+    assert available["result_status"] == "DRAFT"
+    assert available["output_is_draft"] is True
+    assert available["media_complete"] is True
+    assert available["output_filename"] == "review-draft.mp4"
+    assert "Bản nháp" in available["output_warning"]
+
+
+@pytest.fixture
+def synthetic_piper(monkeypatch):
+    """Use the mocked synthesizer without requiring model files in tmp_path."""
+    from core.engines.tts.piper_engine import PiperEngine
+    monkeypatch.setattr(PiperEngine, "is_available", property(lambda _self: True))
 
 
 @pytest.mark.parametrize("speech_fails", [False, True])
@@ -1115,7 +1156,8 @@ def test_stop_keeps_saved_work_and_completed_rows_reopen_editably(persisted):
     assert Path(persisted.segments[0].audio_path).read_bytes() == before
     restored = restore_saved_session(persisted.task_id)
     assert not restored.is_stopped and not restored.is_running
-    assert restored.get_progress()["status"] == "COMPLETED"
+    assert restored.get_progress()["status"] == "PREPARED"
+    assert restored.get_progress()["result_status"] == "RECOVERABLE"
     assert restored.segments[0].final_vi == persisted.segments[0].final_vi
 
 
@@ -1148,7 +1190,9 @@ def test_shutdown_preserves_idle_outcome_and_saved_media(persisted):
     assert persisted.task_id not in active_streaming_sessions
     assert json.loads(_project_path(persisted.task_id).read_text(encoding="utf-8"))["state"] == "READY"
     assert audio.read_bytes() == before
-    assert restore_saved_session(persisted.task_id).get_progress()["status"] == "COMPLETED"
+    restored = restore_saved_session(persisted.task_id)
+    assert restored.get_progress()["status"] == "PREPARED"
+    assert restored.get_progress()["result_status"] == "RECOVERABLE"
 
 
 def test_saved_long_mp4_cannot_hide_drift_inside_a_percentage_tolerance(monkeypatch, tmp_path):
@@ -1171,7 +1215,7 @@ def test_shutdown_cancels_unfinished_work(persisted):
     assert json.loads(_project_path(persisted.task_id).read_text(encoding="utf-8"))["state"] == "STOPPED"
 
 
-def test_stop_mid_synthesis_preserves_ready_rows_and_retries_only_missing(persisted, monkeypatch):
+def test_stop_mid_synthesis_preserves_ready_rows_and_retries_only_missing(persisted, monkeypatch, synthetic_piper):
     first_audio = Path(persisted.segments[0].audio_path).read_bytes()
     later = SegmentItem(1, 2, 3, 1)
     later.text_zh, later.final_vi, later.status = "再见", "Tạm biệt.", "TTS"
@@ -1392,7 +1436,8 @@ from core.streaming.session_store import restore_saved_session
 s = restore_saved_session('persist-test')
 assert s.video_intelligence is None and not s.is_running
 assert s.start_task is None and s.worker_task is None
-assert s.get_progress()['status'] == 'COMPLETED'
+assert s.get_progress()['status'] == 'PREPARED'
+assert s.get_progress()['result_status'] == 'RECOVERABLE'
 assert s.segments[0].final_vi == 'Xin chào.'
 assert s.segments[0].revision == 7 and s.segments[0].verification['status'] == 'manual'
 assert s.caption_style['position'] == 'top' and s.caption_style_revision == 4
@@ -1417,7 +1462,7 @@ def test_missing_selected_voice_keeps_explicit_failure_on_retry(persisted, monke
         assert session.tts_engine is session.edge_tts
 
 
-def test_edit_after_restore_never_initializes_translation_provider(persisted, monkeypatch):
+def test_edit_after_restore_never_initializes_translation_provider(persisted, monkeypatch, synthetic_piper):
     persisted.visual_translation = True
     persisted.persist()
     monkeypatch.setattr("core.video_intelligence.validate_visual_provider", Mock(side_effect=AssertionError("provider not needed")))
@@ -1672,7 +1717,7 @@ def test_valid_reexport_removes_only_stale_output_warning(persisted, saved_mp4):
     assert restored.warnings == ["Cảnh báo khác."]
 
 
-def test_real_failure_shape_resumes_tts_with_completed_review_and_auto_export(persisted, monkeypatch):
+def test_real_failure_shape_resumes_tts_with_completed_review_and_auto_export(persisted, monkeypatch, synthetic_piper):
     """755a2fe4: reviewed visual rows, first TTS failed, next row waiting."""
     monkeypatch.setattr(settings, "LLM_PROVIDER", "opencode")
     persisted.visual_translation = True
@@ -1812,7 +1857,8 @@ def test_finished_visual_prepass_survives_reopen(persisted):
     persisted.segments[0].source_method = "text-ai"
     persisted.persist()
     restored = restore_saved_session(persisted.task_id)
-    assert restored.get_progress()["status"] == "COMPLETED"
+    assert restored.get_progress()["status"] == "PREPARED"
+    assert restored.get_progress()["result_status"] == "RECOVERABLE"
     assert not restored.can_retry and not restored._startup_failed
     assert restored.playable_until == persisted.total_duration
 

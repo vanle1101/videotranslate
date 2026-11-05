@@ -604,6 +604,7 @@ html { scroll-padding-top: 106px; }
 .history-status[data-status="queued"] { border-color: #475569; color: #cbd5e1; background: #1e293b; }
 .history-status[data-status="preview_ready"], .history-status[data-status="prepared"] { border-color: #5b21b6; color: #c4b5fd; background: #2e1065; }
 .history-status[data-status="completed"] { border-color: #1e40af; color: #93c5fd; background: #172554; }
+.history-status[data-status="draft"] { border-color: #92400e; color: #fcd34d; background: #451a03; }
 .history-status[data-status="failed"] { border-color: #9f1239; color: #fda4af; background: #4c0519; }
 .history-progress-content { display: flex; flex-direction: column; gap: 7px; margin-top: 9px; }
 .history-progress-track { height: 5px; max-width: 220px; overflow: hidden; background: #253043; border-radius: 4px; }

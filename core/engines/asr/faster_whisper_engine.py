@@ -1,6 +1,7 @@
 from pathlib import Path
 from typing import List, Dict, Any, Optional
 import importlib.util
+import math
 from config import settings
 from core.engines.asr.base import ASREngine
 from core.dialogue_segments import split_dialogue_segments
@@ -129,3 +130,58 @@ class FasterWhisperFallbackEngine(ASREngine):
             check_cancelled()
             coverage_callback(checked)
         return result
+
+    def transcribe_focused(self, audio_path: Path, *, language: str = "zh",
+                           timeout_seconds: float = 90.0) -> List[Dict[str, Any]]:
+        """Run one bounded, original-audio hypothesis without VAD cropping.
+
+        This recovery path returns timestamped candidates for caller
+        validation; it never certifies a source interval by itself.
+        """
+        if language not in {"zh", "en", "ja", "ko", "yue"}:
+            raise ValueError("Focused ASR language is not supported")
+        if (type(timeout_seconds) not in (int, float)
+                or not math.isfinite(timeout_seconds) or not 1 <= timeout_seconds <= 600):
+            raise ValueError("Focused ASR timeout must be between 1 and 600 seconds")
+        context = current_execution_context()
+        if context.cancel_check and context.cancel_check():
+            raise asyncio.CancelledError("Speech recognition cancelled")
+        self._ensure_loaded()
+        generated, _ = self.model.transcribe(
+            str(audio_path), language=language, beam_size=5, word_timestamps=True,
+            vad_filter=False, multilingual=True, condition_on_previous_text=False,
+            timeout_seconds=float(timeout_seconds))
+        results = []
+        try:
+            for segment in generated:
+                if context.cancel_check and context.cancel_check():
+                    raise asyncio.CancelledError("Speech recognition cancelled")
+                text = str(getattr(segment, "text", "") or "").strip()
+                start, end = getattr(segment, "start", None), getattr(segment, "end", None)
+                if not text or type(start) not in (int, float) or type(end) not in (int, float):
+                    continue
+                words = []
+                for word in getattr(segment, "words", None) or []:
+                    word_text = getattr(word, "word", "")
+                    word_start, word_end = getattr(word, "start", None), getattr(word, "end", None)
+                    if (not isinstance(word_text, str) or type(word_start) not in (int, float)
+                            or type(word_end) not in (int, float)):
+                        continue
+                    item = {"word": word_text, "start": round(float(word_start), 3),
+                            "end": round(float(word_end), 3)}
+                    probability = getattr(word, "probability", None)
+                    if type(probability) in (int, float) and math.isfinite(probability):
+                        item["probability"] = float(probability)
+                    words.append(item)
+                item = {"start": round(float(start), 3), "end": round(float(end), 3),
+                        "text_zh": text, "words": words}
+                for name in ("avg_logprob", "no_speech_prob"):
+                    score = getattr(segment, name, None)
+                    if type(score) in (int, float) and math.isfinite(score):
+                        item[name] = float(score)
+                results.append(item)
+        finally:
+            close = getattr(generated, "close", None)
+            if callable(close):
+                close()
+        return results

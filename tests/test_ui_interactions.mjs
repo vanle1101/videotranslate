@@ -5368,6 +5368,8 @@ test('manual export job polling stays serial until validated completion', async 
   assert.equal(ui.el('export-progress-pct').textContent,'100%');
   assert.equal(ui.el('export-result-box').classList.contains('hidden'),false);
   assert.match(ui.el('task-result-status').textContent,/Bản nháp — cần kiểm tra/);
+  assert.equal(ui.el('task-progress').dataset.status,'PREPARED');
+  assert.equal(ui.el('task-progress-value').textContent,'');
   assert.match(ui.el('export-result-warning').textContent,/#1/);
 });
 
@@ -5690,12 +5692,27 @@ test('idle partial export warns exact missing speech and TTS rows, preserves fai
     const request=ui.requests.find(item=>item.url==='/api/streaming/export-hq/jobs');
     assert.equal(JSON.parse(request.options.body).allow_incomplete,true);
     assert.equal(ui.el('btn-save-result').disabled,false);
-    assert.match(ui.el('task-result-status').textContent,/Bản hiện có đã xuất.*2 câu/);
+    assert.match(ui.el('task-result-status').textContent,/Bản nháp đã xuất — còn câu thiếu.*2 câu/);
     assert.equal(ui.el('export-result-warning').classList.contains('hidden'),false);
     assert.equal(ui.el('task-progress').dataset.status,status);
     assert.equal(ui.el('btn-export-hq').disabled,false,'response status ok must not replace task status');
     assert.equal(ui.alerts.length,0,'the modal warning needs no second confirmation');
   }
+});
+
+test('validated MP4 with unresolved review is linked and labeled draft in history', async () => {
+  const ui=studio(); await ui.start();
+  const task={task_id:'draft-media',title:'clip.mp4',status:'PREPARED',result_status:'DRAFT',
+    output_is_draft:true,output_incomplete:false,output_video_url:'/api/outputs/draft.mp4',
+    output_filename:'draft.mp4',output_warning:'Bản nháp — còn 1 câu cần kiểm tra.',
+    output_review_segment_ids:[0],media_complete:true,source_coverage_complete:true,
+    saved:true,can_open:true,duration:25};
+  ui.replies.set('/api/tasks',{tasks:[task],videos:[task]});
+  await ui.el('btn-refresh-tasks').click();
+  const history=ui.el('tasks-table-body').children[0].innerHTML;
+  assert.match(history,/BẢN NHÁP — CẦN KIỂM TRA/);
+  assert.match(history,/href="\/api\/outputs\/draft.mp4"/);
+  assert.match(history,/Bản nháp — còn 1 câu cần kiểm tra/);
 });
 
 test('manual export preserves strict completion and confirmed silence but opts in for review or missing audio', async () => {
@@ -5752,7 +5769,7 @@ test('partial result socket and history restore keep downloads visible beside un
     assert.match(ui.el('task-result-status').textContent,/Câu #2 chưa có giọng Việt/);
     assert.equal(ui.el('task-result-link').classList.contains('hidden'),false,delivery);
     const history=ui.el('tasks-table-body').children[0].innerHTML;
-    assert.match(history,/ĐÃ XUẤT BẢN HIỆN CÓ/);
+    assert.match(history,/BẢN NHÁP — CÒN CÂU THIẾU/);
     assert.match(history,/Câu #2 chưa có giọng Việt/);
     assert.match(history,/href="\/api\/outputs\/partial.mp4"/);
     assert.equal(ui.el('task-progress').dataset.status,'FAILED');

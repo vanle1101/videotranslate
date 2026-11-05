@@ -1388,7 +1388,8 @@ document.addEventListener("DOMContentLoaded", () => {
       return;
     }
     const incomplete = data.output_incomplete === true;
-    const draft = data.output_is_draft === true || (data.output_review_segment_ids || []).length > 0 || autoState?.reason === "review_required";
+    const draft = data.result_status === "DRAFT" || data.output_is_draft === true ||
+      (data.output_review_segment_ids || []).length > 0 || autoState?.reason === "review_required";
     if (!taskResult) return;
     const origin = `${window.location.protocol}//${window.location.host}`;
     let url;
@@ -1397,7 +1398,7 @@ document.addEventListener("DOMContentLoaded", () => {
     lastExportedFileUrl = url.pathname;
     const warning = typeof data.output_warning === "string" ? data.output_warning : "";
     if (taskResult) taskResult.dataset.automaticStatus = autoState?.status || (incomplete ? "blocked" : "completed");
-    taskResultStatus.textContent = `${incomplete ? "Bản hiện có đã xuất" : draft ? "Bản nháp — cần kiểm tra" : "Video kết quả đã sẵn sàng"}: ${data.output_filename || url.pathname.split("/").pop()}${incomplete ? `. ${warning || "Bản xuất còn câu thiếu hoặc chưa kiểm tra xong."}` : ""}`;
+    taskResultStatus.textContent = `${incomplete ? "Bản nháp đã xuất — còn câu thiếu" : draft ? "Bản nháp — cần kiểm tra" : "Video kết quả đã sẵn sàng"}: ${data.output_filename || url.pathname.split("/").pop()}${incomplete ? `. ${warning || "Bản xuất còn câu thiếu hoặc chưa kiểm tra xong."}` : warning ? `. ${warning}` : ""}`;
     const resultWarning = document.getElementById("export-result-warning");
     if (resultWarning) {
       const ids = (data.output_review_segment_ids || []).filter(Number.isInteger);
@@ -1410,8 +1411,8 @@ document.addEventListener("DOMContentLoaded", () => {
     taskResultLink.classList.remove("hidden");
     btnSaveResult.classList.remove("hidden");
     btnSaveResult.disabled = false;
-    btnSaveResult.innerHTML = `<i class="fa-solid fa-download" aria-hidden="true"></i>${incomplete ? "Tải bản hiện có" : "Tải video"}`;
-    btnSaveResult.title = incomplete ? warning || "Tải MP4 đã xuất từ phần lời và giọng hiện có" : "Lưu toàn bộ MP4 đã dịch, giữ nguyên chất lượng xuất";
+    btnSaveResult.innerHTML = `<i class="fa-solid fa-download" aria-hidden="true"></i>${draft ? "Tải bản nháp" : "Tải video"}`;
+    btnSaveResult.title = draft ? warning || "Tải MP4 bản nháp; nội dung chưa xác minh không được đánh dấu hoàn chỉnh." : "Lưu toàn bộ MP4 đã dịch, giữ nguyên chất lượng xuất";
     updateCaptionStyleAvailability();
   }
 
@@ -3527,12 +3528,15 @@ document.addEventListener("DOMContentLoaded", () => {
       }
       else if (msg.type === "result_ready") {
         automaticExportActive = false;
-        showEta(exportProgressEta, {status: "COMPLETED"});
+        const draftResult = msg.result_status === "DRAFT" || msg.output_is_draft === true || msg.output_incomplete === true;
+        showEta(exportProgressEta, {status: draftResult ? "PREPARED" : "COMPLETED"});
         if (!captionStyleDirty && !captionStyleRequest) captionOutputOutdated = false;
         showTaskResult(msg);
         const partialStatus = ["PREPARED", "FAILED", "STOPPED", "CANCELLED"].includes(currentProgress?.status) ? currentProgress.status : "PREPARED";
-        showTaskProgress({...msg, status: msg.output_incomplete ? partialStatus : "COMPLETED",
-          phase: msg.output_incomplete ? (currentProgress?.phase || "prepared") : "complete", stage: msg.output_incomplete ? "Bản hiện có đã xuất; còn câu thiếu hoặc chưa kiểm tra xong" : "Video kết quả đã sẵn sàng", progress_pct: msg.output_incomplete ? null : 100,
+        showTaskProgress({...msg, status: draftResult ? partialStatus : "COMPLETED",
+          phase: draftResult ? "prepared" : "complete",
+          stage: draftResult ? (msg.output_warning || "Bản nháp đã xuất và kiểm tra; còn nội dung chưa xác minh.") : "Video kết quả đã sẵn sàng",
+          progress_pct: draftResult ? null : 100,
           ...(msg.review_summary ? {review_summary: msg.review_summary} : {})});
       }
       else if (msg.type === "result_invalidated") {
@@ -4764,8 +4768,10 @@ document.addEventListener("DOMContentLoaded", () => {
     const autoStatus = task.automatic_output?.status;
     const names = {QUEUED: "CHỜ XỬ LÝ", RUNNING: "ĐANG CHẠY", PAUSED: "TẠM DỪNG", CANCELLING: "ĐANG DỪNG",
       PREVIEW_READY: "XEM TRƯỚC SẴN SÀNG", PREPARED: "CHỜ XUẤT MP4", CANCELLED: "ĐÃ DỪNG", STOPPED: "ĐÃ DỪNG"};
-    if (task.output_incomplete && historyOutputUrl(task)) return "ĐÃ XUẤT BẢN HIỆN CÓ";
-    if (task.output_is_draft && historyOutputUrl(task)) return "BẢN NHÁP — CẦN KIỂM TRA";
+    if ((task.result_status === "DRAFT" || task.output_is_draft || task.output_incomplete) && historyOutputUrl(task))
+      return task.output_missing_segment_ids?.length ? "BẢN NHÁP — CÒN CÂU THIẾU" : "BẢN NHÁP — CẦN KIỂM TRA";
+    if (task.result_status === "RECOVERABLE") return "CÓ THỂ TIẾP TỤC";
+    if (task.result_status === "FAILED") return "LỖI";
     if (!historyOutputUrl(task)) {
       if (autoStatus === "blocked") return "CHƯA THỂ XUẤT MP4";
       if (autoStatus === "failed") return "LỖI XUẤT MP4";
@@ -4777,7 +4783,10 @@ document.addEventListener("DOMContentLoaded", () => {
 
   function historyStatusBadge(task) {
     const autoStatus = !historyOutputUrl(task) ? task.automatic_output?.status : "";
-    const status = autoStatus === "failed" ? "failed" : autoStatus === "blocked" ? "prepared" : autoStatus === "running" ? "running"
+    const status = task.result_status === "DRAFT" || task.output_is_draft || task.output_incomplete ? "draft"
+      : task.result_status === "COMPLETED" ? "completed"
+      : task.result_status === "RECOVERABLE" ? "prepared" : task.result_status === "FAILED" ? "failed"
+      : autoStatus === "failed" ? "failed" : autoStatus === "blocked" ? "prepared" : autoStatus === "running" ? "running"
       : ["QUEUED", "RUNNING", "PAUSED", "CANCELLING", "PREVIEW_READY", "PREPARED", "COMPLETED", "STOPPED", "CANCELLED"].includes(task.status)
       ? task.status.toLowerCase() : "failed";
     return `<span class="history-status" data-status="${status}">${historyStatus(task)}</span>`;
@@ -4905,7 +4914,8 @@ document.addEventListener("DOMContentLoaded", () => {
       if (task.can_resume || ((task.can_retry || (task.saved && task.can_open !== false)) && ["STOPPED", "CANCELLED", "FAILED"].includes(task.status))) actions += `<button onclick="window.resumeTask('${historyTaskId(sessionId) ? sessionId : task.task_id}')" class="history-button history-button-resume">Tiếp tục</button>`;
       if (task.can_stop) actions += `<button onclick="window.stopTask('${task.task_id}')" class="history-button history-button-stop">Dừng</button>`;
     }
-    const outputUrl = task.status === "COMPLETED" || task.output_incomplete ? historyOutputUrl(task) : "";
+    const outputUrl = task.status === "COMPLETED" || task.output_incomplete || task.output_is_draft ||
+      task.result_status === "DRAFT" ? historyOutputUrl(task) : "";
     if (outputUrl) actions += `<a href="${escapeHtml(outputUrl)}" data-result-preview class="history-button history-button-secondary">Xem kết quả</a>`;
     tr.innerHTML = `
       <td class="history-video-cell"><div class="history-video-identity">${thumbnailMarkup}<div class="history-video-copy"><div class="history-video-title"${originalTitle}>${escapeHtml(videoTitle)}</div>
@@ -4914,7 +4924,7 @@ document.addEventListener("DOMContentLoaded", () => {
       <td class="history-progress-cell">${historyStatusBadge(task)}
         <div class="history-progress-content">
           ${terminalWithoutProgress ? "" : `<div class="history-progress-track" role="progressbar" aria-label="Tiến độ video"${pct === null ? ' aria-valuetext="Chưa có số liệu phần trăm" data-indeterminate="true"' : ` aria-valuemin="0" aria-valuemax="100" aria-valuenow="${pct}" data-indeterminate="false"`}><div class="history-progress-fill" style="width: ${pct === null ? 100 : pct}%"></div></div>`}
-          <span class="history-progress-label">${terminalWithoutProgress ? "" : `${escapeHtml(progressLabel)} · `}${etaLabel ? `${escapeHtml(etaLabel)} · ` : ""}${escapeHtml(task.stage || "")}${task.output_incomplete && task.output_warning ? ` · ${escapeHtml(task.output_warning)}` : ""}</span>
+          <span class="history-progress-label">${terminalWithoutProgress ? "" : `${escapeHtml(progressLabel)} · `}${etaLabel ? `${escapeHtml(etaLabel)} · ` : ""}${escapeHtml(task.stage || "")}${(task.output_incomplete || task.output_is_draft || task.result_status === "DRAFT") && task.output_warning && !(task.stage || "").includes(task.output_warning) ? ` · ${escapeHtml(task.output_warning)}` : ""}</span>
         </div></td>
       <td class="history-duration-cell">${formatTime(task.duration)}</td>
       <td class="history-actions-cell"><div class="history-actions">${actions || '<span class="history-no-action">—</span>'}</div></td>
@@ -5788,15 +5798,23 @@ document.addEventListener("DOMContentLoaded", () => {
       lastExportedFileUrl = data.video_url;
       captionOutputOutdated = false;
       const output = {...data, output_video_url: data.video_url};
-      if (currentProgress) for (const key of ["output_video_url", "output_filename", "output_incomplete", "output_warning", "output_missing_segment_ids", "output_is_draft", "output_review_segment_ids", "output_quality_label"]) currentProgress[key] = output[key];
+      if (currentProgress) for (const key of ["result_status", "output_video_url", "output_filename", "output_incomplete", "output_warning", "output_missing_segment_ids", "output_is_draft", "output_review_segment_ids", "output_quality_label"]) currentProgress[key] = output[key];
       showTaskResult(output);
+      const draftResult = output.result_status === "DRAFT" || output.output_is_draft === true || output.output_incomplete === true;
+      const draftStatus = ["PREPARED", "FAILED", "STOPPED", "CANCELLED"].includes(currentProgress?.status)
+        ? currentProgress.status : "PREPARED";
+      if (currentProgress) showTaskProgress({...currentProgress, ...output,
+        status: draftResult ? draftStatus : "COMPLETED",
+        phase: draftResult ? "prepared" : "complete",
+        stage: draftResult ? (output.output_warning || "Bản nháp đã xuất và kiểm tra; còn nội dung chưa xác minh.") : "MP4 đã xuất và giải mã kiểm tra thành công.",
+        progress_pct: draftResult ? null : 100});
       updateTasksTable();
 
       // Native desktop notification if available
       if (window.desktopBridge && typeof window.desktopBridge.showNotification === "function") {
         window.desktopBridge.showNotification(
           "Xuất Video Hoàn Tất",
-          `${data.output_incomplete ? "Bản hiện có" : "Video"} '${data.output_filename}' đã sẵn sàng!`
+          `${data.result_status === "DRAFT" || data.output_is_draft || data.output_incomplete ? "Bản nháp" : "Video"} '${data.output_filename}' đã sẵn sàng!`
         );
       }
 

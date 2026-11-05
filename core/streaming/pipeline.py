@@ -273,6 +273,7 @@ class StreamingPipelineSession:
         self._source_coverage_intervals = []
         # Durable diagnosis for native ASR gaps. Spans use global source time.
         self._source_missing_speech_spans = []
+        self._source_gap_repair_history = []
         self._source_failure_code = None
         self._source_failure_start = None
         self._source_preparation_stage = None
@@ -2075,6 +2076,7 @@ class StreamingPipelineSession:
                         total_seconds=self.total_duration, can_translate_full=self.can_translate_full)
         snapshot.update(
             source_missing_speech_spans=[list(span) for span in self._source_missing_speech_spans],
+            source_gap_repair_history=deepcopy(self._source_gap_repair_history),
             source_preparation_stage=(self._source_preparation_stage
                 if getattr(self, "_source_preparation_active", False) or self._source_failure_code else None),
             source_failure_code=self._source_failure_code,
@@ -2088,7 +2090,8 @@ class StreamingPipelineSession:
         snapshot["reviewing_segment_ids"] = list(self._reviewing_segment_ids)
         review_targets = self._idle_review_targets()
         snapshot["can_review"] = bool(self.initialized and not self.is_running and not self.is_stopped
-                                      and not self.is_editing and not self.error and settings.LLM_PROVIDER == "opencode"
+                                      and not self.is_editing and not self.error
+                                      and settings.LLM_PROVIDER in {"opencode", "ollama"}
                                       and review_targets and all(s.status in ("READY", "PLAYED") for s in review_targets))
         snapshot["can_pause"] = bool(self.initialized and self.is_running and not self.is_paused and not self.is_stopped and not self.error
                                     and not (self.review_task and not self.review_task.done()))
@@ -2127,18 +2130,35 @@ class StreamingPipelineSession:
                             stage=(missing_speech_message(output_gate["missing_speech_ids"])
                                    if output_gate["missing_speech_ids"] else
                                    "Video còn thiếu nguồn, giọng đọc hoặc timeline chưa hợp lệ; tiếp tục phần còn thiếu."))
-        elif not self.is_running and output_gate.get("media_complete") and output_gate["output_is_draft"]:
-            if (snapshot.get("phase") not in {"prepared", "complete"}
-                    or self.review_summary.get("status") in {"failed", "incomplete"}
-                    and (not getattr(self, "output_filename", "") or self.caption_output_outdated)):
-                snapshot.update(status="PREPARED", phase="prepared", progress_pct=None)
-            snapshot["stage"] = "Bản nháp — cần kiểm tra. " + snapshot.get("stage", "Đủ lời và giọng để xuất video.")
+        elif not self.is_running and output_gate.get("output_is_draft"):
+            # A completed translation/review pass is not a completed result if
+            # the source or editorial gate still marks it as a draft. Keep the
+            # lifecycle at PREPARED even when the last event said "complete".
+            snapshot.update(status="PREPARED", phase="prepared", progress_pct=None)
+            if getattr(self, "output_filename", "") and not self.caption_output_outdated:
+                snapshot["stage"] = (f"{output_gate['output_quality_label']}. MP4 đã xuất và kiểm tra; "
+                                     "các mục chưa xác minh vẫn được giữ trong bản nháp.")
+            else:
+                snapshot["stage"] = (f"{output_gate['output_quality_label']}. Lời dịch và giọng đã lưu; "
+                                     "chưa có MP4. Có thể xuất bản nháp.")
         if self._source_missing_speech_spans and not self.is_running and not self.is_stopped:
             ranges = ", ".join(f"{start:.2f}–{end:.2f}s" for start, end in self._source_missing_speech_spans)
             snapshot["stage"] += f" Chưa nhận diện được lời nói tại {ranges}."
         snapshot["can_resume"] = bool(self.initialized and self.is_running and snapshot["status"] == "PAUSED")
         snapshot["can_stop"] = (snapshot["status"] in {"RUNNING", "PAUSED"}
                                 or bool(self.edit_tasks) and not getattr(self, "_stop_draining", False))
+        published_output = bool(getattr(self, "output_filename", "") and not self.caption_output_outdated)
+        if published_output and (output_gate.get("output_is_draft") or self.output_incomplete
+                                 or output_gate.get("media_complete") is not True):
+            snapshot["result_status"] = "DRAFT"
+        elif published_output and output_gate.get("media_complete") is True:
+            snapshot["result_status"] = "COMPLETED"
+        elif self.is_running:
+            snapshot["result_status"] = "RUNNING"
+        elif self.error and not snapshot.get("can_retry"):
+            snapshot["result_status"] = "FAILED"
+        else:
+            snapshot["result_status"] = "RECOVERABLE"
         audit_active = self.native_audit_task is not None and not self.native_audit_task.done()
         if audit_active and not self.is_stopped and not self.is_running:
             from core.streaming.native_audit_lifecycle import pending_rows
@@ -2194,6 +2214,14 @@ class StreamingPipelineSession:
         missing_speech = missing_spoken_output_ids(self.segments.values())
         if phase == "complete" and missing_speech:
             phase, stage, progress_pct = "prepared", missing_speech_message(missing_speech), None
+        if phase == "complete":
+            output_gate = self._final_output_metadata()
+            if output_gate.get("output_is_draft") or self.output_incomplete:
+                phase = "prepared"
+                stage = (f"{output_gate['output_quality_label']}. "
+                         + ("MP4 bản nháp đã xuất và kiểm tra." if getattr(self, "output_filename", "")
+                            else "Lời dịch và giọng đã lưu; chưa có MP4. Có thể xuất bản nháp."))
+                progress_pct = None
         if (phase == "complete" and getattr(self, "auto_export_result", False)
                 and (not getattr(self, "output_filename", "") or self.caption_output_outdated)):
             phase, stage = "prepared", "Lời dịch và giọng đã xử lý; đang chờ xuất và kiểm định MP4."
@@ -3149,7 +3177,10 @@ class StreamingPipelineSession:
         recover_interrupted(self._chunk_jobs)
         self._visual_scanned_seconds = max(self._visual_scanned_seconds, self._visual_completed_seconds)
         target = min(self.total_duration, self.preview_seconds) if self.translation_mode == "preview" else self.total_duration
-        if (self.visual_translation and self.translation_mode == "full"
+        unresolved_source = any(
+            row.get("state") == "unresolved" and row["start"] < target
+            for row in (self._source_coverage_intervals or []))
+        if (self.visual_translation and not unresolved_source and self.translation_mode == "full"
                 and settings.LLM_PROVIDER in {"opencode", "ollama"}):
             workers = self._parallel_chunk_capacity()
             if workers > 1 or self._parallel_chunk_planning:
@@ -3159,16 +3190,68 @@ class StreamingPipelineSession:
         # queue keeps source decoding and provider work from monopolizing RAM.
         retry_intervals = [(row["start"], row["end"]) for row in self._chunk_jobs
                            if row["state"] != "COMPLETED" and row["start"] < target]
+        source_repair_attempted = set()
+
+        async def repair_pending_source_gaps():
+            from core.streaming.source_repair import repair_unresolved_source_interval
+            pending = [row for row in (self._source_coverage_intervals or [])
+                       if row.get("state") == "unresolved" and row["start"] < target]
+            for interval in pending:
+                key = (interval["start"], interval["end"])
+                if key in source_repair_attempted:
+                    continue
+                source_repair_attempted.add(key)
+                self._source_preparation_active = True
+                self._source_preparation_stage = "gap_repair"
+                await self.report_progress("asr_recovery",
+                    f"Đang phục hồi có giới hạn khoảng nguồn {key[0]:.3f}–{key[1]:.3f} giây…",
+                    source_gap_interval=[key[0], key[1]], source_gap_repair_attempt=1)
+                try:
+                    repaired = await repair_unresolved_source_interval(self, interval)
+                except asyncio.CancelledError:
+                    raise
+                except Exception as error:
+                    logging.getLogger("errors").error(
+                        "SOURCE_GAP_REPAIR_FAILED run_id=%s interval=%s error_type=%s traceback=%s",
+                        self.task_id, key, type(error).__name__, redacted_traceback(error))
+                    repaired = False
+                finally:
+                    self._source_preparation_active = False
+                if repaired and key not in retry_intervals:
+                    # Source coverage and translation coverage are separate
+                    # durable ledgers. Reserve this exact recovered island in
+                    # the normal chunk path so its new rows are translated,
+                    # synthesized and included in the contiguous completion
+                    # frontier before export is considered.
+                    retry_intervals.append(key)
+                if not repaired:
+                    message = (f"Khoảng nguồn {key[0]:.3f}–{key[1]:.3f} giây vẫn chưa được xác minh; "
+                               "đã giữ trạng thái chưa rõ và không xem là im lặng. MP4 nếu xuất được sẽ là bản nháp.")
+                    if message not in self.warnings:
+                        self.warnings.append(message)
+                    await self.report_progress("source_gap_unresolved", message,
+                        source_missing_speech_spans=self._source_missing_speech_spans,
+                        source_gap_repair_history=self._source_gap_repair_history)
+
         attempts, retry_delays = {}, {}
         # A stopped parallel wave may have reserved later PENDING owners before
         # any result was published. Falling back to one worker must reuse those
         # exact ranges, rather than inserting new overlapping intervals.
         self._visual_scanned_seconds = max(self._visual_scanned_seconds,
             max((row["end"] for row in self._chunk_jobs), default=0.))
-        while self._visual_scanned_seconds < target - .001 or retry_intervals:
+        while (self._visual_scanned_seconds < target - .001 or retry_intervals
+               or any(row.get("state") == "unresolved" and row["start"] < target
+                      and (row["start"], row["end"]) not in source_repair_attempted
+                      for row in (self._source_coverage_intervals or []))):
             await self.pause_event.wait()
             if self.is_stopped:
                 raise asyncio.CancelledError
+            unresolved_source = [row for row in (self._source_coverage_intervals or [])
+                                 if row.get("state") == "unresolved" and row["start"] < target
+                                 and (row["start"], row["end"]) not in source_repair_attempted]
+            if unresolved_source and self._visual_scanned_seconds >= target - .001 and not retry_intervals:
+                await repair_pending_source_gaps()
+                continue
             retry_interval = self._visual_scanned_seconds >= target - .001
             if not retry_interval:
                 cursor = self._visual_scanned_seconds
@@ -3184,8 +3267,14 @@ class StreamingPipelineSession:
                     attempt, delay = recovery
                     await self._wait_automatic_recovery(
                         f"dịch đoạn {cursor:.1f}–{nominal_end:.1f} giây", attempt, delay)
-            if not await self._prepare_source_until(nominal_end):
+            source_prepared = await self._prepare_source_until(nominal_end)
+            if not source_prepared:
+                retry_count = len(retry_intervals)
+                await repair_pending_source_gaps()
+                if len(retry_intervals) > retry_count:
+                    continue
                 break
+            await repair_pending_source_gaps()
             island = next_run(self, cursor)
             while island is None and scan_frontier(self) < target - .001:
                 if not await self._prepare_source_until(min(target, scan_frontier(self) + self.preview_seconds)):

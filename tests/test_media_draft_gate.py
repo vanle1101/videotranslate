@@ -32,6 +32,16 @@ def test_full_media_with_unresolved_meaning_is_exportable_draft(runtime_object):
     assert item == before
 
 
+def test_unverified_source_coverage_is_a_draft_even_without_materialized_review_rows():
+    result = final_output_metadata([], valid_audio=lambda _item: True,
+                                   source_complete=False, total_duration=2.)
+    assert result["media_complete"] is False
+    assert result["final_output_blocked"] is True
+    assert result["output_is_draft"] is True
+    assert result["source_coverage_unverified"] is True
+    assert result["output_quality_label"] == "Bản nháp — source coverage chưa hoàn tất"
+
+
 def test_legacy_editorial_metadata_never_claims_media_is_complete():
     result = final_output_metadata([row()])
     assert result["media_complete"] is None

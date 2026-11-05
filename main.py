@@ -626,12 +626,19 @@ def session_output_details(session):
     gate = session_media_gate(session)
     published_incomplete = bool(getattr(session, "output_incomplete", False))
     visible = not gate["final_output_blocked"] or published_incomplete
+    published = bool(visible and getattr(session, "output_filename", ""))
+    result_status = ("DRAFT" if published and (gate["output_is_draft"] or published_incomplete
+                                                   or gate["media_complete"] is not True)
+                     else "COMPLETED" if published else
+                     "RUNNING" if getattr(session, "is_running", False) else
+                     "RECOVERABLE" if getattr(session, "initialized", False) else "FAILED")
     missing_spans = getattr(session, "_source_missing_speech_spans", []) or []
     if not missing_spans:
         missing_spans = [
-            [row.get("start"), row.get("end")]
+            span
             for row in (getattr(session, "_source_coverage_intervals", []) or [])
             if row.get("state") == "unresolved"
+            for span in (row.get("missing_speech_spans") or [[row.get("start"), row.get("end")]])
         ]
     valid_spans = []
     for span in missing_spans:
@@ -655,17 +662,21 @@ def session_output_details(session):
             "Bản nháp đã render và kiểm tra tệp, nhưng source coverage chưa hoàn tất; "
             "không coi phần chưa xử lý là im lặng hoặc MP4 hoàn chỉnh."
         )
+    output_warning = ((f"Bản xuất còn {len(getattr(session, 'output_missing_segment_ids', []))} câu thiếu giọng Việt. "
+        "Phụ đề đã dịch và âm thanh nền được giữ; có thể tải video và bổ sung sau.")
+        if published_incomplete and getattr(session, "output_missing_segment_ids", []) else
+        source_draft_warning if published_incomplete else
+        f"{gate['output_quality_label']}; nội dung chưa xác minh không được đánh dấu hoàn chỉnh."
+        if published and gate["output_is_draft"] else "")
     return {"automatic_output": dict(getattr(session, "automatic_output", {}) or {}),
+            "result_status": result_status,
             "output_video_url": getattr(session, "output_video_url", "") if visible else "",
             "output_filename": getattr(session, "output_filename", "") if visible else "",
             "review_url": getattr(session, "output_review_url", "") if visible else "",
             "output_outdated": getattr(session, "caption_output_outdated", False),
             "output_incomplete": published_incomplete,
             "output_missing_segment_ids": list(getattr(session, "output_missing_segment_ids", [])),
-            "output_warning": ((f"Bản xuất còn {len(getattr(session, 'output_missing_segment_ids', []))} câu thiếu giọng Việt. "
-                "Phụ đề đã dịch và âm thanh nền được giữ; có thể tải video và bổ sung sau.")
-                if published_incomplete and getattr(session, "output_missing_segment_ids", []) else
-                source_draft_warning if published_incomplete else ""),
+            "output_warning": output_warning,
             **gate,
             **review_result_details(session)}
 
@@ -676,6 +687,10 @@ def session_media_gate(session):
     covered = bool(duration > 0 and (
         getattr(session, "_source_prepared_seconds", 0) + .001 >= duration
         if getattr(session, "_chunked_source_started", False) else getattr(session, "initialized", False)))
+    intervals = getattr(session, "_source_coverage_intervals", None) or []
+    if intervals:
+        from core.streaming.source_coverage import source_complete
+        covered = source_complete(intervals, total_duration=duration)
     if getattr(session, "_visual_incremental_started", False):
         covered = covered and getattr(session, "_visual_completed_seconds", 0) + .001 >= duration
     result = final_output_metadata(session.segments.values(), source_complete=covered,
@@ -684,7 +699,7 @@ def session_media_gate(session):
         # A rendered file from known-incomplete source coverage is always a
         # draft, even when every materialized row has good Vietnamese audio.
         result.update(output_is_draft=True, output_quality_label="Bản nháp — source coverage chưa hoàn tất",
-                      content_review_state="REVIEW_REQUIRED")
+                      source_coverage_unverified=True)
     if getattr(session, "review_summary", {}).get("status") in {"failed", "incomplete", "running"}:
         result.update(output_is_draft=True, output_quality_label="Bản nháp — cần kiểm tra",
                       content_review_state="REVIEW_REQUIRED")
@@ -1044,6 +1059,7 @@ async def list_tasks():
             "output_filename": exp.get("output_filename", ""),
             "output_video_url": exp.get("video_url", ""),
             "output_incomplete": exp.get("output_incomplete", False),
+            "result_status": exp.get("result_status", "RUNNING"),
             "output_missing_segment_ids": exp.get("output_missing_segment_ids", []),
             "output_warning": exp.get("output_warning", ""),
             "output_is_draft": exp.get("output_is_draft", False),
@@ -2188,9 +2204,12 @@ async def export_hq(req: ExportHQRequest):
         session.caption_output_outdated = False
         from core.subtitle_cues import CAPTION_RENDERER_VERSION
         session.caption_renderer_version = CAPTION_RENDERER_VERSION
-        export_terminal_status = "PREPARED" if output_incomplete else "COMPLETED"
-        export_terminal_message = (session_output_details(session)["output_warning"] if output_incomplete
-                                   else "MP4 đã xuất và giải mã kiểm tra thành công.")
+        output_details = session_output_details(session)
+        draft_output = output_details["result_status"] == "DRAFT"
+        export_terminal_status = "PREPARED" if draft_output else "COMPLETED"
+        export_terminal_message = (output_details["output_warning"] or
+            ("Bản nháp đã xuất và giải mã kiểm tra; nội dung còn mục chưa xác minh."
+             if draft_output else "MP4 đã xuất và giải mã kiểm tra thành công."))
         record_status(session, export_terminal_status, "export", export_terminal_message)
         # Persist the published result with its terminal export state. A late
         # progress/event notification is best-effort and must not leave the
@@ -2205,8 +2224,7 @@ async def export_hq(req: ExportHQRequest):
             phase_timings_seconds=dict(result.get("phase_timings_seconds") or {}),
             audio_cache_reused=bool(result.get("audio_cache_reused", False)),
             updated_at=max(time.time(), getattr(session, "_history_updated_at", 0) or 0),
-            stage=("Bản nháp đã render và giải mã kiểm tra; source coverage còn thiếu."
-                   if output_incomplete else "MP4 đã xuất và giải mã kiểm tra thành công."),
+            stage=export_terminal_message,
             video_url=session.output_video_url, output_filename=session.output_filename,
             review_url=review_url, warnings=list(session.warnings), metadata_warning=metadata_warning)
         warnings_before_save = warnings_before_export
@@ -2223,20 +2241,19 @@ async def export_hq(req: ExportHQRequest):
             phase_timings_seconds=dict(result.get("phase_timings_seconds") or {}),
             audio_cache_reused=bool(result.get("audio_cache_reused", False)),
             updated_at=max(time.time(), getattr(session, "_history_updated_at", 0) or 0),
-            stage=(metadata_warning or ("Bản nháp đã render và giải mã kiểm tra; source coverage còn thiếu."
-                                        if output_incomplete else "Xuất video hoàn tất thành công!")),
+            stage=(metadata_warning or export_terminal_message),
             video_url=session.output_video_url, output_filename=session.output_filename,
             review_url=review_url, warnings=list(session.warnings), metadata_warning=metadata_warning)
         output_details = {**session_output_details(session), "warnings": list(session.warnings),
                           "metadata_warning": metadata_warning}
         active_export_tasks[export_id].update({key: output_details[key] for key in
-            ("output_incomplete", "output_missing_segment_ids", "output_warning", "output_is_draft",
+            ("result_status", "output_incomplete", "output_missing_segment_ids", "output_warning", "output_is_draft",
              "output_quality_label", "output_review_segment_ids", "content_review_state")})
         try:
             await session.report_progress(
-                "prepared" if output_incomplete else "complete",
+                "prepared" if draft_output else "complete",
                 export_terminal_message,
-                None if output_incomplete else 100,
+                None if draft_output else 100,
             )
             await broadcast_session_event(req.task_id, "result_ready", output_details)
         except (Exception, asyncio.CancelledError) as notification_error:
