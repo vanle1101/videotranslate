@@ -50,3 +50,23 @@ def test_missing_or_invalid_track_timing_does_not_inherit_container_duration(tmp
     with pytest.raises(ValueError, match="thời lượng không khớp"):
         HQExporter.validate_output(result, 2)
     assert len(commands) == 1  # Reject before spending time on a full decode.
+
+
+def test_export_timeline_failure_reports_stream_measurements_without_media_paths(tmp_path, monkeypatch):
+    from core.streaming import export
+    result = tmp_path / "metadata.mp4"
+    result.write_bytes(b"mock media")
+    metadata = {"format": {"duration": "2"}, "streams": [
+        {"codec_type": "video", "width": 64, "height": 64,
+         "start_time": "0", "duration": "1.25"},
+        {"codec_type": "audio", "start_time": "0", "duration": "2"}]}
+    monkeypatch.setattr(export, "run_media", lambda *_args, **_kwargs: json.dumps(metadata).encode())
+
+    with pytest.raises(ValueError) as caught:
+        HQExporter.validate_output(result, 2)
+
+    message = str(caught.value)
+    assert "video.duration=1.250s" in message
+    assert "audio.duration=2.000s" in message
+    assert "expected=2.000s" in message
+    assert str(result) not in message

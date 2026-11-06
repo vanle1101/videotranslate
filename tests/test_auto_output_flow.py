@@ -103,6 +103,40 @@ def test_known_source_gap_schedules_labeled_draft_only_when_rows_are_renderable(
     assert not session.is_running
 
 
+def test_known_source_gap_can_export_draft_with_failed_tts_row_and_original_audio_fallback(tmp_path, monkeypatch):
+    session = _session(tmp_path, review_status="incomplete")
+    session._chunked_source_started = True
+    session._source_prepared_seconds = 2.0
+    session._source_scanned_seconds = 2.0
+    session._source_missing_speech_spans = [[0.8, 0.928]]
+    session._source_failure_code = "source_speech_unrecognized"
+    session._source_failure_start = 0.8
+    session._source_coverage_intervals = [{
+        "start": 0.8, "end": 0.928, "state": "unresolved",
+        "missing_speech_spans": [[0.8, 0.928]], "error_code": "source_speech_unrecognized",
+    }]
+    row = session.segments[0]
+    row.start, row.end, row.duration = 1.0, 1.5, .5
+    row.source_asr_start, row.source_asr_end = 1.1, 1.2
+    row.status, row.failed_stage = "FAILED", "TTS"
+    row.audio_path = None
+    row.error = "Pacing candidate was not independently verified"
+    row.source_method = "audio"
+    row.source_audio_evidence = "original_audio"
+    session.error = "1 câu chưa tạo được giọng."
+    schedule = Mock()
+    monkeypatch.setattr(main, "get_streaming_session", lambda task_id: session)
+    monkeypatch.setattr(main, "schedule_reviewed_export", schedule)
+    monkeypatch.setattr(main, "broadcast_session_event", AsyncMock())
+
+    asyncio.run(main.finalize_session_output(session.task_id))
+
+    schedule.assert_called_once_with(session.task_id, allow_incomplete=True)
+    assert session.automatic_output == {
+        "status": "pending", "policy": "strict_media", "reason": "source_coverage_draft"
+    }
+
+
 def test_known_source_gap_never_becomes_a_draft_when_audio_is_missing(tmp_path, monkeypatch):
     session = _session(tmp_path, review_status="incomplete")
     session._chunked_source_started = True

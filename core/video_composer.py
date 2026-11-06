@@ -175,13 +175,21 @@ class VideoComposer:
         """Read the first decoded video timestamp without loading media in RAM."""
         raw = run_media([
             "ffprobe", "-v", "error", "-select_streams", "v:0",
-            "-show_entries", "stream=start_time:format=duration", "-of", "json", str(video_path),
+            "-read_intervals", "%+#1", "-show_frames",
+            "-show_entries", "frame=best_effort_timestamp_time:stream=start_time:format=duration",
+            "-of", "json", str(video_path),
         ], cancel_check=cancel_check, capture_output=True)
         try:
             metadata = json.loads(raw)
             stream = next(item for item in metadata.get("streams", [])
                           if item.get("codec_type") in (None, "video"))
-            start = float(stream.get("start_time", 0.0))
+            frames = metadata.get("frames", [])
+            # Some WebM/VP9 files report a synthetic stream start_time of zero
+            # even though the first decoded frame is offset from the audio
+            # timeline. The frame timestamp is authoritative when available.
+            raw_start = (frames[0].get("best_effort_timestamp_time")
+                         if frames and isinstance(frames[0], dict) else None)
+            start = float(raw_start if raw_start is not None else stream.get("start_time", 0.0))
         except (ValueError, TypeError, KeyError, StopIteration):
             return 0.0
         if not math.isfinite(start) or start <= 0.001:

@@ -179,6 +179,36 @@ def test_real_partial_export_keeps_subtitle_with_missing_voice_and_separate_mix(
     HQExporter.validate_output(partial["output_path"], 1)
 
 
+def test_partial_draft_restores_original_source_audio_only_inside_uncertain_span(media):
+    source, rows, _ = media
+    partial_rows = [dict(rows[0], omit_voice=True, audio_path=None)]
+    baseline = HQExporter().export("partial-without-source-fallback", source, partial_rows, 1,
+                                   allow_incomplete=True)
+    exporter = HQExporter()
+    try:
+        draft = exporter.export("partial-with-source-fallback", source, partial_rows, 1,
+                                allow_incomplete=True, source_audio_fallback_spans=[[.2, .5]])
+    except TypeError as error:
+        pytest.fail(f"Partial draft export cannot yet restore uncertain source audio: {error}")
+
+    def decoded(path):
+        return run_media(["ffmpeg", "-v", "error", "-i", path, "-map", "0:a:0",
+                          "-f", "s16le", "pipe:1"], capture_output=True)
+
+    before, after = decoded(baseline["output_path"]), decoded(draft["output_path"])
+    assert len(before) == len(after) > 0
+    samples_before = memoryview(before).cast("h")
+    samples_after = memoryview(after).cast("h")
+    def mean_square_difference(start, end):
+        first, last = round(start * 44100) * 2, round(end * 44100) * 2
+        return sum((samples_before[i] - samples_after[i]) ** 2
+                   for i in range(first, last)) / max(1, last - first)
+    outside = mean_square_difference(.05, .15)
+    inside = mean_square_difference(.25, .45)
+    assert inside > max(25, outside * 8)
+    assert draft["output_incomplete"] is True
+
+
 @pytest.mark.parametrize("change", ["voice", "revision", "timing", "source", "ducking", "gain", "mode", "engine", "code"])
 def test_identity_tracks_every_audio_change(media, monkeypatch, change):
     source, rows, root = media

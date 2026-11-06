@@ -817,6 +817,32 @@ SOURCE_OUTPUT_BLOCKED_WARNING = (
 )
 
 
+def _source_audio_fallback_rows(session):
+    """Return failed TTS rows whose original audio can be restored safely."""
+    spans = [tuple(map(float, span)) for span in (getattr(session, "_source_missing_speech_spans", []) or [])
+             if isinstance(span, (list, tuple)) and len(span) == 2
+             and all(type(value) in (int, float) and math.isfinite(value) for value in span)]
+    eligible = {}
+    for row in session.segments.values():
+        if (row.status != "FAILED" or row.failed_stage not in {"TTS", "ALIGNING"}
+                or not str(getattr(row, "final_vi", "") or "").strip()
+                or getattr(row, "confirmed_silence", False)
+                or getattr(row, "source_audio_evidence", None) != "original_audio"
+                or getattr(row, "source_method", None) != "audio"):
+            continue
+        start, end = getattr(row, "source_asr_start", None), getattr(row, "source_asr_end", None)
+        if (type(start) not in (int, float) or type(end) not in (int, float)
+                or not math.isfinite(start) or not math.isfinite(end)
+                or start < 0 or end <= start or end - start > 8
+                or start < row.start - .05 or end > row.end + .05
+                or end > getattr(session, "total_duration", 0) + .001):
+            continue
+        if any(start < gap_end and end > gap_start for gap_start, gap_end in spans):
+            continue
+        eligible[row.id] = (max(0., float(start)), min(float(session.total_duration), float(end)))
+    return eligible
+
+
 def _source_gap_draft_ready(session, gate=None):
     """Allow a clearly labeled draft only for known source gaps.
 
@@ -830,12 +856,18 @@ def _source_gap_draft_ready(session, gate=None):
                       "Chuẩn bị video bị gián đoạn; bấm Tiếp tục để khôi phục phần đã lưu.")
     source_resume_error = bool(error and getattr(session, "_startup_failed", False)
                                and error in recovery_error)
-    if ((error and not source_resume_error) or not session.segments
+    fallback_rows = _source_audio_fallback_rows(session)
+    failed_ids = {row.id for row in session.segments.values() if row.status == "FAILED"}
+    fallback_failures = bool(failed_ids) and failed_ids <= set(fallback_rows)
+    if ((error and not source_resume_error and not fallback_failures) or not session.segments
             or gate.get("source_coverage_complete") is not False
-            or gate.get("missing_speech_ids") or gate.get("missing_audio_ids")
+            or gate.get("missing_speech_ids")
+            or (gate.get("missing_audio_ids")
+                and not set(gate.get("missing_audio_ids") or ()) <= set(fallback_rows))
             or gate.get("invalid_timing_ids")
             or missing_spoken_output_ids(session.segments.values())
-            or any(row.status not in ("READY", "PLAYED") for row in session.segments.values())):
+            or any(row.status not in ("READY", "PLAYED") and row.id not in fallback_rows
+                   for row in session.segments.values())):
         return False
     has_gap_evidence = bool(getattr(session, "_source_missing_speech_spans", None)
                             or getattr(session, "_source_failure_code", None)
@@ -858,7 +890,9 @@ async def finalize_session_output(task_id):
     source_gap_draft = _source_gap_draft_ready(session, gate)
     if ((getattr(session, "error", None) and not source_gap_draft) or not session.segments
             or (gate["final_output_blocked"] and not source_gap_draft)
-            or any(row.status not in ("READY", "PLAYED") for row in session.segments.values())):
+            or any(row.status not in ("READY", "PLAYED")
+                   and not (source_gap_draft and row.id in _source_audio_fallback_rows(session))
+                   for row in session.segments.values())):
         state = {"status": "blocked", "policy": "strict_media",
                  "reason": "media_incomplete"}
         if getattr(session, "automatic_output", None) == state:
@@ -929,7 +963,9 @@ def schedule_reviewed_export(task_id, *, allow_incomplete=False):
                 and not getattr(session, "_visual_prepass_complete", False))
             or missing_spoken_output_ids(session.segments.values())
             or (gate["final_output_blocked"] and not source_gap_draft)
-            or any(s.status not in ("READY", "PLAYED") for s in session.segments.values())):
+            or any(s.status not in ("READY", "PLAYED")
+                   and not (source_gap_draft and s.id in _source_audio_fallback_rows(session))
+                   for s in session.segments.values())):
         return
     owner = getattr(session, "auto_export_task", None)
     if (owner is not None and not owner.done()) or active_export_tasks.get(
@@ -2037,11 +2073,15 @@ async def export_hq(req: ExportHQRequest):
     export_signature = export_revision_signature(session)
     segments_data = [dict(s.to_dict(), audio_path=s.audio_path)
                      for s in session.segments.values()]
+    fallback_rows = (_source_audio_fallback_rows(session)
+                     if req.allow_incomplete and media_gate["source_coverage_complete"] is False else {})
     if req.allow_incomplete:
         for row in segments_data:
             if row["id"] in incomplete_ids:
                 row["audio_path"] = None
                 row["omit_voice"] = True
+    source_audio_fallback_spans = [span for row_id, span in fallback_rows.items()
+                                   if row_id in incomplete_ids]
     output_incomplete = bool(req.allow_incomplete and (incomplete_ids or not media_gate["source_coverage_complete"]))
     stopped_at_start = bool(getattr(session, "is_stopped", False))
     if not segments_data:
@@ -2137,6 +2177,7 @@ async def export_hq(req: ExportHQRequest):
             caption_style=dict(getattr(session, "caption_style", {}) or {}),
             source_screen_texts=getattr(session, "screen_texts", []),
             allow_incomplete=req.allow_incomplete,
+            source_audio_fallback_spans=source_audio_fallback_spans,
         ))
         try:
             result = await asyncio.shield(render_worker)

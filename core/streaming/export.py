@@ -109,17 +109,18 @@ class HQExporter:
         caption_style: Optional[Dict[str, Any]] = None,
         source_screen_texts: Optional[List[Dict[str, Any]]] = None,
         allow_incomplete: bool = False,
+        source_audio_fallback_spans: Optional[List[List[float]]] = None,
     ) -> Dict[str, Any]:
         with tempfile.TemporaryDirectory(prefix=f"hq_export_{task_id}_", dir=settings.TEMP_DIR) as temp_dir:
             return self._export(
                 task_id, Path(video_path), segments, total_duration, Path(temp_dir),
                 mask_chinese, progress_callback, cancel_check, screen_texts, publish_callback, caption_style, source_screen_texts,
-                allow_incomplete,
+                allow_incomplete, source_audio_fallback_spans,
             )
 
     def _export(self, task_id, video_path, segments, total_duration, task_dir,
                 mask_chinese, progress_callback, cancel_check, screen_texts=None, publish_callback=None, caption_style=None, source_screen_texts=None,
-                allow_incomplete=False):
+                allow_incomplete=False, source_audio_fallback_spans=None):
         caption_style = normalize_caption_style(caption_style)
         if not math.isfinite(total_duration) or total_duration <= 0:
             raise ValueError("Thời lượng video phải lớn hơn 0.")
@@ -131,6 +132,8 @@ class HQExporter:
             raise ValueError(missing_speech_message(missing))
         if invalid_dub_timing_ids(spoken_rows, total_duration):
             raise ValueError("Timeline lồng tiếng bị chồng lấn hoặc có thời gian không hợp lệ.")
+        fallback_spans = self._validated_source_audio_fallback_spans(
+            source_audio_fallback_spans, total_duration) if allow_incomplete else []
         # A reusable mix cannot waive the current text and timeline checks.
         # Semantic uncertainty is retained as draft metadata, never a media gap.
         quality = final_output_metadata(segments)
@@ -151,9 +154,11 @@ class HQExporter:
         phase_started = time.monotonic()
         _report(None, "Đang kiểm tra âm thanh đã xử lý để dùng lại...")
         prepared_identity = prepared_background_identity(video_path, task_id, total_duration, cancel_check)
-        audio_identity = build_audio_cache_identity(video_path, segments, total_duration,
-                                                    self.mixer, self.suppressor, cancel_check,
-                                                    background_variant=prepared_identity)
+        # Source-audio restoration is specific to this incomplete draft and
+        # must never share a full narration cache entry.
+        audio_identity = (None if fallback_spans else build_audio_cache_identity(
+            video_path, segments, total_duration, self.mixer, self.suppressor, cancel_check,
+            background_variant=prepared_identity))
         reused = load_audio_cache(audio_identity, task_dir, cancel_check)
         phase_timings["audio_cache_lookup"] = round(time.monotonic() - phase_started, 3)
         pending_audio = None
@@ -165,10 +170,10 @@ class HQExporter:
             phase_started = time.monotonic()
             master_audio, audio_metadata = self._mix_audio(
                 video_path, segments, total_duration, task_dir, _report, _check_cancel, cancel_check,
-                task_id=task_id)
+                task_id=task_id, source_audio_fallback_spans=fallback_spans)
             # A packet can disappear or fail decoding after the identity check.
             # Never publish a fallback mix under the prepared-background key.
-            if prepared_identity != audio_metadata.get("background_interval_digest"):
+            if fallback_spans or prepared_identity != audio_metadata.get("background_interval_digest"):
                 audio_identity = None
             pending_audio = prepare_audio_cache(audio_identity, master_audio, audio_metadata, task_dir, cancel_check)
             phase_timings["audio_mix"] = round(time.monotonic() - phase_started, 3)
@@ -269,6 +274,30 @@ class HQExporter:
             "output_incomplete": any(row.get("omit_voice", False) for row in segments),
         }
 
+    @staticmethod
+    def _validated_source_audio_fallback_spans(spans, total_duration):
+        if spans is None:
+            return []
+        if not isinstance(spans, (list, tuple)):
+            raise ValueError("Khoảng khôi phục âm thanh nguồn không hợp lệ.")
+        parsed = []
+        for span in spans:
+            if (not isinstance(span, (list, tuple)) or len(span) != 2
+                    or any(type(value) not in (int, float) or not math.isfinite(value) for value in span)):
+                raise ValueError("Khoảng khôi phục âm thanh nguồn không hợp lệ.")
+            start, end = map(float, span)
+            if start < 0 or end <= start or end > total_duration + 1 / 44100:
+                raise ValueError("Khoảng khôi phục âm thanh nguồn vượt timeline.")
+            parsed.append((start, min(end, total_duration)))
+        parsed.sort()
+        merged = []
+        for start, end in parsed:
+            if merged and start <= merged[-1][1] + 1 / 44100:
+                merged[-1] = (merged[-1][0], max(merged[-1][1], end))
+            else:
+                merged.append((start, end))
+        return merged
+
     def _background(self, video_path, total_duration, task_dir, report, check_cancel, cancel_check, task_id=None):
         check_cancel()
         prepared = load_prepared_background(video_path, task_id, total_duration, task_dir, cancel_check)
@@ -322,7 +351,7 @@ class HQExporter:
         return instrumental_path, metadata
 
     def _mix_audio(self, video_path, segments, total_duration, task_dir, report, check_cancel, cancel_check,
-                   task_id=None):
+                   task_id=None, source_audio_fallback_spans=None):
         instrumental_path, metadata = self._background(
             video_path, total_duration, task_dir, report, check_cancel, cancel_check, task_id)
 
@@ -336,6 +365,24 @@ class HQExporter:
         master_audio = task_dir / "master_audio_ducked.wav"
         self.mixer.mix(instrumental_path=instrumental_path, voice_path=voice_wav,
                        output_path=master_audio, total_duration=total_duration, cancel_check=cancel_check)
+        if source_audio_fallback_spans:
+            report(None, "Giữ âm thanh gốc tại câu chưa tạo được giọng; bản xuất vẫn là nháp...")
+            restored = task_dir / "master_audio_with_source_fallback.wav"
+            predicates = "+".join(
+                f"between(t,{start:.6f},{end:.6f})" for start, end in source_audio_fallback_spans)
+            filter_complex = (
+                f"[0:a:0]asetpts=PTS-STARTPTS,apad,atrim=duration={total_duration:.6f},"
+                f"aformat=sample_rates=44100:channel_layouts=stereo,"
+                f"volume=0:enable='not({predicates})'[source];"
+                f"[1:a:0]asetpts=PTS-STARTPTS[master];"
+                f"[master][source]amix=inputs=2:duration=first:dropout_transition=0:normalize=0,"
+                f"atrim=duration={total_duration:.6f}[out]"
+            )
+            run_media(["ffmpeg", "-hide_banner", "-loglevel", "error", "-nostdin", "-y",
+                       "-i", str(video_path), "-i", str(master_audio),
+                       "-filter_complex", filter_complex, "-map", "[out]", "-ac", "2", "-ar", "44100",
+                       "-c:a", "pcm_s16le", "-rf64", "auto", str(restored)], cancel_check)
+            master_audio = restored
         return master_audio, metadata
 
     @staticmethod
@@ -346,6 +393,10 @@ class HQExporter:
         raw = run_media(["ffprobe", "-v", "error", "-show_entries",
                          "format=duration:stream=codec_type,width,height,start_time,duration", "-of", "json", str(path)],
                         cancel_check, capture_output=True)
+        metadata = {}
+        duration = None
+        video = None
+        audio = None
         try:
             metadata = json.loads(raw)
             duration = float(metadata["format"]["duration"])
@@ -374,7 +425,26 @@ class HQExporter:
         except (ValueError, TypeError, KeyError, StopIteration):
             valid = False
         if not valid:
-            raise ValueError("Video kết quả thiếu hình, âm thanh hoặc thời lượng không khớp nguồn.")
+            def measured(value):
+                try:
+                    number = float(value)
+                except (TypeError, ValueError, OverflowError):
+                    return "missing/invalid"
+                return f"{number:.3f}s" if math.isfinite(number) else "missing/invalid"
+
+            streams = metadata.get("streams", []) if isinstance(metadata, dict) else []
+            video = video or next((item for item in streams if item.get("codec_type") == "video"), {})
+            audio = audio or next((item for item in streams if item.get("codec_type") == "audio"), {})
+            expected = measured(expected_duration)
+            details = (f"expected={expected}; container.duration={measured(duration)}; "
+                       f"video.start={measured(video.get('start_time'))}; "
+                       f"video.duration={measured(video.get('duration'))}; "
+                       f"video.size={video.get('width', 'missing')}x{video.get('height', 'missing')}; "
+                       f"audio.start={measured(audio.get('start_time'))}; "
+                       f"audio.duration={measured(audio.get('duration'))}")
+            raise ValueError(
+                "Video kết quả thiếu hình, âm thanh hoặc thời lượng không khớp nguồn. "
+                f"Đo được: {details}.")
         # Confirm that both media streams can actually be decoded before publishing.
         # A one-second probe is insufficient for long exports: a truncated or
         # corrupt tail can still pass while the user receives an unplayable
