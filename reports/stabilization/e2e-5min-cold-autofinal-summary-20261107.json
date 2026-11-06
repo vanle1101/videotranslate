@@ -1,0 +1,133 @@
+{
+  "test": "five_minute_fresh_upload_automatic_draft_export",
+  "task_id": "44efc577",
+  "started_at_utc": "2026-11-06T20:40:35.995298+00:00",
+  "input": {
+    "sha256": "40a2f4411ead56459207c3f6dac3191acd0e93cda2f3d28d035d50bd1f3c6b16",
+    "bytes": 462407627,
+    "duration_seconds": 300.048254,
+    "mode": "fresh local upload, no prior task checkpoint"
+  },
+  "runtime": {
+    "source_revision": "b0190319307416773cf0fcb6fb5225dc62772b96ed3ea52cc7868d0d9d4aeafd",
+    "provider": "ollama",
+    "model": "qwen3:4b-no-think",
+    "model_loaded_before_run": false,
+    "asr_engine": "faster-whisper",
+    "asr_model": "small",
+    "asr_device": "cuda",
+    "tts_engine": "piper-tts"
+  },
+  "cache": {
+    "speech_cache": "isolated cold task cache",
+    "media_cache_reads_disabled": true,
+    "speech_cache_hits": 1
+  },
+  "pipeline": {
+    "elapsed_seconds": 913.1,
+    "real_time_factor": 3.043,
+    "phase_timings_seconds": {
+      "align": 185.008,
+      "asr_recovery": 3.766,
+      "prepare": 1.828,
+      "source.asr": 145.515,
+      "source.audio_extract": 1.797,
+      "source.background_extract": 0.908,
+      "source.background_suppress": 16.546,
+      "source.diarization": 1.046,
+      "source_gap_unresolved": 0.093,
+      "source_partial": 0.031,
+      "translate": 226.469,
+      "tts": 103.665
+    },
+    "segment_count": 125,
+    "segment_states": {
+      "READY": 125
+    },
+    "ollama_attempts": 33,
+    "ollama_failed_calls": 1,
+    "pacing_review_attempts": 1,
+    "unresolved_source_gaps": [
+      [
+        2.976,
+        3.104
+      ]
+    ],
+    "source_gap_state": "UNCERTAIN",
+    "user_action_count": 0
+  },
+  "output": {
+    "status": "DRAFT",
+    "complete": false,
+    "incomplete": true,
+    "automatic_export_status": "COMPLETED",
+    "validated": true,
+    "path": "E:\\Dịch video\\workspace\\outputs\\douyin_translated_44efc577_hq.mp4",
+    "bytes": 301593315,
+    "sha256": "a5393b07c2fa8a3625dc946a253295dc2e00f12fb20c28422b8948bd1f5bae31",
+    "duration_seconds": 300.033333,
+    "probe": {
+      "programs": [],
+      "stream_groups": [],
+      "streams": [
+        {
+          "codec_name": "h264",
+          "codec_type": "video",
+          "width": 1920,
+          "height": 1080,
+          "start_time": "0.000000",
+          "duration": "300.033333"
+        },
+        {
+          "codec_name": "aac",
+          "codec_type": "audio",
+          "start_time": "0.000000",
+          "duration": "300.025034"
+        }
+      ],
+      "format": {
+        "duration": "300.033333"
+      }
+    },
+    "http_range_probe": {
+      "status_code": 206,
+      "content_length": 1024,
+      "content_range": "bytes 0-1023/301593315",
+      "accept_ranges": "bytes"
+    },
+    "whole_file_decode": "passed",
+    "warning": "One source interval remains UNCERTAIN at 2.976–3.104s; it is not treated as silence."
+  },
+  "duration_breakdown_seconds": {
+    "align": 185.008,
+    "asr_recovery": 3.766,
+    "prepare": 1.828,
+    "source.asr": 145.515,
+    "source.audio_extract": 1.797,
+    "source.background_extract": 0.908,
+    "source.background_suppress": 16.546,
+    "source.diarization": 1.046,
+    "source_gap_unresolved": 0.093,
+    "source_partial": 0.031,
+    "translate": 226.469,
+    "tts": 103.665,
+    "export_total": 195.3,
+    "export_render_mp4": 150.797,
+    "export_validate_publish": 20.406
+  },
+  "resource_peaks": {
+    "pipeline_process_cpu_percent": 160.0,
+    "pipeline_process_rss_bytes": 8409010176,
+    "system_cpu_percent": 100.0,
+    "system_ram_used_percent": 76.2,
+    "gpu_utilization_percent": 100,
+    "gpu_memory_used_mib": 3668
+  },
+  "recovery_evidence": {
+    "provider_failures": 1,
+    "terminal_failed_rows": 0,
+    "final_ready_rows": 125,
+    "source_gap_repair_attempts": 1,
+    "source_gap_resolution": "unresolved after bounded independent recovery; correctly produced DRAFT"
+  }
+}

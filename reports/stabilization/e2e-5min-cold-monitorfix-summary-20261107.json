@@ -1,0 +1,75 @@
+{
+  "test": "five_minute_cold_monitorfix_after_output_patch",
+  "task_id": "661f62c8",
+  "input_sha256": "40a2f4411ead56459207c3f6dac3191acd0e93cda2f3d28d035d50bd1f3c6b16",
+  "input_bytes": 462407627,
+  "media_duration_seconds": 300.048254,
+  "pipeline_elapsed_seconds": 965.6,
+  "finalize_and_validation_seconds": 203.094,
+  "end_to_validation_seconds": 1168.694,
+  "cold_speech_cache": true,
+  "media_cache_reads_disabled": true,
+  "model_loaded_before_run": false,
+  "asr_engine": "faster-whisper",
+  "whisper_model": "small",
+  "tts_engine": "piper",
+  "model": "local-qwen3-4b",
+  "segment_count": 127,
+  "ready_audio_count": 126,
+  "failed_rows_with_original_audio_fallback": [
+    45
+  ],
+  "source_coverage_complete": false,
+  "source_gaps": [
+    [
+      2.976,
+      3.104
+    ]
+  ],
+  "automatic_output": {
+    "status": "blocked",
+    "policy": "strict_media",
+    "reason": "partial_output"
+  },
+  "export_status": "COMPLETED",
+  "output_gate_status": "DRAFT",
+  "output_path": "E:\\Dịch video\\workspace\\outputs\\douyin_translated_661f62c8_hq.mp4",
+  "output_bytes": 301578622,
+  "output_sha256": "e4d388a544eb58c1155d48c71b248979fd5673493d1c93ce22f72b5547f64024",
+  "ffprobe": {
+    "programs": [],
+    "stream_groups": [],
+    "streams": [
+      {
+        "codec_name": "h264",
+        "codec_type": "video",
+        "start_time": "0.000000",
+        "duration": "300.033333"
+      },
+      {
+        "codec_name": "aac",
+        "codec_type": "audio",
+        "start_time": "0.000000",
+        "duration": "300.025034"
+      }
+    ],
+    "format": {
+      "duration": "300.033333"
+    }
+  },
+  "whole_file_decode": "passed",
+  "output_incomplete": true,
+  "output_missing_segment_ids": [
+    45
+  ],
+  "user_action_count": 0,
+  "cache_mode": "fresh task/session; isolated cold speech cache; media-cache reads disabled",
+  "finalized_at_utc": "2026-11-06T20:30:50Z",
+  "output_http_probe": {
+    "status_code": 206,
+    "content_length": 1024,
+    "content_range": "bytes 0-1023/301578622",
+    "accept_ranges": "bytes"
+  },
+  "output_warning": "One source interval remains UNCERTAIN; source-backed row 45 is listed incomplete and its original audio is restored over its ASR interval."
+}

@@ -1,0 +1,99 @@
+{
+  "schema_version": 1,
+  "task_id": "ea8ebfdd",
+  "recorded_at": "2026-11-07T01:27:51+07:00",
+  "input": {
+    "path": "E:\\Dịch video\\workspace\\inputs\\stabilization-e2e-30s-20261107.webm",
+    "sha256": "6325160405487a81f90f0110aaae464bcd6b8e020e526246366be7cafba0ea21",
+    "bytes": 6929731,
+    "duration_seconds": 30.0,
+    "matching_checkpoint_before_run": false,
+    "per_task_cache_cold": true,
+    "model_runner_forced_cold": false
+  },
+  "runtime": {
+    "tested_endpoint": "http://127.0.0.1:62840",
+    "pid": 35124,
+    "source_fingerprint": "3a52d318e1ead2d57ceb91422728a6cd45c1ffc495afa96b9aa0380090e434f8",
+    "source_matches_disk": true,
+    "model": "qwen3:4b-no-think",
+    "model_digest": "30df30a9c131e48af724631c95b18ac298a8f0b090c23bc9f718eec84f71f824",
+    "asr": "Faster-Whisper (small) [Fallback]",
+    "tts": "piper-tts",
+    "voice": "0",
+    "chunk_workers": 1,
+    "hardware": "GTX 1050 Ti 4GB / Ryzen 3 3100 / 32GB RAM",
+    "test_runtime_stopped_after_verification": true
+  },
+  "run": {
+    "initial_start": "2026-11-07T00:59:31.183+07:00",
+    "first_prepared": "2026-11-07T01:08:16.707+07:00",
+    "review_completed": "2026-11-07T01:11:58.095+07:00",
+    "first_prepared_wall_seconds": 525.524,
+    "prepared_after_review_wall_seconds": 746.912,
+    "failed_exports_before_final_success": 3,
+    "automatic_review_retry_count": 1,
+    "translation_failed_rows": 0,
+    "agent_triggered_export_calls": 2,
+    "user_action_count": 0,
+    "automatic_completion_on_first_attempt": false,
+    "completion_after_source_fix_and_agent_export": true
+  },
+  "phase_timings_seconds": {
+    "prepare": 1.859,
+    "source_audio_extract": 0.125,
+    "source_asr": 7.204,
+    "source_background_extract": 0.125,
+    "source_background_suppress": 0.703,
+    "source_diarization": 0.015,
+    "translate": 46.312,
+    "tts": 21.094,
+    "align": 448.094,
+    "review": 74.031,
+    "recovery_wait": 2.031,
+    "recovery_retry": 145.172
+  },
+  "output": {
+    "path": "E:\\Dịch video\\workspace\\outputs\\douyin_translated_ea8ebfdd_hq.mp4",
+    "sha256": "763914de49e22a1fe2bee942a6efb2ccc5c4e7f85bdddb4d76c0678087b6c1fd",
+    "bytes": 13719769,
+    "status": "DRAFT",
+    "warning": "All speech audio is present, but all 7 rows remain review-needed because independent source verification did not complete.",
+    "duration_seconds": 29.9,
+    "expected_duration_seconds": 30.0,
+    "video": {
+      "codec": "h264",
+      "width": 1080,
+      "height": 1920,
+      "start_seconds": 0.0,
+      "duration_seconds": 29.9
+    },
+    "audio": {
+      "codec": "aac",
+      "start_seconds": 0.0,
+      "duration_seconds": 29.860862
+    },
+    "burned_in_subtitles": true,
+    "missing_speech_ids": [],
+    "missing_audio_ids": [],
+    "ready_rows": 7,
+    "review_pending_rows": 7,
+    "source_coverage_complete": true,
+    "source_gaps": [],
+    "full_ffmpeg_decode_passed": true,
+    "http_status": 200,
+    "http_content_type": "video/mp4"
+  },
+  "initial_export_failure": {
+    "code": "export_failed",
+    "evidence": "Source stream header start_time=0.0 but first decoded video frame timestamp=9.979s; muxed video then began at 9.967s and covered only 20.0s. Audio covered 29.954s. Strict validation rejected the file.",
+    "fix": "Probe the first decoded frame timestamp and pad the leading source timeline with black frames."
+  },
+  "limits": [
+    "The tested cold task took about 12m27s to produce a reviewable draft before export.",
+    "The first automatic export failed; the final successful export was agent-triggered after the source fix, so hands-off automatic export after restart was not independently re-run.",
+    "No five-minute cold E2E was completed. Existing local five-minute files already have saved checkpoints; no new uncheckpointed five-minute source was available in this run.",
+    "The actual desktop UI screenshot capture timed out twice; UI coverage is the 290-test Node suite plus live API verification.",
+    "The source transcript was detected as English with Faster-Whisper fallback, not Mandarin."
+  ]
+}

@@ -1,0 +1,100 @@
+{
+  "schema_version": 1,
+  "task_id": "c9b4655d",
+  "recorded_at": "2026-11-06T19:42:32Z",
+  "input": {
+    "sha256": "40a2f4411ead56459207c3f6dac3191acd0e93cda2f3d28d035d50bd1f3c6b16",
+    "bytes": 462407627,
+    "duration_seconds": 300.048254,
+    "matching_checkpoint_before_run": false,
+    "fresh_upload_task": true,
+    "per_task_speech_cache": "isolated empty directory",
+    "media_cache_reads_disabled": true
+  },
+  "runtime": {
+    "provider": "ollama",
+    "model": "qwen3:4b-no-think",
+    "model_digest": "30df30a9c131e48af724631c95b18ac298a8f0b090c23bc9f718eec84f71f824",
+    "model_loaded_before_run": false,
+    "asr": "faster-whisper",
+    "whisper_model": "small",
+    "whisper_device": "cuda",
+    "tts": "piper-tts",
+    "voice": "piper:0",
+    "gpu_memory_peak_mib": 3907,
+    "system_ram_used_peak_percent": 69.1,
+    "pipeline_process_rss_peak_bytes": 6137593856
+  },
+  "run": {
+    "cold_pipeline_elapsed_seconds": 932.3,
+    "sampled_stage_occupancy_seconds": {
+      "asr": 199.3,
+      "prepare": 40.5,
+      "asr_recovery": 39.6,
+      "translate": 252.9,
+      "tts": 244.7,
+      "align": 149.0
+    },
+    "source_failure_code": "source_speech_unrecognized",
+    "source_prepared_seconds": 2.976,
+    "source_scanned_seconds": 300.048254,
+    "source_gap_state": "UNCERTAIN",
+    "source_gaps": [
+      [
+        2.976,
+        3.104
+      ]
+    ],
+    "ready_rows": 125,
+    "row_count": 125,
+    "missing_audio_rows": 0,
+    "review_pending_rows": 125,
+    "user_action_count": 0,
+    "agent_triggered_finalization_after_harness_error": true,
+    "automatic_export_completed_in_cold_harness": false,
+    "benchmark_harness_error_type": "AttributeError",
+    "all_ready_wav_files_parsed": true,
+    "dub_timeline_overlap_seconds": 0
+  },
+  "output": {
+    "path": "E:\\Dịch video\\workspace\\outputs\\douyin_translated_c9b4655d_hq.mp4",
+    "sha256": "a6ede07a111776f3738554ed5f713d8006ccdda8d58e1294de90489de619e19e",
+    "bytes": 301636152,
+    "status": "DRAFT",
+    "incomplete": true,
+    "warning": "Source interval 2.976–3.104 s remains UNCERTAIN; all 125 materialized rows require review.",
+    "format_duration_seconds": 300.033333,
+    "video": {
+      "codec": "h264",
+      "width": 1920,
+      "height": 1080,
+      "start_seconds": 0.0,
+      "duration_seconds": 300.033333
+    },
+    "audio": {
+      "codec": "aac",
+      "start_seconds": 0.0,
+      "duration_seconds": 300.025034
+    },
+    "full_ffmpeg_decode_passed": true,
+    "media_endpoint_range_status": 206,
+    "media_endpoint_content_type": "video/mp4",
+    "subtitle_sidecar": "E:\\Dịch video\\workspace\\outputs\\douyin_translated_c9b4655d_hq.review.json"
+  },
+  "timing": {
+    "cold_run_seconds": 932.3,
+    "finalize_and_render_seconds": 208.7,
+    "cold_start_to_validated_mp4_seconds": 1247.58,
+    "goal_seconds": 1200,
+    "goal_met": false,
+    "timing_note": "The harness stopped on an AttributeError before awaiting the pending export. The saved project was restored and finalization then ran; elapsed total includes that interruption and agent-triggered recovery."
+  },
+  "limitations": [
+    "The input was a fresh upload task with an isolated empty speech cache and media cache reads disabled; the Ollama model was not loaded before submission.",
+    "The benchmark stopped on an AttributeError before awaiting the scheduled automatic export. The checkpoint was restored in a second process and finalization was agent-triggered; hands-off auto-export was not proven by this run.",
+    "All 125 rows have valid WAVs and no overlap, but all 125 require content review. No semantic correctness claim is made.",
+    "The source gap 2.976–3.104s remains UNCERTAIN. The output is DRAFT, not COMPLETED.",
+    "Cold processing took 932.3 seconds. Total time to validated MP4 including restored export was 1,247.58 seconds, 47.58 seconds beyond the 20-minute target.",
+    "Peak GPU memory was 3,907 MiB of 4,096 MiB; peak system RAM usage was 69.1 percent."
+  ]
+}
