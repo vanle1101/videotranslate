@@ -105,6 +105,17 @@ def _segment_counts(session):
     return counts
 
 
+def _final_output_pending(session):
+    """Do not close the harness event loop while final review/export is owned."""
+    automatic = getattr(session, "automatic_output", {}) or {}
+    if automatic.get("status") in {"pending", "running"}:
+        return True
+    return any(owner is not None and not owner.done() for owner in (
+        getattr(session, "start_task", None), getattr(session, "worker_task", None),
+        getattr(session, "review_task", None), getattr(session, "auto_export_task", None),
+    ))
+
+
 def _summarize_request_intervals(requests):
     """Separate summed request latency from the wall time requests occupy."""
     intervals = [(row.get("started_elapsed_seconds"), row.get("finished_elapsed_seconds"))
@@ -327,7 +338,8 @@ async def _run(source: Path, timeout_seconds: float, sample_seconds: float, *,
                         getattr(session, "review_task", None), getattr(session, "auto_export_task", None)))):
                 report["status"] = automatic.get("status")
                 break
-            if session.error and not session.is_running:
+            if (session.error and not session.is_running
+                    and not _final_output_pending(session)):
                 report["status"] = "failed"
                 break
         else:

@@ -183,7 +183,11 @@ if role != "grandchild":
         streams = {key: subprocess.DEVNULL for key in streams}
     subprocess.Popen([sys.executable, "-B", "-c", os.environ["OWNERSHIP_DUMMY"], str(root), child, mode], **streams)
 if role == "parent":
-    deadline = time.monotonic() + 10
+    # Windows may take several seconds to start nested Python processes when
+    # the full suite is under load (the GUI runner/Defender can hold the image
+    # briefly). Keep readiness bounded, but leave room before the 25s safety
+    # timer below so this test measures ownership rather than startup latency.
+    deadline = time.monotonic() + 20
     while not (root / "grandchild.json").exists():
         if time.monotonic() >= deadline:
             raise TimeoutError("grandchild readiness")
@@ -195,7 +199,7 @@ time.sleep(20)
 '''
 
 
-def _wait_for(predicate, seconds=8):
+def _wait_for(predicate, seconds=22):
     deadline = time.monotonic() + seconds
     while not predicate():
         if time.monotonic() >= deadline:

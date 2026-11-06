@@ -738,7 +738,8 @@ with open(sys.argv[1],'w') as out:
     else: time.sleep(30)
 ''')
     started = time.monotonic()
-    with execution_context("descendant-cancel", None if parent_exits else lambda: time.monotonic() - started > .25):
+    with execution_context("descendant-cancel", None if parent_exits else
+                           lambda: child_pid.exists() and time.monotonic() - started > .25):
         rows, _ = module.SubprocessWhisperModel("small").transcribe(audio)
         if parent_exits:
             assert [row.text for row in rows] == ["x"]
