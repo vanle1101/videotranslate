@@ -47,6 +47,23 @@ def _compact_local_dialogue_context(rows, *, max_chars=900):
     return ""
 
 
+def _source_has_directed_insult(source_text: str) -> bool:
+    """Only direct source insults can license the local rude-address exception.
+
+    A curse mentioned about a third person (for example, ``你别叫他混蛋``)
+    does not establish that ``你`` should become Vietnamese ``mày``. Keep this
+    deliberately narrow; ambiguous register is repaired neutrally or left for
+    review instead of inferred from a keyword anywhere in the sentence.
+    """
+    source = str(source_text or "")
+    direct_patterns = (
+        r"你(?:这个|這個|这|這)?(?:大|臭|狗)?(?:混蛋|王八蛋|傻逼|垃圾|废物|廢物|蠢货|蠢貨|畜生|狗东西|狗東西)",
+        r"你(?:是|真是|就是)(?:个|個|一个|一個)?(?:混蛋|王八蛋|傻逼|垃圾|废物|廢物|蠢货|蠢貨|畜生)",
+        r"你(?:给我|給我)?(?:滚|滾|去死)",
+    )
+    return any(re.search(pattern, source) for pattern in direct_patterns)
+
+
 def _ollama_batch_semantic_issues(source_text: str, translated_text: str,
                                  terms=()) -> set[str]:
     """Catch a few high-impact polarity/role shifts seen in local batch output."""
@@ -69,7 +86,7 @@ def _ollama_batch_semantic_issues(source_text: str, translated_text: str,
             and re.match(r"^(?:mẹ|má|bố|ba|anh|chị|em)\s+ơi\b", lower)):
         issues.add("unspoken_vocative_added")
     if ("你" in source and re.search(r"\bmày\b", lower)
-            and not any(term in source for term in ("混蛋", "王八蛋", "傻逼", "滚", "废物", "蠢", "去死"))):
+            and not _source_has_directed_insult(source)):
         issues.add("rude_address_added")
     if "是哥哥了" in source and re.search(r"\bem trai\b|\bem gái\b", lower):
         issues.add("older_brother_role_changed")
@@ -1041,6 +1058,7 @@ class SemanticTranslator(TranslationEngine):
             else:
                 try:
                     single_result = self._json_response(raw_single)
+                    self._validate_schema(single_result, single_schema, strict=True)
                     single_text = self._clean_ollama_translation(
                         single_result.get("final_vi") if isinstance(single_result, dict) else "")
                 except (StructuredResponseError, TypeError, ValueError):
@@ -1100,6 +1118,8 @@ class SemanticTranslator(TranslationEngine):
                 repair_system = (
                     "Dịch đúng một câu tiếng Trung sang tiếng Việt khẩu ngữ tự nhiên. "
                     "Giữ người nói, người nghe, chủ thể, phủ định và dạng câu. "
+                    "Chữ 你 không tự chứng minh quan hệ thô thân; không dùng mày/tao nếu nguồn không có "
+                    "lời chửi rõ hoặc bằng chứng ngữ cảnh trực tiếp; khi cần dùng bạn hoặc lược đại từ. "
                     "Dùng từ Việt tự nhiên đúng hành động, không dịch sát chữ gượng. "
                     "Không thêm hoặc bỏ ý, không để sót chữ Hán; chỉ trả JSON có final_vi.")
                 repair_prompt = json.dumps({
@@ -1117,6 +1137,7 @@ class SemanticTranslator(TranslationEngine):
                         repair_system, repair_prompt, max_tokens=1024,
                         response_format=repair_schema)
                     repaired_data = self._json_response(raw_repaired)
+                    self._validate_schema(repaired_data, repair_schema, strict=True)
                     repaired = self._clean_ollama_translation(
                         repaired_data.get("final_vi") if isinstance(repaired_data, dict) else "")
                 except (OllamaClientError, StructuredResponseError, TypeError, ValueError):
@@ -1144,19 +1165,23 @@ class SemanticTranslator(TranslationEngine):
                     plain_prompt += "Chỉ trả một câu tiếng Việt tự nhiên; không giải thích."
                     plain_system = (
                         "Dịch câu tiếng Trung sang tiếng Việt khẩu ngữ tự nhiên. Giữ đủ nghĩa, "
-                        "vai người nói, hành động và phủ định. Không thêm lời gọi hoặc ý mới. "
+                        "vai người nói, hành động và phủ định. Chữ 你 không tự chứng minh quan hệ thô thân; "
+                        "không dùng mày/tao nếu nguồn không có lời chửi rõ hoặc bằng chứng ngữ cảnh trực tiếp; "
+                        "khi cần dùng bạn hoặc lược đại từ. Không thêm lời gọi hoặc ý mới. "
                         "Không giải thích hay mô tả cách dịch; chỉ trả đúng một câu tiếng Việt.")
                     # This is one final, bounded plain-text repair after the
                     # structured repair failed validation. The prior 64-token
                     # floor truncated these requests; a compact prompt and a
                     # 160-token floor leave room for a complete short subtitle.
                     plain_max_tokens = min(192, max(160, len(source_text) * 6))
+                    plain_error = None
                     try:
                         plain_value = self._clean_ollama_translation(self._ollama_text_request(
                             plain_system, plain_prompt,
                             max_tokens=plain_max_tokens,
                             response_format="text"))
                     except (OllamaClientError, StructuredResponseError, TypeError, ValueError) as error:
+                        plain_error = error
                         plain_value = ""
                         if isinstance(error, OllamaClientError):
                             metrics = error.metrics
@@ -1174,9 +1199,55 @@ class SemanticTranslator(TranslationEngine):
                                 metrics.get("prompt_eval_count", 0), metrics.get("eval_count", 0),
                                 seconds("eval_duration"), seconds("total_duration"))
                     plain_semantic_issues = _ollama_batch_semantic_issues(source_text, plain_value, terms)
-                    if (plain_value and not re.search(r"[\u3400-\u9fff]", plain_value)
-                            and not (grip_phrase and re.search(r"\bchặt\b", plain_value, re.I))
-                            and not plain_semantic_issues):
+                    plain_is_valid = (plain_value and not re.search(r"[\u3400-\u9fff]", plain_value)
+                        and not (grip_phrase and re.search(r"\bchặt\b", plain_value, re.I))
+                        and not plain_semantic_issues)
+                    if not plain_is_valid:
+                        # A truncated plain response must not end recovery for
+                        # this row. Remove dialogue and repair instructions,
+                        # retain only this source sentence and its local name
+                        # hints, and ask for one schema-safe field. The result
+                        # still goes through the exact same semantic checks.
+                        retryable_local_error = (plain_error is None or
+                            isinstance(plain_error, OllamaClientError)
+                            and plain_error.code in {"provider_incomplete", "provider_invalid_response"})
+                        if retryable_local_error:
+                            compact_terms = [{"src": str(term["src"])[:80],
+                                              "tgt": str(term["tgt"])[:100]}
+                                for term in repair_terms[:4]
+                                if isinstance(term.get("tgt"), str) and term.get("tgt", "").strip()]
+                            compact_prompt = json.dumps({
+                                "source_zh": source_text[:500],
+                                "meaning_constraint": (semantic_hint or repair_hint)[:180],
+                                "name_terms": compact_terms,
+                            }, ensure_ascii=False)
+                            compact_schema = {"type": "object", "properties": {
+                                "final_vi": {"type": "string", "minLength": 1, "maxLength": 300}},
+                                "required": ["final_vi"], "additionalProperties": False}
+                            compact_tokens = max(256, min(512, 128 + min(len(source_text), 64) * 4))
+                            try:
+                                compact_raw = self._ollama_text_request(
+                                    "Dịch duy nhất câu nguồn sang tiếng Việt tự nhiên. "
+                                    "Giữ đúng ý và sắc thái; không đoán người nói/người nghe, "
+                                    "chữ 你 không tự chứng minh quan hệ thô thân; không dùng mày/tao "
+                                    "nếu nguồn không có lời chửi rõ hoặc bằng chứng ngữ cảnh trực tiếp; "
+                                    "khi cần dùng bạn hoặc lược đại từ. Không thêm hoặc bỏ ý, không giải thích. "
+                                    "Chỉ trả JSON final_vi.",
+                                    compact_prompt, max_tokens=compact_tokens,
+                                    response_format=compact_schema)
+                                compact_data = self._json_response(compact_raw)
+                                self._validate_schema(compact_data, compact_schema, strict=True)
+                                plain_value = self._clean_ollama_translation(
+                                    compact_data.get("final_vi") if isinstance(compact_data, dict) else "")
+                            except (OllamaClientError, StructuredResponseError, TypeError, ValueError):
+                                plain_value = ""
+                            plain_semantic_issues = _ollama_batch_semantic_issues(
+                                source_text, plain_value, terms)
+                            plain_is_valid = (plain_value and
+                                not re.search(r"[\u3400-\u9fff]", plain_value)
+                                and not (grip_phrase and re.search(r"\bchặt\b", plain_value, re.I))
+                                and not plain_semantic_issues)
+                    if plain_is_valid:
                         value = plain_value
                     else:
                         row_errors[identity] = self._translation_error(
@@ -1340,6 +1411,8 @@ class SemanticTranslator(TranslationEngine):
                 "hay chuyển nghĩa sang câu khác. Chỉ dùng các câu Việt trước đó để nối mạch; chúng có thể sai, "
                 "không phải câu cần dịch và không được chép lại. "
                 "Không tự đoán quan hệ/xưng hô hoặc thêm lời gọi; chưa rõ thì lược đại từ hay dùng câu trung tính. "
+                "Chữ 你 tự nó không chứng minh quan hệ thô thân; không dịch thành mày/tao nếu nguồn không có "
+                "lời chửi rõ hoặc bằng chứng ngữ cảnh trực tiếp. Khi cần, dùng bạn hoặc lược đại từ. "
                 "Ghi tên riêng bằng chữ Latin, không dịch nghĩa tên. Không giải thích, không để sót chữ Hán. "
                 "Việt hóa cấu trúc, tránh dịch sát chữ gượng. Chỉ áp dụng thông tin ngữ cảnh "
                 "khi câu nguồn hiện tại có dấu hiệu tương ứng.")
@@ -1381,6 +1454,7 @@ class SemanticTranslator(TranslationEngine):
                                                 response_format=response_schema)
                 try:
                     parsed = self._json_response(raw)
+                    self._validate_schema(parsed, response_schema, strict=True)
                 except (StructuredResponseError, TypeError, ValueError) as error:
                     raise self._translation_error("trả về JSON bản dịch một câu không hợp lệ.",
                         code=getattr(error, "code", "invalid_json"),
@@ -1390,15 +1464,58 @@ class SemanticTranslator(TranslationEngine):
                 if not value or re.search(r"[\u3400-\u9fff]", value):
                     raise self._translation_error("chưa tạo được câu Việt hoàn chỉnh.",
                         code="untranslated_text", path="$.final_vi")
+                semantic_issues = _ollama_batch_semantic_issues(clean_zh, value)
+                if semantic_issues:
+                    raise self._translation_error(
+                        "bản dịch một câu chưa vượt qua kiểm tra ngữ nghĩa: "
+                        + ", ".join(sorted(semantic_issues)),
+                        code="semantic_content", path="$.final_vi")
                 return value
 
+            translated = None
             try:
                 translated = request_single(max_tokens)
             except Exception as error:
                 from core.engines.translation.ollama_client import OllamaClientError
-                if not isinstance(error, OllamaClientError) or error.code != "provider_incomplete":
+                if isinstance(error, OllamaClientError) and error.code == "provider_incomplete":
+                    try:
+                        translated = request_single(min(2048, max_tokens * 2))
+                    except (OllamaClientError, StructuredResponseError) as retry_error:
+                        if (isinstance(retry_error, OllamaClientError)
+                                and retry_error.code not in {"provider_incomplete", "provider_invalid_response"}):
+                            raise
+                        if (isinstance(retry_error, StructuredResponseError)
+                                and retry_error.code not in {
+                                    "semantic_content", "untranslated_text", "invalid_json",
+                                    "missing_field", "invalid_type", "invalid_content"}):
+                            raise
+                elif isinstance(error, StructuredResponseError):
+                    if error.code not in {
+                            "semantic_content", "untranslated_text", "invalid_json",
+                            "missing_field", "invalid_type", "invalid_content"}:
+                        raise
+                else:
                     raise
-                translated = request_single(min(2048, max_tokens * 2))
+            if translated is None:
+                # Direct single requests now use the same semantic gate and
+                # bounded per-row repair plan as batch translation. The retry
+                # contains only this source row; no successful sibling is
+                # replayed and each candidate is revalidated by that path.
+                start = max((float(row.get("start", 0) or 0) for row in rolling_context or []
+                             if isinstance(row, dict)), default=0.0) + 1.0
+                end = start + max(.1, float(duration or .1))
+                recovered = self._execute_ollama_text_batch(
+                    [{"id": 0, "start": start, "end": end, "text_zh": clean_zh}],
+                    {"theme": "Video ngắn đời thường", "pronouns": pronouns, "terms": []},
+                    rolling_context or [])
+                if 0 not in recovered:
+                    error = getattr(recovered, "errors", {}).get(0)
+                    if isinstance(error, BaseException):
+                        raise error
+                    raise self._translation_error(
+                        "bản dịch một câu chưa vượt qua kế hoạch sửa có giới hạn.",
+                        code="semantic_content", path="$.final_vi")
+                translated = recovered[0]["final_vi"]
             return {"literal_vi": translated, "natural_vi": translated, "final_vi": translated,
                     "needs_review": False, "review_reason": ""}
 
@@ -1508,10 +1625,53 @@ Quy tắc bắt buộc:
                       f"Ngữ cảnh tham khảo: {context or '(không có)'}\n"
                       f"Mục tiêu đọc: khoảng {float(duration):.2f} giây. {measured}"
                       "Viết lại ngắn hơn, đủ nghĩa và tự nhiên:")
-            candidate = self._clean_ollama_translation(self._ollama_text_request(
-                system, prompt, max_tokens=max(80, min(160, 48 + len(draft)))))
+            try:
+                candidate = self._clean_ollama_translation(self._ollama_text_request(
+                    system, prompt, max_tokens=max(80, min(160, 48 + len(draft)))))
+            except Exception as error:
+                from core.engines.translation.ollama_client import OllamaClientError
+                if not isinstance(error, OllamaClientError) or error.code != "provider_incomplete":
+                    raise
+                # The prose rewrite prompt can be cut off before its short
+                # answer. Use one compact, one-field request for this row;
+                # never accept the partial response or grow an open-ended
+                # continuation. The resulting wording still gets the same
+                # source-semantic and register checks below.
+                compact_schema = {"type": "object", "properties": {
+                    "final_vi": {"type": "string", "minLength": 1, "maxLength": 300}},
+                    "required": ["final_vi"], "additionalProperties": False}
+                compact_prompt = json.dumps({
+                    "source_zh": clean_zh[:400],
+                    "current_vi": draft[:400],
+                    "target_seconds": round(float(duration), 2),
+                    "measured_seconds": (round(float(measured_duration), 2)
+                        if isinstance(measured_duration, (int, float))
+                        and math.isfinite(measured_duration) else None),
+                    "required_reduction_pct": (round(float(feedback["required_reduction_pct"]), 1)
+                        if isinstance(feedback, dict)
+                        and isinstance(feedback.get("required_reduction_pct"), (int, float))
+                        and math.isfinite(feedback["required_reduction_pct"]) else None),
+                }, ensure_ascii=False)
+                compact_system = (
+                    "Rút gọn đúng một câu Việt cho thời lượng yêu cầu. Giữ nguyên ý, "
+                    "chủ thể, hành động, phủ định và sắc thái của câu nguồn; khi quan hệ "
+                    "chưa có chứng cứ, lược đại từ thay vì đoán; không dùng mày/tao nếu "
+                    "nguồn không có lời chửi rõ; không thêm hoặc bỏ ý, không để sót chữ Trung. "
+                    "Chỉ trả JSON có trường final_vi.")
+                compact_tokens = max(256, min(512, 128 + min(len(clean_zh), 64) * 4))
+                try:
+                    compact_raw = self._ollama_text_request(
+                        compact_system, compact_prompt, max_tokens=compact_tokens,
+                        response_format=compact_schema)
+                    compact_data = self._json_response(compact_raw)
+                    self._validate_schema(compact_data, compact_schema, strict=True)
+                    candidate = self._clean_ollama_translation(
+                        compact_data.get("final_vi") if isinstance(compact_data, dict) else "")
+                except (OllamaClientError, StructuredResponseError, TypeError, ValueError):
+                    candidate = ""
             if (not candidate or re.search(r"[\u3400-\u9fff]", candidate)
                     or candidate == draft or len(candidate) >= len(draft)
+                    or _ollama_batch_semantic_issues(clean_zh, candidate)
                     or added_rude_address(draft, candidate)):
                 raise PacingReviewRejected("Không tìm được lời rút gọn an toàn bằng model local.",
                     candidate=candidate, reason="Bản rút gọn cần kiểm tra hoặc không ngắn hơn.",
@@ -1606,7 +1766,8 @@ Trả duy nhất JSON: {{"literal_vi":"...","natural_vi":"...","final_vi":"...",
                          "review_reason": "Đề xuất chưa được xác minh từ biên tập viên."}
             candidate = self._parse_opencode_results(json.dumps(candidate, ensure_ascii=False),
                 [{"id": 0, "text_zh": clean_zh}], single=True)[0]
-        if added_rude_address(draft, candidate["final_vi"]):
+        if (_ollama_batch_semantic_issues(clean_zh, candidate["final_vi"])
+                or added_rude_address(draft, candidate["final_vi"])):
             raise PacingReviewRejected("Bản rút gọn tự đổi xưng hô sang tao/mày; giữ lời trước đó.",
                                       candidate=candidate["final_vi"],
                                       reason="Rút thời lượng không được tự thêm sắc thái thô trong xưng hô.",
@@ -1736,9 +1897,9 @@ Trả duy nhất JSON: {{"literal_vi":"...","natural_vi":"...","final_vi":"...",
             raise self._translation_error("chưa vượt qua kiểm tra: kiểm định thiếu lý do cụ thể.")
         return result
 
-    def _validate_schema(self, value, schema, *, review=False):
+    def _validate_schema(self, value, schema, *, review=False, strict=False):
         try:
-            validate_schema(value, schema)
+            validate_schema(value, schema, reject_unknown=strict)
         except StructuredResponseError as error:
             message = ("chưa vượt qua kiểm tra cấu trúc phản hồi: " if review else "trả về cấu trúc không hợp lệ: ")
             raise self._translation_error(message + str(error), code=error.code, path=error.path) from None

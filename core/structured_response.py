@@ -61,8 +61,9 @@ def parse_object(raw, *, error_type=StructuredResponseError):
     return data
 
 
-def validate_schema(value, schema, *, path="$", error_type=StructuredResponseError):
-    """Validate the JSON Schema subset used by these explicit provider contracts."""
+def validate_schema(value, schema, *, path="$", error_type=StructuredResponseError,
+                    reject_unknown=False):
+    """Validate the supported schema subset; optionally enforce closed objects."""
     kind = schema.get("type")
     valid = {
         "object": lambda: isinstance(value, dict),
@@ -81,14 +82,22 @@ def validate_schema(value, schema, *, path="$", error_type=StructuredResponseErr
             if key not in value:
                 raise error_type(f"Phản hồi AI thiếu trường {path}.{key}.",
                                  code="missing_field", path=f"{path}.{key}")
-        for key, child in schema.get("properties", {}).items():
+        properties = schema.get("properties", {})
+        if reject_unknown and schema.get("additionalProperties") is False:
+            unexpected = next((key for key in value if key not in properties), None)
+            if unexpected is not None:
+                raise error_type(f"Phản hồi AI có trường không được phép tại {path}.{unexpected}.",
+                                 code="invalid_content", path=f"{path}.{unexpected}")
+        for key, child in properties.items():
             if key in value:
-                validate_schema(value[key], child, path=f"{path}.{key}", error_type=error_type)
+                validate_schema(value[key], child, path=f"{path}.{key}", error_type=error_type,
+                                reject_unknown=reject_unknown)
     elif kind == "array":
         if len(value) > schema.get("maxItems", 10000):
             raise error_type(f"Phản hồi AI có quá nhiều hàng tại {path}.", code="invalid_content", path=path)
         for index, child in enumerate(value):
-            validate_schema(child, schema.get("items", {}), path=f"{path}[{index}]", error_type=error_type)
+            validate_schema(child, schema.get("items", {}), path=f"{path}[{index}]",
+                            error_type=error_type, reject_unknown=reject_unknown)
     elif kind == "string" and (len(value) > schema.get("maxLength", 100000) or "\x00" in value):
         raise error_type(f"Phản hồi AI có chuỗi không hợp lệ tại {path}.", code="invalid_content", path=path)
 

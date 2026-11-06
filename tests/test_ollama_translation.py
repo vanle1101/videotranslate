@@ -188,11 +188,13 @@ class OllamaClientTests(unittest.TestCase):
                  json.dumps({"results": [{"id": 5, "final_vi": "知道了妈妈"}]}),
                  json.dumps({"final_vi": "知道了妈妈"}),
                  "知道了妈妈",
+                 json.dumps({"final_vi": "知道了妈妈"}),
              ]) as local:
             result = translator._execute_ollama_text_batch([row], {}, [])
         self.assertNotIn(5, result)
         self.assertEqual(set(result.errors), {5})
-        self.assertEqual(local.call_count, 3)
+        self.assertEqual(local.call_count, 4)
+        self.assertEqual(local.call_args.kwargs["response_format"]["required"], ["final_vi"])
 
     def test_untranslated_batch_row_keeps_successful_sibling_without_replay(self):
         translator = SemanticTranslator("ollama")
@@ -434,6 +436,39 @@ class OllamaClientTests(unittest.TestCase):
         assert result["final_vi"].startswith("Thiến Giai")
         assert "Thiến Giai" in prompts["prompt"]
 
+    def test_local_single_translation_repairs_unproven_rude_address(self):
+        translator = SemanticTranslator("ollama")
+        single = json.dumps({"final_vi": "Mày đeo khuyên tai trông ngầu lắm."}, ensure_ascii=False)
+        bad_batch = json.dumps({"results": [
+            {"id": 0, "final_vi": "Mày đeo khuyên tai trông ngầu lắm."}
+        ]}, ensure_ascii=False)
+        repaired = json.dumps({"final_vi": "Đeo khuyên tai trông ngầu đấy."}, ensure_ascii=False)
+        with patch.object(translator, "_ollama_text_request",
+                          side_effect=[single, bad_batch, repaired]) as request:
+            result = translator.translate_single_segment("你戴耳钉很帅", 1.22)
+
+        self.assertEqual(result["final_vi"], "Đeo khuyên tai trông ngầu đấy.")
+        self.assertEqual(request.call_count, 3)
+        self.assertIn("Chữ 你 không tự chứng minh", request.call_args_list[2].args[0])
+
+    def test_local_pacing_rewrite_uses_compact_schema_after_truncation(self):
+        translator = SemanticTranslator("ollama")
+        truncated = OllamaClientError("truncated", code="provider_incomplete")
+        candidate = json.dumps({"final_vi": "Muốn xỏ khuyên tai à?"}, ensure_ascii=False)
+        with patch.object(translator, "_ollama_text_request",
+                          side_effect=[truncated, candidate]) as request:
+            result = translator.rewrite_for_pacing(
+                "你想打耳洞", "Bạn có muốn đục lỗ tai không?", 0.88,
+                measured_duration=1.35,
+                feedback={"required_reduction_pct": 20.0})
+
+        self.assertEqual(result["final_vi"], "Muốn xỏ khuyên tai à?")
+        self.assertEqual(request.call_count, 2)
+        self.assertEqual(request.call_args.kwargs["response_format"]["required"], ["final_vi"])
+        self.assertGreater(request.call_args.kwargs["max_tokens"], 160)
+        self.assertIn("không dùng mày/tao", request.call_args.args[0])
+        self.assertIn('"required_reduction_pct": 20.0', request.call_args.args[1])
+
     def test_local_single_translation_retries_only_when_generation_is_truncated(self):
         translator = SemanticTranslator("ollama")
         truncated = OllamaClientError("truncated", code="provider_incomplete")
@@ -523,6 +558,21 @@ class OllamaClientTests(unittest.TestCase):
         self.assertEqual(result[1]["final_vi"], "Tiểu Nguyên lên chức anh rồi.")
         self.assertEqual(request.call_count, 2)
 
+    def test_rude_address_heuristic_does_not_use_an_unrelated_curse_as_evidence(self):
+        from core.engines.translation.semantic_translator import _ollama_batch_semantic_issues
+
+        issues = _ollama_batch_semantic_issues(
+            "你不应该叫他混蛋", "Mày không nên gọi anh ta là đồ khốn.")
+
+        self.assertIn("rude_address_added", issues)
+
+    def test_rude_address_heuristic_allows_a_direct_source_insult(self):
+        from core.engines.translation.semantic_translator import _ollama_batch_semantic_issues
+
+        issues = _ollama_batch_semantic_issues("你这个王八蛋", "Mày là đồ khốn.")
+
+        self.assertNotIn("rude_address_added", issues)
+
     def test_local_batch_plain_repair_has_bounded_budget_above_truncation_floor(self):
         translator = SemanticTranslator("ollama")
         wrong_batch = json.dumps({"results": [{"id": 24, "final_vi": "Mày khóc cả buổi chiều à?"}]})
@@ -537,6 +587,23 @@ class OllamaClientTests(unittest.TestCase):
         self.assertEqual(request.call_args.kwargs["response_format"], "text")
         self.assertEqual(request.call_args.kwargs["max_tokens"], 160)
         self.assertLess(len(request.call_args.args[1]), 260)
+
+    def test_local_batch_uses_compact_single_sentence_fallback_after_plain_output_truncates(self):
+        translator = SemanticTranslator("ollama")
+        wrong_batch = json.dumps({"results": [{"id": 24, "final_vi": "Mày khóc cả buổi chiều à?"}]})
+        wrong_repair = json.dumps({"final_vi": "Mày còn khóc cả buổi chiều nữa à?"})
+        fallback = json.dumps({"final_vi": "Cậu còn khóc cả buổi chiều nữa à?"}, ensure_ascii=False)
+        incomplete = OllamaClientError("truncated", code="provider_incomplete")
+        with patch.object(translator, "_ollama_text_request", side_effect=[
+                wrong_batch, wrong_repair, incomplete, fallback]) as request:
+            result = translator._execute_ollama_text_batch(
+                [{"id": 24, "text_zh": "你还哭了一下午"}], {}, [])
+
+        self.assertEqual(result[24]["final_vi"], "Cậu còn khóc cả buổi chiều nữa à?")
+        self.assertEqual(request.call_count, 4)
+        self.assertEqual(request.call_args.kwargs["response_format"]["required"], ["final_vi"])
+        self.assertGreater(request.call_args.kwargs["max_tokens"], 160)
+        self.assertLess(len(request.call_args.args[1]), 240)
 
     def test_local_batch_gives_gender_neutral_mother_misses_child_guidance(self):
         translator = SemanticTranslator("ollama")

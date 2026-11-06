@@ -54,6 +54,16 @@ def test_response_contract_separates_missing_fields_and_wrong_types(change, code
     assert caught.value.path == path
 
 
+def test_response_contract_rejects_unknown_fields_when_schema_is_closed():
+    schema = {"type": "object", "properties": {"final_vi": {"type": "string"}},
+              "required": ["final_vi"], "additionalProperties": False}
+    with pytest.raises(StructuredResponseError) as caught:
+        validate_schema({"final_vi": "Chào bạn.", "commentary": "extra"}, schema,
+                        reject_unknown=True)
+    assert caught.value.code == "invalid_content"
+    assert caught.value.path == "$.commentary"
+
+
 def test_diagnostics_redact_known_and_inline_secrets_and_bound_retention(tmp_path, monkeypatch):
     monkeypatch.setenv("OPENCODE_API_KEY", "hidden-configured-credential")
     raw = '{"api_key":"hidden-configured-credential","authorization":"Bearer hidden-header",' \
