@@ -1,0 +1,256 @@
+{
+  "updated_at": "2026-10-10T00:43:08+07:00",
+  "initial_evidence_reference": "E:\\Dịch video\\workspace\\audit\\continuous-monitor\\initial-findings.json",
+  "groups": [
+    {
+      "id": "SOURCE_PREP_FAILURE",
+      "verification": "NOT_FIXED; no reproduction, code change or regression test yet",
+      "severity": "High",
+      "occurrences": 5,
+      "component": "pipeline/model",
+      "last_log_at": "2026-10-09T23:55:10+07:00",
+      "stage": "source preparation / ASR / diarization / background audio",
+      "suspected_cause": "Late source preparation validation, suppressor duration probe, runtime identity comparison or checkpoint JSON serialization. Exact cause unavailable because exception detail was omitted.",
+      "evidence": "SOURCE_RETRY_PENDING source_start=0.0 error_type=ValueError; zero source coverage and zero segments in saved manifests",
+      "first_log_at": "2026-10-09T23:47:58+07:00",
+      "status": "OPEN_UNVERIFIED",
+      "task_ids": [
+        "046045e1",
+        "9c3d2d15",
+        "6b276d2e",
+        "248460b3"
+      ]
+    },
+    {
+      "id": "FALSE_PREVIEW_READY",
+      "verification": "Confirmed from persisted state and source inspection; NOT_FIXED; live frontend behavior not fully observed",
+      "severity": "High",
+      "component": "backend/pipeline logic",
+      "stage": "preview terminal status",
+      "suspected_cause": "The terminal preview branch treats any(nonready for s in owned) over an empty owned list as false and unconditionally sets _preview_ready=True despite the first interval source failure.",
+      "evidence": "Saved state READY and _preview_ready=true with segments=[], _source_prepared_seconds=0, incomplete-source warning and no output filename; source duration 332.672993 seconds",
+      "status": "OPEN_UNVERIFIED",
+      "task_ids": [
+        "046045e1",
+        "9c3d2d15",
+        "248460b3"
+      ]
+    },
+    {
+      "id": "SOURCE_DIAGNOSTIC_DETAIL_MISSING",
+      "verification": "NOT_FIXED; any later richer logging must redact provider credentials and transcript content",
+      "severity": "Medium",
+      "component": "backend/observability",
+      "stage": "exception reporting",
+      "suspected_cause": "Exception logging at the source retry handler intentionally or accidentally omits diagnostic detail.",
+      "evidence": "SOURCE_RETRY_PENDING records only exception class, source start and task ID; safe error message, exact substage and trace absent",
+      "status": "OPEN_UNVERIFIED",
+      "task_ids": []
+    },
+    {
+      "id": "HISTORICAL_PROJECT_INCOMPLETE",
+      "verification": "NOT_FIXED; actual semantic/caption/audio completeness not verified",
+      "severity": "Medium",
+      "component": "pipeline/output verification",
+      "stage": "saved project / semantic review",
+      "suspected_cause": "Incomplete review or stale media publication; older PacingReviewRejected logs do not by themselves prove currently FAILED segment states.",
+      "evidence": "Saved state READY with 198 READY rows, 8 known-source rows lacking Vietnamese text, 91 rows requiring review, incomplete review_summary and empty output_filename. An older MP4 exists but current manifest does not publish/verify it.",
+      "status": "OPEN_NEEDS_SCOPE_AND_MEDIA_VERIFICATION",
+      "task_ids": [
+        "douyin_7692745161054506290"
+      ]
+    },
+    {
+      "id": "623c2b7ef93ddf7518b2",
+      "severity": "High",
+      "component": "API",
+      "stage": "pipeline",
+      "status": "OPEN_UNVERIFIED",
+      "suspected_cause": "runtime_error",
+      "task_ids": [
+        "douyin_7692745161054506290"
+      ]
+    },
+    {
+      "id": "c198d26c9116d1375645",
+      "severity": "High",
+      "component": "backend",
+      "stage": "pipeline",
+      "status": "OPEN_UNVERIFIED",
+      "suspected_cause": "VideoIntelligenceError",
+      "task_ids": [
+        "douyin_7692745161054506290"
+      ]
+    }
+  ],
+  "task_incidents": [
+    {
+      "key": "e40863348e2608aa66be",
+      "severity": "High",
+      "component": "pipeline_logic",
+      "count": 1,
+      "error_type": "SOURCE_RETRY_PENDING",
+      "last_event_at": "2026-10-09T23:47:58+07:00",
+      "stage": "ASR/source",
+      "task_id": "046045e1",
+      "first_event_at": "2026-10-09T23:47:58+07:00",
+      "status": "OPEN_UNVERIFIED",
+      "source": "manifest",
+      "evidence_reference": "E:\\Dịch video\\workspace\\audit\\continuous_monitor\\incidents.json",
+      "group_id": "SOURCE_PREP_FAILURE"
+    },
+    {
+      "key": "7d6ace6deb24780a4251",
+      "severity": "High",
+      "component": "pipeline_logic",
+      "count": 1,
+      "error_type": "SOURCE_RETRY_PENDING",
+      "last_event_at": "2026-10-09T23:49:53+07:00",
+      "stage": "ASR/source",
+      "task_id": "9c3d2d15",
+      "first_event_at": "2026-10-09T23:49:53+07:00",
+      "status": "OPEN_UNVERIFIED",
+      "source": "manifest",
+      "evidence_reference": "E:\\Dịch video\\workspace\\audit\\continuous_monitor\\incidents.json",
+      "group_id": "SOURCE_PREP_FAILURE"
+    },
+    {
+      "key": "a35024d265b13990580d",
+      "severity": "High",
+      "component": "pipeline_logic",
+      "count": 2,
+      "error_type": "SOURCE_RETRY_PENDING",
+      "last_event_at": "2026-10-09T23:54:30+07:00",
+      "stage": "ASR/source",
+      "task_id": "6b276d2e",
+      "first_event_at": "2026-10-09T23:53:51+07:00",
+      "status": "OPEN_UNVERIFIED",
+      "source": "log:errors.log",
+      "evidence_reference": "E:\\Dịch video\\workspace\\audit\\continuous_monitor\\incidents.json",
+      "group_id": "SOURCE_PREP_FAILURE"
+    },
+    {
+      "key": "4569147871912f1e1ed7",
+      "severity": "High",
+      "component": "pipeline_logic",
+      "count": 1,
+      "error_type": "SOURCE_RETRY_PENDING",
+      "last_event_at": "2026-10-09T23:55:10+07:00",
+      "stage": "ASR/source",
+      "task_id": "248460b3",
+      "first_event_at": "2026-10-09T23:55:10+07:00",
+      "status": "OPEN_UNVERIFIED",
+      "source": "manifest",
+      "evidence_reference": "E:\\Dịch video\\workspace\\audit\\continuous_monitor\\incidents.json",
+      "group_id": "SOURCE_PREP_FAILURE"
+    },
+    {
+      "key": "76b5024f502f8c17e771",
+      "severity": "High",
+      "component": "pipeline_logic",
+      "count": 1,
+      "error_type": "MANIFEST_FAILED",
+      "last_event_at": "2026-10-09T23:54:30+07:00",
+      "stage": "pipeline",
+      "task_id": "6b276d2e",
+      "first_event_at": "2026-10-09T23:54:30+07:00",
+      "status": "OPEN_UNVERIFIED",
+      "source": "manifest",
+      "evidence_reference": "E:\\Dịch video\\workspace\\audit\\continuous_monitor\\incidents.json",
+      "group_id": "SOURCE_PREP_FAILURE"
+    },
+    {
+      "key": "623c2b7ef93ddf7518b2",
+      "severity": "High",
+      "component": "API",
+      "count": 7,
+      "error_type": "runtime_error",
+      "last_event_at": "2026-10-10T00:42:58+07:00",
+      "stage": "pipeline",
+      "task_id": "douyin_7692745161054506290",
+      "first_event_at": "2026-10-10T00:34:22+07:00",
+      "status": "OPEN_UNVERIFIED",
+      "source": "log:ai.log",
+      "evidence_reference": "E:\\Dịch video\\workspace\\audit\\continuous_monitor\\incidents.json",
+      "group_id": "623c2b7ef93ddf7518b2"
+    },
+    {
+      "key": "c198d26c9116d1375645",
+      "severity": "High",
+      "component": "backend",
+      "count": 1,
+      "error_type": "VideoIntelligenceError",
+      "last_event_at": "2026-10-10T00:42:58+07:00",
+      "stage": "pipeline",
+      "task_id": "douyin_7692745161054506290",
+      "first_event_at": "2026-10-10T00:42:58+07:00",
+      "status": "OPEN_UNVERIFIED",
+      "source": "log:errors.log",
+      "evidence_reference": "E:\\Dịch video\\workspace\\audit\\continuous_monitor\\incidents.json",
+      "group_id": "c198d26c9116d1375645"
+    }
+  ],
+  "runner_incidents": [
+    {
+      "error_type": "AutomaticApprovalRejected",
+      "stage": "production reload",
+      "component": "platform permission",
+      "severity": "High",
+      "summary": "Automatic approval review rejected the desktop-stop/restart command with stated reason: blocked by policy. No stop/restart occurred. Independent fixes/tests and actual checkpoint review continue.",
+      "id": "desktop-restart-policy",
+      "event_at": "2026-10-10T00:14:58+07:00",
+      "status": "OPEN_UNVERIFIED",
+      "source": "runner",
+      "details": {}
+    },
+    {
+      "error_type": "AutomaticApprovalRejected",
+      "stage": "background dashboard",
+      "component": "platform permission",
+      "severity": "Low",
+      "summary": "Automatic approval review rejected launching a separate persistent report-updater dashboard with stated reason: blocked by policy. Detached read-only watchdog is already alive; report one-shot updates work.",
+      "id": "dashboard-daemon-policy",
+      "event_at": "2026-10-10T00:14:58+07:00",
+      "status": "OPEN_UNVERIFIED",
+      "source": "runner",
+      "details": {}
+    }
+  ],
+  "counts": {
+    "diagnostic_groups": 6,
+    "task_incident_keys": 7,
+    "logged_failure_occurrences": 13,
+    "runner_incident_events": 2,
+    "verified_fixed_groups": 0,
+    "unresolved_groups": 6
+  },
+  "count_policy": "Diagnostic groups, per-task incident keys and logged occurrences are different counts; manifest observations are not new failure events",
+  "complete_historical_log": {
+    "counts": {
+      "all_error_occurrences": 84,
+      "historical_runtime_occurrences": 46,
+      "intentional_test_fault_occurrences": 38,
+      "runtime_by_type": {
+        "AttributeError": 1,
+        "RuntimeError": 3,
+        "Unrecorded": 1,
+        "PacingReviewRejected": 32,
+        "VideoIntelligenceError": 4,
+        "ValueError": 5
+      },
+      "runtime_by_task": {
+        "108237d8": 1,
+        "0027d6fd": 1,
+        "6e2f28a7": 4,
+        "douyin_7692745161054506290": 35,
+        "046045e1": 1,
+        "9c3d2d15": 1,
+        "6b276d2e": 2,
+        "248460b3": 1
+      }
+    },
+    "evidence_path": "E:\\Dịch video\\reports\\autonomous_audit\\historical_log_audit.json",
+    "scope": "Complete existing errors.log, including multiline traceback frames. Current live status is reported separately.",
+    "limitation": "Old unrecorded exception detail, retry histories and deleted worker state cannot be invented. Source pointers retain access to original evidence; no raw provider data is published."
+  }
+}

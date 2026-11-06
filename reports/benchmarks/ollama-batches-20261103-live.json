@@ -1,0 +1,1636 @@
+{
+  "started_at_utc": "2026-11-03T10:50:47.429882+00:00",
+  "source_transcript": "E:\\Dịch video\\workspace\\cache\\34f4d7b9\\source_preparation\\000000000000.json",
+  "model": "qwen3:4b-no-think",
+  "base_url": "http://127.0.0.1:11434",
+  "source_sentence_count": 16,
+  "model_loaded_before_run": false,
+  "batch_sizes": [
+    8,
+    12,
+    16
+  ],
+  "warmup": {
+    "elapsed_seconds": 13.828,
+    "complete": true,
+    "metrics": {
+      "request_count": 1,
+      "successful_requests": 1,
+      "prompt_tokens": 461,
+      "output_tokens": 32,
+      "prompt_eval_seconds": 3.185,
+      "generation_seconds": 1.804,
+      "model_load_seconds": 8.82,
+      "ollama_total_seconds": 13.815,
+      "prompt_tokens_per_second": 144.72,
+      "output_tokens_per_second": 17.74,
+      "mean_request_wall_seconds": 13.813,
+      "p95_request_wall_seconds": 13.813,
+      "requests": [
+        {
+          "load_duration": 8819520800,
+          "prompt_eval_count": 461,
+          "prompt_eval_duration": 3185461000,
+          "eval_count": 32,
+          "eval_duration": 1804251000,
+          "total_duration": 13815271100,
+          "wall_elapsed_seconds": 13.813,
+          "success": true
+        }
+      ]
+    }
+  },
+  "runs": [
+    {
+      "batch_size": 8,
+      "elapsed_seconds": 27.578,
+      "sentences_per_second": 0.58,
+      "complete": true,
+      "error_ids": [],
+      "residual_han_ids": [],
+      "request_metrics": {
+        "request_count": 2,
+        "successful_requests": 2,
+        "prompt_tokens": 1860,
+        "output_tokens": 342,
+        "prompt_eval_seconds": 8.182,
+        "generation_seconds": 19.306,
+        "model_load_seconds": 0.008,
+        "ollama_total_seconds": 27.58,
+        "prompt_tokens_per_second": 227.34,
+        "output_tokens_per_second": 17.72,
+        "mean_request_wall_seconds": 13.789,
+        "p95_request_wall_seconds": 13.203,
+        "requests": [
+          {
+            "load_duration": 3501300,
+            "prompt_eval_count": 970,
+            "prompt_eval_duration": 4359464000,
+            "eval_count": 176,
+            "eval_duration": 9998890000,
+            "total_duration": 14374174100,
+            "wall_elapsed_seconds": 14.375,
+            "success": true
+          },
+          {
+            "load_duration": 4500600,
+            "prompt_eval_count": 890,
+            "prompt_eval_duration": 3822240000,
+            "eval_count": 166,
+            "eval_duration": 9306752000,
+            "total_duration": 13205656300,
+            "wall_elapsed_seconds": 13.203,
+            "success": true
+          }
+        ]
+      },
+      "translations": [
+        {
+          "id": 0,
+          "source_zh": "一个家庭一个孩子不就够了吗",
+          "final_vi": "Một gia đình một đứa trẻ đã đủ rồi"
+        },
+        {
+          "id": 1,
+          "source_zh": "小元是哥哥了",
+          "final_vi": "Tiểu Nguyên là anh trai"
+        },
+        {
+          "id": 2,
+          "source_zh": "你看妹妹多可爱啊",
+          "final_vi": "Em gái này đẹp quá"
+        },
+        {
+          "id": 3,
+          "source_zh": "是啊,爸爸,他好可爱",
+          "final_vi": "Đúng vậy bố, bé đáng yêu quá"
+        },
+        {
+          "id": 4,
+          "source_zh": "真丑 没见过这么丑的孩子",
+          "final_vi": "Thật là xấu, chưa từng thấy trẻ xấu như thế"
+        },
+        {
+          "id": 5,
+          "source_zh": "像眉毛的小猫",
+          "final_vi": "Mắt mèo nhỏ"
+        },
+        {
+          "id": 6,
+          "source_zh": "护士您好",
+          "final_vi": "Chào cô y tá"
+        },
+        {
+          "id": 7,
+          "source_zh": "孩子还有多久才能出来",
+          "final_vi": "Bé còn bao lâu nữa mới chào đời?"
+        },
+        {
+          "id": 8,
+          "source_zh": "孩子妈妈特别想他",
+          "final_vi": "Mẹ con đặc biệt muốn cậu"
+        },
+        {
+          "id": 9,
+          "source_zh": "再过三天",
+          "final_vi": "còn ba ngày nữa"
+        },
+        {
+          "id": 10,
+          "source_zh": "各项指标稳定就可以了",
+          "final_vi": "các chỉ số ổn định là đủ"
+        },
+        {
+          "id": 11,
+          "source_zh": "太好了",
+          "final_vi": "Tốt quá"
+        },
+        {
+          "id": 12,
+          "source_zh": "谢谢",
+          "final_vi": "Cảm ơn"
+        },
+        {
+          "id": 13,
+          "source_zh": "谢谢",
+          "final_vi": "Cảm ơn"
+        },
+        {
+          "id": 14,
+          "source_zh": "儿子 听到没有",
+          "final_vi": "Con trai ơi, có nghe chưa?"
+        },
+        {
+          "id": 15,
+          "source_zh": "你妹妹就快回家了",
+          "final_vi": "Em gái con sắp về nhà rồi"
+        }
+      ]
+    },
+    {
+      "batch_size": 12,
+      "elapsed_seconds": 28.141,
+      "sentences_per_second": 0.569,
+      "complete": true,
+      "error_ids": [],
+      "residual_han_ids": [],
+      "request_metrics": {
+        "request_count": 2,
+        "successful_requests": 2,
+        "prompt_tokens": 1857,
+        "output_tokens": 344,
+        "prompt_eval_seconds": 8.246,
+        "generation_seconds": 19.715,
+        "model_load_seconds": 0.007,
+        "ollama_total_seconds": 28.127,
+        "prompt_tokens_per_second": 225.21,
+        "output_tokens_per_second": 17.45,
+        "mean_request_wall_seconds": 14.062,
+        "p95_request_wall_seconds": 7.297,
+        "requests": [
+          {
+            "load_duration": 3501600,
+            "prompt_eval_count": 1178,
+            "prompt_eval_duration": 5849065000,
+            "eval_count": 257,
+            "eval_duration": 14898131000,
+            "total_duration": 20828233900,
+            "wall_elapsed_seconds": 20.828,
+            "success": true
+          },
+          {
+            "load_duration": 3110000,
+            "prompt_eval_count": 679,
+            "prompt_eval_duration": 2396570000,
+            "eval_count": 87,
+            "eval_duration": 4817126000,
+            "total_duration": 7298778900,
+            "wall_elapsed_seconds": 7.297,
+            "success": true
+          }
+        ]
+      },
+      "translations": [
+        {
+          "id": 0,
+          "source_zh": "一个家庭一个孩子不就够了吗",
+          "final_vi": "Một gia đình một đứa trẻ không đủ rồi sao?"
+        },
+        {
+          "id": 1,
+          "source_zh": "小元是哥哥了",
+          "final_vi": "Tiểu Nguyên là anh trai rồi"
+        },
+        {
+          "id": 2,
+          "source_zh": "你看妹妹多可爱啊",
+          "final_vi": "Em gái này đẹp quá"
+        },
+        {
+          "id": 3,
+          "source_zh": "是啊,爸爸,他好可爱",
+          "final_vi": "Đúng vậy bố, bé đáng yêu quá"
+        },
+        {
+          "id": 4,
+          "source_zh": "真丑 没见过这么丑的孩子",
+          "final_vi": "Thật là xấu, chưa từng thấy trẻ xấu như thế"
+        },
+        {
+          "id": 5,
+          "source_zh": "像眉毛的小猫",
+          "final_vi": "Mắt mèo nhỏ"
+        },
+        {
+          "id": 6,
+          "source_zh": "护士您好",
+          "final_vi": "Chào cô y tá"
+        },
+        {
+          "id": 7,
+          "source_zh": "孩子还有多久才能出来",
+          "final_vi": "Bé còn bao lâu nữa mới chào đời?"
+        },
+        {
+          "id": 8,
+          "source_zh": "孩子妈妈特别想他",
+          "final_vi": "Mẹ rất mong chờ bé"
+        },
+        {
+          "id": 9,
+          "source_zh": "再过三天",
+          "final_vi": "Còn ba ngày nữa"
+        },
+        {
+          "id": 10,
+          "source_zh": "各项指标稳定就可以了",
+          "final_vi": "Các chỉ số ổn định là đủ"
+        },
+        {
+          "id": 11,
+          "source_zh": "太好了",
+          "final_vi": "Rất tốt"
+        },
+        {
+          "id": 12,
+          "source_zh": "谢谢",
+          "final_vi": "Cảm ơn"
+        },
+        {
+          "id": 13,
+          "source_zh": "谢谢",
+          "final_vi": "Cảm ơn"
+        },
+        {
+          "id": 14,
+          "source_zh": "儿子 听到没有",
+          "final_vi": "Con trai, nghe chưa?"
+        },
+        {
+          "id": 15,
+          "source_zh": "你妹妹就快回家了",
+          "final_vi": "Em gái con sắp về nhà rồi đó"
+        }
+      ]
+    },
+    {
+      "batch_size": 16,
+      "elapsed_seconds": 27.062,
+      "sentences_per_second": 0.591,
+      "complete": true,
+      "error_ids": [],
+      "residual_han_ids": [],
+      "request_metrics": {
+        "request_count": 1,
+        "successful_requests": 1,
+        "prompt_tokens": 1358,
+        "output_tokens": 336,
+        "prompt_eval_seconds": 6.989,
+        "generation_seconds": 20.0,
+        "model_load_seconds": 0.004,
+        "ollama_total_seconds": 27.058,
+        "prompt_tokens_per_second": 194.3,
+        "output_tokens_per_second": 16.8,
+        "mean_request_wall_seconds": 27.062,
+        "p95_request_wall_seconds": 27.062,
+        "requests": [
+          {
+            "load_duration": 3500100,
+            "prompt_eval_count": 1358,
+            "prompt_eval_duration": 6989162000,
+            "eval_count": 336,
+            "eval_duration": 20000178000,
+            "total_duration": 27058357400,
+            "wall_elapsed_seconds": 27.062,
+            "success": true
+          }
+        ]
+      },
+      "translations": [
+        {
+          "id": 0,
+          "source_zh": "一个家庭一个孩子不就够了吗",
+          "final_vi": "Một gia đình một đứa trẻ đã đủ rồi"
+        },
+        {
+          "id": 1,
+          "source_zh": "小元是哥哥了",
+          "final_vi": "Tiểu Nguyên là anh trai"
+        },
+        {
+          "id": 2,
+          "source_zh": "你看妹妹多可爱啊",
+          "final_vi": "Em gái bé quá đáng yêu"
+        },
+        {
+          "id": 3,
+          "source_zh": "是啊,爸爸,他好可爱",
+          "final_vi": "Đúng vậy bố, bé đáng yêu quá"
+        },
+        {
+          "id": 4,
+          "source_zh": "真丑 没见过这么丑的孩子",
+          "final_vi": "Thật xấu xí, chưa từng thấy trẻ xấu xí như thế"
+        },
+        {
+          "id": 5,
+          "source_zh": "像眉毛的小猫",
+          "final_vi": "Mắt mèo nhỏ"
+        },
+        {
+          "id": 6,
+          "source_zh": "护士您好",
+          "final_vi": "Chào cô y tá"
+        },
+        {
+          "id": 7,
+          "source_zh": "孩子还有多久才能出来",
+          "final_vi": "Bé còn bao lâu nữa mới chào đời?"
+        },
+        {
+          "id": 8,
+          "source_zh": "孩子妈妈特别想他",
+          "final_vi": "Mẹ rất mong chờ bé"
+        },
+        {
+          "id": 9,
+          "source_zh": "再过三天",
+          "final_vi": "Còn ba ngày nữa"
+        },
+        {
+          "id": 10,
+          "source_zh": "各项指标稳定就可以了",
+          "final_vi": "Các chỉ số ổn định là đủ"
+        },
+        {
+          "id": 11,
+          "source_zh": "太好了",
+          "final_vi": "Tốt quá"
+        },
+        {
+          "id": 12,
+          "source_zh": "谢谢",
+          "final_vi": "Cảm ơn"
+        },
+        {
+          "id": 13,
+          "source_zh": "谢谢",
+          "final_vi": "Cảm ơn"
+        },
+        {
+          "id": 14,
+          "source_zh": "儿子 听到没有",
+          "final_vi": "Con trai, nghe chưa?"
+        },
+        {
+          "id": 15,
+          "source_zh": "你妹妹就快回家了",
+          "final_vi": "Em gái con sắp về nhà rồi"
+        }
+      ]
+    }
+  ],
+  "environment": {
+    "provider": "ollama",
+    "configured_cpu_threads": 2,
+    "gpu_backend": "see Ollama server log and resource samples"
+  },
+  "elapsed_seconds": 96.609,
+  "resource_samples": [
+    {
+      "at_monotonic": 241415.796,
+      "system_cpu_percent": 0.0,
+      "system_ram_used_percent": 39.0,
+      "system_ram_available_bytes": 20914667520,
+      "gpu": [
+        {
+          "utilization_percent": 13,
+          "memory_used_mib": 436,
+          "memory_total_mib": 4096
+        }
+      ]
+    },
+    {
+      "at_monotonic": 241416.859,
+      "system_cpu_percent": 36.7,
+      "system_ram_used_percent": 39.1,
+      "system_ram_available_bytes": 20862074880,
+      "gpu": [
+        {
+          "utilization_percent": 7,
+          "memory_used_mib": 441,
+          "memory_total_mib": 4096
+        }
+      ]
+    },
+    {
+      "at_monotonic": 241417.906,
+      "system_cpu_percent": 28.0,
+      "system_ram_used_percent": 39.2,
+      "system_ram_available_bytes": 20842000384,
+      "gpu": [
+        {
+          "utilization_percent": 3,
+          "memory_used_mib": 441,
+          "memory_total_mib": 4096
+        }
+      ]
+    },
+    {
+      "at_monotonic": 241418.953,
+      "system_cpu_percent": 36.7,
+      "system_ram_used_percent": 40.2,
+      "system_ram_available_bytes": 20489998336,
+      "gpu": [
+        {
+          "utilization_percent": 43,
+          "memory_used_mib": 2640,
+          "memory_total_mib": 4096
+        }
+      ]
+    },
+    {
+      "at_monotonic": 241420.0,
+      "system_cpu_percent": 17.6,
+      "system_ram_used_percent": 41.7,
+      "system_ram_available_bytes": 19986702336,
+      "gpu": [
+        {
+          "utilization_percent": 7,
+          "memory_used_mib": 2640,
+          "memory_total_mib": 4096
+        }
+      ]
+    },
+    {
+      "at_monotonic": 241421.046,
+      "system_cpu_percent": 17.4,
+      "system_ram_used_percent": 43.0,
+      "system_ram_available_bytes": 19536408576,
+      "gpu": [
+        {
+          "utilization_percent": 6,
+          "memory_used_mib": 2637,
+          "memory_total_mib": 4096
+        }
+      ]
+    },
+    {
+      "at_monotonic": 241422.093,
+      "system_cpu_percent": 21.4,
+      "system_ram_used_percent": 44.4,
+      "system_ram_available_bytes": 19069071360,
+      "gpu": [
+        {
+          "utilization_percent": 10,
+          "memory_used_mib": 2637,
+          "memory_total_mib": 4096
+        }
+      ]
+    },
+    {
+      "at_monotonic": 241423.125,
+      "system_cpu_percent": 18.6,
+      "system_ram_used_percent": 45.6,
+      "system_ram_available_bytes": 18633244672,
+      "gpu": [
+        {
+          "utilization_percent": 12,
+          "memory_used_mib": 2637,
+          "memory_total_mib": 4096
+        }
+      ]
+    },
+    {
+      "at_monotonic": 241424.171,
+      "system_cpu_percent": 18.2,
+      "system_ram_used_percent": 47.4,
+      "system_ram_available_bytes": 18024714240,
+      "gpu": [
+        {
+          "utilization_percent": 8,
+          "memory_used_mib": 2994,
+          "memory_total_mib": 4096
+        }
+      ]
+    },
+    {
+      "at_monotonic": 241425.218,
+      "system_cpu_percent": 33.7,
+      "system_ram_used_percent": 47.7,
+      "system_ram_available_bytes": 17940955136,
+      "gpu": [
+        {
+          "utilization_percent": 98,
+          "memory_used_mib": 3001,
+          "memory_total_mib": 4096
+        }
+      ]
+    },
+    {
+      "at_monotonic": 241426.265,
+      "system_cpu_percent": 15.4,
+      "system_ram_used_percent": 47.7,
+      "system_ram_available_bytes": 17934073856,
+      "gpu": [
+        {
+          "utilization_percent": 98,
+          "memory_used_mib": 3001,
+          "memory_total_mib": 4096
+        }
+      ]
+    },
+    {
+      "at_monotonic": 241427.312,
+      "system_cpu_percent": 18.0,
+      "system_ram_used_percent": 47.7,
+      "system_ram_available_bytes": 17939181568,
+      "gpu": [
+        {
+          "utilization_percent": 98,
+          "memory_used_mib": 3001,
+          "memory_total_mib": 4096
+        }
+      ]
+    },
+    {
+      "at_monotonic": 241428.359,
+      "system_cpu_percent": 36.2,
+      "system_ram_used_percent": 47.7,
+      "system_ram_available_bytes": 17932627968,
+      "gpu": [
+        {
+          "utilization_percent": 64,
+          "memory_used_mib": 3002,
+          "memory_total_mib": 4096
+        }
+      ]
+    },
+    {
+      "at_monotonic": 241429.406,
+      "system_cpu_percent": 34.8,
+      "system_ram_used_percent": 47.7,
+      "system_ram_available_bytes": 17921576960,
+      "gpu": [
+        {
+          "utilization_percent": 69,
+          "memory_used_mib": 3002,
+          "memory_total_mib": 4096
+        }
+      ]
+    },
+    {
+      "at_monotonic": 241430.468,
+      "system_cpu_percent": 28.3,
+      "system_ram_used_percent": 47.7,
+      "system_ram_available_bytes": 17937125376,
+      "gpu": [
+        {
+          "utilization_percent": 98,
+          "memory_used_mib": 3002,
+          "memory_total_mib": 4096
+        }
+      ]
+    },
+    {
+      "at_monotonic": 241431.515,
+      "system_cpu_percent": 13.0,
+      "system_ram_used_percent": 47.7,
+      "system_ram_available_bytes": 17938681856,
+      "gpu": [
+        {
+          "utilization_percent": 98,
+          "memory_used_mib": 3002,
+          "memory_total_mib": 4096
+        }
+      ]
+    },
+    {
+      "at_monotonic": 241432.562,
+      "system_cpu_percent": 17.0,
+      "system_ram_used_percent": 47.7,
+      "system_ram_available_bytes": 17930633216,
+      "gpu": [
+        {
+          "utilization_percent": 97,
+          "memory_used_mib": 3002,
+          "memory_total_mib": 4096
+        }
+      ]
+    },
+    {
+      "at_monotonic": 241433.609,
+      "system_cpu_percent": 25.2,
+      "system_ram_used_percent": 47.7,
+      "system_ram_available_bytes": 17924538368,
+      "gpu": [
+        {
+          "utilization_percent": 97,
+          "memory_used_mib": 3003,
+          "memory_total_mib": 4096
+        }
+      ]
+    },
+    {
+      "at_monotonic": 241434.656,
+      "system_cpu_percent": 29.4,
+      "system_ram_used_percent": 47.7,
+      "system_ram_available_bytes": 17929441280,
+      "gpu": [
+        {
+          "utilization_percent": 67,
+          "memory_used_mib": 3003,
+          "memory_total_mib": 4096
+        }
+      ]
+    },
+    {
+      "at_monotonic": 241435.687,
+      "system_cpu_percent": 31.7,
+      "system_ram_used_percent": 47.7,
+      "system_ram_available_bytes": 17912733696,
+      "gpu": [
+        {
+          "utilization_percent": 69,
+          "memory_used_mib": 3003,
+          "memory_total_mib": 4096
+        }
+      ]
+    },
+    {
+      "at_monotonic": 241436.734,
+      "system_cpu_percent": 37.9,
+      "system_ram_used_percent": 47.7,
+      "system_ram_available_bytes": 17924562944,
+      "gpu": [
+        {
+          "utilization_percent": 66,
+          "memory_used_mib": 3003,
+          "memory_total_mib": 4096
+        }
+      ]
+    },
+    {
+      "at_monotonic": 241437.781,
+      "system_cpu_percent": 33.8,
+      "system_ram_used_percent": 47.7,
+      "system_ram_available_bytes": 17919893504,
+      "gpu": [
+        {
+          "utilization_percent": 67,
+          "memory_used_mib": 3003,
+          "memory_total_mib": 4096
+        }
+      ]
+    },
+    {
+      "at_monotonic": 241438.828,
+      "system_cpu_percent": 35.1,
+      "system_ram_used_percent": 47.7,
+      "system_ram_available_bytes": 17928495104,
+      "gpu": [
+        {
+          "utilization_percent": 67,
+          "memory_used_mib": 3003,
+          "memory_total_mib": 4096
+        }
+      ]
+    },
+    {
+      "at_monotonic": 241439.875,
+      "system_cpu_percent": 49.4,
+      "system_ram_used_percent": 47.7,
+      "system_ram_available_bytes": 17921695744,
+      "gpu": [
+        {
+          "utilization_percent": 55,
+          "memory_used_mib": 3003,
+          "memory_total_mib": 4096
+        }
+      ]
+    },
+    {
+      "at_monotonic": 241440.921,
+      "system_cpu_percent": 35.0,
+      "system_ram_used_percent": 47.7,
+      "system_ram_available_bytes": 17929555968,
+      "gpu": [
+        {
+          "utilization_percent": 66,
+          "memory_used_mib": 3003,
+          "memory_total_mib": 4096
+        }
+      ]
+    },
+    {
+      "at_monotonic": 241441.968,
+      "system_cpu_percent": 36.6,
+      "system_ram_used_percent": 47.7,
+      "system_ram_available_bytes": 17930571776,
+      "gpu": [
+        {
+          "utilization_percent": 65,
+          "memory_used_mib": 3003,
+          "memory_total_mib": 4096
+        }
+      ]
+    },
+    {
+      "at_monotonic": 241443.015,
+      "system_cpu_percent": 37.4,
+      "system_ram_used_percent": 47.7,
+      "system_ram_available_bytes": 17938440192,
+      "gpu": [
+        {
+          "utilization_percent": 68,
+          "memory_used_mib": 3003,
+          "memory_total_mib": 4096
+        }
+      ]
+    },
+    {
+      "at_monotonic": 241444.062,
+      "system_cpu_percent": 34.6,
+      "system_ram_used_percent": 48.2,
+      "system_ram_available_bytes": 17767456768,
+      "gpu": [
+        {
+          "utilization_percent": 58,
+          "memory_used_mib": 3003,
+          "memory_total_mib": 4096
+        }
+      ]
+    },
+    {
+      "at_monotonic": 241445.109,
+      "system_cpu_percent": 26.1,
+      "system_ram_used_percent": 48.2,
+      "system_ram_available_bytes": 17765543936,
+      "gpu": [
+        {
+          "utilization_percent": 98,
+          "memory_used_mib": 3003,
+          "memory_total_mib": 4096
+        }
+      ]
+    },
+    {
+      "at_monotonic": 241446.156,
+      "system_cpu_percent": 17.5,
+      "system_ram_used_percent": 48.2,
+      "system_ram_available_bytes": 17773187072,
+      "gpu": [
+        {
+          "utilization_percent": 98,
+          "memory_used_mib": 3003,
+          "memory_total_mib": 4096
+        }
+      ]
+    },
+    {
+      "at_monotonic": 241447.203,
+      "system_cpu_percent": 17.7,
+      "system_ram_used_percent": 48.2,
+      "system_ram_available_bytes": 17757863936,
+      "gpu": [
+        {
+          "utilization_percent": 98,
+          "memory_used_mib": 3003,
+          "memory_total_mib": 4096
+        }
+      ]
+    },
+    {
+      "at_monotonic": 241448.25,
+      "system_cpu_percent": 30.1,
+      "system_ram_used_percent": 48.2,
+      "system_ram_available_bytes": 17757618176,
+      "gpu": [
+        {
+          "utilization_percent": 54,
+          "memory_used_mib": 3003,
+          "memory_total_mib": 4096
+        }
+      ]
+    },
+    {
+      "at_monotonic": 241449.296,
+      "system_cpu_percent": 39.3,
+      "system_ram_used_percent": 48.2,
+      "system_ram_available_bytes": 17749942272,
+      "gpu": [
+        {
+          "utilization_percent": 66,
+          "memory_used_mib": 3003,
+          "memory_total_mib": 4096
+        }
+      ]
+    },
+    {
+      "at_monotonic": 241450.359,
+      "system_cpu_percent": 35.3,
+      "system_ram_used_percent": 48.2,
+      "system_ram_available_bytes": 17767145472,
+      "gpu": [
+        {
+          "utilization_percent": 68,
+          "memory_used_mib": 3003,
+          "memory_total_mib": 4096
+        }
+      ]
+    },
+    {
+      "at_monotonic": 241451.39,
+      "system_cpu_percent": 33.5,
+      "system_ram_used_percent": 48.2,
+      "system_ram_available_bytes": 17749692416,
+      "gpu": [
+        {
+          "utilization_percent": 66,
+          "memory_used_mib": 3003,
+          "memory_total_mib": 4096
+        }
+      ]
+    },
+    {
+      "at_monotonic": 241452.437,
+      "system_cpu_percent": 39.1,
+      "system_ram_used_percent": 48.2,
+      "system_ram_available_bytes": 17762451456,
+      "gpu": [
+        {
+          "utilization_percent": 66,
+          "memory_used_mib": 3003,
+          "memory_total_mib": 4096
+        }
+      ]
+    },
+    {
+      "at_monotonic": 241453.484,
+      "system_cpu_percent": 34.0,
+      "system_ram_used_percent": 48.2,
+      "system_ram_available_bytes": 17759580160,
+      "gpu": [
+        {
+          "utilization_percent": 67,
+          "memory_used_mib": 3003,
+          "memory_total_mib": 4096
+        }
+      ]
+    },
+    {
+      "at_monotonic": 241454.531,
+      "system_cpu_percent": 33.6,
+      "system_ram_used_percent": 48.2,
+      "system_ram_available_bytes": 17757990912,
+      "gpu": [
+        {
+          "utilization_percent": 66,
+          "memory_used_mib": 3003,
+          "memory_total_mib": 4096
+        }
+      ]
+    },
+    {
+      "at_monotonic": 241455.578,
+      "system_cpu_percent": 39.0,
+      "system_ram_used_percent": 48.2,
+      "system_ram_available_bytes": 17756434432,
+      "gpu": [
+        {
+          "utilization_percent": 67,
+          "memory_used_mib": 3003,
+          "memory_total_mib": 4096
+        }
+      ]
+    },
+    {
+      "at_monotonic": 241456.625,
+      "system_cpu_percent": 36.8,
+      "system_ram_used_percent": 48.2,
+      "system_ram_available_bytes": 17744175104,
+      "gpu": [
+        {
+          "utilization_percent": 66,
+          "memory_used_mib": 3003,
+          "memory_total_mib": 4096
+        }
+      ]
+    },
+    {
+      "at_monotonic": 241457.671,
+      "system_cpu_percent": 39.9,
+      "system_ram_used_percent": 48.6,
+      "system_ram_available_bytes": 17608597504,
+      "gpu": [
+        {
+          "utilization_percent": 93,
+          "memory_used_mib": 3003,
+          "memory_total_mib": 4096
+        }
+      ]
+    },
+    {
+      "at_monotonic": 241458.718,
+      "system_cpu_percent": 16.2,
+      "system_ram_used_percent": 48.6,
+      "system_ram_available_bytes": 17608101888,
+      "gpu": [
+        {
+          "utilization_percent": 98,
+          "memory_used_mib": 3003,
+          "memory_total_mib": 4096
+        }
+      ]
+    },
+    {
+      "at_monotonic": 241459.765,
+      "system_cpu_percent": 13.7,
+      "system_ram_used_percent": 48.6,
+      "system_ram_available_bytes": 17606864896,
+      "gpu": [
+        {
+          "utilization_percent": 98,
+          "memory_used_mib": 3003,
+          "memory_total_mib": 4096
+        }
+      ]
+    },
+    {
+      "at_monotonic": 241460.796,
+      "system_cpu_percent": 25.1,
+      "system_ram_used_percent": 48.7,
+      "system_ram_available_bytes": 17598730240,
+      "gpu": [
+        {
+          "utilization_percent": 92,
+          "memory_used_mib": 3003,
+          "memory_total_mib": 4096
+        }
+      ]
+    },
+    {
+      "at_monotonic": 241461.843,
+      "system_cpu_percent": 19.6,
+      "system_ram_used_percent": 48.6,
+      "system_ram_available_bytes": 17607467008,
+      "gpu": [
+        {
+          "utilization_percent": 98,
+          "memory_used_mib": 3003,
+          "memory_total_mib": 4096
+        }
+      ]
+    },
+    {
+      "at_monotonic": 241462.89,
+      "system_cpu_percent": 16.0,
+      "system_ram_used_percent": 48.6,
+      "system_ram_available_bytes": 17604071424,
+      "gpu": [
+        {
+          "utilization_percent": 98,
+          "memory_used_mib": 3003,
+          "memory_total_mib": 4096
+        }
+      ]
+    },
+    {
+      "at_monotonic": 241463.937,
+      "system_cpu_percent": 33.1,
+      "system_ram_used_percent": 48.7,
+      "system_ram_available_bytes": 17601675264,
+      "gpu": [
+        {
+          "utilization_percent": 53,
+          "memory_used_mib": 3003,
+          "memory_total_mib": 4096
+        }
+      ]
+    },
+    {
+      "at_monotonic": 241464.984,
+      "system_cpu_percent": 41.1,
+      "system_ram_used_percent": 48.7,
+      "system_ram_available_bytes": 17587466240,
+      "gpu": [
+        {
+          "utilization_percent": 68,
+          "memory_used_mib": 3003,
+          "memory_total_mib": 4096
+        }
+      ]
+    },
+    {
+      "at_monotonic": 241466.031,
+      "system_cpu_percent": 32.3,
+      "system_ram_used_percent": 48.7,
+      "system_ram_available_bytes": 17597419520,
+      "gpu": [
+        {
+          "utilization_percent": 67,
+          "memory_used_mib": 3003,
+          "memory_total_mib": 4096
+        }
+      ]
+    },
+    {
+      "at_monotonic": 241467.078,
+      "system_cpu_percent": 34.9,
+      "system_ram_used_percent": 48.7,
+      "system_ram_available_bytes": 17592709120,
+      "gpu": [
+        {
+          "utilization_percent": 69,
+          "memory_used_mib": 3003,
+          "memory_total_mib": 4096
+        }
+      ]
+    },
+    {
+      "at_monotonic": 241468.109,
+      "system_cpu_percent": 37.1,
+      "system_ram_used_percent": 48.6,
+      "system_ram_available_bytes": 17605496832,
+      "gpu": [
+        {
+          "utilization_percent": 66,
+          "memory_used_mib": 3003,
+          "memory_total_mib": 4096
+        }
+      ]
+    },
+    {
+      "at_monotonic": 241469.156,
+      "system_cpu_percent": 34.0,
+      "system_ram_used_percent": 48.7,
+      "system_ram_available_bytes": 17599246336,
+      "gpu": [
+        {
+          "utilization_percent": 68,
+          "memory_used_mib": 3003,
+          "memory_total_mib": 4096
+        }
+      ]
+    },
+    {
+      "at_monotonic": 241470.203,
+      "system_cpu_percent": 34.6,
+      "system_ram_used_percent": 48.6,
+      "system_ram_available_bytes": 17606606848,
+      "gpu": [
+        {
+          "utilization_percent": 67,
+          "memory_used_mib": 3003,
+          "memory_total_mib": 4096
+        }
+      ]
+    },
+    {
+      "at_monotonic": 241471.25,
+      "system_cpu_percent": 35.3,
+      "system_ram_used_percent": 48.7,
+      "system_ram_available_bytes": 17600368640,
+      "gpu": [
+        {
+          "utilization_percent": 69,
+          "memory_used_mib": 3003,
+          "memory_total_mib": 4096
+        }
+      ]
+    },
+    {
+      "at_monotonic": 241472.296,
+      "system_cpu_percent": 39.4,
+      "system_ram_used_percent": 48.7,
+      "system_ram_available_bytes": 17583419392,
+      "gpu": [
+        {
+          "utilization_percent": 68,
+          "memory_used_mib": 3005,
+          "memory_total_mib": 4096
+        }
+      ]
+    },
+    {
+      "at_monotonic": 241473.343,
+      "system_cpu_percent": 36.6,
+      "system_ram_used_percent": 48.7,
+      "system_ram_available_bytes": 17589747712,
+      "gpu": [
+        {
+          "utilization_percent": 66,
+          "memory_used_mib": 3006,
+          "memory_total_mib": 4096
+        }
+      ]
+    },
+    {
+      "at_monotonic": 241474.39,
+      "system_cpu_percent": 34.3,
+      "system_ram_used_percent": 48.7,
+      "system_ram_available_bytes": 17597353984,
+      "gpu": [
+        {
+          "utilization_percent": 63,
+          "memory_used_mib": 3005,
+          "memory_total_mib": 4096
+        }
+      ]
+    },
+    {
+      "at_monotonic": 241475.437,
+      "system_cpu_percent": 33.8,
+      "system_ram_used_percent": 48.7,
+      "system_ram_available_bytes": 17601318912,
+      "gpu": [
+        {
+          "utilization_percent": 66,
+          "memory_used_mib": 3005,
+          "memory_total_mib": 4096
+        }
+      ]
+    },
+    {
+      "at_monotonic": 241476.484,
+      "system_cpu_percent": 33.6,
+      "system_ram_used_percent": 48.7,
+      "system_ram_available_bytes": 17602015232,
+      "gpu": [
+        {
+          "utilization_percent": 65,
+          "memory_used_mib": 3005,
+          "memory_total_mib": 4096
+        }
+      ]
+    },
+    {
+      "at_monotonic": 241477.531,
+      "system_cpu_percent": 36.5,
+      "system_ram_used_percent": 48.7,
+      "system_ram_available_bytes": 17602936832,
+      "gpu": [
+        {
+          "utilization_percent": 62,
+          "memory_used_mib": 3003,
+          "memory_total_mib": 4096
+        }
+      ]
+    },
+    {
+      "at_monotonic": 241478.578,
+      "system_cpu_percent": 33.3,
+      "system_ram_used_percent": 49.3,
+      "system_ram_available_bytes": 17384853504,
+      "gpu": [
+        {
+          "utilization_percent": 98,
+          "memory_used_mib": 3001,
+          "memory_total_mib": 4096
+        }
+      ]
+    },
+    {
+      "at_monotonic": 241479.625,
+      "system_cpu_percent": 14.5,
+      "system_ram_used_percent": 49.3,
+      "system_ram_available_bytes": 17396473856,
+      "gpu": [
+        {
+          "utilization_percent": 97,
+          "memory_used_mib": 3001,
+          "memory_total_mib": 4096
+        }
+      ]
+    },
+    {
+      "at_monotonic": 241480.671,
+      "system_cpu_percent": 22.4,
+      "system_ram_used_percent": 49.3,
+      "system_ram_available_bytes": 17368993792,
+      "gpu": [
+        {
+          "utilization_percent": 73,
+          "memory_used_mib": 3001,
+          "memory_total_mib": 4096
+        }
+      ]
+    },
+    {
+      "at_monotonic": 241481.703,
+      "system_cpu_percent": 32.9,
+      "system_ram_used_percent": 49.3,
+      "system_ram_available_bytes": 17388535808,
+      "gpu": [
+        {
+          "utilization_percent": 66,
+          "memory_used_mib": 3001,
+          "memory_total_mib": 4096
+        }
+      ]
+    },
+    {
+      "at_monotonic": 241482.75,
+      "system_cpu_percent": 37.2,
+      "system_ram_used_percent": 49.3,
+      "system_ram_available_bytes": 17391222784,
+      "gpu": [
+        {
+          "utilization_percent": 66,
+          "memory_used_mib": 3001,
+          "memory_total_mib": 4096
+        }
+      ]
+    },
+    {
+      "at_monotonic": 241483.796,
+      "system_cpu_percent": 37.0,
+      "system_ram_used_percent": 49.3,
+      "system_ram_available_bytes": 17393192960,
+      "gpu": [
+        {
+          "utilization_percent": 66,
+          "memory_used_mib": 3001,
+          "memory_total_mib": 4096
+        }
+      ]
+    },
+    {
+      "at_monotonic": 241484.843,
+      "system_cpu_percent": 37.5,
+      "system_ram_used_percent": 49.3,
+      "system_ram_available_bytes": 17380093952,
+      "gpu": [
+        {
+          "utilization_percent": 70,
+          "memory_used_mib": 3001,
+          "memory_total_mib": 4096
+        }
+      ]
+    },
+    {
+      "at_monotonic": 241485.89,
+      "system_cpu_percent": 38.3,
+      "system_ram_used_percent": 49.6,
+      "system_ram_available_bytes": 17284894720,
+      "gpu": [
+        {
+          "utilization_percent": 91,
+          "memory_used_mib": 3001,
+          "memory_total_mib": 4096
+        }
+      ]
+    },
+    {
+      "at_monotonic": 241486.937,
+      "system_cpu_percent": 15.4,
+      "system_ram_used_percent": 49.6,
+      "system_ram_available_bytes": 17276993536,
+      "gpu": [
+        {
+          "utilization_percent": 98,
+          "memory_used_mib": 3001,
+          "memory_total_mib": 4096
+        }
+      ]
+    },
+    {
+      "at_monotonic": 241487.968,
+      "system_cpu_percent": 12.9,
+      "system_ram_used_percent": 49.6,
+      "system_ram_available_bytes": 17281966080,
+      "gpu": [
+        {
+          "utilization_percent": 98,
+          "memory_used_mib": 3001,
+          "memory_total_mib": 4096
+        }
+      ]
+    },
+    {
+      "at_monotonic": 241489.015,
+      "system_cpu_percent": 27.0,
+      "system_ram_used_percent": 49.6,
+      "system_ram_available_bytes": 17277067264,
+      "gpu": [
+        {
+          "utilization_percent": 86,
+          "memory_used_mib": 3001,
+          "memory_total_mib": 4096
+        }
+      ]
+    },
+    {
+      "at_monotonic": 241490.062,
+      "system_cpu_percent": 21.9,
+      "system_ram_used_percent": 49.6,
+      "system_ram_available_bytes": 17289388032,
+      "gpu": [
+        {
+          "utilization_percent": 98,
+          "memory_used_mib": 3001,
+          "memory_total_mib": 4096
+        }
+      ]
+    },
+    {
+      "at_monotonic": 241491.171,
+      "system_cpu_percent": 25.7,
+      "system_ram_used_percent": 49.6,
+      "system_ram_available_bytes": 17283108864,
+      "gpu": [
+        {
+          "utilization_percent": 98,
+          "memory_used_mib": 3001,
+          "memory_total_mib": 4096
+        }
+      ]
+    },
+    {
+      "at_monotonic": 241492.218,
+      "system_cpu_percent": 17.2,
+      "system_ram_used_percent": 49.6,
+      "system_ram_available_bytes": 17273118720,
+      "gpu": [
+        {
+          "utilization_percent": 98,
+          "memory_used_mib": 3001,
+          "memory_total_mib": 4096
+        }
+      ]
+    },
+    {
+      "at_monotonic": 241493.265,
+      "system_cpu_percent": 34.2,
+      "system_ram_used_percent": 49.6,
+      "system_ram_available_bytes": 17281572864,
+      "gpu": [
+        {
+          "utilization_percent": 41,
+          "memory_used_mib": 3002,
+          "memory_total_mib": 4096
+        }
+      ]
+    },
+    {
+      "at_monotonic": 241494.328,
+      "system_cpu_percent": 34.8,
+      "system_ram_used_percent": 49.6,
+      "system_ram_available_bytes": 17270534144,
+      "gpu": [
+        {
+          "utilization_percent": 63,
+          "memory_used_mib": 3002,
+          "memory_total_mib": 4096
+        }
+      ]
+    },
+    {
+      "at_monotonic": 241495.375,
+      "system_cpu_percent": 35.1,
+      "system_ram_used_percent": 49.6,
+      "system_ram_available_bytes": 17280409600,
+      "gpu": [
+        {
+          "utilization_percent": 69,
+          "memory_used_mib": 3002,
+          "memory_total_mib": 4096
+        }
+      ]
+    },
+    {
+      "at_monotonic": 241496.421,
+      "system_cpu_percent": 36.3,
+      "system_ram_used_percent": 49.6,
+      "system_ram_available_bytes": 17270992896,
+      "gpu": [
+        {
+          "utilization_percent": 65,
+          "memory_used_mib": 3002,
+          "memory_total_mib": 4096
+        }
+      ]
+    },
+    {
+      "at_monotonic": 241497.468,
+      "system_cpu_percent": 40.1,
+      "system_ram_used_percent": 49.6,
+      "system_ram_available_bytes": 17270120448,
+      "gpu": [
+        {
+          "utilization_percent": 65,
+          "memory_used_mib": 3002,
+          "memory_total_mib": 4096
+        }
+      ]
+    },
+    {
+      "at_monotonic": 241498.515,
+      "system_cpu_percent": 36.4,
+      "system_ram_used_percent": 49.7,
+      "system_ram_available_bytes": 17255104512,
+      "gpu": [
+        {
+          "utilization_percent": 65,
+          "memory_used_mib": 3002,
+          "memory_total_mib": 4096
+        }
+      ]
+    },
+    {
+      "at_monotonic": 241499.562,
+      "system_cpu_percent": 34.1,
+      "system_ram_used_percent": 49.6,
+      "system_ram_available_bytes": 17276383232,
+      "gpu": [
+        {
+          "utilization_percent": 69,
+          "memory_used_mib": 3002,
+          "memory_total_mib": 4096
+        }
+      ]
+    },
+    {
+      "at_monotonic": 241500.609,
+      "system_cpu_percent": 34.6,
+      "system_ram_used_percent": 49.6,
+      "system_ram_available_bytes": 17272537088,
+      "gpu": [
+        {
+          "utilization_percent": 69,
+          "memory_used_mib": 3002,
+          "memory_total_mib": 4096
+        }
+      ]
+    },
+    {
+      "at_monotonic": 241501.656,
+      "system_cpu_percent": 37.6,
+      "system_ram_used_percent": 49.6,
+      "system_ram_available_bytes": 17271107584,
+      "gpu": [
+        {
+          "utilization_percent": 69,
+          "memory_used_mib": 3002,
+          "memory_total_mib": 4096
+        }
+      ]
+    },
+    {
+      "at_monotonic": 241502.703,
+      "system_cpu_percent": 39.0,
+      "system_ram_used_percent": 49.7,
+      "system_ram_available_bytes": 17253609472,
+      "gpu": [
+        {
+          "utilization_percent": 69,
+          "memory_used_mib": 3002,
+          "memory_total_mib": 4096
+        }
+      ]
+    },
+    {
+      "at_monotonic": 241503.75,
+      "system_cpu_percent": 59.0,
+      "system_ram_used_percent": 49.7,
+      "system_ram_available_bytes": 17228349440,
+      "gpu": [
+        {
+          "utilization_percent": 59,
+          "memory_used_mib": 3002,
+          "memory_total_mib": 4096
+        }
+      ]
+    },
+    {
+      "at_monotonic": 241504.812,
+      "system_cpu_percent": 44.0,
+      "system_ram_used_percent": 49.6,
+      "system_ram_available_bytes": 17262202880,
+      "gpu": [
+        {
+          "utilization_percent": 62,
+          "memory_used_mib": 3004,
+          "memory_total_mib": 4096
+        }
+      ]
+    },
+    {
+      "at_monotonic": 241505.859,
+      "system_cpu_percent": 36.5,
+      "system_ram_used_percent": 49.7,
+      "system_ram_available_bytes": 17260130304,
+      "gpu": [
+        {
+          "utilization_percent": 69,
+          "memory_used_mib": 3004,
+          "memory_total_mib": 4096
+        }
+      ]
+    },
+    {
+      "at_monotonic": 241506.906,
+      "system_cpu_percent": 33.6,
+      "system_ram_used_percent": 49.7,
+      "system_ram_available_bytes": 17254506496,
+      "gpu": [
+        {
+          "utilization_percent": 64,
+          "memory_used_mib": 3004,
+          "memory_total_mib": 4096
+        }
+      ]
+    },
+    {
+      "at_monotonic": 241507.937,
+      "system_cpu_percent": 36.6,
+      "system_ram_used_percent": 49.6,
+      "system_ram_available_bytes": 17271726080,
+      "gpu": [
+        {
+          "utilization_percent": 63,
+          "memory_used_mib": 3004,
+          "memory_total_mib": 4096
+        }
+      ]
+    },
+    {
+      "at_monotonic": 241508.984,
+      "system_cpu_percent": 33.6,
+      "system_ram_used_percent": 49.7,
+      "system_ram_available_bytes": 17260580864,
+      "gpu": [
+        {
+          "utilization_percent": 64,
+          "memory_used_mib": 3004,
+          "memory_total_mib": 4096
+        }
+      ]
+    },
+    {
+      "at_monotonic": 241510.031,
+      "system_cpu_percent": 33.9,
+      "system_ram_used_percent": 49.6,
+      "system_ram_available_bytes": 17262514176,
+      "gpu": [
+        {
+          "utilization_percent": 66,
+          "memory_used_mib": 3004,
+          "memory_total_mib": 4096
+        }
+      ]
+    },
+    {
+      "at_monotonic": 241511.078,
+      "system_cpu_percent": 35.5,
+      "system_ram_used_percent": 49.6,
+      "system_ram_available_bytes": 17266696192,
+      "gpu": [
+        {
+          "utilization_percent": 68,
+          "memory_used_mib": 3003,
+          "memory_total_mib": 4096
+        }
+      ]
+    },
+    {
+      "at_monotonic": 241512.125,
+      "system_cpu_percent": 32.5,
+      "system_ram_used_percent": 49.6,
+      "system_ram_available_bytes": 17270288384,
+      "gpu": [
+        {
+          "utilization_percent": 67,
+          "memory_used_mib": 3003,
+          "memory_total_mib": 4096
+        }
+      ]
+    }
+  ],
+  "resource_peaks": {
+    "system_cpu_percent": 59.0,
+    "system_ram_used_percent": 49.7,
+    "gpu_utilization_percent": 98,
+    "gpu_memory_used_mib": 3006
+  }
+}

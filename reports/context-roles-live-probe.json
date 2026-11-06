@@ -1,0 +1,120 @@
+{
+  "66": {
+    "id": 66,
+    "self_address": "con",
+    "listener_address": "mẹ",
+    "self_uncertain": false,
+    "listener_uncertain": false,
+    "uncertain": false,
+    "reason": "66 là người con nói với mẹ: 我女儿 là con gái của con (người thứ ba là cô gái), không phải người nghe; người nói 66 tiếp tục gọi 妈 ở 68 sau khi bị phủ nhận ở 67 nên cùng người nói.",
+    "turn_check": {
+      "ambiguous_roles": [],
+      "reason": "So sánh cách đọc cùng người nói (66 và 68 đều là con đáp câu hỏi 65) với cách đọc đổi người (66 là mẹ, 67 là con tiếp tục gọi mẹ); cách đọc đổi bị loại vì quyền nhận con gái đã xác nhận là của người bố trẻ ở 30 và 91, còn 67-69 là mẹ phủ nhận và trêu ngoại hình người con, nên giữ con nói với mẹ.",
+      "evidence": [
+        {
+          "id": 65,
+          "quote": "谁呀"
+        },
+        {
+          "id": 66,
+          "quote": "听她说是我女儿"
+        },
+        {
+          "id": 67,
+          "quote": "那肯定不是你的"
+        },
+        {
+          "id": 68,
+          "quote": "妈"
+        },
+        {
+          "id": 69,
+          "quote": "你自己照照镜子"
+        }
+      ]
+    },
+    "evidence": [
+      {
+        "id": 30,
+        "quote": "你女儿"
+      },
+      {
+        "id": 65,
+        "quote": "谁呀"
+      },
+      {
+        "id": 66,
+        "quote": "听她说是我女儿"
+      },
+      {
+        "id": 67,
+        "quote": "那肯定不是你的"
+      },
+      {
+        "id": 68,
+        "quote": "妈"
+      },
+      {
+        "id": 91,
+        "quote": "你真是我女儿"
+      },
+      {
+        "id": 69,
+        "quote": "你自己照照镜子"
+      }
+    ]
+  },
+  "67": {
+    "id": 67,
+    "self_address": "mẹ",
+    "listener_address": "con",
+    "self_uncertain": false,
+    "listener_uncertain": false,
+    "uncertain": false,
+    "reason": "67 là mẹ đáp con để phủ nhận lời 66: 你的 là của con (quyền nhận con gái của người con); 67 kẹp giữa đáp 66 và tiếng gọi 妈 của người con ở 68 rồi mẹ nói tiếp 你自己照照镜子 ở 69.",
+    "turn_check": {
+      "ambiguous_roles": [],
+      "reason": "So sánh cách đọc mẹ đáp con (67 phủ nhận 66) với cách đọc con đáp mẹ (67 là con phủ nhận mẹ ở 66); cách đọc sau bị loại vì 我女儿 ở 66 đã là nhận của người bố trẻ theo 30 và 91, 68 妈 là phản ứng của người con sau khi bị phủ nhận, 69 là mẹ trêu con, nên giữ mẹ nói với con.",
+      "evidence": [
+        {
+          "id": 66,
+          "quote": "听她说是我女儿"
+        },
+        {
+          "id": 67,
+          "quote": "那肯定不是你的"
+        },
+        {
+          "id": 68,
+          "quote": "妈"
+        },
+        {
+          "id": 69,
+          "quote": "你自己照照镜子"
+        }
+      ]
+    },
+    "evidence": [
+      {
+        "id": 66,
+        "quote": "听她说是我女儿"
+      },
+      {
+        "id": 67,
+        "quote": "那肯定不是你的"
+      },
+      {
+        "id": 68,
+        "quote": "妈"
+      },
+      {
+        "id": 69,
+        "quote": "你自己照照镜子"
+      },
+      {
+        "id": 91,
+        "quote": "你真是我女儿"
+      }
+    ]
+  }
+}

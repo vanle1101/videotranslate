@@ -1,0 +1,1022 @@
+........................................................................ [  2%]
+........................................................................ [  5%]
+........................................................................ [  7%]
+........................................................................ [ 10%]
+........................................................................ [ 13%]
+........................................................................ [ 15%]
+.................................................................................................................. [ 19%]
+........................................................................ [ 22%]
+........................................................................ [ 25%]
+........................................................................ [ 27%]
+............FF.F........................................................ [ 30%]
+........................................................................ [ 32%]
+........................................................................ [ 35%]
+....................................................................s........................... [ 38%]
+........................................................................ [ 41%]
+........................................................................ [ 44%]
+........................................................................ [ 46%]
+........................................................................ [ 49%]
+................................... [ 50%]
+.................................................................................................................................... [ 55%]
+........................................................................ [ 58%]
+........................................................................ [ 60%]
+........................................................................ [ 63%]
+........................................................................ [ 65%]
+........................................................................ [ 68%]
+........................................................................ [ 71%]
+........................................................................ [ 73%]
+........................................................................ [ 76%]
+........................................................................ [ 78%]
+........................................................................ [ 81%]
+........................................................................ [ 84%]
+........................................................................ [ 86%]
+FFF....FFFF...............F..F.......................................... [ 89%]
+........................................................................ [ 91%]
+...............................................F........F.........FFFFFF [ 94%]
+....F.FF................................................................ [ 97%]
+........................................................................ [ 99%]
+.....                                                                    [100%]
+================================== FAILURES ===================================
+___ test_dense_failure_can_stage_verified_neighbor_without_exceeding_bounds ___
+
+session = <core.streaming.pipeline.StreamingPipelineSession object at 0x000001C9D2A084F0>
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x000001C9D2A08490>
+
+    def test_dense_failure_can_stage_verified_neighbor_without_exceeding_bounds(session, monkeypatch):
+        focus = prepare_dense_rescue(session)
+        before = snapshot(session)
+        shorter = "N\u0103m nay m\u01b0\u1eddi ch\xedn."
+        proof = {"status": "verified", "text": shorter, "provider": "opencode", "address_preserved": True,
+                 "reason": "Gi\u1eef n\u0103m nay v\xe0 tu\u1ed5i m\u01b0\u1eddi ch\xedn, c\xe2u trung t\xednh \u0111\u1ee7 ngh\u0129a."}
+        session.translator.rewrite_for_pacing.return_value = {"final_vi": shorter, "pacing_verification": proof}
+        calls = []
+        def synthesize(**kwargs):
+            calls.append(kwargs)
+            if len(calls) == 1:
+                error = pipeline.PacingReviewRejected("Focus cannot shorten safely")
+                error.required_dub_duration = 1.48
+                raise error
+            measured = 1.0515 if kwargs["text"] == shorter else 1.465
+            write_pcm(kwargs["output_path"], measured)
+            return {"text": kwargs["text"], "tts_duration": measured * 1.15,
+                    "speed_ratio": 1.15, "boundaries": [], "pacing_verification": None}
+        monkeypatch.setattr(pipeline, "synthesize_natural_speech", synthesize)
+        asyncio.run(session._synthesize_segment(focus))
+>       assert focus.status == "READY" and session.segments[6].final_vi == shorter
+E       AssertionError: assert ('READY' == 'READY'
+E         
+E           READY and 'N\u0103m nay m\u01b0\u1eddi ch\xedn tu\u1ed5i.' == 'N\u0103m nay m\u01b0\u1eddi ch\xedn.'
+E         
+E         - N\u0103m nay m\u01b0\u1eddi ch\xedn.
+E         + N\u0103m nay m\u01b0\u1eddi ch\xedn tu\u1ed5i.
+E         ?                  +++++)
+
+E:\\D\u1ecbch video\\tests\\test_dub_pipeline.py:484: AssertionError
+------------------------------ Captured log call ------------------------------
+INFO     pipeline:pipeline.py:1666 [dub-pipeline] \u0110ang t\u1ea1o gi\u1ecdng \u0111\u1ecdc c\xe2u 8 \xb7 \u0110\xe3 ho\xe0n t\u1ea5t 7/8 c\xe2u (87.5%)\nINFO     pipeline:pipeline.py:2984 PACING_NEIGHBOR_STAGED run_id=dub-pipeline focus_id=7 neighbor_id=6 measured_seconds=1.169958 rewritten=False\nINFO     pipeline:pipeline.py:2984 PACING_NEIGHBOR_STAGED run_id=dub-pipeline focus_id=7 neighbor_id=8 measured_seconds=0.915500 rewritten=False
+_ test_dense_rescue_retries_shortest_verified_focus_candidate_without_rewrite _
+
+session = <core.streaming.pipeline.StreamingPipelineSession object at 0x000001C9D32D7D30>
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x000001C9D32D7C70>
+
+    def test_dense_rescue_retries_shortest_verified_focus_candidate_without_rewrite(session, monkeypatch):
+        focus = prepare_dense_rescue(session)
+        shorter = "N\u0103m nay m\u01b0\u1eddi ch\xedn."
+        proof = {"status": "verified", "text": shorter, "provider": "opencode",
+                 "address_preserved": True, "reason": "Gi\u1eef \u0111\u1ee7 ngh\u0129a."}
+        session.translator.rewrite_for_pacing.return_value = {
+            "final_vi": shorter, "pacing_verification": proof}
+        calls = []
+    
+        def synthesize(**kwargs):
+            calls.append(kwargs)
+            if len(calls) == 1:
+                error = pipeline.SpeechBudgetError("Focus candidate needs neighbor space")
+                error.required_dub_duration = 1.48
+                error.candidate_text = shorter
+                error.pacing_verification = proof
+                raise error
+            measured = 1.0515 if kwargs["text"] == shorter else 1.465
+            write_pcm(kwargs["output_path"], measured)
+            return {"text": kwargs["text"], "tts_duration": measured * 1.15,
+                    "speed_ratio": 1.15, "boundaries": [],
+                    "pacing_verification": kwargs.get("pacing_verification")}
+    
+        monkeypatch.setattr(pipeline, "synthesize_natural_speech", synthesize)
+        asyncio.run(session._synthesize_segment(focus))
+    
+        # Neighbor staging may synthesize first; the final call is the focus retry.
+        retry = calls[-1]
+        assert retry["text"] == shorter
+        assert retry["translator"] is None
+        assert retry["pacing_verification"] == proof
+        assert focus.final_vi == shorter
+        assert focus.verification["pacing"] == proof
+>       assert session.translator.rewrite_for_pacing.call_count == 1
+E       AssertionError: assert 0 == 1
+E        +  where 0 = <Mock name='mock.rewrite_for_pacing' id='1966343026096'>.call_count
+E        +    where <Mock name='mock.rewrite_for_pacing' id='1966343026096'> = <Mock id='1966343026624'>.rewrite_for_pacing
+E        +      where <Mock id='1966343026624'> = <core.streaming.pipeline.StreamingPipelineSession object at 0x000001C9D32D7D30>.translator
+
+E:\\D\u1ecbch video\\tests\\test_dub_pipeline.py:536: AssertionError
+------------------------------ Captured log call ------------------------------
+INFO     pipeline:pipeline.py:1666 [dub-pipeline] \u0110ang t\u1ea1o gi\u1ecdng \u0111\u1ecdc c\xe2u 8 \xb7 \u0110\xe3 ho\xe0n t\u1ea5t 7/8 c\xe2u (87.5%)\nINFO     pipeline:pipeline.py:2984 PACING_NEIGHBOR_STAGED run_id=dub-pipeline focus_id=7 neighbor_id=6 measured_seconds=1.169958 rewritten=False\nINFO     pipeline:pipeline.py:2984 PACING_NEIGHBOR_STAGED run_id=dub-pipeline focus_id=7 neighbor_id=8 measured_seconds=0.915500 rewritten=False
+_________ test_uncommitted_dense_rescue_preserves_neighbors[rejected] _________
+
+session = <core.streaming.pipeline.StreamingPipelineSession object at 0x000001C9D29F6D70>
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x000001C9D29F6EC0>
+failure = 'rejected'
+
+    @pytest.mark.parametrize("failure", ["manual", "rejected", "cancelled", "stale"])
+    def test_uncommitted_dense_rescue_preserves_neighbors(session, monkeypatch, failure):
+        focus = prepare_dense_rescue(session)
+        if failure == "manual":
+            session.segments[6].verification["status"] = "manual"
+        before = snapshot(session)
+        shorter = "N\u0103m nay m\u01b0\u1eddi ch\xedn."
+        session.translator.rewrite_for_pacing.side_effect = pipeline.PacingReviewRejected("Unsafe neighbor") if failure == "rejected" else None
+        session.translator.rewrite_for_pacing.return_value = {"final_vi": shorter, "pacing_verification": {"status":"verified", "text":shorter}}
+        calls = []
+        def synthesize(**kwargs):
+            calls.append(kwargs)
+            if len(calls) == 1:
+                error = pipeline.PacingReviewRejected("Cannot shorten")
+                error.required_dub_duration = 1.48
+                raise error
+            measured = 1.0515 if kwargs["text"] == shorter else 1.465
+            write_pcm(kwargs["output_path"], measured)
+            if failure == "cancelled":
+                session.is_stopped = True
+            if failure == "stale":
+                focus.revision += 1
+            return {"text": kwargs["text"], "tts_duration": measured * 1.15,
+                    "speed_ratio":1.15, "boundaries":[], "pacing_verification":None}
+        monkeypatch.setattr(pipeline, "synthesize_natural_speech", synthesize)
+        expected = asyncio.CancelledError if failure == "cancelled" else pipeline.SegmentEditConflict if failure == "stale" else pipeline.PacingReviewRejected
+>       with pytest.raises(expected):
+E       Failed: DID NOT RAISE PacingReviewRejected
+
+E:\\D\u1ecbch video\\tests\\test_dub_pipeline.py:566: Failed
+------------------------------ Captured log call ------------------------------
+INFO     pipeline:pipeline.py:1666 [dub-pipeline] \u0110ang t\u1ea1o gi\u1ecdng \u0111\u1ecdc c\xe2u 8 \xb7 \u0110\xe3 ho\xe0n t\u1ea5t 7/8 c\xe2u (87.5%)\nINFO     pipeline:pipeline.py:2984 PACING_NEIGHBOR_STAGED run_id=dub-pipeline focus_id=7 neighbor_id=6 measured_seconds=1.169958 rewritten=False\nINFO     pipeline:pipeline.py:2984 PACING_NEIGHBOR_STAGED run_id=dub-pipeline focus_id=7 neighbor_id=8 measured_seconds=0.915500 rewritten=False
+_ test_new_stop_cancels_stopped_repair_drains_late_write_and_allows_new_edit_retry _
+
+session = <core.streaming.pipeline.StreamingPipelineSession object at 0x000001C9D66CC460>
+
+    def test_new_stop_cancels_stopped_repair_drains_late_write_and_allows_new_edit_retry(session):
+        from core.runtime_context import current_execution_context
+        row = mark_failed_speech(session, stopped=True)
+        manifest = session.persist()
+        before, durable = deepcopy(row.to_dict()), manifest.read_bytes()
+        entered, release = threading.Event(), threading.Event()
+        checks = []
+        def synthesize(*, output_path, **kwargs):
+            check = current_execution_context().cancel_check
+            checks.append(check)
+            assert check is not None and not check(), "Saved STOPPED is not a new cancellation"
+            entered.set()
+            assert release.wait(3)
+            assert check(), "New Stop must reach the actual adapter"
+            Path(output_path).write_bytes(b"late provider output")
+        session.tts_engine.synthesize.side_effect = synthesize
+        async def run():
+            editing = asyncio.create_task(session.edit_segment(0, "L\u1eddi m\u1edbi"))
+            await wait_until(entered.is_set)
+            assert session.is_stopped and not session.is_running and session.get_progress()["can_stop"]
+            async with client() as api:
+                response = await api.get("/api/tasks")
+                assert response.status_code == 200
+                listed = next(item for item in response.json()["tasks"] if item["task_id"] == session.task_id)
+                assert listed["status"] == "STOPPED" and listed["can_stop"] is True
+                assert listed["can_repair_failed"] is False
+            stopping = asyncio.create_task(main.stop_task(session.task_id))
+            try:
+                await wait_until(lambda: checks[0]())
+                assert not stopping.done() and row.to_dict() == before
+                assert session.get_progress()["status"] == "CANCELLING"
+            finally:
+                release.set()
+                await asyncio.gather(editing, return_exceptions=True)
+                assert (await stopping)["action"] == "stopped"
+            assert editing.cancelled() and row.to_dict() == before
+            assert session.get_progress()["can_repair_failed"]
+            assert Path(row.audio_path).read_bytes() == b"old audio"
+            def fresh_synthesize(*, text, output_path, **kwargs):
+                assert not current_execution_context().cancel_check()
+                Path(output_path).write_bytes(text.encode())
+            session.tts_engine.synthesize.side_effect = fresh_synthesize
+            repaired = await session.edit_segment(0, "L\u1eddi m\u1edbi")
+            assert repaired["status"] == "READY" and repaired["revision"] == 1
+            assert Path(row.audio_path).read_bytes() == "L\u1eddi m\u1edbi aligned".encode()
+            assert session.is_stopped and not session.is_running
+>       asyncio.run(run())
+
+E:\\D\u1ecbch video\\tests\\test_transcript_edit.py:926: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _
+E:\\Train gi\u1ecdng\\tools\\python310\\lib\\asyncio\\runners.py:44: in run
+    return loop.run_until_complete(main)
+E:\\Train gi\u1ecdng\\tools\\python310\\lib\\asyncio\\base_events.py:649: in run_until_complete
+    return future.result()
+E:\\D\u1ecbch video\\tests\\test_transcript_edit.py:898: in run
+    await wait_until(entered.is_set)
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _
+
+predicate = <bound method Event.is_set of <threading.Event object at 0x000001C9D66CF9A0>>
+
+    async def wait_until(predicate):
+>       async with asyncio.timeout(3):
+E       AttributeError: module 'asyncio' has no attribute 'timeout'
+
+E:\\D\u1ecbch video\\tests\\test_transcript_edit.py:164: AttributeError
+_ test_stop_during_http_repair_returns_actionable_cancel_instead_of_server_failure _
+
+session = <core.streaming.pipeline.StreamingPipelineSession object at 0x000001C9D66CD3C0>
+
+    def test_stop_during_http_repair_returns_actionable_cancel_instead_of_server_failure(session):
+        from core.runtime_context import current_execution_context
+        row = mark_failed_speech(session, stopped=True)
+        session.persist()
+        before = deepcopy(row.to_dict())
+        entered, release = threading.Event(), threading.Event()
+        def synthesize(*, output_path, **kwargs):
+            check = current_execution_context().cancel_check
+            entered.set()
+            assert release.wait(3)
+            assert check()
+            Path(output_path).write_bytes(b"late cancelled voice")
+        session.tts_engine.synthesize.side_effect = synthesize
+        async def run():
+            async with client() as api:
+                editing = asyncio.create_task(api.patch(route(session), json={"final_vi": "L\u1eddi m\u1edbi"}))
+                await wait_until(entered.is_set)
+                stopping = asyncio.create_task(api.post(f"/api/tasks/{session.task_id}/stop"))
+                try:
+                    await wait_until(lambda: session._edit_cancellations and
+                                     any(token.is_set() for token, _ in session._edit_cancellations.values()))
+                finally:
+                    release.set()
+                cancelled = await editing
+                assert cancelled.status_code == 409
+                assert "\u0110\xe3 d\u1eebng" in cancelled.json()["detail"]
+                assert (await stopping).status_code == 200
+                assert row.to_dict() == before and Path(row.audio_path).read_bytes() == b"old audio"
+>       asyncio.run(run())
+
+E:\\D\u1ecbch video\\tests\\test_transcript_edit.py:959: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _
+E:\\Train gi\u1ecdng\\tools\\python310\\lib\\asyncio\\runners.py:44: in run
+    return loop.run_until_complete(main)
+E:\\Train gi\u1ecdng\\tools\\python310\\lib\\asyncio\\base_events.py:649: in run_until_complete
+    return future.result()
+E:\\D\u1ecbch video\\tests\\test_transcript_edit.py:947: in run
+    await wait_until(entered.is_set)
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _
+
+predicate = <bound method Event.is_set of <threading.Event object at 0x000001C9D66CC280>>
+
+    async def wait_until(predicate):
+>       async with asyncio.timeout(3):
+E       AttributeError: module 'asyncio' has no attribute 'timeout'
+
+E:\\D\u1ecbch video\\tests\\test_transcript_edit.py:164: AttributeError
+__ test_inflight_edit_blocks_other_edits_and_export_but_keeps_existing_audio __
+
+session = <core.streaming.pipeline.StreamingPipelineSession object at 0x000001C9D4A5D750>
+
+    def test_inflight_edit_blocks_other_edits_and_export_but_keeps_existing_audio(session):
+        entered, release = threading.Event(), threading.Event()
+    
+        def synthesize(*, text, output_path, **kwargs):
+            entered.set()
+            assert release.wait(3)
+            Path(output_path).write_bytes(text.encode())
+    
+        session.tts_engine.synthesize.side_effect = synthesize
+    
+        async def run():
+            async with client() as api:
+                editing = asyncio.create_task(api.patch(route(session), json={"final_vi": "B\u1ea3n m\u1edbi"}))
+                try:
+                    await wait_until(entered.is_set)
+                    blocked = await api.patch(route(session), json={"final_vi": "B\u1ea3n ghi \u0111\xe8"})
+                    assert blocked.status_code == 409
+                    export = await api.post("/api/streaming/export-hq", json={"task_id": session.task_id})
+                    assert export.status_code == 409
+                    assert Path(session.segments[0].audio_path).read_bytes() == b"old audio"
+                    assert session.segments[0].final_vi == "L\u1eddi tho\u1ea1i c\u0169"
+                finally:
+                    release.set()
+                    response = await editing
+                assert response.status_code == 200
+>       asyncio.run(run())
+
+E:\\D\u1ecbch video\\tests\\test_transcript_edit.py:987: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _
+E:\\Train gi\u1ecdng\\tools\\python310\\lib\\asyncio\\runners.py:44: in run
+    return loop.run_until_complete(main)
+E:\\Train gi\u1ecdng\\tools\\python310\\lib\\asyncio\\base_events.py:649: in run_until_complete
+    return future.result()
+E:\\D\u1ecbch video\\tests\\test_transcript_edit.py:976: in run
+    await wait_until(entered.is_set)
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _
+
+predicate = <bound method Event.is_set of <threading.Event object at 0x000001C9D65539D0>>
+
+    async def wait_until(predicate):
+>       async with asyncio.timeout(3):
+E       AttributeError: module 'asyncio' has no attribute 'timeout'
+
+E:\\D\u1ecbch video\\tests\\test_transcript_edit.py:164: AttributeError
+------------------------------ Captured log call ------------------------------
+INFO     pipeline:natural_speech.py:125 PACING_MEASURED run_id=transcript-test speech_id=868432d2 attempt=1 measured_seconds=3.3000 slot_seconds=3.0000 raw_budget_seconds=3.4500 required_speed=1.1000 max_speed=1.1500
+INFO     pipeline:natural_speech.py:257 PACING_READY run_id=transcript-test speech_id=868432d2 attempt=1 speed=1.1000 rewritten=False
+_____ test_export_uses_revised_text_and_audio_and_blocks_edits_until_done _____
+
+session = <core.streaming.pipeline.StreamingPipelineSession object at 0x000001C9D673B1F0>
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x000001C9D6738A60>
+
+    def test_export_uses_revised_text_and_audio_and_blocks_edits_until_done(session, monkeypatch):
+        entered, release = threading.Event(), threading.Event()
+        seen = {}
+    
+        def export(**kwargs):
+            segment = kwargs["segments"][0]
+            seen.update(segment)
+            seen["bytes"] = Path(segment["audio_path"]).read_bytes()
+            entered.set()
+            assert release.wait(3)
+            return {"output_filename": "final.mp4", "elapsed_seconds": 0.1}
+    
+        monkeypatch.setattr(main, "HQExporter", lambda: SimpleNamespace(export=export))
+    
+        async def run():
+            async with client() as api:
+                edited = await api.patch(route(session), json={"final_vi": "B\u1ea3n xu\u1ea5t"})
+                assert edited.status_code == 200, edited.text
+                exporting = asyncio.create_task(api.post("/api/streaming/export-hq", json={"task_id": session.task_id}))
+                try:
+                    await wait_until(entered.is_set)
+                    response = await api.patch(route(session), json={"final_vi": "Ghi \u0111\xe8 gi\u1eefa ch\u1eebng"})
+                    assert response.status_code == 409
+                finally:
+                    release.set()
+                    result = await exporting
+                assert result.status_code == 200
+>       asyncio.run(run())
+
+E:\\D\u1ecbch video\\tests\\test_transcript_edit.py:1049: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _
+E:\\Train gi\u1ecdng\\tools\\python310\\lib\\asyncio\\runners.py:44: in run
+    return loop.run_until_complete(main)
+E:\\Train gi\u1ecdng\\tools\\python310\\lib\\asyncio\\base_events.py:649: in run_until_complete
+    return future.result()
+E:\\D\u1ecbch video\\tests\\test_transcript_edit.py:1042: in run
+    await wait_until(entered.is_set)
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _
+
+predicate = <bound method Event.is_set of <threading.Event object at 0x000001C9D673A3B0>>
+
+    async def wait_until(predicate):
+>       async with asyncio.timeout(3):
+E       AttributeError: module 'asyncio' has no attribute 'timeout'
+
+E:\\D\u1ecbch video\\tests\\test_transcript_edit.py:164: AttributeError
+------------------------------ Captured log call ------------------------------
+INFO     pipeline:natural_speech.py:125 PACING_MEASURED run_id=transcript-test speech_id=bfb302a3 attempt=1 measured_seconds=3.3000 slot_seconds=3.0000 raw_budget_seconds=3.4500 required_speed=1.1000 max_speed=1.1500\nINFO     pipeline:natural_speech.py:257 PACING_READY run_id=transcript-test speech_id=bfb302a3 attempt=1 speed=1.1000 rewritten=False\nINFO     pipeline:pipeline.py:1666 [transcript-test] MP4 \u0111\xe3 xu\u1ea5t v\xe0 gi\u1ea3i m\xe3 ki\u1ec3m tra th\xe0nh c\xf4ng. (100%)
+______ test_stop_waits_for_synthesis_thread_before_removing_owned_audio _______
+
+session = <core.streaming.pipeline.StreamingPipelineSession object at 0x000001C9D660AF80>
+
+    def test_stop_waits_for_synthesis_thread_before_removing_owned_audio(session):
+        entered, release = threading.Event(), threading.Event()
+    
+        def synthesize(*, output_path, **kwargs):
+            entered.set()
+            assert release.wait(3)
+            Path(output_path).write_bytes(b"late write")
+    
+        session.tts_engine.synthesize.side_effect = synthesize
+        old_audio = Path(session.segments[0].audio_path)
+    
+        async def run():
+            editing = asyncio.create_task(session.edit_segment(0, "B\u1ea3n m\u1edbi"))
+            await wait_until(entered.is_set)
+            stopping = asyncio.create_task(main.stop_task(session.task_id))
+            try:
+                await wait_until(lambda: session.is_stopped)
+                assert not stopping.done()
+                assert old_audio.read_bytes() == b"old audio"
+            finally:
+                release.set()
+                await asyncio.gather(editing, return_exceptions=True)
+                assert (await stopping)["action"] == "stopped"
+            assert editing.cancelled()
+>       asyncio.run(run())
+
+E:\\D\u1ecbch video\\tests\\test_transcript_edit.py:1078: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _
+E:\\Train gi\u1ecdng\\tools\\python310\\lib\\asyncio\\runners.py:44: in run
+    return loop.run_until_complete(main)
+E:\\Train gi\u1ecdng\\tools\\python310\\lib\\asyncio\\base_events.py:649: in run_until_complete
+    return future.result()
+E:\\D\u1ecbch video\\tests\\test_transcript_edit.py:1067: in run
+    await wait_until(entered.is_set)
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _
+
+predicate = <bound method Event.is_set of <threading.Event object at 0x000001C9D660AB30>>
+
+    async def wait_until(predicate):
+>       async with asyncio.timeout(3):
+E       AttributeError: module 'asyncio' has no attribute 'timeout'
+
+E:\\D\u1ecbch video\\tests\\test_transcript_edit.py:164: AttributeError
+_ test_ready_segment_edit_waits_for_pipeline_tts_lock_without_requiring_pause _
+
+session = <core.streaming.pipeline.StreamingPipelineSession object at 0x000001C9D4A5DBA0>
+
+    def test_ready_segment_edit_waits_for_pipeline_tts_lock_without_requiring_pause(session):
+        session.is_running = True
+    
+        async def run():
+            async with session._tts_lock:
+                editing = asyncio.create_task(session.edit_segment(0, "B\u1ea3n m\u1edbi"))
+                await wait_until(lambda: session.is_editing)
+                session.tts_engine.synthesize.assert_not_called()
+            result = await editing
+            assert result["final_vi"] == "B\u1ea3n m\u1edbi" and not session.is_paused
+>       asyncio.run(run())
+
+E:\\D\u1ecbch video\\tests\\test_transcript_edit.py:1093: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _
+E:\\Train gi\u1ecdng\\tools\\python310\\lib\\asyncio\\runners.py:44: in run
+    return loop.run_until_complete(main)
+E:\\Train gi\u1ecdng\\tools\\python310\\lib\\asyncio\\base_events.py:649: in run_until_complete
+    return future.result()
+E:\\D\u1ecbch video\\tests\\test_transcript_edit.py:1089: in run
+    await wait_until(lambda: session.is_editing)
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _
+
+predicate = <function test_ready_segment_edit_waits_for_pipeline_tts_lock_without_requiring_pause.<locals>.run.<locals>.<lambda> at 0x000001C9D66FC160>
+
+    async def wait_until(predicate):
+>       async with asyncio.timeout(3):
+E       AttributeError: module 'asyncio' has no attribute 'timeout'
+
+E:\\D\u1ecbch video\\tests\\test_transcript_edit.py:164: AttributeError
+____ test_shutdown_from_another_thread_cancels_edit_on_its_own_event_loop _____
+
+session = <core.streaming.pipeline.StreamingPipelineSession object at 0x000001C9D674B1C0>
+
+    def test_shutdown_from_another_thread_cancels_edit_on_its_own_event_loop(session):
+        entered, release = threading.Event(), threading.Event()
+    
+        def synthesize(*, output_path, **kwargs):
+            entered.set()
+            assert release.wait(3)
+            Path(output_path).write_bytes(b"late write")
+    
+        session.tts_engine.synthesize.side_effect = synthesize
+    
+        async def run():
+            editing = asyncio.create_task(session.edit_segment(0, "B\u1ea3n m\u1edbi"))
+            await wait_until(entered.is_set)
+            try:
+                await asyncio.to_thread(session.stop)
+                await wait_until(lambda: session.is_stopped)
+                assert session.cache_dir.exists()
+            finally:
+                release.set()
+                await asyncio.gather(editing, return_exceptions=True)
+            assert editing.cancelled()
+>       asyncio.run(run())
+
+E:\\D\u1ecbch video\\tests\\test_transcript_edit.py:1117: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _
+E:\\Train gi\u1ecdng\\tools\\python310\\lib\\asyncio\\runners.py:44: in run
+    return loop.run_until_complete(main)
+E:\\Train gi\u1ecdng\\tools\\python310\\lib\\asyncio\\base_events.py:649: in run_until_complete
+    return future.result()
+E:\\D\u1ecbch video\\tests\\test_transcript_edit.py:1108: in run
+    await wait_until(entered.is_set)
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _
+
+predicate = <bound method Event.is_set of <threading.Event object at 0x000001C9D674BCA0>>
+
+    async def wait_until(predicate):
+>       async with asyncio.timeout(3):
+E       AttributeError: module 'asyncio' has no attribute 'timeout'
+
+E:\\D\u1ecbch video\\tests\\test_transcript_edit.py:164: AttributeError
+_ test_review_progress_tracks_speech_stages_until_timing_commits_and_clears_only_resolved_warning _
+
+session = <core.streaming.pipeline.StreamingPipelineSession object at 0x000001C9D66CF7F0>
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x000001C9D66CF520>
+
+    def test_review_progress_tracks_speech_stages_until_timing_commits_and_clears_only_resolved_warning(session, monkeypatch):
+        from core.translation_review import AutomaticTranslationReviewer
+        from core.streaming.pipeline import REVIEW_FAILURE_WARNINGS, build_speech_timing
+        monkeypatch.setattr(settings, "LLM_PROVIDER", "opencode")
+        old_warnings = list(REVIEW_FAILURE_WARNINGS)
+        unrelated = "Kh\xf4ng l\u01b0u \u0111\u01b0\u1ee3c ti\u1ebfn \u0111\u1ed9 nh\u1eadn di\u1ec7n xu\u1ed1ng \u0111\u0129a; gi\u1eef trong phi\xean hi\u1ec7n t\u1ea1i."
+        session.warnings = [*old_warnings, unrelated]
+        long_text, shorter = "L\u1eddi d\xe0i c\u1ea7n vi\u1ebft g\u1ecdn \u0111\u1ec3 gi\u1ecdng \u0111\u1ecdc gi\u1eef nh\u1ecbp t\u1ef1 nhi\xean.", "L\u1eddi g\u1ecdn \u0111\u1ee7 ngh\u0129a."
+        callback = {}
+        def review(*args, progress_callback, **kwargs):
+            callback["semantic"] = progress_callback
+            progress_callback(100)
+            return {"segments": {0: dict(session.segments[0].to_dict(), final_vi=long_text,
+                                         verification={"status": "verified"})},
+                    "summary": {"checked": 1, "verified": 1}}
+        monkeypatch.setattr(AutomaticTranslationReviewer, "review", review)
+        session.aligner.get_audio_duration.side_effect = lambda path: 4.2 if Path(path).read_text(encoding="utf-8") == long_text else 2.7
+        def rewrite(*args, **kwargs):
+            # A delayed callback from the finished semantic stage must not replace
+            # the live TTS/pacing stage or reintroduce 100%.
+            callback["semantic"](100)
+            return {"final_vi": shorter, "pacing_verification": {"status": "verified", "text": shorter}}
+        session.translator = SimpleNamespace(rewrite_for_pacing=rewrite)
+        entered, release = threading.Event(), threading.Event()
+        def measured_timing(*args, **kwargs):
+            entered.set()
+            assert release.wait(3)
+            return build_speech_timing(*args, **kwargs)
+        monkeypatch.setattr("core.streaming.pipeline.build_speech_timing", measured_timing)
+    
+        async def run():
+            await session.start_automatic_review()
+            task = session.review_task
+            await wait_until(entered.is_set)
+            try:
+                await asyncio.sleep(.02)
+                state = session.get_progress()
+                assert state["status"] == "RUNNING" and state["phase"] == "review"
+                assert state["review_stage"] == "aligning" and state["progress_pct"] is None
+                assert session.segments[0].final_vi == "L\u1eddi tho\u1ea1i c\u0169"
+                assert Path(session.segments[0].audio_path).read_bytes() == b"old audio"
+                states = [data for kind, data in session.events if kind == "progress"]
+                assert {"tts", "rewriting", "aligning"}.issubset({state.get("review_stage") for state in states})
+                assert not any(state.get("progress_pct") == 100 for state in states)
+                assert all(warning in session.warnings for warning in old_warnings)
+            finally:
+                release.set()
+                await task
+>       asyncio.run(run())
+
+E:\\D\u1ecbch video\\tests\\test_transcript_edit.py:1389: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _
+E:\\Train gi\u1ecdng\\tools\\python310\\lib\\asyncio\\runners.py:44: in run
+    return loop.run_until_complete(main)
+E:\\Train gi\u1ecdng\\tools\\python310\\lib\\asyncio\\base_events.py:649: in run_until_complete
+    return future.result()
+E:\\D\u1ecbch video\\tests\\test_transcript_edit.py:1374: in run
+    await wait_until(entered.is_set)
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _
+
+predicate = <bound method Event.is_set of <threading.Event object at 0x000001C9D66CC130>>
+
+    async def wait_until(predicate):
+>       async with asyncio.timeout(3):
+E       AttributeError: module 'asyncio' has no attribute 'timeout'
+
+E:\\D\u1ecbch video\\tests\\test_transcript_edit.py:164: AttributeError
+------------------------------ Captured log call ------------------------------
+INFO     pipeline:pipeline.py:1666 [transcript-test] AI \u0111ang ki\u1ec3m tra l\u1ea1i t\u1eebng c\xe2u v\u1edbi ngu\u1ed3n\u2026\nINFO     pipeline:pipeline.py:1666 [transcript-test] AI \u0111ang \u0111\u1ed1i chi\u1ebfu ngu\u1ed3n v\xe0 s\u1eeda b\u1ea3n d\u1ecbch\u2026
+_ test_automatic_review_reserves_task_blocks_edit_export_and_keeps_old_media_on_failure _
+
+session = <core.streaming.pipeline.StreamingPipelineSession object at 0x000001C9D679D150>
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x000001C9D679C640>
+
+    def test_automatic_review_reserves_task_blocks_edit_export_and_keeps_old_media_on_failure(session, monkeypatch):
+        from core.translation_review import AutomaticTranslationReviewer
+        monkeypatch.setattr(settings, "LLM_PROVIDER", "opencode")
+        entered, release = threading.Event(), threading.Event()
+        def review(*args, **kwargs):
+            entered.set()
+            assert release.wait(3)
+            raise RuntimeError("test service failure")
+        monkeypatch.setattr(AutomaticTranslationReviewer, "review", review)
+        segment = session.segments[0]
+        segment.needs_review = True
+        async def run():
+            async with client() as api:
+                assert (await api.post(f"/api/streaming/{session.task_id}/review")).status_code == 200
+                task = session.review_task
+                await wait_until(entered.is_set)
+                try:
+                    assert (await api.post(f"/api/streaming/{session.task_id}/review")).status_code == 409
+                    assert (await api.patch(route(session), json={"final_vi": "Ghi \u0111\xe8"})).status_code == 409
+                    assert (await api.post('/api/streaming/export-hq', json={"task_id": session.task_id})).status_code == 409
+                finally:
+                    release.set()
+                    await task
+>       asyncio.run(run())
+
+E:\\D\u1ecbch video\\tests\\test_transcript_edit.py:1480: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _
+E:\\Train gi\u1ecdng\\tools\\python310\\lib\\asyncio\\runners.py:44: in run
+    return loop.run_until_complete(main)
+E:\\Train gi\u1ecdng\\tools\\python310\\lib\\asyncio\\base_events.py:649: in run_until_complete
+    return future.result()
+E:\\D\u1ecbch video\\tests\\test_transcript_edit.py:1472: in run
+    await wait_until(entered.is_set)
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _
+
+predicate = <bound method Event.is_set of <threading.Event object at 0x000001C9D679D3F0>>
+
+    async def wait_until(predicate):
+>       async with asyncio.timeout(3):
+E       AttributeError: module 'asyncio' has no attribute 'timeout'
+
+E:\\D\u1ecbch video\\tests\\test_transcript_edit.py:164: AttributeError
+------------------------------ Captured log call ------------------------------
+INFO     pipeline:pipeline.py:1666 [transcript-test] AI \u0111ang ki\u1ec3m tra l\u1ea1i t\u1eebng c\xe2u v\u1edbi ngu\u1ed3n\u2026
+_______ test_manual_screen_splits_survive_prepass_retry_and_full_result _______
+
+partial_session = (<core.streaming.pipeline.StreamingPipelineSession object at 0x000001C9D67AA140>, [('progress', {'type': 'progress', '...l-visual', 'screen_texts': [{'id': 'o0', 'start': 0.0, 'end': 3.0, 'text_zh': '\u4f60\u597d', ...}], 'segments': [], ...}), ...])
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x000001C9D67A9CF0>
+
+    def test_manual_screen_splits_survive_prepass_retry_and_full_result(partial_session, monkeypatch):
+        session, events = partial_session
+        _, speech = install_review_and_speech(session, monkeypatch)
+        session.segments[0].start, session.segments[0].duration = .5, 1.5
+        original = screen_at(0., 3., "B\u1ea3n d\u1ecbch tr\u01b0\u1edbc s\u1eeda")
+    
+        def analyze(path, start, end, rows, summary, check):
+            if start:
+                raise OpenCodeClientError("later timeout")
+            return {**result_for(rows), "screen_texts": [deepcopy(original)]}
+    
+        monkeypatch.setattr(session.video_intelligence, "analyze_chunk", analyze)
+    
+        async def fit(segment, *, text, output_path, **options):
+            output_path.write_bytes(b"isolated fitted speech")
+            return ({"text": text, "tts_duration": 1, "speed_ratio": 1, "boundaries": []},
+                    {"subtitle_cues": [], "subtitle_timing_source": "offline-test"}, {})
+    
+        monkeypatch.setattr(session, "_fit_dub", fit)
+    
+        async def run():
+            with pytest.raises(OpenCodeClientError):
+                await session.start()
+            await session.edit_segment(0, "L\u1eddi do ng\u01b0\u1eddi d\xf9ng s\u1eeda.")
+            committed = deepcopy(session.screen_texts)
+            assert [(screen["start"], screen["end"]) for screen in committed] == [(0., .5), (.5, 2.), (2., 3.)]
+            assert committed[1]["mask_only"] is True and committed[1]["text_vi"] == ""
+            monkeypatch.setattr(session.video_intelligence, "analyze_chunk",
+                lambda path, start, end, rows, summary, check: {
+                    **result_for(rows), "screen_texts": [screen_at(25., 26., "Ch\u1eef \u1edf \u0111o\u1ea1n sau")]})
+            await session.retry_failed_synthesis()
+            await session.start_task
+            await session.worker_task
+            assert session.screen_texts[:3] == committed
+            assert session.screen_texts[3]["text_vi"] == "Ch\u1eef \u1edf \u0111o\u1ea1n sau"
+            assert session.segments[0].final_vi == "L\u1eddi do ng\u01b0\u1eddi d\xf9ng s\u1eeda."
+            assert session._visual_prepass_complete
+    
+>       asyncio.run(run())
+
+E:\\D\u1ecbch video\\tests\\test_visual_partial_publication.py:387: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _
+E:\\Train gi\u1ecdng\\tools\\python310\\lib\\asyncio\\runners.py:44: in run
+    return loop.run_until_complete(main)
+E:\\Train gi\u1ecdng\\tools\\python310\\lib\\asyncio\\base_events.py:649: in run_until_complete
+    return future.result()
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _
+
+    async def run():
+        with pytest.raises(OpenCodeClientError):
+            await session.start()
+        await session.edit_segment(0, "L\u1eddi do ng\u01b0\u1eddi d\xf9ng s\u1eeda.")
+        committed = deepcopy(session.screen_texts)
+        assert [(screen["start"], screen["end"]) for screen in committed] == [(0., .5), (.5, 2.), (2., 3.)]
+        assert committed[1]["mask_only"] is True and committed[1]["text_vi"] == ""
+        monkeypatch.setattr(session.video_intelligence, "analyze_chunk",
+            lambda path, start, end, rows, summary, check: {
+                **result_for(rows), "screen_texts": [screen_at(25., 26., "Ch\u1eef \u1edf \u0111o\u1ea1n sau")]})
+        await session.retry_failed_synthesis()
+        await session.start_task
+>       await session.worker_task
+E       TypeError: object NoneType can't be used in 'await' expression
+
+E:\\D\u1ecbch video\\tests\\test_visual_partial_publication.py:381: TypeError
+------------------------------ Captured log call ------------------------------
+INFO     pipeline:pipeline.py:1666 [partial-visual] \u0110ang t\xe1ch \xe2m thanh t\u1eeb video...\nINFO     pipeline:pipeline.py:1666 [partial-visual] \u0110ang \u0111\u1ecdc ph\u1ee5 \u0111\u1ec1 v\xe0 ti\xeau \u0111\u1ec1 trong khung h\xecnh...\nWARNING  pipeline:video_intelligence.py:321 Kh\xf4ng l\u01b0u \u0111\u01b0\u1ee3c \u0111i\u1ec3m ti\u1ebfp t\u1ee5c ph\xe2n t\xedch video: FileNotFoundError\nINFO     pipeline:pipeline.py:1666 [partial-visual] \u0110ang \u0111\u1ed1i chi\u1ebfu l\u1eddi tho\u1ea1i, ph\u1ee5 \u0111\u1ec1 v\xe0 ti\xeau \u0111\u1ec1 (50%)\nINFO     pipeline:pipeline.py:1666 [partial-visual] AI \u0111ang ki\u1ec3m tra l\u1ea1i t\u1eebng c\xe2u v\u1edbi ngu\u1ed3n\u2026\nINFO     pipeline:pipeline.py:1666 [partial-visual] \u0110ang \u0111\u1ed1i chi\u1ebfu l\u1eddi tho\u1ea1i, ph\u1ee5 \u0111\u1ec1 v\xe0 ti\xeau \u0111\u1ec1 (50%)\nERROR    errors:pipeline.py:1733 [partial-visual] Kh\xf4ng th\u1ec3 x\u1eed l\xfd video: later timeout\nINFO     pipeline:pipeline.py:1666 [partial-visual] \u0110ang t\xe1ch \xe2m thanh t\u1eeb video...\nINFO     pipeline:pipeline.py:1666 [partial-visual] \u0110ang \u0111\u1ecdc ph\u1ee5 \u0111\u1ec1 v\xe0 ti\xeau \u0111\u1ec1 trong khung h\xecnh...\nERROR    errors:pipeline.py:1733 [partial-visual] Kh\xf4ng th\u1ec3 x\u1eed l\xfd video: \u0110i\u1ec3m ti\u1ebfp t\u1ee5c ch\u1ee9a v\xf9ng OCR kh\xf4ng h\u1ee3p l\u1ec7.
+______ test_bounded_prepass_owns_only_global_interval_and_keeps_context _______
+
+source = WindowsPath('E:/D\u1ecbch video/workspace/private/autonomous-tests/source/broad-regression/python-offline-a163a3ab327e-tmp/test_bounded_prepass_owns_only0/source.mp4')
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x000001C9D67176A0>
+
+    def test_bounded_prepass_owns_only_global_interval_and_keeps_context(source, monkeypatch):
+        intelligence = VideoIntelligence()
+        rows = segments()
+        calls = []
+        def analyze(path, start, end, owned, summary, cancel):
+            calls.append((start, end, [row.id for row in owned], list(intelligence._source_dialogue), summary))
+            return result_for(owned)
+        monkeypatch.setattr(intelligence, "analyze_chunk", analyze)
+        result = intelligence.prepass(source, rows[1:], total_duration=48, start_time=24, end_time=48,
+                                      context_segments=rows, previous_summary="previous exchange")
+        assert set(result["segments"]) == {1}
+        assert calls[0][:3] == (24, 48, [1])
+        assert [row["id"] for row in calls[0][3]] == [0, 1]
+        assert calls[0][4] == "previous exchange"
+        assert intelligence._source_dialogue == []
+        calls.clear()
+        intelligence.prepass(source, rows[1:], total_duration=48, start_time=24, end_time=48,
+                              context_segments=rows, previous_summary="previous exchange")
+>       assert not calls, "Exact interval resumes from its validated checkpoint"
+E       AssertionError: Exact interval resumes from its validated checkpoint
+E       assert not [(24.0, 48.0, [1], [{'id': 0, 'start': 0.0, 'end': 2.0, 'asr_text': '\u4f60\u597d'}, {'id': 1, 'start': 24.0, 'end': 26.0, 'asr_text': '\u518d\u89c1', ...}], 'previous exchange')]
+
+E:\\D\u1ecbch video\\tests\\test_visual_resume.py:57: AssertionError
+------------------------------ Captured log call ------------------------------
+WARNING  pipeline:video_intelligence.py:321 Kh\xf4ng l\u01b0u \u0111\u01b0\u1ee3c \u0111i\u1ec3m ti\u1ebfp t\u1ee5c ph\xe2n t\xedch video: FileNotFoundError\nWARNING  pipeline:video_intelligence.py:321 Kh\xf4ng l\u01b0u \u0111\u01b0\u1ee3c \u0111i\u1ec3m ti\u1ebfp t\u1ee5c ph\xe2n t\xedch video: FileNotFoundError
+____ test_new_instance_resumes_only_remaining_chunks_and_previous_context _____
+
+source = WindowsPath('E:/D\u1ecbch video/workspace/private/autonomous-tests/source/broad-regression/python-offline-a163a3ab327e-tmp/test_new_instance_resumes_only0/source.mp4')
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x000001C9D6719120>
+
+    def test_new_instance_resumes_only_remaining_chunks_and_previous_context(source, monkeypatch):
+        first = interrupt_after_first(source, monkeypatch)
+        assert first._checkpoint_context is None
+        checkpoints = list(source.parent.glob("cache/visual_checkpoints/*/*.json"))
+>       assert len(checkpoints) == 1
+E       assert 0 == 1
+E        +  where 0 = len([])
+
+E:\\D\u1ecbch video\\tests\\test_visual_resume.py:177: AssertionError
+------------------------------ Captured log call ------------------------------
+WARNING  pipeline:video_intelligence.py:321 Kh\xf4ng l\u01b0u \u0111\u01b0\u1ee3c \u0111i\u1ec3m ti\u1ebfp t\u1ee5c ph\xe2n t\xedch video: FileNotFoundError
+______ test_chunk_callback_is_detached_and_restores_before_later_timeout ______
+
+source = WindowsPath('E:/D\u1ecbch video/workspace/private/autonomous-tests/source/broad-regression/python-offline-a163a3ab327e-tmp/test_chunk_callback_is_detache0/source.mp4')
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x000001C9D67A7940>
+
+    def test_chunk_callback_is_detached_and_restores_before_later_timeout(source, monkeypatch):
+        first = VideoIntelligence()
+        published = []
+    
+        def publish(result, start, end):
+            published.append((set(result["segments"]), start, end))
+            result["segments"][0]["final_vi"] = "Callback must not change the checkpoint"
+    
+        def analyze(path, start, end, rows, summary, cancel):
+            if start:
+                assert published == [({0}, 0., 24.)]
+                raise OpenCodeClientError("later timeout")
+            return result_for(rows)
+    
+        monkeypatch.setattr(first, "analyze_chunk", analyze)
+        with pytest.raises(OpenCodeClientError):
+            first.prepass(source, segments(), 48, chunk_callback=publish)
+        restored = []
+        second = VideoIntelligence()
+        monkeypatch.setattr(second, "analyze_chunk", Mock(side_effect=OpenCodeClientError("still unavailable")))
+        with pytest.raises(OpenCodeClientError):
+            second.prepass(source, segments(), 48, chunk_callback=lambda result, start, end: restored.append(result))
+>       assert restored[0]["segments"][0]["final_vi"] == "Xin chào."
+E       IndexError: list index out of range
+
+E:\\D\u1ecbch video\\tests\\test_visual_resume.py:217: IndexError
+------------------------------ Captured log call ------------------------------
+WARNING  pipeline:video_intelligence.py:321 Kh\xf4ng l\u01b0u \u0111\u01b0\u1ee3c \u0111i\u1ec3m ti\u1ebfp t\u1ee5c ph\xe2n t\xedch video: FileNotFoundError
+____ test_corrupt_or_false_complete_checkpoint_cannot_skip_work[truncated] ____
+
+source = WindowsPath('E:/D\u1ecbch video/workspace/private/autonomous-tests/source/broad-regression/python-offline-a163a3ab327e-tmp/test_corrupt_or_false_complete0/source.mp4')
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x000001C9D67A78E0>
+corruption = 'truncated'
+
+    @pytest.mark.parametrize("corruption", ["truncated", "digest", "missing_output", "false_complete"])
+    def test_corrupt_or_false_complete_checkpoint_cannot_skip_work(source, monkeypatch, corruption):
+        interrupt_after_first(source, monkeypatch)
+>       path = next(source.parent.glob("cache/visual_checkpoints/*/*.json"))
+E       StopIteration
+
+E:\\D\u1ecbch video\\tests\\test_visual_resume.py:223: StopIteration
+------------------------------ Captured log call ------------------------------
+WARNING  pipeline:video_intelligence.py:321 Kh\xf4ng l\u01b0u \u0111\u01b0\u1ee3c \u0111i\u1ec3m ti\u1ebfp t\u1ee5c ph\xe2n t\xedch video: FileNotFoundError
+_____ test_corrupt_or_false_complete_checkpoint_cannot_skip_work[digest] ______
+
+source = WindowsPath('E:/D\u1ecbch video/workspace/private/autonomous-tests/source/broad-regression/python-offline-a163a3ab327e-tmp/test_corrupt_or_false_complete1/source.mp4')
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x000001C9D678FEE0>
+corruption = 'digest'
+
+    @pytest.mark.parametrize("corruption", ["truncated", "digest", "missing_output", "false_complete"])
+    def test_corrupt_or_false_complete_checkpoint_cannot_skip_work(source, monkeypatch, corruption):
+        interrupt_after_first(source, monkeypatch)
+>       path = next(source.parent.glob("cache/visual_checkpoints/*/*.json"))
+E       StopIteration
+
+E:\\D\u1ecbch video\\tests\\test_visual_resume.py:223: StopIteration
+------------------------------ Captured log call ------------------------------
+WARNING  pipeline:video_intelligence.py:321 Kh\xf4ng l\u01b0u \u0111\u01b0\u1ee3c \u0111i\u1ec3m ti\u1ebfp t\u1ee5c ph\xe2n t\xedch video: FileNotFoundError
+_ test_corrupt_or_false_complete_checkpoint_cannot_skip_work[missing_output] __
+
+source = WindowsPath('E:/D\u1ecbch video/workspace/private/autonomous-tests/source/broad-regression/python-offline-a163a3ab327e-tmp/test_corrupt_or_false_complete2/source.mp4')
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x000001C9D6718D90>
+corruption = 'missing_output'
+
+    @pytest.mark.parametrize("corruption", ["truncated", "digest", "missing_output", "false_complete"])
+    def test_corrupt_or_false_complete_checkpoint_cannot_skip_work(source, monkeypatch, corruption):
+        interrupt_after_first(source, monkeypatch)
+>       path = next(source.parent.glob("cache/visual_checkpoints/*/*.json"))
+E       StopIteration
+
+E:\\D\u1ecbch video\\tests\\test_visual_resume.py:223: StopIteration
+------------------------------ Captured log call ------------------------------
+WARNING  pipeline:video_intelligence.py:321 Kh\xf4ng l\u01b0u \u0111\u01b0\u1ee3c \u0111i\u1ec3m ti\u1ebfp t\u1ee5c ph\xe2n t\xedch video: FileNotFoundError
+_ test_corrupt_or_false_complete_checkpoint_cannot_skip_work[false_complete] __
+
+source = WindowsPath('E:/D\u1ecbch video/workspace/private/autonomous-tests/source/broad-regression/python-offline-a163a3ab327e-tmp/test_corrupt_or_false_complete3/source.mp4')
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x000001C9D675ECB0>
+corruption = 'false_complete'
+
+    @pytest.mark.parametrize("corruption", ["truncated", "digest", "missing_output", "false_complete"])
+    def test_corrupt_or_false_complete_checkpoint_cannot_skip_work(source, monkeypatch, corruption):
+        interrupt_after_first(source, monkeypatch)
+>       path = next(source.parent.glob("cache/visual_checkpoints/*/*.json"))
+E       StopIteration
+
+E:\\D\u1ecbch video\\tests\\test_visual_resume.py:223: StopIteration
+------------------------------ Captured log call ------------------------------
+WARNING  pipeline:video_intelligence.py:321 Kh\xf4ng l\u01b0u \u0111\u01b0\u1ee3c \u0111i\u1ec3m ti\u1ebfp t\u1ee5c ph\xe2n t\xedch video: FileNotFoundError
+______________ test_cancel_keeps_only_previously_finished_chunks ______________
+
+source = WindowsPath('E:/D\u1ecbch video/workspace/private/autonomous-tests/source/broad-regression/python-offline-a163a3ab327e-tmp/test_cancel_keeps_only_previou0/source.mp4')
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x000001C9D67A7A30>
+
+    def test_cancel_keeps_only_previously_finished_chunks(source, monkeypatch):
+        cancelled = False
+        first = VideoIntelligence()
+    
+        def progress(value):
+            nonlocal cancelled
+            cancelled = True
+    
+        monkeypatch.setattr(first, "analyze_chunk", lambda path, start, end, rows, summary, cancel: result_for(rows))
+        with pytest.raises(VideoIntelligenceError, match="h\u1ee7y"):
+            first.prepass(source, segments(), 48, cancel_check=lambda: cancelled, progress_callback=progress)
+        second = VideoIntelligence()
+        analyze = Mock(side_effect=lambda path, start, end, rows, summary, cancel: result_for(rows))
+        monkeypatch.setattr(second, "analyze_chunk", analyze)
+        second.prepass(source, segments(), 48)
+>       assert analyze.call_count == 1
+E       AssertionError: assert 2 == 1
+E        +  where 2 = <Mock id='1966397804592'>.call_count
+
+E:\\D\u1ecbch video\\tests\\test_visual_resume.py:278: AssertionError
+------------------------------ Captured log call ------------------------------
+WARNING  pipeline:video_intelligence.py:321 Kh\xf4ng l\u01b0u \u0111\u01b0\u1ee3c \u0111i\u1ec3m ti\u1ebfp t\u1ee5c ph\xe2n t\xedch video: FileNotFoundError\nWARNING  pipeline:video_intelligence.py:321 Kh\xf4ng l\u01b0u \u0111\u01b0\u1ee3c \u0111i\u1ec3m ti\u1ebfp t\u1ee5c ph\xe2n t\xedch video: FileNotFoundError\nWARNING  pipeline:video_intelligence.py:321 Kh\xf4ng l\u01b0u \u0111\u01b0\u1ee3c \u0111i\u1ec3m ti\u1ebfp t\u1ee5c ph\xe2n t\xedch video: FileNotFoundError
+_____________ test_completed_ocr_survives_later_provider_failure ______________
+
+source = WindowsPath('E:/D\u1ecbch video/workspace/private/autonomous-tests/source/broad-regression/python-offline-a163a3ab327e-tmp/test_completed_ocr_survives_la0/source.mp4')
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x000001C9D671BB20>
+
+    def test_completed_ocr_survives_later_provider_failure(source, monkeypatch):
+        observed = [{"id": "o0", "start": 0., "end": 2., "text_zh": "\u4f60\u597d",
+                     "bbox": [.1, .8, .4, .1], "confidence": .99}]
+        first = VideoIntelligence()
+        extract = Mock(return_value=observed)
+        monkeypatch.setattr(first.screen_ocr, "extract", extract)
+        monkeypatch.setattr(first, "_translate_text", Mock(side_effect=OpenCodeClientError("timeout")))
+        with pytest.raises(OpenCodeClientError):
+            first.prepass(source, segments()[:1], 2)
+        extract.assert_called_once()
+        second = VideoIntelligence()
+        monkeypatch.setattr(second.screen_ocr, "extract", Mock(side_effect=AssertionError("OCR must resume")))
+        translate = Mock(return_value=result_for(segments()[:1]))
+        monkeypatch.setattr(second, "_translate_text", translate)
+>       assert 0 in second.prepass(source, segments()[:1], 2)["segments"]
+
+E:\\D\u1ecbch video\\tests\\test_visual_resume.py:312: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _
+core\video_intelligence.py:1362: in prepass
+    return self._prepass(video_path, segments, total_duration, cancel_check, progress_callback, chunk_callback,
+core\video_intelligence.py:1457: in _prepass
+    result = self.analyze_chunk(video_path, cursor, end, chunk_segments, summary, cancel_check)
+core\video_intelligence.py:1252: in analyze_chunk
+    observed = self.screen_ocr.extract(video_path, start, end, **options)
+E:\\Train gi\u1ecdng\\tools\\python310\\lib\\unittest\\mock.py:1114: in __call__
+    return self._mock_call(*args, **kwargs)
+E:\\Train gi\u1ecdng\\tools\\python310\\lib\\unittest\\mock.py:1118: in _mock_call
+    return self._execute_mock_call(*args, **kwargs)
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _
+
+self = <Mock id='1966397824336'>
+args = (WindowsPath('E:/D\u1ecbch video/workspace/private/autonomous-tests/source/broad-regression/python-offline-a163a3ab327e-tmp/test_completed_ocr_survives_la0/source.mp4'), 0.0, 2.0)
+kwargs = {'cancel_check': None}
+
+    def _execute_mock_call(self, /, *args, **kwargs):
+        # separate from _increment_mock_call so that awaited functions are
+        # executed separately from their call, also AsyncMock overrides this method
+    
+        effect = self.side_effect
+        if effect is not None:
+            if _is_exception(effect):
+>               raise effect
+E               AssertionError: OCR must resume
+
+E:\\Train gi\u1ecdng\\tools\\python310\\lib\\unittest\\mock.py:1173: AssertionError
+------------------------------ Captured log call ------------------------------
+WARNING  pipeline:video_intelligence.py:321 Kh\xf4ng l\u01b0u \u0111\u01b0\u1ee3c \u0111i\u1ec3m ti\u1ebfp t\u1ee5c ph\xe2n t\xedch video: FileNotFoundError
+____________ test_verified_text_batch_survives_next_batch_timeout _____________
+
+source = WindowsPath('E:/D\u1ecbch video/workspace/private/autonomous-tests/source/broad-regression/python-offline-a163a3ab327e-tmp/test_verified_text_batch_survi0/source.mp4')
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x000001C9D6734C40>
+
+    def test_verified_text_batch_survives_next_batch_timeout(source, monkeypatch):
+        rows = [SimpleNamespace(id=i, start=float(i), end=i + .8, text_zh="\u4f60\u597d") for i in range(13)]
+        monkeypatch.setattr("core.video_intelligence.OpenCodeZenClient", Mock(return_value=SimpleNamespace(has_credentials=True, model="test-model")))
+        requests = []
+    
+        def request(client, prompt, payload, observed, start, end, cancel):
+            requests.append([item["id"] for item in payload])
+            if len(requests) == 3:
+                raise OpenCodeClientError("timeout in batch two")
+            result = result_for([SimpleNamespace(id=item["id"], start=item["start"], end=item["end"], text_zh=item["asr_text"]) for item in payload], f"batch-{payload[0]['id']}")
+            return "validated raw", result
+    
+        def correction(client, payload, observed, context, cancel):
+            return {item["id"]: {"text_zh": item["asr_text"], "evidence_ids": [], "needs_review": False, "review_reason": ""} for item in payload}
+    
+        first = VideoIntelligence()
+        monkeypatch.setattr(first.screen_ocr, "extract", Mock(return_value=[]))
+        monkeypatch.setattr(first, "_correct_source", correction)
+        monkeypatch.setattr(first, "_request_text_result", request)
+        with pytest.raises(VideoIntelligenceError, match="timeout"):
+            first.prepass(source, rows, 13)
+        assert requests == [list(range(4)), list(range(4)), list(range(4, 8))]
+        second = VideoIntelligence()
+        monkeypatch.setattr(second.screen_ocr, "extract", Mock(side_effect=AssertionError("OCR already retained")))
+        monkeypatch.setattr(second, "_correct_source", correction)
+        monkeypatch.setattr(second, "_request_text_result", request)
+>       final = second.prepass(source, rows, 13)
+
+E:\\D\u1ecbch video\\tests\\test_visual_resume.py:342: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _
+core\video_intelligence.py:1362: in prepass
+    return self._prepass(video_path, segments, total_duration, cancel_check, progress_callback, chunk_callback,
+core\video_intelligence.py:1457: in _prepass
+    result = self.analyze_chunk(video_path, cursor, end, chunk_segments, summary, cancel_check)
+core\video_intelligence.py:1252: in analyze_chunk
+    observed = self.screen_ocr.extract(video_path, start, end, **options)
+E:\\Train gi\u1ecdng\\tools\\python310\\lib\\unittest\\mock.py:1114: in __call__
+    return self._mock_call(*args, **kwargs)
+E:\\Train gi\u1ecdng\\tools\\python310\\lib\\unittest\\mock.py:1118: in _mock_call
+    return self._execute_mock_call(*args, **kwargs)
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _
+
+self = <Mock id='1966397944208'>
+args = (WindowsPath('E:/D\u1ecbch video/workspace/private/autonomous-tests/source/broad-regression/python-offline-a163a3ab327e-tmp/test_verified_text_batch_survi0/source.mp4'), 0.0, 13.0)
+kwargs = {'cancel_check': None}
+
+    def _execute_mock_call(self, /, *args, **kwargs):
+        # separate from _increment_mock_call so that awaited functions are
+        # executed separately from their call, also AsyncMock overrides this method
+    
+        effect = self.side_effect
+        if effect is not None:
+            if _is_exception(effect):
+>               raise effect
+E               AssertionError: OCR already retained
+
+E:\\Train gi\u1ecdng\\tools\\python310\\lib\\unittest\\mock.py:1173: AssertionError
+------------------------------ Captured log call ------------------------------
+WARNING  pipeline:video_intelligence.py:321 Kh\xf4ng l\u01b0u \u0111\u01b0\u1ee3c \u0111i\u1ec3m ti\u1ebfp t\u1ee5c ph\xe2n t\xedch video: FileNotFoundError\nWARNING  pipeline:video_intelligence.py:321 Kh\xf4ng l\u01b0u \u0111\u01b0\u1ee3c \u0111i\u1ec3m ti\u1ebfp t\u1ee5c ph\xe2n t\xedch video: FileNotFoundError
+============================== warnings summary ===============================
+tests/test_download_ranges.py::test_incorrect_content_range_is_rejected
+  E:\\D\u1ecbch video\\venv\\lib\\site-packages\\_pytest\\raises.py:613: PytestWarning: matching against an empty string will *always* pass. If you want to check for an empty message you need to pass '^$'. If you don't want to match you should pass `None` or leave out the parameter.\n    super().__init__(match=match, check=check)
+
+tests/test_recovery_ledger.py::test_simulated_manifest_workload_without_media_or_api[0.0833333333]
+tests/test_recovery_ledger.py::test_simulated_manifest_workload_without_media_or_api[0.5]
+tests/test_recovery_ledger.py::test_simulated_manifest_workload_without_media_or_api[1]
+tests/test_recovery_ledger.py::test_simulated_manifest_workload_without_media_or_api[4]
+  ..\..\..\..\..\tests\test_recovery_ledger.py:77: PytestWarning: record_property is incompatible with junit_family 'xunit2' (use 'legacy' or 'xunit1')
+    @pytest.mark.parametrize("hours", [.0833333333, .5, 1, 4])
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+=========================== short test summary info ===========================
+FAILED tests/test_dub_pipeline.py::test_dense_failure_can_stage_verified_neighbor_without_exceeding_bounds
+FAILED tests/test_dub_pipeline.py::test_dense_rescue_retries_shortest_verified_focus_candidate_without_rewrite
+FAILED tests/test_dub_pipeline.py::test_uncommitted_dense_rescue_preserves_neighbors[rejected]
+FAILED tests/test_transcript_edit.py::test_new_stop_cancels_stopped_repair_drains_late_write_and_allows_new_edit_retry
+FAILED tests/test_transcript_edit.py::test_stop_during_http_repair_returns_actionable_cancel_instead_of_server_failure
+FAILED tests/test_transcript_edit.py::test_inflight_edit_blocks_other_edits_and_export_but_keeps_existing_audio
+FAILED tests/test_transcript_edit.py::test_export_uses_revised_text_and_audio_and_blocks_edits_until_done
+FAILED tests/test_transcript_edit.py::test_stop_waits_for_synthesis_thread_before_removing_owned_audio
+FAILED tests/test_transcript_edit.py::test_ready_segment_edit_waits_for_pipeline_tts_lock_without_requiring_pause
+FAILED tests/test_transcript_edit.py::test_shutdown_from_another_thread_cancels_edit_on_its_own_event_loop
+FAILED tests/test_transcript_edit.py::test_review_progress_tracks_speech_stages_until_timing_commits_and_clears_only_resolved_warning
+FAILED tests/test_transcript_edit.py::test_automatic_review_reserves_task_blocks_edit_export_and_keeps_old_media_on_failure
+FAILED tests/test_visual_partial_publication.py::test_manual_screen_splits_survive_prepass_retry_and_full_result
+FAILED tests/test_visual_resume.py::test_bounded_prepass_owns_only_global_interval_and_keeps_context
+FAILED tests/test_visual_resume.py::test_new_instance_resumes_only_remaining_chunks_and_previous_context
+FAILED tests/test_visual_resume.py::test_chunk_callback_is_detached_and_restores_before_later_timeout
+FAILED tests/test_visual_resume.py::test_corrupt_or_false_complete_checkpoint_cannot_skip_work[truncated]
+FAILED tests/test_visual_resume.py::test_corrupt_or_false_complete_checkpoint_cannot_skip_work[digest]
+FAILED tests/test_visual_resume.py::test_corrupt_or_false_complete_checkpoint_cannot_skip_work[missing_output]
+FAILED tests/test_visual_resume.py::test_corrupt_or_false_complete_checkpoint_cannot_skip_work[false_complete]
+FAILED tests/test_visual_resume.py::test_cancel_keeps_only_previously_finished_chunks
+FAILED tests/test_visual_resume.py::test_completed_ocr_survives_later_provider_failure
+FAILED tests/test_visual_resume.py::test_verified_text_batch_survives_next_batch_timeout
+23 failed, 2734 passed, 1 skipped, 5 warnings, 127 subtests passed in 409.67s (0:06:49)

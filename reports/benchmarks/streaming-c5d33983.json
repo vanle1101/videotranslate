@@ -1,0 +1,1912 @@
+{
+  "started_at_utc": "2026-11-03T10:35:15.404282+00:00",
+  "source_path": "E:\\Dịch video\\workspace\\inputs\\upload_4b769b18.mp4",
+  "source_bytes": 44858917,
+  "media_duration_seconds": 30.014559,
+  "cache_mode": "fresh task; no session checkpoints reused",
+  "provider": "ollama",
+  "model": "qwen3:4b-no-think",
+  "asr_engine": "faster-whisper",
+  "whisper_model": "small",
+  "whisper_device": "cuda",
+  "whisper_compute_type": "int8_float32",
+  "asr_cpu_threads": 2,
+  "configured_translation_workers": 1,
+  "actual_translation_workers": 1,
+  "tts_engine": "piper-tts",
+  "samples": [
+    {
+      "at_monotonic": 240485.984,
+      "gpu": [
+        {
+          "utilization_percent": 11,
+          "memory_used_mib": 476,
+          "memory_total_mib": 4096
+        }
+      ],
+      "system_cpu_percent": 0.0,
+      "system_ram_used_percent": 39.2,
+      "system_ram_available_bytes": 20833169408,
+      "pipeline_process_cpu_percent": 0.0,
+      "pipeline_process_rss_bytes": 568676352,
+      "processes": [
+        {
+          "name": "python.exe",
+          "rss_bytes": 84582400
+        },
+        {
+          "name": "python.exe",
+          "rss_bytes": 3526656
+        },
+        {
+          "name": "conhost.exe",
+          "rss_bytes": 11661312
+        },
+        {
+          "name": "python.exe",
+          "rss_bytes": 426291200
+        },
+        {
+          "name": "ollama.exe",
+          "rss_bytes": 42614784
+        }
+      ],
+      "elapsed_seconds": 3.2,
+      "phase": "asr",
+      "stage": "Đang nhận diện lời nói của đoạn tiếp theo…",
+      "source_prepared_seconds": 0.0,
+      "translation_completed_segments": 0,
+      "translation_total_segments": 0,
+      "segment_states": {},
+      "completed_chunks": 0,
+      "total_chunks": 0,
+      "automatic_output_status": null,
+      "export_status": null,
+      "ollama_queue": null,
+      "download_metrics": null
+    },
+    {
+      "at_monotonic": 240488.953,
+      "gpu": [
+        {
+          "utilization_percent": 82,
+          "memory_used_mib": 948,
+          "memory_total_mib": 4096
+        }
+      ],
+      "system_cpu_percent": 57.5,
+      "system_ram_used_percent": 40.4,
+      "system_ram_available_bytes": 20448333824,
+      "pipeline_process_cpu_percent": 0.0,
+      "pipeline_process_rss_bytes": 541941760,
+      "processes": [
+        {
+          "name": "python.exe",
+          "rss_bytes": 84619264
+        },
+        {
+          "name": "python.exe",
+          "rss_bytes": 3526656
+        },
+        {
+          "name": "conhost.exe",
+          "rss_bytes": 11661312
+        },
+        {
+          "name": "python.exe",
+          "rss_bytes": 399519744
+        },
+        {
+          "name": "ollama.exe",
+          "rss_bytes": 42614784
+        }
+      ],
+      "elapsed_seconds": 5.3,
+      "phase": "asr",
+      "stage": "Đang nhận diện lời nói của đoạn tiếp theo…",
+      "source_prepared_seconds": 0.0,
+      "translation_completed_segments": 0,
+      "translation_total_segments": 0,
+      "segment_states": {},
+      "completed_chunks": 0,
+      "total_chunks": 0,
+      "automatic_output_status": null,
+      "export_status": null,
+      "ollama_queue": null,
+      "download_metrics": null
+    },
+    {
+      "at_monotonic": 240491.031,
+      "gpu": [
+        {
+          "utilization_percent": 93,
+          "memory_used_mib": 948,
+          "memory_total_mib": 4096
+        }
+      ],
+      "system_cpu_percent": 37.6,
+      "system_ram_used_percent": 40.3,
+      "system_ram_available_bytes": 20456873984,
+      "pipeline_process_cpu_percent": 0.0,
+      "pipeline_process_rss_bytes": 550195200,
+      "processes": [
+        {
+          "name": "python.exe",
+          "rss_bytes": 84635648
+        },
+        {
+          "name": "python.exe",
+          "rss_bytes": 3526656
+        },
+        {
+          "name": "conhost.exe",
+          "rss_bytes": 11661312
+        },
+        {
+          "name": "python.exe",
+          "rss_bytes": 407756800
+        },
+        {
+          "name": "ollama.exe",
+          "rss_bytes": 42614784
+        }
+      ],
+      "elapsed_seconds": 7.3,
+      "phase": "asr",
+      "stage": "Đang nhận diện lời nói của đoạn tiếp theo…",
+      "source_prepared_seconds": 0.0,
+      "translation_completed_segments": 0,
+      "translation_total_segments": 0,
+      "segment_states": {},
+      "completed_chunks": 0,
+      "total_chunks": 0,
+      "automatic_output_status": null,
+      "export_status": null,
+      "ollama_queue": null,
+      "download_metrics": null
+    },
+    {
+      "at_monotonic": 240493.093,
+      "gpu": [
+        {
+          "utilization_percent": 53,
+          "memory_used_mib": 916,
+          "memory_total_mib": 4096
+        }
+      ],
+      "system_cpu_percent": 36.5,
+      "system_ram_used_percent": 40.3,
+      "system_ram_available_bytes": 20454973440,
+      "pipeline_process_cpu_percent": 0.0,
+      "pipeline_process_rss_bytes": 550334464,
+      "processes": [
+        {
+          "name": "python.exe",
+          "rss_bytes": 84660224
+        },
+        {
+          "name": "python.exe",
+          "rss_bytes": 3526656
+        },
+        {
+          "name": "conhost.exe",
+          "rss_bytes": 11661312
+        },
+        {
+          "name": "python.exe",
+          "rss_bytes": 407871488
+        },
+        {
+          "name": "ollama.exe",
+          "rss_bytes": 42614784
+        }
+      ],
+      "elapsed_seconds": 9.4,
+      "phase": "asr",
+      "stage": "Đang nhận diện lời nói của đoạn tiếp theo…",
+      "source_prepared_seconds": 0.0,
+      "translation_completed_segments": 0,
+      "translation_total_segments": 0,
+      "segment_states": {},
+      "completed_chunks": 0,
+      "total_chunks": 0,
+      "automatic_output_status": null,
+      "export_status": null,
+      "ollama_queue": null,
+      "download_metrics": null
+    },
+    {
+      "at_monotonic": 240495.171,
+      "gpu": [
+        {
+          "utilization_percent": 4,
+          "memory_used_mib": 476,
+          "memory_total_mib": 4096
+        }
+      ],
+      "system_cpu_percent": 35.0,
+      "system_ram_used_percent": 39.2,
+      "system_ram_available_bytes": 20854652928,
+      "pipeline_process_cpu_percent": 0.0,
+      "pipeline_process_rss_bytes": 161038336,
+      "processes": [
+        {
+          "name": "python.exe",
+          "rss_bytes": 84971520
+        },
+        {
+          "name": "python.exe",
+          "rss_bytes": 3543040
+        },
+        {
+          "name": "conhost.exe",
+          "rss_bytes": 11644928
+        },
+        {
+          "name": "python.exe",
+          "rss_bytes": 18264064
+        },
+        {
+          "name": "ollama.exe",
+          "rss_bytes": 42614784
+        }
+      ],
+      "elapsed_seconds": 11.5,
+      "phase": "asr",
+      "stage": "Đang nhận diện lời nói của đoạn tiếp theo…",
+      "source_prepared_seconds": 0.0,
+      "translation_completed_segments": 0,
+      "translation_total_segments": 0,
+      "segment_states": {},
+      "completed_chunks": 0,
+      "total_chunks": 0,
+      "automatic_output_status": null,
+      "export_status": null,
+      "ollama_queue": null,
+      "download_metrics": null
+    },
+    {
+      "at_monotonic": 240497.234,
+      "gpu": [
+        {
+          "utilization_percent": 3,
+          "memory_used_mib": 476,
+          "memory_total_mib": 4096
+        }
+      ],
+      "system_cpu_percent": 42.8,
+      "system_ram_used_percent": 40.2,
+      "system_ram_available_bytes": 20503998464,
+      "pipeline_process_cpu_percent": 0.0,
+      "pipeline_process_rss_bytes": 517763072,
+      "processes": [
+        {
+          "name": "python.exe",
+          "rss_bytes": 84975616
+        },
+        {
+          "name": "python.exe",
+          "rss_bytes": 3543040
+        },
+        {
+          "name": "conhost.exe",
+          "rss_bytes": 11644928
+        },
+        {
+          "name": "python.exe",
+          "rss_bytes": 374984704
+        },
+        {
+          "name": "ollama.exe",
+          "rss_bytes": 42614784
+        }
+      ],
+      "elapsed_seconds": 13.5,
+      "phase": "asr",
+      "stage": "Đang nhận diện lời nói của đoạn tiếp theo…",
+      "source_prepared_seconds": 0.0,
+      "translation_completed_segments": 0,
+      "translation_total_segments": 0,
+      "segment_states": {},
+      "completed_chunks": 0,
+      "total_chunks": 0,
+      "automatic_output_status": null,
+      "export_status": null,
+      "ollama_queue": null,
+      "download_metrics": null
+    },
+    {
+      "at_monotonic": 240499.296,
+      "gpu": [
+        {
+          "utilization_percent": 7,
+          "memory_used_mib": 477,
+          "memory_total_mib": 4096
+        }
+      ],
+      "system_cpu_percent": 67.3,
+      "system_ram_used_percent": 40.3,
+      "system_ram_available_bytes": 20458201088,
+      "pipeline_process_cpu_percent": 0.0,
+      "pipeline_process_rss_bytes": 524111872,
+      "processes": [
+        {
+          "name": "python.exe",
+          "rss_bytes": 84983808
+        },
+        {
+          "name": "python.exe",
+          "rss_bytes": 3543040
+        },
+        {
+          "name": "conhost.exe",
+          "rss_bytes": 11644928
+        },
+        {
+          "name": "python.exe",
+          "rss_bytes": 381308928
+        },
+        {
+          "name": "ollama.exe",
+          "rss_bytes": 42631168
+        }
+      ],
+      "elapsed_seconds": 15.7,
+      "phase": "asr",
+      "stage": "Đang nhận diện lời nói của đoạn tiếp theo…",
+      "source_prepared_seconds": 0.0,
+      "translation_completed_segments": 0,
+      "translation_total_segments": 0,
+      "segment_states": {},
+      "completed_chunks": 0,
+      "total_chunks": 0,
+      "automatic_output_status": null,
+      "export_status": null,
+      "ollama_queue": null,
+      "download_metrics": null
+    },
+    {
+      "at_monotonic": 240501.406,
+      "gpu": [
+        {
+          "utilization_percent": 12,
+          "memory_used_mib": 477,
+          "memory_total_mib": 4096
+        }
+      ],
+      "system_cpu_percent": 44.9,
+      "system_ram_used_percent": 40.4,
+      "system_ram_available_bytes": 20418580480,
+      "pipeline_process_cpu_percent": 0.0,
+      "pipeline_process_rss_bytes": 610492416,
+      "processes": [
+        {
+          "name": "python.exe",
+          "rss_bytes": 85250048
+        },
+        {
+          "name": "python.exe",
+          "rss_bytes": 3543040
+        },
+        {
+          "name": "conhost.exe",
+          "rss_bytes": 11644928
+        },
+        {
+          "name": "python.exe",
+          "rss_bytes": 467423232
+        },
+        {
+          "name": "ollama.exe",
+          "rss_bytes": 42631168
+        }
+      ],
+      "elapsed_seconds": 17.7,
+      "phase": "asr",
+      "stage": "Đang nhận diện lời nói của đoạn tiếp theo…",
+      "source_prepared_seconds": 0.0,
+      "translation_completed_segments": 0,
+      "translation_total_segments": 0,
+      "segment_states": {},
+      "completed_chunks": 0,
+      "total_chunks": 0,
+      "automatic_output_status": null,
+      "export_status": null,
+      "ollama_queue": null,
+      "download_metrics": null
+    },
+    {
+      "at_monotonic": 240503.468,
+      "gpu": [
+        {
+          "utilization_percent": 19,
+          "memory_used_mib": 477,
+          "memory_total_mib": 4096
+        }
+      ],
+      "system_cpu_percent": 39.4,
+      "system_ram_used_percent": 39.2,
+      "system_ram_available_bytes": 20855074816,
+      "pipeline_process_cpu_percent": 0.0,
+      "pipeline_process_rss_bytes": 169549824,
+      "processes": [
+        {
+          "name": "python.exe",
+          "rss_bytes": 85295104
+        },
+        {
+          "name": "python.exe",
+          "rss_bytes": 3530752
+        },
+        {
+          "name": "conhost.exe",
+          "rss_bytes": 11665408
+        },
+        {
+          "name": "python.exe",
+          "rss_bytes": 26427392
+        },
+        {
+          "name": "ollama.exe",
+          "rss_bytes": 42631168
+        }
+      ],
+      "elapsed_seconds": 19.8,
+      "phase": "asr",
+      "stage": "Đang nhận diện lời nói của đoạn tiếp theo…",
+      "source_prepared_seconds": 0.0,
+      "translation_completed_segments": 0,
+      "translation_total_segments": 0,
+      "segment_states": {},
+      "completed_chunks": 0,
+      "total_chunks": 0,
+      "automatic_output_status": null,
+      "export_status": null,
+      "ollama_queue": null,
+      "download_metrics": null
+    },
+    {
+      "at_monotonic": 240505.531,
+      "gpu": [
+        {
+          "utilization_percent": 14,
+          "memory_used_mib": 475,
+          "memory_total_mib": 4096
+        }
+      ],
+      "system_cpu_percent": 36.5,
+      "system_ram_used_percent": 40.3,
+      "system_ram_available_bytes": 20481253376,
+      "pipeline_process_cpu_percent": 0.0,
+      "pipeline_process_rss_bytes": 514846720,
+      "processes": [
+        {
+          "name": "python.exe",
+          "rss_bytes": 85303296
+        },
+        {
+          "name": "python.exe",
+          "rss_bytes": 3530752
+        },
+        {
+          "name": "conhost.exe",
+          "rss_bytes": 11669504
+        },
+        {
+          "name": "python.exe",
+          "rss_bytes": 371712000
+        },
+        {
+          "name": "ollama.exe",
+          "rss_bytes": 42631168
+        }
+      ],
+      "elapsed_seconds": 21.9,
+      "phase": "asr",
+      "stage": "Đang nhận diện lời nói của đoạn tiếp theo…",
+      "source_prepared_seconds": 0.0,
+      "translation_completed_segments": 0,
+      "translation_total_segments": 0,
+      "segment_states": {},
+      "completed_chunks": 0,
+      "total_chunks": 0,
+      "automatic_output_status": null,
+      "export_status": null,
+      "ollama_queue": null,
+      "download_metrics": null
+    },
+    {
+      "at_monotonic": 240507.609,
+      "gpu": [
+        {
+          "utilization_percent": 15,
+          "memory_used_mib": 475,
+          "memory_total_mib": 4096
+        }
+      ],
+      "system_cpu_percent": 47.4,
+      "system_ram_used_percent": 40.6,
+      "system_ram_available_bytes": 20348116992,
+      "pipeline_process_cpu_percent": 0.0,
+      "pipeline_process_rss_bytes": 631447552,
+      "processes": [
+        {
+          "name": "python.exe",
+          "rss_bytes": 85311488
+        },
+        {
+          "name": "python.exe",
+          "rss_bytes": 3530752
+        },
+        {
+          "name": "conhost.exe",
+          "rss_bytes": 11669504
+        },
+        {
+          "name": "python.exe",
+          "rss_bytes": 488304640
+        },
+        {
+          "name": "ollama.exe",
+          "rss_bytes": 42631168
+        }
+      ],
+      "elapsed_seconds": 23.9,
+      "phase": "asr",
+      "stage": "Đang nhận diện lời nói của đoạn tiếp theo…",
+      "source_prepared_seconds": 0.0,
+      "translation_completed_segments": 0,
+      "translation_total_segments": 0,
+      "segment_states": {},
+      "completed_chunks": 0,
+      "total_chunks": 0,
+      "automatic_output_status": null,
+      "export_status": null,
+      "ollama_queue": null,
+      "download_metrics": null
+    },
+    {
+      "at_monotonic": 240509.671,
+      "gpu": [
+        {
+          "utilization_percent": 13,
+          "memory_used_mib": 475,
+          "memory_total_mib": 4096
+        }
+      ],
+      "system_cpu_percent": 25.1,
+      "system_ram_used_percent": 41.2,
+      "system_ram_available_bytes": 20150067200,
+      "pipeline_process_cpu_percent": 0.0,
+      "pipeline_process_rss_bytes": 855801856,
+      "processes": [
+        {
+          "name": "python.exe",
+          "rss_bytes": 85315584
+        },
+        {
+          "name": "python.exe",
+          "rss_bytes": 3530752
+        },
+        {
+          "name": "conhost.exe",
+          "rss_bytes": 11669504
+        },
+        {
+          "name": "python.exe",
+          "rss_bytes": 712654848
+        },
+        {
+          "name": "ollama.exe",
+          "rss_bytes": 42631168
+        }
+      ],
+      "elapsed_seconds": 26.0,
+      "phase": "asr",
+      "stage": "Đang nhận diện lời nói của đoạn tiếp theo…",
+      "source_prepared_seconds": 0.0,
+      "translation_completed_segments": 0,
+      "translation_total_segments": 0,
+      "segment_states": {},
+      "completed_chunks": 0,
+      "total_chunks": 0,
+      "automatic_output_status": null,
+      "export_status": null,
+      "ollama_queue": null,
+      "download_metrics": null
+    },
+    {
+      "at_monotonic": 240511.734,
+      "gpu": [
+        {
+          "utilization_percent": 3,
+          "memory_used_mib": 1166,
+          "memory_total_mib": 4096
+        }
+      ],
+      "system_cpu_percent": 33.5,
+      "system_ram_used_percent": 44.8,
+      "system_ram_available_bytes": 18914246656,
+      "pipeline_process_cpu_percent": 0.0,
+      "pipeline_process_rss_bytes": 2106523648,
+      "processes": [
+        {
+          "name": "python.exe",
+          "rss_bytes": 85315584
+        },
+        {
+          "name": "python.exe",
+          "rss_bytes": 3530752
+        },
+        {
+          "name": "conhost.exe",
+          "rss_bytes": 11669504
+        },
+        {
+          "name": "python.exe",
+          "rss_bytes": 1944727552
+        },
+        {
+          "name": "ffmpeg.exe",
+          "rss_bytes": 7122944
+        },
+        {
+          "name": "conhost.exe",
+          "rss_bytes": 11526144
+        },
+        {
+          "name": "ollama.exe",
+          "rss_bytes": 42631168
+        }
+      ],
+      "elapsed_seconds": 28.1,
+      "phase": "asr",
+      "stage": "Đang nhận diện lời nói của đoạn tiếp theo…",
+      "source_prepared_seconds": 0.0,
+      "translation_completed_segments": 0,
+      "translation_total_segments": 0,
+      "segment_states": {},
+      "completed_chunks": 0,
+      "total_chunks": 0,
+      "automatic_output_status": null,
+      "export_status": null,
+      "ollama_queue": null,
+      "download_metrics": null
+    },
+    {
+      "at_monotonic": 240513.812,
+      "gpu": [
+        {
+          "utilization_percent": 100,
+          "memory_used_mib": 1778,
+          "memory_total_mib": 4096
+        }
+      ],
+      "system_cpu_percent": 28.6,
+      "system_ram_used_percent": 45.4,
+      "system_ram_available_bytes": 18729218048,
+      "pipeline_process_cpu_percent": 0.0,
+      "pipeline_process_rss_bytes": 2284716032,
+      "processes": [
+        {
+          "name": "python.exe",
+          "rss_bytes": 85315584
+        },
+        {
+          "name": "python.exe",
+          "rss_bytes": 3530752
+        },
+        {
+          "name": "conhost.exe",
+          "rss_bytes": 11669504
+        },
+        {
+          "name": "python.exe",
+          "rss_bytes": 2141569024
+        },
+        {
+          "name": "ollama.exe",
+          "rss_bytes": 42631168
+        }
+      ],
+      "elapsed_seconds": 30.1,
+      "phase": "asr",
+      "stage": "Đang nhận diện lời nói của đoạn tiếp theo…",
+      "source_prepared_seconds": 0.0,
+      "translation_completed_segments": 0,
+      "translation_total_segments": 0,
+      "segment_states": {},
+      "completed_chunks": 0,
+      "total_chunks": 0,
+      "automatic_output_status": null,
+      "export_status": null,
+      "ollama_queue": null,
+      "download_metrics": null
+    },
+    {
+      "at_monotonic": 240515.875,
+      "gpu": [
+        {
+          "utilization_percent": 100,
+          "memory_used_mib": 1778,
+          "memory_total_mib": 4096
+        }
+      ],
+      "system_cpu_percent": 28.5,
+      "system_ram_used_percent": 45.6,
+      "system_ram_available_bytes": 18638979072,
+      "pipeline_process_cpu_percent": 0.0,
+      "pipeline_process_rss_bytes": 2371674112,
+      "processes": [
+        {
+          "name": "python.exe",
+          "rss_bytes": 85364736
+        },
+        {
+          "name": "python.exe",
+          "rss_bytes": 3530752
+        },
+        {
+          "name": "conhost.exe",
+          "rss_bytes": 11669504
+        },
+        {
+          "name": "python.exe",
+          "rss_bytes": 2228477952
+        },
+        {
+          "name": "ollama.exe",
+          "rss_bytes": 42631168
+        }
+      ],
+      "elapsed_seconds": 32.2,
+      "phase": "asr",
+      "stage": "Đang nhận diện lời nói của đoạn tiếp theo…",
+      "source_prepared_seconds": 0.0,
+      "translation_completed_segments": 0,
+      "translation_total_segments": 0,
+      "segment_states": {},
+      "completed_chunks": 0,
+      "total_chunks": 0,
+      "automatic_output_status": null,
+      "export_status": null,
+      "ollama_queue": null,
+      "download_metrics": null
+    },
+    {
+      "at_monotonic": 240517.937,
+      "gpu": [
+        {
+          "utilization_percent": 3,
+          "memory_used_mib": 1212,
+          "memory_total_mib": 4096
+        }
+      ],
+      "system_cpu_percent": 27.9,
+      "system_ram_used_percent": 42.0,
+      "system_ram_available_bytes": 19893350400,
+      "pipeline_process_cpu_percent": 0.0,
+      "pipeline_process_rss_bytes": 1110646784,
+      "processes": [
+        {
+          "name": "python.exe",
+          "rss_bytes": 85377024
+        },
+        {
+          "name": "python.exe",
+          "rss_bytes": 3530752
+        },
+        {
+          "name": "conhost.exe",
+          "rss_bytes": 11669504
+        },
+        {
+          "name": "python.exe",
+          "rss_bytes": 967438336
+        },
+        {
+          "name": "ollama.exe",
+          "rss_bytes": 42631168
+        }
+      ],
+      "elapsed_seconds": 34.2,
+      "phase": "asr",
+      "stage": "Đang nhận diện lời nói của đoạn tiếp theo…",
+      "source_prepared_seconds": 0.0,
+      "translation_completed_segments": 0,
+      "translation_total_segments": 0,
+      "segment_states": {},
+      "completed_chunks": 0,
+      "total_chunks": 0,
+      "automatic_output_status": null,
+      "export_status": null,
+      "ollama_queue": null,
+      "download_metrics": null
+    },
+    {
+      "at_monotonic": 240520.0,
+      "gpu": [
+        {
+          "utilization_percent": 3,
+          "memory_used_mib": 520,
+          "memory_total_mib": 4096
+        }
+      ],
+      "system_cpu_percent": 57.1,
+      "system_ram_used_percent": 40.5,
+      "system_ram_available_bytes": 20412751872,
+      "pipeline_process_cpu_percent": 0.0,
+      "pipeline_process_rss_bytes": 646094848,
+      "processes": [
+        {
+          "name": "python.exe",
+          "rss_bytes": 85393408
+        },
+        {
+          "name": "python.exe",
+          "rss_bytes": 3538944
+        },
+        {
+          "name": "conhost.exe",
+          "rss_bytes": 11673600
+        },
+        {
+          "name": "python.exe",
+          "rss_bytes": 502857728
+        },
+        {
+          "name": "ollama.exe",
+          "rss_bytes": 42631168
+        }
+      ],
+      "elapsed_seconds": 36.3,
+      "phase": "asr",
+      "stage": "Đang nhận diện lời nói của đoạn tiếp theo…",
+      "source_prepared_seconds": 0.0,
+      "translation_completed_segments": 0,
+      "translation_total_segments": 0,
+      "segment_states": {},
+      "completed_chunks": 0,
+      "total_chunks": 0,
+      "automatic_output_status": null,
+      "export_status": null,
+      "ollama_queue": null,
+      "download_metrics": null
+    },
+    {
+      "at_monotonic": 240522.062,
+      "gpu": [
+        {
+          "utilization_percent": 88,
+          "memory_used_mib": 948,
+          "memory_total_mib": 4096
+        }
+      ],
+      "system_cpu_percent": 50.8,
+      "system_ram_used_percent": 40.3,
+      "system_ram_available_bytes": 20482306048,
+      "pipeline_process_cpu_percent": 0.0,
+      "pipeline_process_rss_bytes": 545681408,
+      "processes": [
+        {
+          "name": "python.exe",
+          "rss_bytes": 85397504
+        },
+        {
+          "name": "python.exe",
+          "rss_bytes": 3538944
+        },
+        {
+          "name": "conhost.exe",
+          "rss_bytes": 11673600
+        },
+        {
+          "name": "python.exe",
+          "rss_bytes": 402440192
+        },
+        {
+          "name": "ollama.exe",
+          "rss_bytes": 42631168
+        }
+      ],
+      "elapsed_seconds": 38.4,
+      "phase": "asr",
+      "stage": "Đang nhận diện lời nói của đoạn tiếp theo…",
+      "source_prepared_seconds": 0.0,
+      "translation_completed_segments": 0,
+      "translation_total_segments": 0,
+      "segment_states": {},
+      "completed_chunks": 0,
+      "total_chunks": 0,
+      "automatic_output_status": null,
+      "export_status": null,
+      "ollama_queue": null,
+      "download_metrics": null
+    },
+    {
+      "at_monotonic": 240524.125,
+      "gpu": [
+        {
+          "utilization_percent": 3,
+          "memory_used_mib": 820,
+          "memory_total_mib": 4096
+        }
+      ],
+      "system_cpu_percent": 47.1,
+      "system_ram_used_percent": 41.2,
+      "system_ram_available_bytes": 20171722752,
+      "pipeline_process_cpu_percent": 0.0,
+      "pipeline_process_rss_bytes": 863129600,
+      "processes": [
+        {
+          "name": "python.exe",
+          "rss_bytes": 85405696
+        },
+        {
+          "name": "python.exe",
+          "rss_bytes": 3538944
+        },
+        {
+          "name": "conhost.exe",
+          "rss_bytes": 11673600
+        },
+        {
+          "name": "python.exe",
+          "rss_bytes": 719880192
+        },
+        {
+          "name": "ollama.exe",
+          "rss_bytes": 42631168
+        }
+      ],
+      "elapsed_seconds": 40.4,
+      "phase": "asr",
+      "stage": "Đang nhận diện lời nói của đoạn tiếp theo…",
+      "source_prepared_seconds": 0.0,
+      "translation_completed_segments": 0,
+      "translation_total_segments": 0,
+      "segment_states": {},
+      "completed_chunks": 0,
+      "total_chunks": 0,
+      "automatic_output_status": null,
+      "export_status": null,
+      "ollama_queue": null,
+      "download_metrics": null
+    },
+    {
+      "at_monotonic": 240526.187,
+      "gpu": [
+        {
+          "utilization_percent": 90,
+          "memory_used_mib": 948,
+          "memory_total_mib": 4096
+        }
+      ],
+      "system_cpu_percent": 40.7,
+      "system_ram_used_percent": 41.2,
+      "system_ram_available_bytes": 20151660544,
+      "pipeline_process_cpu_percent": 0.0,
+      "pipeline_process_rss_bytes": 883888128,
+      "processes": [
+        {
+          "name": "python.exe",
+          "rss_bytes": 85405696
+        },
+        {
+          "name": "python.exe",
+          "rss_bytes": 3538944
+        },
+        {
+          "name": "conhost.exe",
+          "rss_bytes": 11673600
+        },
+        {
+          "name": "python.exe",
+          "rss_bytes": 740638720
+        },
+        {
+          "name": "ollama.exe",
+          "rss_bytes": 42631168
+        }
+      ],
+      "elapsed_seconds": 42.5,
+      "phase": "asr",
+      "stage": "Đang nhận diện lời nói của đoạn tiếp theo…",
+      "source_prepared_seconds": 0.0,
+      "translation_completed_segments": 0,
+      "translation_total_segments": 0,
+      "segment_states": {},
+      "completed_chunks": 0,
+      "total_chunks": 0,
+      "automatic_output_status": null,
+      "export_status": null,
+      "ollama_queue": null,
+      "download_metrics": null
+    },
+    {
+      "at_monotonic": 240528.265,
+      "gpu": [
+        {
+          "utilization_percent": 3,
+          "memory_used_mib": 476,
+          "memory_total_mib": 4096
+        }
+      ],
+      "system_cpu_percent": 36.9,
+      "system_ram_used_percent": 39.1,
+      "system_ram_available_bytes": 20869693440,
+      "pipeline_process_cpu_percent": 0.0,
+      "pipeline_process_rss_bytes": 129576960,
+      "processes": [
+        {
+          "name": "python.exe",
+          "rss_bytes": 86638592
+        },
+        {
+          "name": "ollama.exe",
+          "rss_bytes": 42938368
+        }
+      ],
+      "elapsed_seconds": 44.6,
+      "phase": "translate",
+      "stage": "Đang dịch lô câu 1–14 · Lời và giọng Việt: 0/14 câu đã nhận diện; chưa biết tổng số câu",
+      "source_prepared_seconds": 0.18,
+      "translation_completed_segments": 0,
+      "translation_total_segments": 14,
+      "segment_states": {
+        "TRANSLATING": 14
+      },
+      "completed_chunks": 1,
+      "total_chunks": 2,
+      "automatic_output_status": null,
+      "export_status": null,
+      "ollama_queue": null,
+      "download_metrics": null
+    },
+    {
+      "at_monotonic": 240530.375,
+      "gpu": [
+        {
+          "utilization_percent": 3,
+          "memory_used_mib": 479,
+          "memory_total_mib": 4096
+        }
+      ],
+      "system_cpu_percent": 51.8,
+      "system_ram_used_percent": 39.4,
+      "system_ram_available_bytes": 20790308864,
+      "pipeline_process_cpu_percent": 9.9,
+      "pipeline_process_rss_bytes": 132419584,
+      "processes": [
+        {
+          "name": "python.exe",
+          "rss_bytes": 86638592
+        },
+        {
+          "name": "ollama.exe",
+          "rss_bytes": 45780992
+        }
+      ],
+      "elapsed_seconds": 46.7,
+      "phase": "translate",
+      "stage": "Đang dịch lô câu 1–14 · Lời và giọng Việt: 0/14 câu đã nhận diện; chưa biết tổng số câu",
+      "source_prepared_seconds": 0.18,
+      "translation_completed_segments": 0,
+      "translation_total_segments": 14,
+      "segment_states": {
+        "TRANSLATING": 14
+      },
+      "completed_chunks": 1,
+      "total_chunks": 2,
+      "automatic_output_status": null,
+      "export_status": null,
+      "ollama_queue": null,
+      "download_metrics": null
+    },
+    {
+      "at_monotonic": 240532.437,
+      "gpu": [
+        {
+          "utilization_percent": 19,
+          "memory_used_mib": 2679,
+          "memory_total_mib": 4096
+        }
+      ],
+      "system_cpu_percent": 40.8,
+      "system_ram_used_percent": 41.5,
+      "system_ram_available_bytes": 20060291072,
+      "pipeline_process_cpu_percent": 0.0,
+      "pipeline_process_rss_bytes": 131973120,
+      "processes": [
+        {
+          "name": "python.exe",
+          "rss_bytes": 86638592
+        },
+        {
+          "name": "ollama.exe",
+          "rss_bytes": 45334528
+        }
+      ],
+      "elapsed_seconds": 48.8,
+      "phase": "translate",
+      "stage": "Đang dịch lô câu 1–14 · Lời và giọng Việt: 0/14 câu đã nhận diện; chưa biết tổng số câu",
+      "source_prepared_seconds": 0.18,
+      "translation_completed_segments": 0,
+      "translation_total_segments": 14,
+      "segment_states": {
+        "TRANSLATING": 14
+      },
+      "completed_chunks": 1,
+      "total_chunks": 2,
+      "automatic_output_status": null,
+      "export_status": null,
+      "ollama_queue": null,
+      "download_metrics": null
+    },
+    {
+      "at_monotonic": 240534.5,
+      "gpu": [
+        {
+          "utilization_percent": 6,
+          "memory_used_mib": 2679,
+          "memory_total_mib": 4096
+        }
+      ],
+      "system_cpu_percent": 19.2,
+      "system_ram_used_percent": 44.2,
+      "system_ram_available_bytes": 19123306496,
+      "pipeline_process_cpu_percent": 0.0,
+      "pipeline_process_rss_bytes": 131985408,
+      "processes": [
+        {
+          "name": "python.exe",
+          "rss_bytes": 86638592
+        },
+        {
+          "name": "ollama.exe",
+          "rss_bytes": 45346816
+        }
+      ],
+      "elapsed_seconds": 50.8,
+      "phase": "translate",
+      "stage": "Đang dịch lô câu 1–14 · Lời và giọng Việt: 0/14 câu đã nhận diện; chưa biết tổng số câu",
+      "source_prepared_seconds": 0.18,
+      "translation_completed_segments": 0,
+      "translation_total_segments": 14,
+      "segment_states": {
+        "TRANSLATING": 14
+      },
+      "completed_chunks": 1,
+      "total_chunks": 2,
+      "automatic_output_status": null,
+      "export_status": null,
+      "ollama_queue": null,
+      "download_metrics": null
+    },
+    {
+      "at_monotonic": 240536.562,
+      "gpu": [
+        {
+          "utilization_percent": 2,
+          "memory_used_mib": 2679,
+          "memory_total_mib": 4096
+        }
+      ],
+      "system_cpu_percent": 20.9,
+      "system_ram_used_percent": 47.0,
+      "system_ram_available_bytes": 18179862528,
+      "pipeline_process_cpu_percent": 0.8,
+      "pipeline_process_rss_bytes": 132026368,
+      "processes": [
+        {
+          "name": "python.exe",
+          "rss_bytes": 86638592
+        },
+        {
+          "name": "ollama.exe",
+          "rss_bytes": 45387776
+        }
+      ],
+      "elapsed_seconds": 52.9,
+      "phase": "translate",
+      "stage": "Đang dịch lô câu 1–14 · Lời và giọng Việt: 0/14 câu đã nhận diện; chưa biết tổng số câu",
+      "source_prepared_seconds": 0.18,
+      "translation_completed_segments": 0,
+      "translation_total_segments": 14,
+      "segment_states": {
+        "TRANSLATING": 14
+      },
+      "completed_chunks": 1,
+      "total_chunks": 2,
+      "automatic_output_status": null,
+      "export_status": null,
+      "ollama_queue": null,
+      "download_metrics": null
+    },
+    {
+      "at_monotonic": 240538.625,
+      "gpu": [
+        {
+          "utilization_percent": 98,
+          "memory_used_mib": 3043,
+          "memory_total_mib": 4096
+        }
+      ],
+      "system_cpu_percent": 22.8,
+      "system_ram_used_percent": 47.9,
+      "system_ram_available_bytes": 17876463616,
+      "pipeline_process_cpu_percent": 0.8,
+      "pipeline_process_rss_bytes": 132030464,
+      "processes": [
+        {
+          "name": "python.exe",
+          "rss_bytes": 86638592
+        },
+        {
+          "name": "ollama.exe",
+          "rss_bytes": 45391872
+        }
+      ],
+      "elapsed_seconds": 54.9,
+      "phase": "translate",
+      "stage": "Đang dịch lô câu 1–14 · Lời và giọng Việt: 0/14 câu đã nhận diện; chưa biết tổng số câu",
+      "source_prepared_seconds": 0.18,
+      "translation_completed_segments": 0,
+      "translation_total_segments": 14,
+      "segment_states": {
+        "TRANSLATING": 14
+      },
+      "completed_chunks": 1,
+      "total_chunks": 2,
+      "automatic_output_status": null,
+      "export_status": null,
+      "ollama_queue": null,
+      "download_metrics": null
+    },
+    {
+      "at_monotonic": 240540.687,
+      "gpu": [
+        {
+          "utilization_percent": 90,
+          "memory_used_mib": 3044,
+          "memory_total_mib": 4096
+        }
+      ],
+      "system_cpu_percent": 23.1,
+      "system_ram_used_percent": 47.8,
+      "system_ram_available_bytes": 17880588288,
+      "pipeline_process_cpu_percent": 0.0,
+      "pipeline_process_rss_bytes": 132034560,
+      "processes": [
+        {
+          "name": "python.exe",
+          "rss_bytes": 86642688
+        },
+        {
+          "name": "ollama.exe",
+          "rss_bytes": 45391872
+        }
+      ],
+      "elapsed_seconds": 57.0,
+      "phase": "translate",
+      "stage": "Đang dịch lô câu 1–14 · Lời và giọng Việt: 0/14 câu đã nhận diện; chưa biết tổng số câu",
+      "source_prepared_seconds": 0.18,
+      "translation_completed_segments": 0,
+      "translation_total_segments": 14,
+      "segment_states": {
+        "TRANSLATING": 14
+      },
+      "completed_chunks": 1,
+      "total_chunks": 2,
+      "automatic_output_status": null,
+      "export_status": null,
+      "ollama_queue": null,
+      "download_metrics": null
+    },
+    {
+      "at_monotonic": 240542.75,
+      "gpu": [
+        {
+          "utilization_percent": 98,
+          "memory_used_mib": 3044,
+          "memory_total_mib": 4096
+        }
+      ],
+      "system_cpu_percent": 16.1,
+      "system_ram_used_percent": 47.8,
+      "system_ram_available_bytes": 17890136064,
+      "pipeline_process_cpu_percent": 0.0,
+      "pipeline_process_rss_bytes": 131977216,
+      "processes": [
+        {
+          "name": "python.exe",
+          "rss_bytes": 86585344
+        },
+        {
+          "name": "ollama.exe",
+          "rss_bytes": 45391872
+        }
+      ],
+      "elapsed_seconds": 59.1,
+      "phase": "translate",
+      "stage": "Đang dịch lô câu 1–14 · Lời và giọng Việt: 0/14 câu đã nhận diện; chưa biết tổng số câu",
+      "source_prepared_seconds": 0.18,
+      "translation_completed_segments": 0,
+      "translation_total_segments": 14,
+      "segment_states": {
+        "TRANSLATING": 14
+      },
+      "completed_chunks": 1,
+      "total_chunks": 2,
+      "automatic_output_status": null,
+      "export_status": null,
+      "ollama_queue": null,
+      "download_metrics": null
+    },
+    {
+      "at_monotonic": 240544.812,
+      "gpu": [
+        {
+          "utilization_percent": 98,
+          "memory_used_mib": 3044,
+          "memory_total_mib": 4096
+        }
+      ],
+      "system_cpu_percent": 21.3,
+      "system_ram_used_percent": 47.8,
+      "system_ram_available_bytes": 17894793216,
+      "pipeline_process_cpu_percent": 0.0,
+      "pipeline_process_rss_bytes": 131977216,
+      "processes": [
+        {
+          "name": "python.exe",
+          "rss_bytes": 86585344
+        },
+        {
+          "name": "ollama.exe",
+          "rss_bytes": 45391872
+        }
+      ],
+      "elapsed_seconds": 61.1,
+      "phase": "translate",
+      "stage": "Đang dịch lô câu 1–14 · Lời và giọng Việt: 0/14 câu đã nhận diện; chưa biết tổng số câu",
+      "source_prepared_seconds": 0.18,
+      "translation_completed_segments": 0,
+      "translation_total_segments": 14,
+      "segment_states": {
+        "TRANSLATING": 14
+      },
+      "completed_chunks": 1,
+      "total_chunks": 2,
+      "automatic_output_status": null,
+      "export_status": null,
+      "ollama_queue": null,
+      "download_metrics": null
+    },
+    {
+      "at_monotonic": 240546.875,
+      "gpu": [
+        {
+          "utilization_percent": 67,
+          "memory_used_mib": 3044,
+          "memory_total_mib": 4096
+        }
+      ],
+      "system_cpu_percent": 29.4,
+      "system_ram_used_percent": 47.8,
+      "system_ram_available_bytes": 17878872064,
+      "pipeline_process_cpu_percent": 0.0,
+      "pipeline_process_rss_bytes": 131977216,
+      "processes": [
+        {
+          "name": "python.exe",
+          "rss_bytes": 86585344
+        },
+        {
+          "name": "ollama.exe",
+          "rss_bytes": 45391872
+        }
+      ],
+      "elapsed_seconds": 63.2,
+      "phase": "translate",
+      "stage": "Đang dịch lô câu 1–14 · Lời và giọng Việt: 0/14 câu đã nhận diện; chưa biết tổng số câu",
+      "source_prepared_seconds": 0.18,
+      "translation_completed_segments": 0,
+      "translation_total_segments": 14,
+      "segment_states": {
+        "TRANSLATING": 14
+      },
+      "completed_chunks": 1,
+      "total_chunks": 2,
+      "automatic_output_status": null,
+      "export_status": null,
+      "ollama_queue": null,
+      "download_metrics": null
+    },
+    {
+      "at_monotonic": 240548.937,
+      "gpu": [
+        {
+          "utilization_percent": 66,
+          "memory_used_mib": 3044,
+          "memory_total_mib": 4096
+        }
+      ],
+      "system_cpu_percent": 35.4,
+      "system_ram_used_percent": 47.8,
+      "system_ram_available_bytes": 17881214976,
+      "pipeline_process_cpu_percent": 0.0,
+      "pipeline_process_rss_bytes": 131981312,
+      "processes": [
+        {
+          "name": "python.exe",
+          "rss_bytes": 86589440
+        },
+        {
+          "name": "ollama.exe",
+          "rss_bytes": 45391872
+        }
+      ],
+      "elapsed_seconds": 65.2,
+      "phase": "translate",
+      "stage": "Đang dịch lô câu 1–14 · Lời và giọng Việt: 0/14 câu đã nhận diện; chưa biết tổng số câu",
+      "source_prepared_seconds": 0.18,
+      "translation_completed_segments": 0,
+      "translation_total_segments": 14,
+      "segment_states": {
+        "TRANSLATING": 14
+      },
+      "completed_chunks": 1,
+      "total_chunks": 2,
+      "automatic_output_status": null,
+      "export_status": null,
+      "ollama_queue": null,
+      "download_metrics": null
+    },
+    {
+      "at_monotonic": 240551.0,
+      "gpu": [
+        {
+          "utilization_percent": 62,
+          "memory_used_mib": 3044,
+          "memory_total_mib": 4096
+        }
+      ],
+      "system_cpu_percent": 36.3,
+      "system_ram_used_percent": 47.9,
+      "system_ram_available_bytes": 17875017728,
+      "pipeline_process_cpu_percent": 0.0,
+      "pipeline_process_rss_bytes": 131981312,
+      "processes": [
+        {
+          "name": "python.exe",
+          "rss_bytes": 86589440
+        },
+        {
+          "name": "ollama.exe",
+          "rss_bytes": 45391872
+        }
+      ],
+      "elapsed_seconds": 67.3,
+      "phase": "translate",
+      "stage": "Đang dịch lô câu 1–14 · Lời và giọng Việt: 0/14 câu đã nhận diện; chưa biết tổng số câu",
+      "source_prepared_seconds": 0.18,
+      "translation_completed_segments": 0,
+      "translation_total_segments": 14,
+      "segment_states": {
+        "TRANSLATING": 14
+      },
+      "completed_chunks": 1,
+      "total_chunks": 2,
+      "automatic_output_status": null,
+      "export_status": null,
+      "ollama_queue": null,
+      "download_metrics": null
+    },
+    {
+      "at_monotonic": 240553.078,
+      "gpu": [
+        {
+          "utilization_percent": 67,
+          "memory_used_mib": 3044,
+          "memory_total_mib": 4096
+        }
+      ],
+      "system_cpu_percent": 35.0,
+      "system_ram_used_percent": 47.8,
+      "system_ram_available_bytes": 17894199296,
+      "pipeline_process_cpu_percent": 0.8,
+      "pipeline_process_rss_bytes": 131985408,
+      "processes": [
+        {
+          "name": "python.exe",
+          "rss_bytes": 86593536
+        },
+        {
+          "name": "ollama.exe",
+          "rss_bytes": 45391872
+        }
+      ],
+      "elapsed_seconds": 69.4,
+      "phase": "translate",
+      "stage": "Đang dịch lô câu 1–14 · Lời và giọng Việt: 0/14 câu đã nhận diện; chưa biết tổng số câu",
+      "source_prepared_seconds": 0.18,
+      "translation_completed_segments": 0,
+      "translation_total_segments": 14,
+      "segment_states": {
+        "TRANSLATING": 14
+      },
+      "completed_chunks": 1,
+      "total_chunks": 2,
+      "automatic_output_status": null,
+      "export_status": null,
+      "ollama_queue": null,
+      "download_metrics": null
+    },
+    {
+      "at_monotonic": 240555.14,
+      "gpu": [
+        {
+          "utilization_percent": 66,
+          "memory_used_mib": 3045,
+          "memory_total_mib": 4096
+        }
+      ],
+      "system_cpu_percent": 44.4,
+      "system_ram_used_percent": 47.8,
+      "system_ram_available_bytes": 17892380672,
+      "pipeline_process_cpu_percent": 0.8,
+      "pipeline_process_rss_bytes": 131985408,
+      "processes": [
+        {
+          "name": "python.exe",
+          "rss_bytes": 86593536
+        },
+        {
+          "name": "ollama.exe",
+          "rss_bytes": 45391872
+        }
+      ],
+      "elapsed_seconds": 71.5,
+      "phase": "translate",
+      "stage": "Đang dịch lô câu 1–14 · Lời và giọng Việt: 0/14 câu đã nhận diện; chưa biết tổng số câu",
+      "source_prepared_seconds": 0.18,
+      "translation_completed_segments": 0,
+      "translation_total_segments": 14,
+      "segment_states": {
+        "TRANSLATING": 14
+      },
+      "completed_chunks": 1,
+      "total_chunks": 2,
+      "automatic_output_status": null,
+      "export_status": null,
+      "ollama_queue": null,
+      "download_metrics": null
+    },
+    {
+      "at_monotonic": 240557.218,
+      "gpu": [
+        {
+          "utilization_percent": 69,
+          "memory_used_mib": 3045,
+          "memory_total_mib": 4096
+        }
+      ],
+      "system_cpu_percent": 33.5,
+      "system_ram_used_percent": 47.8,
+      "system_ram_available_bytes": 17885835264,
+      "pipeline_process_cpu_percent": 0.0,
+      "pipeline_process_rss_bytes": 131985408,
+      "processes": [
+        {
+          "name": "python.exe",
+          "rss_bytes": 86593536
+        },
+        {
+          "name": "ollama.exe",
+          "rss_bytes": 45391872
+        }
+      ],
+      "elapsed_seconds": 73.5,
+      "phase": "translate",
+      "stage": "Đang dịch lô câu 1–14 · Lời và giọng Việt: 0/14 câu đã nhận diện; chưa biết tổng số câu",
+      "source_prepared_seconds": 0.18,
+      "translation_completed_segments": 0,
+      "translation_total_segments": 14,
+      "segment_states": {
+        "TRANSLATING": 14
+      },
+      "completed_chunks": 1,
+      "total_chunks": 2,
+      "automatic_output_status": null,
+      "export_status": null,
+      "ollama_queue": null,
+      "download_metrics": null
+    },
+    {
+      "at_monotonic": 240559.281,
+      "gpu": [
+        {
+          "utilization_percent": 69,
+          "memory_used_mib": 3045,
+          "memory_total_mib": 4096
+        }
+      ],
+      "system_cpu_percent": 34.7,
+      "system_ram_used_percent": 47.8,
+      "system_ram_available_bytes": 17889497088,
+      "pipeline_process_cpu_percent": 0.0,
+      "pipeline_process_rss_bytes": 131985408,
+      "processes": [
+        {
+          "name": "python.exe",
+          "rss_bytes": 86593536
+        },
+        {
+          "name": "ollama.exe",
+          "rss_bytes": 45391872
+        }
+      ],
+      "elapsed_seconds": 75.6,
+      "phase": "translate",
+      "stage": "Đang dịch lô câu 1–14 · Lời và giọng Việt: 0/14 câu đã nhận diện; chưa biết tổng số câu",
+      "source_prepared_seconds": 0.18,
+      "translation_completed_segments": 0,
+      "translation_total_segments": 14,
+      "segment_states": {
+        "TRANSLATING": 14
+      },
+      "completed_chunks": 1,
+      "total_chunks": 2,
+      "automatic_output_status": null,
+      "export_status": null,
+      "ollama_queue": null,
+      "download_metrics": null
+    },
+    {
+      "at_monotonic": 240561.359,
+      "gpu": [
+        {
+          "utilization_percent": 70,
+          "memory_used_mib": 3047,
+          "memory_total_mib": 4096
+        }
+      ],
+      "system_cpu_percent": 38.6,
+      "system_ram_used_percent": 47.8,
+      "system_ram_available_bytes": 17883910144,
+      "pipeline_process_cpu_percent": 0.8,
+      "pipeline_process_rss_bytes": 131985408,
+      "processes": [
+        {
+          "name": "python.exe",
+          "rss_bytes": 86593536
+        },
+        {
+          "name": "ollama.exe",
+          "rss_bytes": 45391872
+        }
+      ],
+      "elapsed_seconds": 77.7,
+      "phase": "translate",
+      "stage": "Đang dịch lô câu 1–14 · Lời và giọng Việt: 0/14 câu đã nhận diện; chưa biết tổng số câu",
+      "source_prepared_seconds": 0.18,
+      "translation_completed_segments": 0,
+      "translation_total_segments": 14,
+      "segment_states": {
+        "TRANSLATING": 14
+      },
+      "completed_chunks": 1,
+      "total_chunks": 2,
+      "automatic_output_status": null,
+      "export_status": null,
+      "ollama_queue": null,
+      "download_metrics": null
+    },
+    {
+      "at_monotonic": 240565.109,
+      "gpu": [
+        {
+          "utilization_percent": 7,
+          "memory_used_mib": 3047,
+          "memory_total_mib": 4096
+        }
+      ],
+      "system_cpu_percent": 46.0,
+      "system_ram_used_percent": 48.4,
+      "system_ram_available_bytes": 17678815232,
+      "pipeline_process_cpu_percent": 0.0,
+      "pipeline_process_rss_bytes": 285786112,
+      "processes": [
+        {
+          "name": "python.exe",
+          "rss_bytes": 240443392
+        },
+        {
+          "name": "ollama.exe",
+          "rss_bytes": 45342720
+        }
+      ],
+      "elapsed_seconds": 81.6,
+      "phase": "tts",
+      "stage": "Đang tạo giọng đọc câu 1 · Lời và giọng Việt: 0/14 câu đã nhận diện; chưa biết tổng số câu",
+      "source_prepared_seconds": 0.18,
+      "translation_completed_segments": 0,
+      "translation_total_segments": 14,
+      "segment_states": {
+        "TTS": 1,
+        "WAITING": 13
+      },
+      "completed_chunks": 1,
+      "total_chunks": 2,
+      "automatic_output_status": null,
+      "export_status": null,
+      "ollama_queue": null,
+      "download_metrics": null
+    },
+    {
+      "at_monotonic": 240567.343,
+      "gpu": [
+        {
+          "utilization_percent": 6,
+          "memory_used_mib": 3044,
+          "memory_total_mib": 4096
+        }
+      ],
+      "system_cpu_percent": 52.5,
+      "system_ram_used_percent": 48.6,
+      "system_ram_available_bytes": 17636052992,
+      "pipeline_process_cpu_percent": 0.0,
+      "pipeline_process_rss_bytes": 308953088,
+      "processes": [
+        {
+          "name": "python.exe",
+          "rss_bytes": 263610368
+        },
+        {
+          "name": "ollama.exe",
+          "rss_bytes": 45342720
+        }
+      ],
+      "elapsed_seconds": 83.7,
+      "phase": "tts",
+      "stage": "Đang tạo giọng đọc câu 7 · Lời và giọng Việt: 6/14 câu đã nhận diện; chưa biết tổng số câu",
+      "source_prepared_seconds": 0.18,
+      "translation_completed_segments": 6,
+      "translation_total_segments": 14,
+      "segment_states": {
+        "READY": 6,
+        "TTS": 1,
+        "WAITING": 7
+      },
+      "completed_chunks": 1,
+      "total_chunks": 2,
+      "automatic_output_status": null,
+      "export_status": null,
+      "ollama_queue": null,
+      "download_metrics": null
+    },
+    {
+      "at_monotonic": 240569.406,
+      "gpu": [
+        {
+          "utilization_percent": 13,
+          "memory_used_mib": 3044,
+          "memory_total_mib": 4096
+        }
+      ],
+      "system_cpu_percent": 48.7,
+      "system_ram_used_percent": 48.7,
+      "system_ram_available_bytes": 17584177152,
+      "pipeline_process_cpu_percent": 0.0,
+      "pipeline_process_rss_bytes": 311029760,
+      "processes": [
+        {
+          "name": "python.exe",
+          "rss_bytes": 265687040
+        },
+        {
+          "name": "ollama.exe",
+          "rss_bytes": 45342720
+        }
+      ],
+      "elapsed_seconds": 85.7,
+      "phase": "align",
+      "stage": "Đang căn nhịp đọc câu 12 · Lời và giọng Việt: 11/14 câu đã nhận diện; chưa biết tổng số câu",
+      "source_prepared_seconds": 0.18,
+      "translation_completed_segments": 11,
+      "translation_total_segments": 14,
+      "segment_states": {
+        "READY": 11,
+        "ALIGNING": 1,
+        "WAITING": 2
+      },
+      "completed_chunks": 1,
+      "total_chunks": 2,
+      "automatic_output_status": null,
+      "export_status": null,
+      "ollama_queue": null,
+      "download_metrics": null
+    },
+    {
+      "at_monotonic": 240571.484,
+      "gpu": [
+        {
+          "utilization_percent": 16,
+          "memory_used_mib": 3044,
+          "memory_total_mib": 4096
+        }
+      ],
+      "system_cpu_percent": 35.0,
+      "system_ram_used_percent": 48.6,
+      "system_ram_available_bytes": 17629868032,
+      "pipeline_process_cpu_percent": 0.0,
+      "pipeline_process_rss_bytes": 311103488,
+      "processes": [
+        {
+          "name": "python.exe",
+          "rss_bytes": 265760768
+        },
+        {
+          "name": "ollama.exe",
+          "rss_bytes": 45342720
+        }
+      ],
+      "elapsed_seconds": 87.8,
+      "phase": "failed",
+      "stage": "Chưa dịch hết video; các đoạn đã hoàn tất được giữ để tiếp tục. Chưa nhận diện được lời nói tại 0.18–6.25s.",
+      "source_prepared_seconds": 0.18,
+      "translation_completed_segments": 14,
+      "translation_total_segments": 14,
+      "segment_states": {
+        "READY": 14
+      },
+      "completed_chunks": 2,
+      "total_chunks": 2,
+      "automatic_output_status": "blocked",
+      "export_status": null,
+      "ollama_queue": null,
+      "download_metrics": null
+    }
+  ],
+  "resource_peaks": {
+    "pipeline_process_cpu_percent": 9.9,
+    "pipeline_process_rss_bytes": 2371674112,
+    "system_cpu_percent": 67.3,
+    "system_ram_used_percent": 48.7,
+    "gpu_utilization_percent": 100,
+    "gpu_memory_used_mib": 3047
+  },
+  "task_id": "c5d33983",
+  "submitted_at_elapsed_seconds": 0.125,
+  "model_loaded_before_run": false,
+  "status": "blocked",
+  "elapsed_seconds": 87.8,
+  "real_time_factor": 2.925,
+  "phase_timings_seconds": {
+    "align": 2.544,
+    "prepare": 1.844,
+    "source.asr": 41.438,
+    "source.audio_extract": 0.078,
+    "source.background_extract": 0.078,
+    "source.background_suppress": 0.656,
+    "source.diarization": 0.0,
+    "source_partial": 0.25,
+    "translate": 34.484,
+    "tts": 5.253
+  },
+  "download_metrics": {},
+  "source_prepared_seconds": 0.18,
+  "source_failure_code": "source_speech_unrecognized",
+  "missing_source_speech_spans": 1,
+  "segment_states": {
+    "READY": 14
+  },
+  "automatic_output": {
+    "status": "blocked",
+    "policy": "strict_media",
+    "reason": "media_incomplete"
+  },
+  "export": {},
+  "review_summary": {}
+}

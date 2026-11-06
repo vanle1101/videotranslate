@@ -1,0 +1,14 @@
+{
+  "observed_at": "2026-10-10T00:12:29+07:00",
+  "command": "venv/Scripts/python.exe reports/autonomous_audit/test_report_updater.py",
+  "scope": "audit reporting artifact only; real pipeline tests remain separate",
+  "result": "PASS",
+  "tests_passed": 4,
+  "duration_seconds": 0.684,
+  "checks": [
+    "partial runner events and restart deduplication",
+    "fix requires linked tests and regression reopens it",
+    "DONE and missing evidence do not verify media",
+    "localhost report server restricts files and mutation routes"
+  ]
+}

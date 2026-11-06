@@ -1,0 +1,313 @@
+{
+  "updated_at": "2026-10-10T00:43:08+07:00",
+  "reporter_pid": 12972,
+  "reporter_run_id": "cfc61c983948",
+  "report_samples": 34,
+  "report_interval_seconds": 60,
+  "audit_started_at": "2026-10-10T00:09:52+07:00",
+  "elapsed_audit_seconds": 1996.6682076454163,
+  "authorization": {
+    "immediate_repairs_authorized": true,
+    "inactivity_gate_enforced": false,
+    "source": "Latest user instruction cancels 30-minute gate; ordered real SHORT then LONG validation authorized",
+    "watchdog_input_data": {
+      "available": true,
+      "reason": "Continuous unchanged input tick observed",
+      "observed_continuous_idle_seconds": 180.0,
+      "os_idle_seconds": 193.78,
+      "eligible_inactivity_only": false,
+      "auto_fix_enabled": false,
+      "scope": "Windows keyboard/mouse in the observer's active console session; conservative, not application-specific",
+      "requirement": "1800 seconds continuously observed; separate job completion/checkpoint/backup and user-return checks still required"
+    },
+    "input_gate_role": "Informational only"
+  },
+  "ordered_runs": [
+    {
+      "video_label": "SHORT",
+      "video_id": "7692745161054506290",
+      "status": "FAILED",
+      "stage": "AI kiểm tra lại chưa hoàn tất. Bản nháp được giữ; bấm AI kiểm tra lại để thử tiếp.",
+      "progress_pct": null,
+      "eta_seconds": null,
+      "actual_output_verified": false,
+      "verification": {},
+      "task_id": "douyin_7692745161054506290",
+      "run_id": "real-68a6b4a3deaa",
+      "total_seconds": 320.040635,
+      "last_event_at": "2026-10-10T00:43:08+07:00",
+      "started_at": "2026-10-10T00:14:58+07:00",
+      "processed_seconds": 320.040635,
+      "elapsed_seconds": 1867.9529999999995,
+      "output_filename": "",
+      "total_chunks": 0,
+      "completed_chunks": 0,
+      "retry_chunks": 0,
+      "ai_queue": {
+        "active_requests": 0,
+        "queued_requests": 0,
+        "requests": 20,
+        "retry_requests": 1,
+        "cache_hits": 0,
+        "consecutive_failures": 0,
+        "circuit_retry_after": 0,
+        "half_open": false
+      },
+      "segment_states": {
+        "PENDING": 0,
+        "RUNNING": 0,
+        "COMPLETED": 106,
+        "RETRY_PENDING": 0,
+        "REVIEW_REQUIRED": 92,
+        "FAILED": 0
+      },
+      "current_segment": null,
+      "source_prepared_seconds": 0.0,
+      "review_scope": null,
+      "phase": "review",
+      "review_summary": {
+        "status": "failed"
+      },
+      "reviewing_segment_ids": [],
+      "completed_at": "2026-10-10T00:43:08+07:00",
+      "manifest_observation": {
+        "state": "READY",
+        "updated_at": "2026-10-10T00:42:58+07:00",
+        "segment_count": 198,
+        "segment_statuses": {
+          "READY": 198
+        },
+        "source_prepared_seconds": 0.0,
+        "total_duration_seconds": 320.040635,
+        "output_filename": "",
+        "output_exists": false,
+        "output_size_bytes": null
+      },
+      "event_age_seconds": 0.6577057838439941,
+      "progress_source": "runner event",
+      "review_substages": {
+        "source": "existing structured ai.log",
+        "task_id": "douyin_7692745161054506290",
+        "address_context": {
+          "read_segment_count": 36,
+          "uncertain_segment_count": 28,
+          "completed_subreads": 9,
+          "active_segment_ids": [
+            36,
+            37,
+            38,
+            39
+          ],
+          "last_read_at": "2026-10-10T00:37:10+07:00",
+          "eta_seconds": null,
+          "total_required_address_segments": null
+        },
+        "semantic_review": {
+          "completed_segment_count": null,
+          "status": "failed",
+          "checkpoint_batches_seen": 0,
+          "provider_response_is_semantic_completion": false,
+          "accepted_segments": 0
+        },
+        "provider": {
+          "requests_seen": 18,
+          "completed_seen": 15,
+          "active_request_count": 0,
+          "request_durations_seconds": [
+            37.718,
+            52.531,
+            60.406,
+            84.141,
+            50.672,
+            43.766,
+            37.578,
+            55.468,
+            69.39,
+            53.031,
+            43.578,
+            73.437,
+            50.265,
+            60.922,
+            68.469
+          ],
+          "active_phase": null
+        },
+        "manifest_total_segments": 198,
+        "note": "Address READ confirms a structured role/context reading, including uncertain IDs; it does not complete semantic/source/audio review. Total address work and stage ETA are unknown.",
+        "available": true
+      }
+    },
+    {
+      "video_label": "LONG",
+      "video_id": "7666381909177470271",
+      "status": "WAITING",
+      "stage": null,
+      "progress_pct": null,
+      "eta_seconds": null,
+      "actual_output_verified": false,
+      "verification": {},
+      "event_age_seconds": null,
+      "progress_source": "No ordered runner event yet"
+    }
+  ],
+  "ordered_run_ids": {
+    "SHORT": "7692745161054506290",
+    "LONG": "7666381909177470271"
+  },
+  "stages": [
+    "download",
+    "ASR",
+    "translation",
+    "segmentation",
+    "TTS",
+    "alignment",
+    "mix",
+    "export",
+    "verification"
+  ],
+  "resources": {
+    "io_available": true,
+    "handle_count": 3278,
+    "open_fd_count": null,
+    "read_bytes": 16244211885,
+    "write_bytes": 2137776097,
+    "read_bytes_per_second": 498309.19,
+    "write_bytes_per_second": 321021.29,
+    "cpu_percent": 41.5,
+    "rss_bytes": 4692254720,
+    "system_cpu_percent": 30.2,
+    "system_ram_available_bytes": 18931965952,
+    "system_ram_used_percent": 44.8,
+    "disk": {
+      "total_bytes": 1000186310656,
+      "used_bytes": 681250201600,
+      "free_bytes": 318936109056
+    },
+    "gpu": {
+      "available": true,
+      "observed_at": "2026-10-10T00:42:37+07:00",
+      "csv": "0, NVIDIA GeForce GTX 1050 Ti, 35, 1027, 4096, 45",
+      "error": null
+    },
+    "watchdog_stale": false,
+    "watchdog_age_seconds": 1.66
+  },
+  "health": {
+    "available": true,
+    "status": "ok",
+    "url": "http://127.0.0.1:50889/api/health",
+    "elapsed_ms": 0.0,
+    "ffmpeg": true,
+    "ffprobe": true,
+    "failures_in_a_row": 0
+  },
+  "API_telemetry": {
+    "observed_log_counts": {
+      "retry_events_seen": 4,
+      "requests_seen": 20,
+      "completed_seen": 16
+    },
+    "coverage": "Incomplete: existing structured production logs only; not a request interceptor"
+  },
+  "counts": {
+    "diagnostic_groups": 6,
+    "task_incident_keys": 7,
+    "logged_failure_occurrences": 13,
+    "runner_incident_events": 2,
+    "verified_fixed_groups": 0,
+    "unresolved_groups": 6
+  },
+  "test_counts": {
+    "PASS": 7,
+    "FAIL": 1
+  },
+  "historical_error_counts": {
+    "all_error_occurrences": 84,
+    "historical_runtime_occurrences": 46,
+    "intentional_test_fault_occurrences": 38,
+    "runtime_by_type": {
+      "AttributeError": 1,
+      "RuntimeError": 3,
+      "Unrecorded": 1,
+      "PacingReviewRejected": 32,
+      "VideoIntelligenceError": 4,
+      "ValueError": 5
+    },
+    "runtime_by_task": {
+      "108237d8": 1,
+      "0027d6fd": 1,
+      "6e2f28a7": 4,
+      "douyin_7692745161054506290": 35,
+      "046045e1": 1,
+      "9c3d2d15": 1,
+      "6b276d2e": 2,
+      "248460b3": 1
+    }
+  },
+  "fix_counts": {
+    "APPLIED_UNVERIFIED": 4
+  },
+  "status": "BLOCKED",
+  "verified_completed": false,
+  "notes": [
+    "Reporter collects evidence; it never changes source, restarts services or calls task routes",
+    "No ETA is invented; missing runner telemetry remains null",
+    "Output verification requires measured picture/audio/subtitles/duration/sync checks and an evidence file",
+    "Original frontend already shows stage, measured progress, download speed/ETA, segment/retry/chunk counts, AI queue and pipeline ETA",
+    "Frontend lacks host I/O/handle metrics and the ordered audit comparison; this separate dashboard supplies available metrics"
+  ],
+  "warnings": [],
+  "blocked_reasons": [
+    {
+      "error_type": "AutomaticApprovalRejected",
+      "stage": "production reload",
+      "component": "platform permission",
+      "severity": "High",
+      "summary": "Automatic approval review rejected the desktop-stop/restart command with stated reason: blocked by policy. No stop/restart occurred. Independent fixes/tests and actual checkpoint review continue.",
+      "id": "desktop-restart-policy",
+      "event_at": "2026-10-10T00:14:58+07:00",
+      "status": "OPEN_UNVERIFIED",
+      "source": "runner",
+      "details": {}
+    },
+    {
+      "error_type": "AutomaticApprovalRejected",
+      "stage": "background dashboard",
+      "component": "platform permission",
+      "severity": "Low",
+      "summary": "Automatic approval review rejected launching a separate persistent report-updater dashboard with stated reason: blocked by policy. Detached read-only watchdog is already alive; report one-shot updates work.",
+      "id": "dashboard-daemon-policy",
+      "event_at": "2026-10-10T00:14:58+07:00",
+      "status": "OPEN_UNVERIFIED",
+      "source": "runner",
+      "details": {}
+    }
+  ],
+  "acceptance_gates": {
+    "outputs_verified_and_terminal": false,
+    "all_recorded_tests_pass": false,
+    "all_diagnostic_groups_verified_fixed": false,
+    "no_unresolved_runner_incidents": false,
+    "ordered_short_then_long_proven": false
+  },
+  "evidence_references": {
+    "original_findings": "E:\\Dịch video\\workspace\\audit\\continuous-monitor\\initial-findings.json",
+    "preexisting_patch": "E:\\Dịch video\\workspace\\audit\\continuous-monitor\\preexisting-source-changes.patch",
+    "source_baseline_hashes": "E:\\Dịch video\\workspace\\audit\\continuous-monitor\\source-baseline-hashes.json",
+    "initial_manifests": "E:\\Dịch video\\workspace\\audit\\continuous-monitor\\initial-evidence",
+    "runtime_events": "E:\\Dịch video\\reports\\autonomous_audit\\runtime_events.jsonl"
+  },
+  "modified_source_files": [
+    "core/engines/alignment/timing_aligner.py",
+    "core/streaming/chunked_source.py",
+    "core/streaming/pipeline.py",
+    "core/streaming/source_revision.py",
+    "scripts/complete_and_export.py",
+    "scripts/finalize_all_segments.py",
+    "scripts/run_export.py",
+    "scripts/run_task_e2e.py",
+    "scripts/safe_legacy_helpers.py",
+    "scripts/synthesize_remaining.py",
+    "tests/test_legacy_helper_safety.py"
+  ]
+}

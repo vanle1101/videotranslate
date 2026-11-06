@@ -1,0 +1,261 @@
+{
+  "schema": 1,
+  "check_id": "qa-20261010-231454-7bfa5309",
+  "started_at": "2026-10-10T23:14:54+07:00",
+  "video_label": null,
+  "manifest": "E:\\Dịch video\\reports\\autonomous_audit\\qa\\checker-selftest-20261010-231452-8f025c5e\\stale-output-manifest.json",
+  "output": "E:\\Dịch video\\reports\\autonomous_audit\\qa\\checker-selftest-20261010-231452-8f025c5e\\synthetic-output.mp4",
+  "qa_directory": "E:\\Dịch video\\reports\\autonomous_audit\\qa\\checker-selftest-20261010-231452-8f025c5e\\cases\\qa-20261010-231454-7bfa5309",
+  "verified_completed": false,
+  "OUTPUT_VERIFIED": false,
+  "content_or_audio_quality_inferred_from_metadata": false,
+  "task_id": "synthetic-only",
+  "source": "E:\\Dịch video\\reports\\autonomous_audit\\qa\\checker-selftest-20261010-231452-8f025c5e\\synthetic-source.mp4",
+  "source_probe": {
+    "duration_seconds": 2.0,
+    "start_time_seconds": 0.0,
+    "size_bytes": 30888.0,
+    "streams": [
+      {
+        "index": 0,
+        "codec_name": "h264",
+        "codec_type": "video",
+        "width": 128,
+        "height": 96,
+        "duration": "2.000000",
+        "start_time": "0.000000",
+        "avg_frame_rate": "10/1",
+        "nb_frames": "20",
+        "rotation": 0,
+        "display_dimensions": [
+          128,
+          96
+        ]
+      },
+      {
+        "index": 1,
+        "codec_name": "aac",
+        "codec_type": "audio",
+        "sample_rate": "16000",
+        "channels": 1,
+        "duration": "2.000000",
+        "start_time": "0.000000",
+        "avg_frame_rate": "0/0",
+        "nb_frames": "33",
+        "rotation": 0
+      }
+    ]
+  },
+  "output_probe": {
+    "duration_seconds": 2.0,
+    "start_time_seconds": 0.0,
+    "size_bytes": 30888.0,
+    "streams": [
+      {
+        "index": 0,
+        "codec_name": "h264",
+        "codec_type": "video",
+        "width": 128,
+        "height": 96,
+        "duration": "2.000000",
+        "start_time": "0.000000",
+        "avg_frame_rate": "10/1",
+        "nb_frames": "20",
+        "rotation": 0,
+        "display_dimensions": [
+          128,
+          96
+        ]
+      },
+      {
+        "index": 1,
+        "codec_name": "aac",
+        "codec_type": "audio",
+        "sample_rate": "16000",
+        "channels": 1,
+        "duration": "2.000000",
+        "start_time": "0.000000",
+        "avg_frame_rate": "0/0",
+        "nb_frames": "33",
+        "rotation": 0
+      }
+    ]
+  },
+  "duration_difference_seconds": 0.0,
+  "pipeline_state": "READY",
+  "review_summary_counts": {
+    "status": "running"
+  },
+  "segments": [
+    {
+      "row_id": 0,
+      "status": "READY",
+      "revision": 0,
+      "source_text_sha256": "6ffe571c73cfbee7931afb6f08bc6bbb20ed82a2191f205a86b1bbfd190d42af",
+      "translation_sha256": "8aaecd06d85c7f743d3545e7b865f3053c647591f95919c1c0b003046d4757aa",
+      "cues": [
+        {
+          "start": 0.45,
+          "end": 0.85,
+          "text_sha256": "8aaecd06d85c7f743d3545e7b865f3053c647591f95919c1c0b003046d4757aa"
+        }
+      ],
+      "failures": [],
+      "source_start": 0.4,
+      "source_end": 1.0,
+      "dub_start": 0.4,
+      "dub_end": 1.0,
+      "known_source_speech": true,
+      "has_translated_speech": true,
+      "confirmed_silence": false,
+      "recorded_semantic_evidence": {
+        "status": "verified",
+        "source_supported": true,
+        "semantic_verified": true,
+        "second_pass_status": "completed",
+        "review_gate_revision": 2,
+        "address_verified": null,
+        "source_scope_conflict": null,
+        "audio_audit_status": null
+      },
+      "audio": {
+        "duration_seconds": 0.5,
+        "channels": 1,
+        "sample_rate": 16000,
+        "pcm_frames": 8000,
+        "peak_ratio": 0.21362956633198035,
+        "rms_dbfs": -17.388505431009197,
+        "last_20ms_rms_dbfs": -240.0,
+        "meaning_or_naturalness_verified": false
+      }
+    }
+  ],
+  "segment_count": 1,
+  "subtitles": {
+    "manifest_cue_count": 1,
+    "embedded_subtitle_streams": 0,
+    "sidecar_supplied": true,
+    "sidecar_verified": true,
+    "burned_in_visibility_verified": false,
+    "sidecar_cue_count": 1,
+    "unmatched_row_ids": []
+  },
+  "full_decode_verified": true,
+  "sampled_frames": [
+    {
+      "media": "source",
+      "at_seconds": 0.0,
+      "path": "E:\\Dịch video\\reports\\autonomous_audit\\qa\\checker-selftest-20261010-231452-8f025c5e\\cases\\qa-20261010-231454-7bfa5309\\00-source-0.000s.png",
+      "bytes": 253667,
+      "visual_reviewed": false
+    },
+    {
+      "media": "output",
+      "at_seconds": 0.0,
+      "path": "E:\\Dịch video\\reports\\autonomous_audit\\qa\\checker-selftest-20261010-231452-8f025c5e\\cases\\qa-20261010-231454-7bfa5309\\00-output-0.000s.png",
+      "bytes": 253667,
+      "visual_reviewed": false
+    },
+    {
+      "media": "source",
+      "at_seconds": 1.85,
+      "path": "E:\\Dịch video\\reports\\autonomous_audit\\qa\\checker-selftest-20261010-231452-8f025c5e\\cases\\qa-20261010-231454-7bfa5309\\01-source-1.850s.png",
+      "bytes": 328246,
+      "visual_reviewed": false
+    },
+    {
+      "media": "output",
+      "at_seconds": 1.85,
+      "path": "E:\\Dịch video\\reports\\autonomous_audit\\qa\\checker-selftest-20261010-231452-8f025c5e\\cases\\qa-20261010-231454-7bfa5309\\01-output-1.850s.png",
+      "bytes": 328246,
+      "visual_reviewed": false
+    }
+  ],
+  "bindings": {
+    "manifest_sha256": "60572a216f205ea6fd8666631e417dcd26fe0ac9a25c2179764e82a4eeaeb07f",
+    "source_sha256": "8d3498e0433f60cf46a5cf3685fa2051c81731b6eace88fde7356be639fe4f48",
+    "output_sha256": "8d3498e0433f60cf46a5cf3685fa2051c81731b6eace88fde7356be639fe4f48"
+  },
+  "independent_review": {
+    "supplied": false,
+    "valid": false,
+    "scope": "Requires actual independent complete source/output watching and output audio audition; flags alone are not review"
+  },
+  "technical_checks": {
+    "full_decode": true,
+    "duration": true,
+    "picture_stream_and_sampled_frames": true,
+    "audio_stream_and_row_wav_bounds": true,
+    "timing_bounds": true,
+    "subtitle_manifest_complete": true
+  },
+  "completed_at": "2026-10-10T23:14:54+07:00",
+  "elapsed_seconds": 0.579,
+  "failures": [
+    {
+      "code": "OUTPUT_NOT_PUBLISHED_BY_CURRENT_MANIFEST"
+    },
+    {
+      "code": "CAPTION_OUTPUT_MARKED_STALE"
+    },
+    {
+      "code": "GLOBAL_SEMANTIC_REVIEW_INCOMPLETE"
+    }
+  ],
+  "pending_content_audio_perceptual_review": [
+    "INDEPENDENT_CONTENT_AUDIO_PERCEPTUAL_REVIEW_PENDING"
+  ],
+  "subprocess_measurements": [
+    {
+      "stage": "probe_source",
+      "exit_code": 0,
+      "elapsed_seconds": 0.063,
+      "error_excerpt": null
+    },
+    {
+      "stage": "probe_output",
+      "exit_code": 0,
+      "elapsed_seconds": 0.046,
+      "error_excerpt": null
+    },
+    {
+      "stage": "full_output_decode",
+      "exit_code": 0,
+      "elapsed_seconds": 0.063,
+      "error_excerpt": null
+    },
+    {
+      "stage": "render_frame:source",
+      "exit_code": 0,
+      "elapsed_seconds": 0.094,
+      "error_excerpt": null
+    },
+    {
+      "stage": "render_frame:output",
+      "exit_code": 0,
+      "elapsed_seconds": 0.078,
+      "error_excerpt": null
+    },
+    {
+      "stage": "render_frame:source",
+      "exit_code": 0,
+      "elapsed_seconds": 0.109,
+      "error_excerpt": null
+    },
+    {
+      "stage": "render_frame:output",
+      "exit_code": 0,
+      "elapsed_seconds": 0.11,
+      "error_excerpt": null
+    }
+  ],
+  "limits": {
+    "deadline_seconds": 60,
+    "decode_timeout_seconds": 10,
+    "frame_count": 2,
+    "threads_per_ffmpeg": 1
+  },
+  "status": "REJECTED",
+  "acceptance_event_eligible": false,
+  "evidence_path": "E:\\Dịch video\\reports\\autonomous_audit\\qa\\checker-selftest-20261010-231452-8f025c5e\\cases\\qa-20261010-231454-7bfa5309\\acceptance.json"
+}

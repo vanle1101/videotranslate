@@ -1,0 +1,77 @@
+{
+  "status": "pending_real_pipeline_acceptance",
+  "sources": [
+    {
+      "url": "https://www.douyin.com/jingxuan?modal_id=7686836817752050994",
+      "provenance": "User supplied 2026-10-15",
+      "acceptance": "pending",
+      "source_evidence": "E:\\Dịch video\\workspace\\audit\\goal_runtime_20261014\\additional_sources_20261015\\7686836817752050994.json",
+      "source_metadata": {
+        "id": "7686836817752050994",
+        "title": "她今天有点不太对劲 《她今天有点不太对劲》 意外互换之后，东北留子勇闯韩国高中 #即梦片场 #即梦AI创作者成长计划 #她今天有点不太对劲 #瓦卡奖VACAT征集大赛 #AI创作者……版本过低，升级后可展示全部信息",
+        "duration": 432.426
+      },
+      "download": {
+        "status": "completed",
+        "file_path": "E:\\Dịch video\\workspace\\inputs\\video_82345f6a510644ed924253ecae68d881.mp4",
+        "bytes": 352939130,
+        "sha256": "015309276cebf857180c15b142b79bfda2eb2a41655b7f37d11eb7331edf4185",
+        "duration_seconds": 432.425215,
+        "ffprobe_returncode": 0,
+        "streams": [
+          {
+            "codec_name": "h264",
+            "codec_type": "video",
+            "width": 1922,
+            "height": 1080,
+            "duration": "432.400000"
+          },
+          {
+            "codec_name": "aac",
+            "codec_type": "audio",
+            "duration": "432.425215"
+          }
+        ],
+        "observed_utc": "2026-10-14T19:35:48.175050+00:00"
+      }
+    },
+    {
+      "url": "https://www.douyin.com/jingxuan?modal_id=7696088077957090575",
+      "provenance": "Public Douyin recommendation opened through Codex browser 2026-10-15",
+      "title_observed": "一口气看完2026最新科幻惊悚片希望hopeu #新片推荐 #韩国电影希望 #恐怖惊悚",
+      "creator_observed": "剧梗之王",
+      "listed_duration": "38:02",
+      "language": "unverified; title is not evidence of spoken language",
+      "acceptance": "pending",
+      "source_evidence": "E:\\Dịch video\\workspace\\audit\\goal_runtime_20261014\\additional_sources_20261015\\7696088077957090575.json",
+      "source_metadata": {
+        "id": "7696088077957090575",
+        "title": "一口气看完2026最新科幻惊悚片希望hopeu #新片推荐  #韩国电影希望 #恐怖惊悚",
+        "duration": 2282.434
+      },
+      "download": {
+        "status": "completed",
+        "file_path": "E:\\Dịch video\\workspace\\inputs\\video_170664c24bc14c0fb0ee3bdf62288d1a.mp4",
+        "bytes": 3097668748,
+        "sha256": "e1186f124a82ee54d0a0cc9402a864a0d794afdd43b52bc12c233d7de627f6b9",
+        "duration_seconds": 2282.428662,
+        "ffprobe_returncode": 0,
+        "streams": [
+          {
+            "codec_name": "hevc",
+            "codec_type": "video",
+            "width": 1758,
+            "height": 1080,
+            "duration": "2282.400000"
+          },
+          {
+            "codec_name": "aac",
+            "codec_type": "audio",
+            "duration": "2282.428662"
+          }
+        ],
+        "observed_utc": "2026-10-14T19:35:48.175551+00:00"
+      }
+    }
+  ]
+}

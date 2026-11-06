@@ -1,0 +1,432 @@
+{
+  "label": "before-restart",
+  "segments": 195,
+  "edited": 41,
+  "unchanged_other_texts": 154,
+  "all_source_unchanged": true,
+  "joke_153_159_unchanged": true,
+  "missing_speech_ids": [
+    38
+  ],
+  "review_summary": {
+    "status": "incomplete",
+    "checked": 194,
+    "verified": 71,
+    "corrected": 29,
+    "unresolved": 87,
+    "manual": 1,
+    "incomplete": 7
+  },
+  "audio_checks": [
+    {
+      "number": 33,
+      "text": "Con 19 tuổi.",
+      "revision": 6,
+      "wav_seconds": 0.921875,
+      "speech_end": 46.08233333333334,
+      "dub_tail_limit": null,
+      "speed_ratio": 1.35,
+      "sha256": "921dbdf40d6746e1967ccd706b10ab07a1fce4ef0e0112f040bfa6070d96fc44"
+    },
+    {
+      "number": 37,
+      "text": "Con cứ tưởng là...",
+      "revision": 2,
+      "wav_seconds": 0.9165,
+      "speech_end": 50.85979166666667,
+      "dub_tail_limit": null,
+      "speed_ratio": 1.35,
+      "sha256": "7dc4621e0d5e7509f41614f1dac0e9c2feef4b9c66e46413c33e6d72b88a8b5a"
+    },
+    {
+      "number": 38,
+      "text": "Hồi trẻ bố đẹp trai hơn chứ.",
+      "revision": 2,
+      "wav_seconds": 1.51,
+      "speech_end": 52.37629166666667,
+      "dub_tail_limit": null,
+      "speed_ratio": 1.18,
+      "sha256": "48bb408be2814b2a3a9bbd23cb808e1326d2d8755598dc8accf45147f4554e1f"
+    },
+    {
+      "number": 49,
+      "text": "Vậy gen của bố sau này cũng tốt đấy chứ.",
+      "revision": 2,
+      "wav_seconds": 2.506375,
+      "speech_end": 67.96000000000001,
+      "dub_tail_limit": null,
+      "speed_ratio": 1.0,
+      "sha256": "d1c138b0506d57978a0d9f430e69a05440a0436521105e44d5451c914cf05946"
+    },
+    {
+      "number": 50,
+      "text": "Chẳng nhờ bố mấy đâu.",
+      "revision": 1,
+      "wav_seconds": 1.3374583333333334,
+      "speech_end": 70.42999999999999,
+      "dub_tail_limit": 71.08,
+      "speed_ratio": 1.0,
+      "sha256": "2b8326134dad18907bed0d4200a1ac914cc7336fe73155f78a6abbc3b551fcab"
+    },
+    {
+      "number": 51,
+      "text": "Vậy con về tìm bố làm gì?",
+      "revision": 1,
+      "wav_seconds": 1.3827916666666666,
+      "speech_end": 72.42999999999999,
+      "dub_tail_limit": null,
+      "speed_ratio": 1.34,
+      "sha256": "47e78b4fe111e5ea880aeda3d0d11fef36af962f69b4566cc6ba7ca538d8a72b"
+    },
+    {
+      "number": 59,
+      "text": "Sau này cô ấy là vợ bố.",
+      "revision": 1,
+      "wav_seconds": 1.577875,
+      "speech_end": 83.25,
+      "dub_tail_limit": 83.92,
+      "speed_ratio": 1.18,
+      "sha256": "c2e1dfb669bfd65a82ae1e14f79e34efa3fb0d1cb99cd302548bde09a222e1dc"
+    },
+    {
+      "number": 63,
+      "text": "Chính mẹ con bảo con về.",
+      "revision": 2,
+      "wav_seconds": 1.4569583333333334,
+      "speech_end": 88.03999999999999,
+      "dub_tail_limit": null,
+      "speed_ratio": 1.13,
+      "sha256": "6dc746273f211710e720004ea5741918f09d36f3bd03e456972a59225cff2545"
+    },
+    {
+      "number": 67,
+      "text": "Cô ấy bảo là con gái của con.",
+      "revision": 3,
+      "wav_seconds": 1.4989166666666667,
+      "speech_end": 98.64,
+      "dub_tail_limit": 99.58,
+      "speed_ratio": 1.34,
+      "sha256": "4a71df88a00c8b104b1ff4dabadd04975ed7cd168a3dd17b042cd579271a6654"
+    },
+    {
+      "number": 68,
+      "text": "Chắc chẳng phải con của con đâu.",
+      "revision": 3,
+      "wav_seconds": 1.5604166666666666,
+      "speech_end": 101.44,
+      "dub_tail_limit": 101.68,
+      "speed_ratio": 1.14,
+      "sha256": "80640c5a88df4fcc9e2be51b9e13f241627af58551d964a17678f20a6e3012b1"
+    },
+    {
+      "number": 70,
+      "text": "Con tự soi gương xem đi.",
+      "revision": 2,
+      "wav_seconds": 1.2770416666666666,
+      "speech_end": 103.72,
+      "dub_tail_limit": 104.8,
+      "speed_ratio": 1.3,
+      "sha256": "8db4921530e92f3cc1fd5220d82c2adc804dada6d0946e51351cd43f8dd86334"
+    },
+    {
+      "number": 74,
+      "text": "Cháu thật là con gái nó à?",
+      "revision": 2,
+      "wav_seconds": 1.36125,
+      "speech_end": 112.75999999999999,
+      "dub_tail_limit": 113.5,
+      "speed_ratio": 1.3,
+      "sha256": "9dc111865cb6352f7e8affab78ac61bcbf7b300a5ab6ed697caa24b3ed1c4bb4"
+    },
+    {
+      "number": 76,
+      "text": "Dạ.",
+      "revision": 1,
+      "wav_seconds": 0.398875,
+      "speech_end": 115.66,
+      "dub_tail_limit": null,
+      "speed_ratio": 1.05,
+      "sha256": "11c733408723cd3aa83075e616c3ea203ac3e1739cfc0f1407fa7fb20eced652"
+    },
+    {
+      "number": 77,
+      "text": "Mẹ con có xinh không?",
+      "revision": 1,
+      "wav_seconds": 1.04525,
+      "speech_end": 117.07,
+      "dub_tail_limit": 118.08,
+      "speed_ratio": 1.35,
+      "sha256": "a77646859e33e4c389c4cb41c9368d4525c40a3aab1a26c9ac5c1e48884ac363"
+    },
+    {
+      "number": 78,
+      "text": "Bố thấy sao?",
+      "revision": 1,
+      "wav_seconds": 0.8513333333333334,
+      "speech_end": 118.88,
+      "dub_tail_limit": null,
+      "speed_ratio": 1.15,
+      "sha256": "2b6b9d218bebfcc2e6664e350989f6a4bcac0deeb90e73f51b3b20a01160b7e3"
+    },
+    {
+      "number": 83,
+      "text": "Sau này bố cháu cũng không ăn.",
+      "revision": 2,
+      "wav_seconds": 1.4452916666666666,
+      "speech_end": 128.56695833333333,
+      "dub_tail_limit": 128.95,
+      "speed_ratio": 1.27,
+      "sha256": "af80064c9b386d1e3fe2d9a1b6d541931e47419077e44f9b24efeea6bce0d761"
+    },
+    {
+      "number": 92,
+      "text": "Con thật là con gái bố sao?",
+      "revision": 1,
+      "wav_seconds": 1.404125,
+      "speech_end": 143.35,
+      "dub_tail_limit": 143.98,
+      "speed_ratio": 1.29,
+      "sha256": "ccb18fd1555805084823d72accd94ed4da16f704bafc08bc9b7d4fc75968dc4e"
+    },
+    {
+      "number": 94,
+      "text": "Sau này bố đẹp trai hơn à?",
+      "revision": 1,
+      "wav_seconds": 1.3567916666666666,
+      "speech_end": 147.0,
+      "dub_tail_limit": 147.56,
+      "speed_ratio": 1.34,
+      "sha256": "dd423790a8db72935c8b5bd61bef5978601a14931e929d158d06ecbc014e256c"
+    },
+    {
+      "number": 98,
+      "text": "Vậy mẹ con xinh thật nhỉ.",
+      "revision": 2,
+      "wav_seconds": 1.599375,
+      "speech_end": 154.41137500000002,
+      "dub_tail_limit": null,
+      "speed_ratio": 1.1,
+      "sha256": "b4f670b43027e47fab68ceed285376f60e3f05ce10dca20bb9bf645a38b5b8e7"
+    },
+    {
+      "number": 101,
+      "text": "Tối nay bố có đi không.",
+      "revision": 2,
+      "wav_seconds": 1.1842916666666667,
+      "speech_end": 157.55220833333334,
+      "dub_tail_limit": 157.62,
+      "speed_ratio": 1.28,
+      "sha256": "3610ad07ca77b31709d4893b1808b5adb60d268a7c4b4c3f113f718c7b460ff6"
+    },
+    {
+      "number": 104,
+      "text": "Con thì sao?",
+      "revision": 1,
+      "wav_seconds": 0.845375,
+      "speech_end": 159.82999999999998,
+      "dub_tail_limit": 160.64,
+      "speed_ratio": 1.1,
+      "sha256": "f748eba6305d18322795c537875f197903f67e56752c6b3bad7a299e0830baeb"
+    },
+    {
+      "number": 109,
+      "text": "Mười phần trăm còn lại giống bố.",
+      "revision": 3,
+      "wav_seconds": 1.322125,
+      "speech_end": 166.087875,
+      "dub_tail_limit": 166.1,
+      "speed_ratio": 1.35,
+      "sha256": "e1c0e4e915801fc2ad727249956657242adf5d9b2eca165ce60d594039156822"
+    },
+    {
+      "number": 114,
+      "text": "Con thật sự không về...",
+      "revision": 4,
+      "wav_seconds": 1.2994583333333334,
+      "speech_end": 170.714125,
+      "dub_tail_limit": null,
+      "speed_ratio": 1.14,
+      "sha256": "c41bec3c820c5366e1c93d5b0e716b38109bddb1b2f57ffd5aeaca22deeada57"
+    },
+    {
+      "number": 115,
+      "text": "Để đùa với bố đâu.",
+      "revision": 4,
+      "wav_seconds": 1.0507083333333334,
+      "speech_end": 171.81358333333333,
+      "dub_tail_limit": null,
+      "speed_ratio": 1.35,
+      "sha256": "f59f06120a9f64ac2571254afa36e068de8e9415cc762b4310a2c14996af153c"
+    },
+    {
+      "number": 118,
+      "text": "Mẹ con chỉ dặn con một câu.",
+      "revision": 1,
+      "wav_seconds": 1.605875,
+      "speech_end": 176.04000000000002,
+      "dub_tail_limit": 176.31,
+      "speed_ratio": 1.12,
+      "sha256": "6eedde4c786b248dc5a8bb30a880d69f765c8038c2aa6200395c86082110e17d"
+    },
+    {
+      "number": 122,
+      "text": "Còn con thì sao?",
+      "revision": 3,
+      "wav_seconds": 0.8684583333333333,
+      "speech_end": 180.71,
+      "dub_tail_limit": 180.83,
+      "speed_ratio": 1.35,
+      "sha256": "a61e2bfcc7e36fde24236b16827981f3c4a02548ad085a14c05233219e585122"
+    },
+    {
+      "number": 123,
+      "text": "Con...",
+      "revision": 1,
+      "wav_seconds": 0.31904166666666667,
+      "speech_end": 181.07000000000002,
+      "dub_tail_limit": null,
+      "speed_ratio": 1.16,
+      "sha256": "359d3c9433f0430c90f158957ba7df2ceab2d658b2c0392663dbb2ae8b69baa4"
+    },
+    {
+      "number": 124,
+      "text": "Nếu bố mẹ không quen nhau...",
+      "revision": 1,
+      "wav_seconds": 1.2268333333333334,
+      "speech_end": 182.7,
+      "dub_tail_limit": null,
+      "speed_ratio": 1.35,
+      "sha256": "c00da70044f047b07a266f57d696688eecd869e1d5c81f9d5f81d3592b241306"
+    },
+    {
+      "number": 125,
+      "text": "Thì còn có con không?",
+      "revision": 3,
+      "wav_seconds": 1.0167083333333333,
+      "speech_end": 183.73683333333332,
+      "dub_tail_limit": 184.41,
+      "speed_ratio": 1.33,
+      "sha256": "404834bd8c97ba5ceb55dbdc5ba0e0114ad39f1d0b58ec6141701b660496d8b5"
+    },
+    {
+      "number": 136,
+      "text": "Bố tôi không đi.",
+      "revision": 2,
+      "wav_seconds": 0.856375,
+      "speech_end": 197.53,
+      "dub_tail_limit": null,
+      "speed_ratio": 1.35,
+      "sha256": "75980f4f2a65469d60bdb903937db27b1863cfadd6e1d13905d3cc701688a3ce"
+    },
+    {
+      "number": 138,
+      "text": "Tối nay bố tôi không đi đâu hết.",
+      "revision": 3,
+      "wav_seconds": 1.5670416666666667,
+      "speech_end": 200.75766666666664,
+      "dub_tail_limit": null,
+      "speed_ratio": 1.18,
+      "sha256": "8e1f951e432c2efa76dca4df055018244a2035354be3587495b6b80f0f992d8b"
+    },
+    {
+      "number": 140,
+      "text": "Tối nay bố tôi sẽ mắc sai lầm lớn nhất đời.",
+      "revision": 1,
+      "wav_seconds": 2.2595,
+      "speech_end": 203.67,
+      "dub_tail_limit": null,
+      "speed_ratio": 1.18,
+      "sha256": "8540c15f6853728990df477dbcb5e7dc55ce4dc621dd7fb45f46e3f8a4150690"
+    },
+    {
+      "number": 143,
+      "text": "Mẹ con tên gì?",
+      "revision": 1,
+      "wav_seconds": 0.9317083333333334,
+      "speech_end": 206.69000000000003,
+      "dub_tail_limit": 206.94,
+      "speed_ratio": 1.33,
+      "sha256": "99591bb10c63d880dfb4feaa016fa1c54c21bbbda6d130bf4ecd0227791284a7"
+    },
+    {
+      "number": 149,
+      "text": "Bố đến cũng chẳng tìm được.",
+      "revision": 4,
+      "wav_seconds": 1.1746666666666667,
+      "speech_end": 211.79999999999998,
+      "dub_tail_limit": null,
+      "speed_ratio": 1.3,
+      "sha256": "bce71e0ef29a74fe0e1341ea6005be999f1146e080f8c8f015abe8ba6c852c80"
+    },
+    {
+      "number": 160,
+      "text": "Sau này nó làm ăn thế nào?",
+      "revision": 1,
+      "wav_seconds": 1.4447916666666667,
+      "speech_end": 222.46495833333333,
+      "dub_tail_limit": 222.53,
+      "speed_ratio": 1.21,
+      "sha256": "94715d199579fb5448986e4bbd9fc230cb08092815d623ed17d10c05d7fb6fa8"
+    },
+    {
+      "number": 162,
+      "text": "Có tiền không?",
+      "revision": 2,
+      "wav_seconds": 0.8722083333333334,
+      "speech_end": 224.35679166666668,
+      "dub_tail_limit": 224.79,
+      "speed_ratio": 1.0,
+      "sha256": "4518cdfda9395cc9e866bc2c2614849c2ac7e1b70f680e31e81042be6ad96ed1"
+    },
+    {
+      "number": 164,
+      "text": "Có hiếu không?",
+      "revision": 1,
+      "wav_seconds": 0.8529166666666667,
+      "speech_end": 226.43,
+      "dub_tail_limit": 226.97,
+      "speed_ratio": 1.0,
+      "sha256": "e9bbc45f62ccf6d052afad4e3fc08ec684bc4a1400414c37fdf3970eb8806e89"
+    },
+    {
+      "number": 172,
+      "text": "Mẹ con đâu rồi?",
+      "revision": 2,
+      "wav_seconds": 0.9225833333333333,
+      "speech_end": 256.60516666666666,
+      "dub_tail_limit": null,
+      "speed_ratio": 1.35,
+      "sha256": "1185d60d6c03b5032416ad6157923e58619ab5f9e89fd5ee2a6e30fe0a507f4e"
+    },
+    {
+      "number": 173,
+      "text": "Bố biết sao được?",
+      "revision": 3,
+      "wav_seconds": 1.095,
+      "speech_end": 257.669,
+      "dub_tail_limit": null,
+      "speed_ratio": 1.02,
+      "sha256": "a9fda8379af1289e4902abba8c54ae8002498f1231126401001426a1cf9653b6"
+    },
+    {
+      "number": 174,
+      "text": "Con có nói mẹ trông thế nào đâu.",
+      "revision": 3,
+      "wav_seconds": 1.4498333333333333,
+      "speech_end": 259.239,
+      "dub_tail_limit": null,
+      "speed_ratio": 1.35,
+      "sha256": "e6fec2d5a8b28cd2351c4cf19292298bd8118f18b46b753ad69701b9190bdf4f"
+    },
+    {
+      "number": 181,
+      "text": "Tôi là bố con bé.",
+      "revision": 1,
+      "wav_seconds": 1.00625,
+      "speech_end": 280.71999999999997,
+      "dub_tail_limit": null,
+      "speed_ratio": 1.33,
+      "sha256": "54d5a06bb31a795e58c87254e95bd69231474696058643d0a1b909ee13443717"
+    }
+  ]
+}

@@ -1,0 +1,31 @@
+<!doctype html>
+<html lang="vi">
+<meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Giám sát dịch video — kiểm chứng thực tế</title>
+<style>
+:root{color-scheme:dark;font:15px system-ui,sans-serif;color:#e4edf7;background:#101722}body{max-width:1200px;margin:28px auto;padding:0 20px}h1{font-size:25px;margin-bottom:6px}h2{font-size:18px;margin:24px 0 12px}.muted{color:#99aabd}.row{display:flex;gap:16px;flex-wrap:wrap}.card{flex:1;min-width:250px;background:#192332;border:1px solid #2b3a50;border-radius:12px;padding:18px}.pill{display:inline-block;background:#2b394d;padding:4px 9px;border-radius:6px;font-size:12px}progress{width:100%;height:18px;accent-color:#41c7a3;margin-top:16px}dl{display:grid;grid-template-columns:1fr 1fr;gap:9px}dt{color:#99aabd}dd{margin:0;text-align:right}table{width:100%;border-collapse:collapse}td,th{padding:10px;border-bottom:1px solid #2b3a50;text-align:left;font-size:13px}.bad{color:#ffab91}.ok{color:#61dcb0}a{color:#78c6ff}#connection{float:right}small{line-height:1.6}.metrics .card{min-width:160px}.big{font-size:24px;font-weight:650}.note{line-height:1.6;margin-top:20px}.stages{line-height:1.8;color:#99aabd}
+</style>
+<body>
+<span id="connection" class="pill">Chờ dữ liệu</span><h1>Giám sát dịch video</h1>
+<p class="muted">SHORT trước, LONG sau · chỉ hiển thị bằng chứng đã ghi nhận · cập nhật báo cáo mỗi 60 giây</p>
+<p id="status" class="pill">Chưa kiểm chứng hoàn tất</p><p id="stamp" class="muted"></p>
+<div class="row" id="jobs"></div>
+<h2>Tài nguyên đang quan sát</h2><div class="row metrics" id="resources"></div>
+<h2>Lỗi và kiểm thử</h2><div class="row"><div class="card"><h3>Lỗi</h3><div id="errors"></div></div><div class="card"><h3>Kiểm thử / sửa lỗi</h3><div id="tests"></div></div></div>
+<p class="stages">Tải video → ASR → Dịch → Phân đoạn → TTS → Đồng bộ → Ghép âm → Xuất → Kiểm chứng</p>
+<p class="note muted">Quyền sửa ngay đã được người dùng cấp. Bộ đếm không thao tác chỉ để tham khảo. Chưa có dữ liệu sẽ hiển thị “—”; không suy đoán ETA hoặc kết quả kiểm thử. Dashboard không chứa lời thoại, bản dịch hay thông tin xác thực.</p>
+<p><a href="final_report.md" target="_blank">Báo cáo hiện tại</a> · <a href="fixes_applied.md" target="_blank">Các sửa đổi</a> · <a href="benchmark_results.json" target="_blank">Số liệu đo</a> · <a href="test_results.json" target="_blank">Kiểm thử</a></p>
+<script>
+const $=id=>document.getElementById(id),esc=value=>String(value??'—').replace(/[&<>"']/g,char=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[char]));
+const number=value=>typeof value==='number'&&Number.isFinite(value)?value.toLocaleString('vi-VN',{maximumFractionDigits:1}):'—';
+const duration=value=>typeof value==='number'?`${Math.floor(value/60)}p ${Math.floor(value%60)}s`:'—';
+const bytes=value=>typeof value==='number'?`${number(value/1024/1024)} MB`:'—';
+const dl=items=>`<dl>${items.map(([name,value])=>`<dt>${esc(name)}</dt><dd>${esc(value)}</dd>`).join('')}</dl>`;
+async function refresh(){try{const response=await fetch(`live_progress.json?t=${Date.now()}`,{cache:'no-store'});if(!response.ok)throw Error('HTTP '+response.status);const data=await response.json();const age=(Date.now()-Date.parse(data.updated_at))/1000;$('connection').textContent=age>130?'Báo cáo chưa cập nhật':'Đang theo dõi';$('connection').classList.toggle('bad',age>130||data.resources.watchdog_stale);$('status').textContent=data.status;$('status').classList.toggle('ok',data.verified_completed);$('stamp').textContent=`Cập nhật: ${data.updated_at} · Đã quan sát ${duration(data.elapsed_audit_seconds)} · Health: ${data.health.status??'—'}`;
+$('jobs').innerHTML=data.ordered_runs.map(job=>{const manifest=job.manifest_observation??{},pct=typeof job.progress_pct==='number'?job.progress_pct:null,queue=job.ai_queue??{};return `<section class="card"><span class="pill">${esc(job.video_label)}</span><h2>${esc(job.video_id)}</h2><p>${esc(job.status)} · ${esc(job.stage)}</p><progress ${pct===null?'':`value="${Math.max(0,Math.min(100,pct))}" max="100"`}></progress><p class="muted">${pct===null?'Chưa có số liệu phần trăm':number(pct)+'%'}</p>${dl([['Đã xử lý',`${number(job.processed_seconds)} / ${number(job.total_seconds)} s`],['Thời gian',duration(job.elapsed_seconds)],['Còn lại (ETA)',duration(job.eta_seconds)],['Câu đã lưu',number(manifest.segment_count)],['Hàng đợi AI',`${number(queue.active_requests)} chạy / ${number(queue.queued_requests)} chờ`],['Retry',number(job.retry_count??job.retry_chunks)],['Video đã kiểm chứng',job.actual_output_verified?'Đạt':'Chưa'],['Tuổi dữ liệu tiến độ',duration(job.event_age_seconds)]])}<small class="muted">${esc(job.output_filename??manifest.output_filename??'Chưa có video đầu ra')}</small></section>`}).join('');
+const r=data.resources;$('resources').innerHTML=[['CPU tiến trình',typeof r.cpu_percent==='number'?number(r.cpu_percent)+'%':'—'],['RAM tiến trình',bytes(r.rss_bytes)],['RAM khả dụng',bytes(r.system_ram_available_bytes)],['Đọc / ghi mỗi giây',`${bytes(r.read_bytes_per_second)} / ${bytes(r.write_bytes_per_second)}`],['Handles / FD',number(r.handle_count??r.open_fd_count)],['GPU',r.gpu?.available?r.gpu.csv:'Chưa có số liệu']].map(([name,value])=>`<div class="card"><div class="muted">${esc(name)}</div><p class="big">${esc(value)}</p></div>`).join('');
+$('errors').innerHTML=dl([['Nhóm chẩn đoán',number(data.counts.diagnostic_groups)],['Sự cố theo tác vụ',number(data.counts.task_incident_keys)],['Lần lỗi trong log',number(data.counts.logged_failure_occurrences)],['Nhóm đã xác minh sửa',number(data.counts.verified_fixed_groups)],['Nhóm chưa xử lý',number(data.counts.unresolved_groups)],['Sự cố runner',number(data.counts.runner_incident_events)]]);
+$('tests').innerHTML=dl([...Object.entries(data.test_counts).map(([key,value])=>['Test '+key,number(value)]),...Object.entries(data.fix_counts).map(([key,value])=>['Fix '+key,number(value)])])+(Object.keys(data.test_counts).length?'':'<p class="muted">Chưa có kết quả kiểm thử được ghi nhận.</p>');
+}catch(error){$('connection').textContent='Không đọc được báo cáo';$('connection').classList.add('bad');$('stamp').textContent='Mở dashboard qua localhost HTTP server của report_updater.py; xem báo cáo Markdown nếu server chưa chạy.'}}
+refresh();setInterval(refresh,5000);
+</script></body></html>

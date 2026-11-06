@@ -1,0 +1,107 @@
+{
+  "updated_at": "2026-10-10T00:43:08+07:00",
+  "counts": {
+    "PASS": 7,
+    "FAIL": 1
+  },
+  "tests": [
+    {
+      "test_id": "audit-reporter-acceptance",
+      "test_name": "Audit reporter acceptance checks (4)",
+      "test_kind": "artifact-unit-integration",
+      "result": "PASS",
+      "at": "2026-10-10T00:12:29+07:00",
+      "run_id": "",
+      "duration_seconds": 0.684,
+      "evidence_path": "E:\\Dịch video\\reports\\autonomous_audit\\reporter_validation.json",
+      "video_label": null,
+      "details": {}
+    },
+    {
+      "test_id": "source-tests-85",
+      "test_name": "Source identity, preparation and preview regressions (85)",
+      "test_kind": "unit-integration-real-ffmpeg",
+      "result": "PASS",
+      "at": "2026-10-10T00:14:58+07:00",
+      "run_id": "",
+      "duration_seconds": 6.39,
+      "evidence_path": "E:\\Dịch video\\workspace\\private\\autonomous-tests\\source\\source-fix-report.json",
+      "video_label": null,
+      "details": {}
+    },
+    {
+      "test_id": "tts-tests-126",
+      "test_name": "Timing publication, natural speech and speech cache (126)",
+      "test_kind": "unit-integration-real-pcm",
+      "result": "PASS",
+      "at": "2026-10-10T00:14:58+07:00",
+      "run_id": "",
+      "duration_seconds": 14.77,
+      "evidence_path": "E:\\Dịch video\\workspace\\private\\autonomous-tests\\tts\\tts_findings.json",
+      "video_label": null,
+      "details": {}
+    },
+    {
+      "test_id": "legacy-helper-safety-tests-12",
+      "test_name": "Retired helper CLI and import safety",
+      "test_kind": "script-entry-point-regression",
+      "result": "PASS",
+      "at": "2026-10-10T00:21:34+07:00",
+      "run_id": "",
+      "duration_seconds": 15.25,
+      "evidence_path": "E:\\Dịch video\\workspace\\private\\autonomous-tests\\tts\\helper_safety_tests.json",
+      "video_label": null,
+      "details": {}
+    },
+    {
+      "test_id": "legacy-helper-safety-tests-15",
+      "test_name": "Five retired helper CLI and import safety",
+      "test_kind": "script-entry-point-regression",
+      "result": "PASS",
+      "at": "2026-10-10T00:25:47+07:00",
+      "run_id": "",
+      "duration_seconds": 7.26,
+      "evidence_path": "E:\\Dịch video\\workspace\\private\\autonomous-tests\\tts\\helper_e2e_safety_tests.json",
+      "video_label": null,
+      "details": {}
+    },
+    {
+      "test_id": "python-offline-a163a3ab327e",
+      "test_name": "python-offline",
+      "test_kind": "offline-regression-isolated",
+      "result": "FAIL",
+      "at": "2026-10-10T00:28:40+07:00",
+      "run_id": "",
+      "duration_seconds": 418.328,
+      "evidence_path": "E:\\Dịch video\\reports\\autonomous_audit\\regression-evidence.json",
+      "video_label": null,
+      "details": {}
+    },
+    {
+      "test_id": "python-qt-offscreen-1893cd45b74a",
+      "test_name": "python-qt-offscreen",
+      "test_kind": "offline-regression-isolated",
+      "result": "PASS",
+      "at": "2026-10-10T00:29:03+07:00",
+      "run_id": "",
+      "duration_seconds": 22.687,
+      "evidence_path": "E:\\Dịch video\\reports\\autonomous_audit\\regression-evidence.json",
+      "video_label": null,
+      "details": {}
+    },
+    {
+      "test_id": "node-ui-offline-9cab0e262811",
+      "test_name": "node-ui-offline",
+      "test_kind": "offline-regression-isolated",
+      "result": "PASS",
+      "at": "2026-10-10T00:29:06+07:00",
+      "run_id": "",
+      "duration_seconds": 2.937,
+      "evidence_path": "E:\\Dịch video\\reports\\autonomous_audit\\regression-evidence.json",
+      "video_label": null,
+      "details": {}
+    }
+  ],
+  "all_recorded_tests_pass": false,
+  "note": "No test result is fabricated or inferred from pipeline DONE"
+}
