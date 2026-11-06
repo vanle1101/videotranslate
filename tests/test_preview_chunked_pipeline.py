@@ -271,7 +271,8 @@ def test_explicit_review_only_rechecks_published_preview_and_preserves_waiting_l
         assert not any(event == "progress" and payload["status"] == "COMPLETED" for event, payload in events)
 
     asyncio.run(run())
-    assert reviewed == [{"regenerate_audio": True, "force_review": True, "segment_ids": {0, 1, 2}}]
+    assert reviewed == [{"regenerate_audio": True, "force_review": True,
+                         "segment_ids": {0, 1, 2}, "fast_local": False}]
     assert prepared == [(0, 24)] and speech == [0, 1, 2]
 
 
@@ -879,6 +880,7 @@ def test_retry_review_failure_keeps_incomplete_evidence_instead_of_forcing_verif
 def test_semantic_review_stage_uses_indeterminate_progress_with_real_source_coverage(preview, monkeypatch):
     session, *_ , events = preview
     session._visual_completed_seconds = 12
+    session.is_running = True
     monkeypatch.setattr(session, "_review_translations", StreamingPipelineSession._review_translations.__get__(session))
     row = SegmentItem(0, 0, 1, 1)
     row.text_zh = "源"
@@ -925,7 +927,8 @@ def test_turning_ocr_review_off_still_uses_bounded_preview_then_full(preview, mo
         await session.translate_full()
         await session.start_task
         await session.worker_task
-        assert session.get_progress()["status"] == "COMPLETED"
+        assert session.get_progress()["status"] == "PREPARED"
+        assert not getattr(session, "output_filename", "")
         assert session.playable_until == 64
     asyncio.run(run())
     assert prepared == [(0, 24), (32, 56)]

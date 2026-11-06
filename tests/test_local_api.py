@@ -54,6 +54,9 @@ class LocalAPITests(unittest.TestCase):
             patch.dict(main.active_export_tasks, {}, clear=True),
             patch.dict(main.stream_sockets, {}, clear=True),
             patch.object(main, "task_history", []),
+            patch.object(settings, "TTS_ENGINE", "edge-tts"),
+            patch.object(settings, "LLM_PROVIDER", "opencode"),
+            patch.object(settings, "TRANSLATION_CHUNK_WORKERS", 1),
         ]
         for item in self.patches:
             item.start()

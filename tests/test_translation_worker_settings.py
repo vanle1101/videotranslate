@@ -82,6 +82,8 @@ def worker_api(tmp_path, monkeypatch):
     monkeypatch.setattr(main.settings, "BASE_DIR", tmp_path)
     monkeypatch.setattr(main.settings, "TRANSLATION_CHUNK_WORKERS", 5)
     monkeypatch.setattr(main.settings, "OPENCODE_CONCURRENCY", 5)
+    # Exercise multi-worker provider behavior rather than the machine's Ollama cap.
+    monkeypatch.setattr(main.settings, "LLM_PROVIDER", "opencode")
     monkeypatch.setattr(main, "active_streaming_sessions", {})
     monkeypatch.setattr(main, "active_export_tasks", {})
     monkeypatch.setattr(main, "resolve_api_key", lambda: None)

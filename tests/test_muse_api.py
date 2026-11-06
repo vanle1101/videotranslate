@@ -12,6 +12,8 @@ from core.services.muse_service import ERRORS, MuseError
 
 @pytest.fixture
 def muse(monkeypatch):
+    # Keep settings API tests independent of the machine's local provider.
+    monkeypatch.setattr(settings, "LLM_PROVIDER", "opencode")
     service = Mock()
     state = {"installed": True, "running": True, "logged_in": True, "composer_ready": True}
     service.status.return_value = state.copy()

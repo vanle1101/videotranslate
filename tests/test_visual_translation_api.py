@@ -72,7 +72,8 @@ def source_api(tmp_path, monkeypatch):
 def post_source(source_api, route, enabled):
     async def request():
         async with httpx.AsyncClient(transport=httpx.ASGITransport(app=main.app), base_url="http://test") as api:
-            payload = {"voice": "vi-VN-HoaiMyNeural", "tts_engine": "edge-tts"}
+            payload = {"voice": "vi-VN-HoaiMyNeural", "tts_engine": "edge-tts",
+                       "translation_mode": "preview"}
             if enabled is not None:
                 payload["visual_translation"] = enabled
             if route == "upload":

@@ -38,7 +38,7 @@ def test_automatic_language_policy_invalidates_old_source_but_not_background(mon
     monkeypatch.setattr(chunked_source, "_media_identity", lambda _: {"media": "same"})
     monkeypatch.setattr(source_revision, "source_runtime_identity", lambda _: {"runtime": "same"})
     identity = chunked_source._source_identity(SimpleNamespace())
-    assert identity["language_routing_version"] == 7
+    assert identity["language_routing_version"] == 8
     assert identity != {**identity, "language_routing_version": 6}
     assert chunked_source._media_identity(SimpleNamespace()) == {"media": "same"}
 

@@ -37,6 +37,8 @@ def test_shared_queue_diagnostics_never_resolve_filesystem_paths(monkeypatch, tm
 def isolated(monkeypatch, tmp_path):
     layer = AIExecutionLayer(AIExecutionPolicy(retry_jitter=0), cache_root=tmp_path / "cache")
     monkeypatch.setattr(oc, "_shared_execution_layer", lambda: layer)
+    # This adapter-only suite must not inherit the machine-level Ollama choice.
+    monkeypatch.setattr(settings, "LLM_PROVIDER", "opencode")
     monkeypatch.setattr(settings, "OPENCODE_API_KEY", "")
     monkeypatch.delenv("OPENCODE_API_KEY", raising=False)
     monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path / "existing-data"))

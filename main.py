@@ -55,7 +55,7 @@ from core.history_thumbnail import (
 )
 from core.streaming.output_gate import final_output_metadata, missing_spoken_output_ids, missing_speech_message
 from core.runtime_errors import export_failure
-from core.runtime_revision import STARTED_SOURCE_REVISION
+from core.runtime_revision import STARTED_SOURCE_REVISION, source_revision as current_source_revision
 from core.media_preview import preview_manager, DEFAULT_COMPATIBILITY_SECONDS
 from core.voice_catalog import list_voices, resolve_voice
 from core.voice_preview import select_voice, voice_preview_manager, VoicePreviewBusy
@@ -122,8 +122,13 @@ def _source_start_lock():
 
 @app.get("/api/health")
 async def health():
+    disk_revision = current_source_revision()
     return {"status": "ok", "ffmpeg": bool(shutil.which("ffmpeg")),
-            "ffprobe": bool(shutil.which("ffprobe")), "source_revision": STARTED_SOURCE_REVISION}
+            "ffprobe": bool(shutil.which("ffprobe")),
+            "source_revision": STARTED_SOURCE_REVISION,
+            "started_source_revision": STARTED_SOURCE_REVISION,
+            "disk_source_revision": disk_revision,
+            "source_matches_disk": disk_revision == STARTED_SOURCE_REVISION}
 
 @app.get("/api/library")
 def list_library():
@@ -306,7 +311,11 @@ def _write_env_updates(updates: Dict[str, str]):
 
 @app.get("/", response_class=HTMLResponse)
 async def index(request: Request):
-    return templates.TemplateResponse(request=request, name="index.html", context={"settings": settings})
+    return templates.TemplateResponse(request=request, name="index.html", context={
+        "settings": settings,
+        "source_revision": current_source_revision(),
+        "started_source_revision": STARTED_SOURCE_REVISION,
+    })
 
 @app.get("/api/hardware")
 async def get_hardware():
@@ -486,7 +495,10 @@ async def update_settings(req: ConfigRequest):
     selected_provider = req.llm_provider or settings.LLM_PROVIDER
     if selected_provider == "ollama":
         # Local Ollama here has one inference runner; extra worker threads only queue requests.
-        env_updates["TRANSLATION_CHUNK_WORKERS"] = "1"
+        # Persist the safety cap only when it changes the saved configuration.
+        # Unrelated settings saves must not rewrite an already-correct value.
+        if settings.TRANSLATION_CHUNK_WORKERS != 1:
+            env_updates["TRANSLATION_CHUNK_WORKERS"] = "1"
     elif req.translation_chunk_workers is not None:
         selected_workers = str(req.translation_chunk_workers)
         env_updates["TRANSLATION_CHUNK_WORKERS"] = selected_workers

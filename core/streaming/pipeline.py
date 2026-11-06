@@ -2032,8 +2032,11 @@ class StreamingPipelineSession:
                 def admitted(row):
                     index = bisect_right(starts, row.start) - 1
                     return index >= 0 and row.end <= intervals[index]["end"] + .001
-                rows = [row for row in self.segments.values()
-                        if self._published_row(row) or admitted(row)]
+                # Recognition can publish lookahead sentences before their
+                # translation chunk is admitted. Do not include those future
+                # rows in the current processing denominator: progress must
+                # follow the bounded worker queue, not source lookahead.
+                rows = [row for row in self.segments.values() if admitted(row)]
         completed = 0
         valid_ids = set()
         for row in rows:
@@ -5049,8 +5052,35 @@ class StreamingPipelineSession:
                 if not seg.confirmed_silence:
                     if not seg.text_zh.strip():
                         self._raise_missing_source(seg)
-                    seg.status = seg.failed_stage = "TRANSLATING"
-                    raise RuntimeError("Chưa có lời Việt có căn cứ; cần bổ sung bản dịch trước khi tạo giọng.")
+                    if old_audio_path:
+                        # An empty edit must not detach a previously saved dub
+                        # until a supported replacement is ready. Keep the old
+                        # WAV and leave this row recoverable through translation.
+                        seg.status = seg.failed_stage = "TRANSLATING"
+                        raise RuntimeError("Chưa có lời Việt có căn cứ; giữ giọng hiện tại và cần bổ sung bản dịch trước khi thay thế.")
+                    # A recognized but untranslated utterance is an editorial
+                    # gap, not a TTS failure or a silence verdict. Keep the
+                    # source video playable as a draft, remove any stale dub
+                    # reference, and let review/edit repair the missing words.
+                    with self._durable_edit_publication(seg, {}, pending_path):
+                        if seg.audio_path and seg.audio_path not in seg.superseded_audio_paths:
+                            seg.superseded_audio_paths.append(seg.audio_path)
+                        seg.audio_path = seg.audio_url = None
+                        seg.tts_duration, seg.speed_ratio = 0.0, 1.0
+                        seg.subtitle_cues = []
+                        seg.subtitle_timing_source = "unresolved"
+                        seg.speech_start = seg.speech_end = None
+                        seg.status = "READY"
+                        seg.failed_stage = None
+                        seg.error = None
+                        seg._retry_synthesis = False
+                        seg.needs_review = True
+                        if not seg.review_reason:
+                            seg.review_reason = "Chưa có bản dịch tiếng Việt để tạo giọng; cần bổ sung lời có căn cứ."
+                        self._refresh_processed_duration()
+                    await self.emit("segment_update", seg.to_dict())
+                    await self._update_ready()
+                    return
                 # Only an explicit silence verdict can retire existing speech.
                 with self._durable_edit_publication(seg, {}, pending_path):
                     if seg.audio_path and seg.audio_path not in seg.superseded_audio_paths:

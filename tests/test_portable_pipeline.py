@@ -240,7 +240,8 @@ class PortablePipelineTests(unittest.TestCase):
 
     def test_worker_failure_stops_and_emits_error(self):
         events = []
-        session = self.session(event_callback=lambda event, data: events.append((event, data)))
+        session = self.session(event_callback=lambda event, data: events.append((event, data)),
+                               tts_engine_name="edge-tts")
         session.total_duration = 2
         session.start_wall_time = time.time()
         session.is_running = True
@@ -306,10 +307,14 @@ class PortablePipelineTests(unittest.TestCase):
 
     @unittest.skipUnless(shutil.which("ffmpeg") and shutil.which("ffprobe"), "FFmpeg is required")
     def test_legacy_streaming_keeps_asr_preparation_for_resume_and_cleans_scratch(self):
+        provider_patch = patch.object(settings, "LLM_PROVIDER", "opencode")
+        provider_patch.start()
+        self.addCleanup(provider_patch.stop)
         audio = self.root / "hội thoại.wav"
         write_wave(audio, 2)
         events = []
-        session = self.session(event_callback=lambda event, data: events.append((event, data)))
+        session = self.session(event_callback=lambda event, data: events.append((event, data)),
+                               tts_engine_name="edge-tts")
         session.video_path = audio
         session.faster_whisper.transcribe = Mock(return_value=[
             {"start": 0, "end": 1, "text_zh": "第一句。"}, {"start": 1, "end": 2, "text_zh": "第二句。"}])
@@ -346,10 +351,10 @@ class PortablePipelineTests(unittest.TestCase):
         self.assertEqual(session.suppression_stats["mode"], "DSP_MONO_ADAPTIVE_FORMANT")
         self.assertEqual(session.bgm_audio_path.suffix, ".ogg")
         progress = [data for event, data in events if event == "progress"]
-        self.assertTrue({"prepare", "asr", "translate", "tts", "align", "complete"}.issubset({item["phase"] for item in progress}))
+        self.assertTrue({"prepare", "asr", "translate", "tts", "align", "prepared"}.issubset({item["phase"] for item in progress}))
         self.assertIsNone(progress[0]["progress_pct"])
-        self.assertEqual(progress[-1]["progress_pct"], 100)
-        self.assertEqual(progress[-1]["status"], "COMPLETED")
+        self.assertIsNone(progress[-1]["progress_pct"])
+        self.assertEqual(progress[-1]["status"], "PREPARED")
         probe = subprocess.run([
             "ffprobe", "-v", "error", "-show_streams", "-of", "json", str(session.bgm_audio_path),
         ], capture_output=True, check=True)

@@ -51,6 +51,11 @@ document.addEventListener("DOMContentLoaded", () => {
   const btnReviewWorker = document.getElementById("btn-review-worker");
   const btnExportHQ = document.getElementById("btn-export-hq");
   const videoUrlStatus = document.getElementById("video-url-status");
+  const sourceRevision = document.querySelector('meta[name="studio-source-revision"]')?.content || "";
+  const backendRevision = document.querySelector('meta[name="studio-backend-revision"]')?.content || "";
+  const runtimeBuildCompatible = Boolean(sourceRevision && backendRevision && sourceRevision === backendRevision);
+  const runtimeBuildWarning = document.getElementById("runtime-build-warning");
+  if (!runtimeBuildCompatible && runtimeBuildWarning) runtimeBuildWarning.hidden = false;
   const taskProgress = document.getElementById("task-progress");
   const taskProgressStage = document.getElementById("task-progress-stage");
   const taskProgressValue = document.getElementById("task-progress-value");
@@ -1814,8 +1819,8 @@ document.addEventListener("DOMContentLoaded", () => {
       taskProgressDetail.textContent += ` Công đoạn hiện tại: ${formatProgressPercent(currentProgress.stage_progress_pct)}.`;
     }
     btnPauseWorker.classList.toggle("hidden", !currentProgress.can_pause);
-    btnResumeWorker.classList.toggle("hidden", !currentProgress.can_resume);
-    btnRetryWorker?.classList.toggle("hidden", !currentProgress.can_retry);
+    btnResumeWorker.classList.toggle("hidden", !runtimeBuildCompatible || !currentProgress.can_resume);
+    btnRetryWorker?.classList.toggle("hidden", !runtimeBuildCompatible || !currentProgress.can_retry);
     btnReviewWorker?.classList.toggle("hidden", !currentProgress.can_review || reviewInProgress());
     btnStopWorker.classList.toggle("hidden", currentProgress.can_stop === false ||
       (terminal && !isPreviewReady(status) && currentProgress.can_stop !== true));
@@ -4524,14 +4529,14 @@ document.addEventListener("DOMContentLoaded", () => {
     setWorkerSourceBusy(!!pendingTaskAction || reviewInProgress() || automaticExportActive ||
       pendingTranscriptSaves > 0 || currentProgress?.can_stop === true);
     btnPauseWorker.classList.toggle("hidden", currentProgress?.can_pause !== true);
-    btnResumeWorker.classList.toggle("hidden", currentProgress?.can_resume !== true);
+    btnResumeWorker.classList.toggle("hidden", !runtimeBuildCompatible || currentProgress?.can_resume !== true);
     btnStopWorker.classList.toggle("hidden", currentProgress?.can_stop !== true);
     btnStopWorker.disabled = false;
     updateExportAvailability();
   }
 
   async function controlTask(id, action) {
-    if (!id) return;
+    if (!id || (action === "resume" && !runtimeBuildCompatible)) return;
     if (id === currentTaskId && ["pause", "stop"].includes(action)) {
       autoPlayTaskId = null;
       playWhenPreviewReady = false;
@@ -4556,7 +4561,7 @@ document.addEventListener("DOMContentLoaded", () => {
     }
   }
   window.studioPause = () => controlTask(currentTaskId, "pause");
-  window.studioResume = () => controlTask(currentTaskId, "resume");
+  window.studioResume = () => runtimeBuildCompatible ? controlTask(currentTaskId, "resume") : false;
   window.studioStop = () => {
     if (!currentTaskId && pendingStart) {
       pendingStart.cancelled = true;
@@ -4674,7 +4679,7 @@ document.addEventListener("DOMContentLoaded", () => {
   }
   window.restoreRememberedTask = restoreRememberedTask;
   window.studioRetry = async () => {
-    if (!currentTaskId || !currentProgress?.can_retry || pendingTaskAction || btnRetryWorker.disabled) return;
+    if (!runtimeBuildCompatible || !currentTaskId || !currentProgress?.can_retry || pendingTaskAction || btnRetryWorker.disabled) return;
     const taskId = currentTaskId;
     const request = {kind: "retry", progressSeen: false};
     pendingTaskAction = request;
@@ -4745,7 +4750,7 @@ document.addEventListener("DOMContentLoaded", () => {
   // =========================================================
   window.pauseTask = id => controlTask(id, "pause");
   window.resumeTask = async id => {
-    if (!historyTaskId(id)) return;
+    if (!runtimeBuildCompatible || !historyTaskId(id)) return;
     // A stopped/failed saved session must be reattached before retrying. This
     // preserves its checkpoint and prevents the history button from creating
     // a second task through a fresh start request.
@@ -4911,7 +4916,7 @@ document.addEventListener("DOMContentLoaded", () => {
     }
     if (historyTaskId(task.task_id)) {
       if (task.can_pause) actions += `<button onclick="window.pauseTask('${task.task_id}')" class="history-button history-button-pause">Tạm dừng</button>`;
-      if (task.can_resume || ((task.can_retry || (task.saved && task.can_open !== false)) && ["STOPPED", "CANCELLED", "FAILED"].includes(task.status))) actions += `<button onclick="window.resumeTask('${historyTaskId(sessionId) ? sessionId : task.task_id}')" class="history-button history-button-resume">Tiếp tục</button>`;
+      if (runtimeBuildCompatible && (task.can_resume || ((task.can_retry || (task.saved && task.can_open !== false)) && ["STOPPED", "CANCELLED", "FAILED"].includes(task.status)))) actions += `<button onclick="window.resumeTask('${historyTaskId(sessionId) ? sessionId : task.task_id}')" class="history-button history-button-resume">Tiếp tục</button>`;
       if (task.can_stop) actions += `<button onclick="window.stopTask('${task.task_id}')" class="history-button history-button-stop">Dừng</button>`;
     }
     const outputUrl = task.status === "COMPLETED" || task.output_incomplete || task.output_is_draft ||

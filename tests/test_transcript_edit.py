@@ -279,8 +279,9 @@ def test_uncertain_draft_is_audible_before_edit_and_edit_replaces_audio_without_
         assert draft["subtitle_cues"] and draft["speech_start"] is not None
         assert session.error is None and session.first_play_emitted
         assert session.playable_until == session.total_duration
-        assert session.get_progress()["status"] == "COMPLETED"
-        assert session.get_telemetry()["status"] == "finished"
+        assert session.get_progress()["status"] == "PREPARED"
+        assert session.get_progress()["output_is_draft"] and not getattr(session, "output_filename", "")
+        assert session.get_telemetry()["status"] == "prepared"
         assert session.get_telemetry()["review_count"] == 1
         assert session.total_processed_duration == segment.duration
         async with client() as api:
@@ -366,9 +367,10 @@ def test_editing_one_draft_keeps_other_drafts_playable_and_does_not_fail_the_ses
     assert second.review_reason == "Câu sau cần nghe lại"
     assert session.total_processed_duration == 6
     assert session.error is None
-    assert session.get_progress()["status"] == "COMPLETED"
+    assert session.get_progress()["status"] == "PREPARED"
+    assert session.get_progress()["output_is_draft"]
     assert session.get_progress()["review_count"] == 1
-    assert session.get_telemetry()["status"] == "finished"
+    assert session.get_telemetry()["status"] == "prepared"
     assert session.playable_until == session.total_duration
 
 
@@ -441,7 +443,8 @@ def test_retry_synthesis_preserves_ready_audio_and_translation_and_resumes_waiti
             assert Path(segment.audio_path).read_bytes() == f"Bản nháp câu {segment.id} aligned".encode()
         session.asr_engine.transcribe.assert_not_called()
         session.translator.translate_single_segment.assert_not_called()
-        assert session.get_progress()["status"] == "COMPLETED"
+        assert session.get_progress()["status"] == "PREPARED"
+        assert session.get_progress()["output_is_draft"]
 
     asyncio.run(run())
     assert attempts == 3
@@ -1247,14 +1250,22 @@ def test_automatic_review_only_regenerates_changed_audio_and_preserves_uncertain
     row = dict(segment.to_dict(), final_vi="Lời đã kiểm tra" if changed else segment.final_vi,
                needs_review=unresolved, review_reason="Nguồn bị cắt" if unresolved else None,
                verification={"status": "unresolved" if unresolved else "corrected" if changed else "verified"})
-    monkeypatch.setattr(AutomaticTranslationReviewer, "review", lambda *a, **kw: {
-        "segments": {0: row}, "summary": {"checked": 1, "corrected": int(changed and not unresolved), "unresolved": int(unresolved)}})
+    review_entered, release_review = threading.Event(), threading.Event()
+    def review(*args, **kwargs):
+        review_entered.set()
+        if not release_review.wait(5):
+            raise TimeoutError("review fixture was not released")
+        return {"segments": {0: row}, "summary": {"checked": 1,
+                "corrected": int(changed and not unresolved), "unresolved": int(unresolved)}}
+    monkeypatch.setattr(AutomaticTranslationReviewer, "review", review)
     async def run():
         async with client() as api:
             response = await api.post(f"/api/streaming/{session.task_id}/review")
             assert response.status_code == 200 and response.json()["status"] == "reviewing"
+            assert review_entered.wait(2)
             task = session.review_task
             assert task is not None
+            release_review.set()
             await task
             assert session.get_progress()["can_review"]
             assert session.get_progress()["status"] == "PREPARED"

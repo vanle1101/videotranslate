@@ -4,12 +4,17 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>Douyin2TikTok AI Studio - Desktop Application</title>
+  <meta name="studio-source-revision" content="{{ source_revision }}">
+  <meta name="studio-backend-revision" content="{{ started_source_revision }}">
   <script src="https://cdn.tailwindcss.com"></script>
   <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
   <link rel="stylesheet" href="/static/style.css?v={{ settings.BASE_DIR.joinpath('static', 'style.css').stat().st_mtime_ns }}">
   <link rel="stylesheet" href="/static/studio-compact-panels.css?v={{ settings.BASE_DIR.joinpath('static', 'studio-compact-panels.css').stat().st_mtime_ns }}">
 </head>
 <body data-asr-engine="{{ settings.ASR_ENGINE }}" data-tts-engine="{{ settings.TTS_ENGINE }}" data-whisper-model="{{ settings.WHISPER_MODEL_SIZE }}" class="bg-[#0b0d13] text-gray-100 min-h-screen font-sans antialiased selection:bg-pink-500 selection:text-white">
+  <div id="runtime-build-warning" role="alert" hidden style="background:#7f1d1d;color:#fff;padding:10px 16px;font-weight:600">
+    Giao diện và backend đang dùng khác phiên bản source. Hãy thoát hẳn Studio rồi mở lại; Retry/Tiếp tục đang bị khóa để bảo vệ checkpoint.
+  </div>
   
   <header class="app-header">
     <div class="app-brand">
@@ -627,6 +632,6 @@
 
   <script src="/static/studio-layout.js?v={{ settings.BASE_DIR.joinpath('static', 'studio-layout.js').stat().st_mtime_ns }}"></script>
   <script src="/qtwebchannel.js"></script>
-  <script src="/static/app.js?v={{ settings.BASE_DIR.joinpath('static', 'app.js').stat().st_mtime_ns }}"></script>
+  <script src="/static/app.js?v={{ settings.BASE_DIR.joinpath('static', 'app.js').stat().st_mtime_ns }}&amp;rev={{ source_revision }}"></script>
 </body>
 </html>

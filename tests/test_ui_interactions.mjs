@@ -967,7 +967,7 @@ test('the end of a compatibility window advances at the exact global boundary in
   assert.equal(video.paused,false);
 });
 
-function studio(cookieReply = { configured: false, count: 0, message: '' }, voiceConfig = {}) {
+function studio(cookieReply = { configured: false, count: 0, message: '' }, voiceConfig = {}, buildMismatch = false) {
   const elements = new Map(), audio = [], sockets = [], requests = [], alerts = [], copied = [];
   const intervals = new Map();
   const timeouts = new Map();
@@ -1049,6 +1049,7 @@ function studio(cookieReply = { configured: false, count: 0, message: '' }, voic
   for (const match of template.matchAll(/<([a-z][\w-]*)\b[^>]*\bid="([^"]+)"/gi)) {
     const element = new Element(match[2]);
     element.tagName = match[1].toUpperCase();
+    if (/\shidden(?:\s|>|=)/i.test(match[0])) element.hidden = true;
     if (element.tagName === 'SELECT') element.options = [];
     elements.set(match[2], element);
   }
@@ -1072,6 +1073,9 @@ function studio(cookieReply = { configured: false, count: 0, message: '' }, voic
   const documentEvents = {};
   const document = {
     getElementById: el,
+    querySelector: selector => selector === 'meta[name="studio-source-revision"]'
+      ? { content: buildMismatch ? 'ui-test-disk-revision' : 'ui-test-build-revision' }
+      : selector === 'meta[name="studio-backend-revision"]' ? { content: 'ui-test-build-revision' } : null,
     createElement: tag => { const element = new Element(); element.tagName = tag.toUpperCase(); return element; },
     querySelectorAll: selector => selector === '.source-tab' ? ['source-tab-url', 'source-tab-file', 'source-tab-library'].map(el) : selector === '.diag-cat-btn' ? diagnosticsButtons : [],
     addEventListener: (event, callback) => {
@@ -1171,6 +1175,23 @@ function studio(cookieReply = { configured: false, count: 0, message: '' }, voic
   const preview = id => row(id).querySelector('.voice-preview-button').click();
   return { el, row, choose, preview, audio, sockets, requests, replies, alerts, copied, window, document, playerSurface, flush, tickIntervals, tickTimeouts, tickFrames, frames, start, saved };
 }
+
+test('a frontend/backend fingerprint mismatch warns and blocks Retry and Resume mutations', async () => {
+  const ui = studio(undefined, {}, true);
+  await ui.flush();
+  assert.equal(ui.el('runtime-build-warning').hidden, false);
+  ui.replies.set('/api/streaming/mismatched-project', {
+    task_id: 'mismatched-project', initialized: true, duration: 10, segments_count: 1,
+    video_url: '/source.mp4', segments: [],
+    progress: { status: 'FAILED', can_retry: true, can_resume: true, can_stop: false },
+  });
+  await ui.window.studioAttachTask('mismatched-project');
+  assert.equal(ui.el('btn-retry-worker').classList.contains('hidden'), true);
+  assert.equal(ui.el('btn-resume-worker').classList.contains('hidden'), true);
+  await ui.window.studioRetry();
+  await ui.window.studioResume();
+  assert.equal(ui.requests.some(item => /\/retry$|\/resume$/.test(item.url)), false);
+});
 
 const voiceCatalog = {
   default_voice_id: 'edge:vi-VN-HoaiMyNeural',

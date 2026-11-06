@@ -64,7 +64,7 @@ def test_history_then_attach_restores_exact_edits_without_provider(saved_project
         assert snapshot["voice"] == saved_project.voice
         assert snapshot["tts_engine"] == saved_project.tts_engine_name
         assert snapshot["output_outdated"] is True
-        assert snapshot["progress"]["status"] == "COMPLETED"
+        assert snapshot["progress"]["status"] == "PREPARED"
         restored = active_streaming_sessions[saved_project.task_id]
         assert restored.worker_task is None and restored.start_task is None
         assert Path(restored.segments[0].audio_path).read_bytes() == Path(saved_project.segments[0].audio_path).read_bytes()
