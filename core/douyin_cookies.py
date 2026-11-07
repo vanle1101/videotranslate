@@ -15,7 +15,6 @@ MAX_COOKIE_BYTES = 1024 * 1024
 _ALLOWED_DOMAINS = ("douyin.com", "iesdouyin.com")
 _COOKIE_NAME = re.compile(r"^[!#$%&'*+\-.^_`|~0-9A-Za-z]+$")
 _DOMAIN_LABEL = re.compile(r"^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$")
-_MALFORMED = "Tệp cookie không đúng định dạng Netscape. Hãy xuất lại cookie Douyin."
 
 
 class DouyinCookieError(ValueError):
@@ -56,15 +55,23 @@ def cookie_policy():
 
 def parse_douyin_cookies(content, *, now=None):
     """Validate Netscape input; discard unrelated domains and expired records."""
+    return _parse_douyin_cookies(content, now=now)[0]
+
+
+def _parse_douyin_cookies(content, *, now=None):
+    """Return the validated jar and count of unusable empty-name rows."""
     if not isinstance(content, bytes) or len(content) > MAX_COOKIE_BYTES:
         raise DouyinCookieError("Tệp cookie phải có dung lượng tối đa 1 MiB.")
     try:
         source = content.decode("utf-8-sig")
     except UnicodeError:
-        raise DouyinCookieError(_MALFORMED) from None
+        raise DouyinCookieError("Không đọc được tệp cookie UTF-8. Hãy xuất lại dưới dạng Netscape UTF-8.") from None
     jar = CookieJar(policy=cookie_policy())
     current_time = time.time() if now is None else now
-    for raw_line in source.splitlines():
+    saw_douyin_domain = False
+    saw_expired_cookie = False
+    empty_name_rows = 0
+    for line_number, raw_line in enumerate(source.splitlines(), start=1):
         if not raw_line.strip():
             continue
         http_only = raw_line.startswith("#HttpOnly_")
@@ -73,27 +80,40 @@ def parse_douyin_cookies(content, *, now=None):
         line = raw_line[len("#HttpOnly_"):] if http_only else raw_line
         fields = line.split("\t")
         if len(fields) != 7:
-            raise DouyinCookieError(_MALFORMED)
+            raise DouyinCookieError(_cookie_line_error(line_number, "cần đúng 7 trường phân cách bằng tab"))
         domain, include_subdomains, cookie_path, secure, expiry, name, value = fields
         if not _allowed_domain(domain):
             continue
-        if (include_subdomains not in {"TRUE", "FALSE"}
-                or secure not in {"TRUE", "FALSE"}
-                or not expiry.isascii() or not expiry.isdigit()
-                or not cookie_path.startswith("/")
-                or not _COOKIE_NAME.fullmatch(name)
-                or any(ord(char) < 32 or ord(char) == 127 for char in cookie_path + value)):
-            raise DouyinCookieError(_MALFORMED)
+        saw_douyin_domain = True
+        if include_subdomains not in {"TRUE", "FALSE"}:
+            raise DouyinCookieError(_cookie_line_error(line_number, "cờ miền phụ phải là TRUE hoặc FALSE"))
+        if secure not in {"TRUE", "FALSE"}:
+            raise DouyinCookieError(_cookie_line_error(line_number, "cờ bảo mật phải là TRUE hoặc FALSE"))
+        if not expiry.isascii() or not expiry.isdigit():
+            raise DouyinCookieError(_cookie_line_error(line_number, "cột thời hạn phải là số Unix hợp lệ"))
+        if not cookie_path.startswith("/"):
+            raise DouyinCookieError(_cookie_line_error(line_number, "đường dẫn cookie phải bắt đầu bằng dấu /"))
+        if any(ord(char) < 32 or ord(char) == 127 for char in cookie_path + value):
+            raise DouyinCookieError(_cookie_line_error(line_number, "đường dẫn hoặc giá trị có ký tự điều khiển"))
+        if name and not _COOKIE_NAME.fullmatch(name):
+            raise DouyinCookieError(_cookie_line_error(line_number, "tên cookie không hợp lệ"))
         has_subdomains = include_subdomains == "TRUE"
         if domain.startswith(".") and not has_subdomains:
-            raise DouyinCookieError(_MALFORMED)
+            raise DouyinCookieError(_cookie_line_error(line_number, "miền có dấu chấm đầu phải cho phép miền phụ"))
         try:
             expires = int(expiry)
         except ValueError:
-            raise DouyinCookieError(_MALFORMED) from None
+            raise DouyinCookieError(_cookie_line_error(line_number, "cột thời hạn nằm ngoài phạm vi hợp lệ")) from None
         if expires > 253402300799:
-            raise DouyinCookieError(_MALFORMED)
+            raise DouyinCookieError(_cookie_line_error(line_number, "cột thời hạn nằm ngoài phạm vi hợp lệ"))
         if expires and expires <= current_time:
+            saw_expired_cookie = True
+            continue
+        # Netscape exports occasionally include a blank-name placeholder row.
+        # An empty name cannot form an HTTP cookie, so skip just that row while
+        # continuing to validate and import the remaining Douyin records.
+        if not name:
+            empty_name_rows += 1
             continue
         host = domain.lower().removeprefix(".")
         jar.set_cookie(Cookie(
@@ -105,8 +125,17 @@ def parse_douyin_cookies(content, *, now=None):
             rfc2109=False,
         ))
     if not len(jar):
-        raise DouyinCookieError("Tệp không có cookie Douyin còn hiệu lực. Hãy đăng nhập và xuất lại cookie.")
-    return jar
+        if saw_douyin_domain and saw_expired_cookie:
+            raise DouyinCookieError("Cookie Douyin trong tệp đã hết hạn. Hãy đăng nhập và xuất phiên mới.")
+        if saw_douyin_domain:
+            raise DouyinCookieError("Tệp không có cookie Douyin dùng được; bản ghi thiếu tên không thể sử dụng.")
+        raise DouyinCookieError("Tệp không có cookie thuộc miền Douyin được hỗ trợ. Cookie miền khác đã bị bỏ qua.")
+    return jar, empty_name_rows
+
+
+def _cookie_line_error(line_number, reason):
+    """Build a fixed, secret-free validation message for one Netscape row."""
+    return f"Tệp Netscape cookies có lỗi tại dòng {line_number}: {reason}."
 
 
 def _serialize(jar):
@@ -163,7 +192,7 @@ def douyin_cookie_revision(*, path=None):
 
 
 def import_douyin_cookies(content, *, path=None):
-    jar = parse_douyin_cookies(content)
+    jar, skipped_empty_names = _parse_douyin_cookies(content)
     serialized = _serialize(jar)
     if len(serialized) > MAX_COOKIE_BYTES:
         raise DouyinCookieError("Tệp cookie phải có dung lượng tối đa 1 MiB.")
@@ -188,7 +217,12 @@ def import_douyin_cookies(content, *, path=None):
                 temporary.unlink(missing_ok=True)
             except OSError:
                 pass
-    return get_douyin_cookie_status(path=target)
+    status = get_douyin_cookie_status(path=target)
+    if skipped_empty_names:
+        status["warnings"] = [
+            f"Đã bỏ qua {skipped_empty_names} bản ghi không có tên cookie vì không thể gửi qua HTTP."
+        ]
+    return status
 
 
 def clear_douyin_cookies(*, path=None):

@@ -72,6 +72,32 @@ def test_bad_file_preserves_working_copy_and_never_echoes_its_content(cookie_api
     assert client.get(ENDPOINT).json()["count"] == 1
 
 
+def test_api_reports_specific_sanitized_parser_reason(cookie_api):
+    client, _ = cookie_api
+    invalid = (b"# Netscape HTTP Cookie File\n"
+               b"www.douyin.com\tFALSE\t/\tTRUE\tnot-a-number\tsessionid\tprivate-value\n")
+    response = upload(client, invalid)
+    assert response.status_code == 422
+    assert response.json()["detail"] == "Tệp Netscape cookies có lỗi tại dòng 2: cột thời hạn phải là số Unix hợp lệ."
+    assert "private-value" not in response.text
+
+
+def test_api_imports_usable_rows_and_reports_empty_name_row_safely(cookie_api):
+    client, _ = cookie_api
+    content = (b"# Netscape HTTP Cookie File\n"
+               b"www.douyin.com\tFALSE\t/\tTRUE\t4102444800\t\tunusable-value\n"
+               b"www.douyin.com\tFALSE\t/\tTRUE\t4102444800\tsessionid\tusable-value\n")
+    response = upload(client, content)
+    assert response.status_code == 200
+    assert response.json()["configured"] is True
+    assert response.json()["count"] == 1
+    assert response.json()["warnings"] == [
+        "Đã bỏ qua 1 bản ghi không có tên cookie vì không thể gửi qua HTTP."
+    ]
+    assert "unusable-value" not in response.text
+    assert "usable-value" not in response.text
+
+
 def test_oversize_file_rejected_without_replacing_working_copy(cookie_api):
     client, _ = cookie_api
     assert upload(client).status_code == 200

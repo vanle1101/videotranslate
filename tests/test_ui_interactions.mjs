@@ -1494,6 +1494,48 @@ test('failed Douyin import preserves existing configuration and never renders ba
   assert.equal(input.value, '');
 });
 
+test('Douyin import shows a sanitized parser reason returned by the local API', async () => {
+  const ui = studio({ configured: true, count: 4 }); await ui.flush();
+  const detail = 'Tệp Netscape cookies có lỗi tại dòng 54: tên cookie không hợp lệ.';
+  ui.replies.set('/api/douyin/cookies', () => ({
+    ok: false, status: 422, json: async () => ({ detail }),
+  }));
+  const input = ui.el('douyin-cookies-file');
+  input.files = [{ name: 'local.txt', size: 9337 }]; input.value = 'local.txt';
+  await input.emit('change');
+  assert.equal(ui.el('douyin-cookies-state').textContent, 'Đã nhập 4 cookie Douyin trên máy này.');
+  assert.match(ui.el('douyin-cookies-status').textContent, /dòng 54: tên cookie không hợp lệ/);
+  assert.equal(input.value, '');
+});
+
+test('Douyin import explains that an empty-name Netscape row was skipped', async () => {
+  const ui = studio({ configured: false, count: 0 }); await ui.flush();
+  ui.replies.set('/api/douyin/cookies', () => ({
+    ok: true, json: async () => ({
+      configured: true, count: 3,
+      warnings: ['Đã bỏ qua 1 bản ghi không có tên cookie vì không thể gửi qua HTTP.'],
+    }),
+  }));
+  const input = ui.el('douyin-cookies-file');
+  input.files = [{ name: 'local.txt', size: 9337 }]; input.value = 'local.txt';
+  await input.emit('change');
+  assert.match(ui.el('douyin-cookies-state').textContent, /Đã nhập 3 cookie Douyin/);
+  assert.match(ui.el('douyin-cookies-status').textContent, /Đã bỏ qua 1 bản ghi không có tên cookie/);
+});
+
+test('Douyin import hides arbitrary validation text that could contain secret data', async () => {
+  const ui = studio({ configured: false, count: 0 }); await ui.flush();
+  ui.replies.set('/api/douyin/cookies', () => ({
+    ok: false, status: 422, json: async () => ({ detail: 'session-secret C:\\Users\\private.txt' }),
+  }));
+  const input = ui.el('douyin-cookies-file');
+  input.files = [{ name: 'local.txt', size: 100 }]; input.value = 'local.txt';
+  await input.emit('change');
+  const message = ui.el('douyin-cookies-status').textContent;
+  assert.match(message, /Không nhập được cookie/);
+  assert.doesNotMatch(message, /session-secret|private\.txt/);
+});
+
 test('late initial status cannot overwrite a completed cookie import', async () => {
   let resolveInitial;
   const ui = studio(() => new Promise(resolve => { resolveInitial = resolve; }));

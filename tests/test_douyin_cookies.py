@@ -64,6 +64,33 @@ def test_import_filters_domains_expiry_and_preserves_http_only_session(cookie_fi
     assert not cookie_file.exists()
 
 
+def test_export_with_empty_name_cookie_skips_only_that_unusable_row():
+    jar = cookies.parse_douyin_cookies(data(
+        record("www.douyin.com", subdomains="FALSE", secure="FALSE", name="", value="legacy-row"),
+        record("www.douyin.com", subdomains="FALSE", name="sessionid", value="usable-row"),
+    ))
+    assert len(jar) == 1
+    assert [cookie.name for cookie in jar] == ["sessionid"]
+    assert "sessionid=" in header(jar, "https://www.douyin.com/video/123")
+
+
+def test_netscape_header_crlf_bom_httponly_and_exact_www_domain():
+    source = (
+        "\ufeff# Netscape HTTP Cookie File\r\n"
+        "# exported locally\r\n"
+        "#HttpOnly_.douyin.com\tTRUE\t/\tTRUE\t0\tsecure_session\tsecret-one\r\n"
+        "www.douyin.com\tFALSE\t/\tFALSE\t4102444800\tweb_session\tsecret-two\r\n"
+        ".other.example\tTRUE\t/\tTRUE\t4102444800\tother\tsecret-three\r\n"
+    ).encode("utf-8")
+    jar = cookies.parse_douyin_cookies(source)
+    assert len(jar) == 2
+    assert {cookie.name for cookie in jar} == {"secure_session", "web_session"}
+    assert "secure_session=" in header(jar, "https://v.douyin.com/short/abc")
+    assert "web_session=" in header(jar, "https://www.douyin.com/video/123")
+    assert "web_session=" not in header(jar, "https://v.douyin.com/short/abc")
+    assert not header(jar, "http://www.douyin.com/video/123")
+
+
 @pytest.mark.parametrize("domain", [
     ".notdouyin.com", ".douyin.com.evil.test", ".iesdouyin.com.evil.test",
     ".evil-iesdouyin.com", ".com", ".douyin.com.", "douyin.com:443", "douyin.com/path",
@@ -113,6 +140,35 @@ def test_invalid_import_is_safe_and_preserves_previous_file(payload, cookie_file
     assert str(cookie_file) not in str(captured.value)
     assert cookie_file.read_bytes() == before
     assert len(list(cookie_file.parent.iterdir())) == 1
+
+
+def test_invalid_expiry_has_a_specific_safe_validation_reason():
+    with pytest.raises(cookies.DouyinCookieError) as captured:
+        cookies.parse_douyin_cookies(data(record(expiry="not-a-number", value=SENTINEL)))
+    assert str(captured.value) == "Tệp Netscape cookies có lỗi tại dòng 2: cột thời hạn phải là số Unix hợp lệ."
+    assert SENTINEL not in str(captured.value)
+
+
+@pytest.mark.parametrize(("row", "reason"), [
+    ("www.douyin.com\tFALSE\t/\tTRUE\t4102444800\tsessionid\n", "cần đúng 7 trường phân cách bằng tab"),
+    (record(secure="yes"), "cờ bảo mật phải là TRUE hoặc FALSE"),
+    (record(path="video"), "đường dẫn cookie phải bắt đầu bằng dấu /"),
+    (record(name="bad;name"), "tên cookie không hợp lệ"),
+    (record(".douyin.com", subdomains="FALSE", name=""), "miền có dấu chấm đầu phải cho phép miền phụ"),
+    (record(expiry=253402300800, name=""), "cột thời hạn nằm ngoài phạm vi hợp lệ"),
+])
+def test_invalid_netscape_rows_report_only_a_safe_reason(row, reason):
+    with pytest.raises(cookies.DouyinCookieError) as captured:
+        cookies.parse_douyin_cookies(data(row))
+    assert str(captured.value) == f"Tệp Netscape cookies có lỗi tại dòng 2: {reason}."
+    assert SENTINEL not in str(captured.value)
+
+
+def test_cookie_file_with_only_other_domains_reports_domain_filtering():
+    with pytest.raises(cookies.DouyinCookieError) as captured:
+        cookies.parse_douyin_cookies(data(record(".example.com")))
+    assert str(captured.value) == "Tệp không có cookie thuộc miền Douyin được hỗ trợ. Cookie miền khác đã bị bỏ qua."
+    assert SENTINEL not in str(captured.value)
 
 
 def test_atomic_save_failure_preserves_prior_import_and_removes_own_temp(cookie_file, monkeypatch):

@@ -5353,6 +5353,38 @@ document.addEventListener("DOMContentLoaded", () => {
     douyinCookiesStatus.classList.toggle("text-gray-400", !isError);
   }
 
+  function safeDouyinCookieValidationDetail(detail) {
+    const safeReasons = new Set([
+      "cần đúng 7 trường phân cách bằng tab",
+      "cờ miền phụ phải là TRUE hoặc FALSE",
+      "cờ bảo mật phải là TRUE hoặc FALSE",
+      "cột thời hạn phải là số Unix hợp lệ",
+      "đường dẫn cookie phải bắt đầu bằng dấu /",
+      "đường dẫn hoặc giá trị có ký tự điều khiển",
+      "tên cookie không hợp lệ",
+      "miền có dấu chấm đầu phải cho phép miền phụ",
+      "cột thời hạn nằm ngoài phạm vi hợp lệ",
+    ]);
+    const lineError = typeof detail === "string"
+      ? detail.match(/^Tệp Netscape cookies có lỗi tại dòng ([1-9]\d{0,6}): (.+)\.$/)
+      : null;
+    if (lineError && safeReasons.has(lineError[2])) return detail;
+    const safeMessages = new Set([
+      "Tệp cookie phải có dung lượng tối đa 1 MiB.",
+      "Không đọc được tệp cookie UTF-8. Hãy xuất lại dưới dạng Netscape UTF-8.",
+      "Cookie Douyin trong tệp đã hết hạn. Hãy đăng nhập và xuất phiên mới.",
+      "Tệp không có cookie Douyin dùng được; bản ghi thiếu tên không thể sử dụng.",
+      "Tệp không có cookie thuộc miền Douyin được hỗ trợ. Cookie miền khác đã bị bỏ qua.",
+    ]);
+    return safeMessages.has(detail) ? detail : null;
+  }
+
+  function safeDouyinCookieWarnings(warnings) {
+    if (!Array.isArray(warnings)) return [];
+    return warnings.filter(warning => typeof warning === "string"
+      && /^Đã bỏ qua [1-9]\d{0,5} bản ghi không có tên cookie vì không thể gửi qua HTTP\.$/.test(warning));
+  }
+
   function applyDouyinCookiesStatus(data) {
     if (typeof data?.configured !== "boolean" || !Number.isInteger(data.count) || data.count < 0) {
       throw new Error("invalid cookie status");
@@ -5405,18 +5437,31 @@ document.addEventListener("DOMContentLoaded", () => {
       }
       const response = await fetch("/api/douyin/cookies", options);
       if (!response.ok) {
-        showDouyinCookiesMessage(importing && [400, 413, 415, 422].includes(response.status)
-          ? "Không nhập được tệp. Chọn bản Netscape cookies .txt hợp lệ, chỉ xuất từ Douyin và không quá 1 MiB. Cookie đã lưu trước đó được giữ nguyên."
-          : importing
-            ? "Không nhập được cookie. Cookie đã lưu trước đó được giữ nguyên; hãy thử lại."
-            : "Chưa xác nhận xóa được cookie. Bấm Kiểm tra trạng thái trước khi thử lại.", true);
+        let detail = null;
+        if (importing && response.status === 413) {
+          detail = "Tệp cookie phải có dung lượng tối đa 1 MiB.";
+        } else if (importing && response.status === 422) {
+          try {
+            detail = safeDouyinCookieValidationDetail((await response.json())?.detail);
+          } catch (_) {
+            detail = null;
+          }
+        }
+        showDouyinCookiesMessage(importing
+          ? detail
+            ? `${detail} Cookie đã lưu trước đó được giữ nguyên.`
+            : "Không nhập được cookie. Cookie đã lưu trước đó được giữ nguyên; hãy kiểm tra tệp hoặc trạng thái dịch vụ."
+          : "Chưa xác nhận xóa được cookie. Bấm Kiểm tra trạng thái trước khi thử lại.", true);
         return;
       }
       const data = await response.json();
       if (version !== douyinCookiesVersion) return;
       applyDouyinCookiesStatus(data);
+      const warnings = importing ? safeDouyinCookieWarnings(data.warnings) : [];
       showDouyinCookiesMessage(importing
-        ? "Đã nhập cookie. Với tác vụ AUTH_REQUIRED, mở Lịch sử rồi bấm Tiếp tục để thử lại cùng task. Phiên chưa được xác minh."
+        ? warnings.length
+          ? `Đã nhập cookie. ${warnings.join(" ")} Với tác vụ AUTH_REQUIRED, mở Lịch sử rồi bấm Tiếp tục để thử lại cùng task. Phiên chưa được xác minh.`
+          : "Đã nhập cookie. Với tác vụ AUTH_REQUIRED, mở Lịch sử rồi bấm Tiếp tục để thử lại cùng task. Phiên chưa được xác minh."
         : "Đã xóa bản cookie khỏi Studio. Phiên đăng nhập trong Chrome vẫn giữ nguyên.");
     } catch (_) {
       showDouyinCookiesMessage(importing
