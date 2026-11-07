@@ -381,11 +381,11 @@
     <section id="douyin-cookies-panel" aria-labelledby="douyin-cookies-heading" class="bg-[#12151f] border border-gray-800 rounded-2xl p-5 shadow-xl space-y-3">
       <h3 id="douyin-cookies-heading" class="text-sm font-bold text-cyan-300">Tải video Douyin</h3>
       <p class="text-xs text-gray-300 leading-relaxed">Dán toàn bộ nội dung chia sẻ vào ô <strong>Video nguồn</strong>, rồi bấm <strong>Bắt đầu</strong>. Studio thử tải video công khai miễn phí, không cần API key hoặc mở Chrome.</p>
-      <p class="text-xs text-gray-400 leading-relaxed">Khả năng tải phụ thuộc video và kết nối. Nếu cách tải công khai không dùng được, Studio thử cách tải dự phòng và cookie đã nhập nếu có.</p>
+      <p class="text-xs text-gray-400 leading-relaxed">Studio thử nguồn công khai trước. Chỉ khi Douyin trả HTTP 403 và bạn đã nhập cookie hợp lệ, Studio mới thử đúng một lượt dự phòng có xác thực.</p>
       <details class="rounded-xl border border-gray-800 bg-[#08090d]/50">
         <summary class="cursor-pointer rounded-xl px-3 py-3 text-xs font-semibold text-gray-300 hover:text-white focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-cyan-400">Nâng cao: cookie cho video cần đăng nhập</summary>
         <div class="px-3 pb-3 space-y-3">
-          <p id="douyin-cookies-help" class="text-xs text-gray-400 leading-relaxed">Chỉ cần thử cách này khi bộ tải yêu cầu phiên đăng nhập. Phiên Chrome không tự chuyển sang Studio. Chọn tệp Netscape cookies <span class="font-mono">.txt</span> chỉ xuất từ Douyin sau khi đăng nhập (tối đa 1 MiB). Bản sao được lưu trên máy và chỉ dùng để tải video Douyin.</p>
+          <p id="douyin-cookies-help" class="text-xs text-gray-400 leading-relaxed">Chỉ cần thử cách này khi bộ tải yêu cầu phiên đăng nhập. Trong Douyin, đăng nhập bằng cách thông thường rồi tự xuất tệp Netscape cookies <span class="font-mono">.txt</span> (tối đa 1 MiB). Chọn tệp để nhập; Studio kiểm tra định dạng, miền và hạn dùng mà không hiển thị giá trị. Cookie chỉ được gửi tới các máy chủ thuộc miền Douyin trong một lượt tải. Phiên Chrome không tự chuyển sang Studio; CAPTCHA không bị vượt qua.</p>
           <p id="douyin-cookies-state" class="text-xs text-gray-300">Chưa kiểm tra cookie đã nhập.</p>
           <div class="flex flex-wrap items-center gap-2">
             <input id="douyin-cookies-file" type="file" accept=".txt,text/plain" aria-label="Chọn tệp cookie Douyin" aria-describedby="douyin-cookies-help" class="hidden">

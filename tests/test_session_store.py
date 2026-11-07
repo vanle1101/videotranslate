@@ -37,6 +37,56 @@ def test_measured_timing_conflict_and_real_failure_reason_survive_repeated_resto
         active_streaming_sessions.pop(persisted.task_id)
 
 
+def test_auth_required_download_retry_unlocks_only_after_cookie_import(monkeypatch):
+    from core import douyin_cookies
+
+    session = StreamingPipelineSession("auth-required", None)
+    session.source_url = "https://www.douyin.com/video/1234567890123456789"
+    session._source_downloader = object()
+    session._startup_failed = True
+    session.error = "Douyin yêu cầu phiên đăng nhập."
+    session._source_failure_code = "AUTH_REQUIRED"
+    monkeypatch.setattr(douyin_cookies, "get_douyin_cookie_status",
+                        lambda: {"configured": False, "stored": False, "count": 0})
+    assert session.can_retry is False
+    assert session.get_progress()["can_retry"] is False
+
+    monkeypatch.setattr(douyin_cookies, "get_douyin_cookie_status",
+                        lambda: {"configured": True, "stored": True, "count": 1})
+    assert session.can_retry is True
+    assert session.get_progress()["can_retry"] is True
+
+
+def test_cookie_blocked_download_can_retry_after_cookie_file_changes(persisted, monkeypatch):
+    from core import douyin_cookies
+
+    persisted.video_path = None
+    persisted.source_url = "https://www.douyin.com/video/1234567890123456789"
+    persisted._source_downloader = object()
+    persisted._startup_failed = True
+    persisted.error = "Phiên Douyin không được chấp nhận."
+    persisted._source_failure_code = "CAPTCHA_REQUIRED"
+    persisted._download_auth_cookie_revision = [1000, 64]
+    persisted.persist()
+    active_streaming_sessions.pop(persisted.task_id, None)
+
+    monkeypatch.setattr(douyin_cookies, "get_douyin_cookie_status",
+                        lambda: {"configured": True, "stored": True, "count": 1})
+    monkeypatch.setattr(douyin_cookies, "douyin_cookie_revision", lambda: [1000, 64], raising=False)
+    restored = restore_saved_session(persisted.task_id)
+    assert restored._source_failure_code == "CAPTCHA_REQUIRED"
+    assert restored._download_auth_cookie_revision == [1000, 64]
+    assert restored.can_retry is False
+    history = next(row for row in list_saved_sessions() if row["task_id"] == persisted.task_id)
+    assert history["can_retry"] is False
+
+    monkeypatch.setattr(douyin_cookies, "douyin_cookie_revision", lambda: [2000, 64], raising=False)
+    assert restored.can_retry is True
+    history = next(row for row in list_saved_sessions() if row["task_id"] == persisted.task_id)
+    assert history["can_retry"] is True
+    active_streaming_sessions.pop(persisted.task_id, None)
+
+
 @pytest.mark.parametrize("field,value", [
     ("code", "DONE"), ("required_seconds", "1.59"), ("required_seconds", True),
     ("required_seconds", 0), ("required_seconds", float("inf")),

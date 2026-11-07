@@ -1,5 +1,6 @@
 """Cookie import/scoping tests with synthetic values; no browser or network."""
 import json
+import os
 import tempfile
 from pathlib import Path
 from urllib.request import HTTPCookieProcessor, Request
@@ -138,6 +139,19 @@ def test_missing_and_expired_storage_status_never_exposes_values(cookie_file):
     assert status["configured"] is False and status["count"] == 0
     assert status["imported_at"] is None and status["message"]
     assert SENTINEL not in json.dumps(status)
+
+
+def test_cookie_revision_is_secret_free_and_changes_after_reimport(cookie_file):
+    assert cookies.douyin_cookie_revision(path=cookie_file) is None
+    cookies.import_douyin_cookies(data(record(value="first-session")), path=cookie_file)
+    first = cookies.douyin_cookie_revision(path=cookie_file)
+    assert isinstance(first, list) and len(first) == 2
+    os.utime(cookie_file, ns=(first[0] + 10_000_000, first[0] + 10_000_000))
+    cookies.import_douyin_cookies(data(record(value="second-session")), path=cookie_file)
+    second = cookies.douyin_cookie_revision(path=cookie_file)
+    assert second != first
+    assert "first-session" not in json.dumps(second)
+    assert "second-session" not in json.dumps(second)
 
 
 def test_redirect_cookie_scoping_secure_host_only_and_path():

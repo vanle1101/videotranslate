@@ -314,9 +314,10 @@ def test_worker_resolver_failure_enters_existing_fallback(
         def prepare_filename(self, info):
             return prefix + ".mp4"
 
-    def fallback(options, url):
+    def fallback(options, url, **kwargs):
         assert url == expected_url and options["noplaylist"] is True
         assert options["outtmpl"] == prefix + ".%(ext)s"
+        assert kwargs.get("use_imported_douyin_cookies") is False
         assert "cookiesfrombrowser" not in options
         assert "cookiefile" not in options
         return Fallback()
@@ -780,6 +781,190 @@ def test_http_403_fails_fast_without_mirror_retry(monkeypatch, work_directory):
     assert waits == []
 
 
+def test_http_403_enters_cookie_fallback_only_at_douyin_worker_boundary(
+        monkeypatch, work_directory, capsys):
+    prefix = str(work_directory / "video")
+    monkeypatch.setattr(worker.sys, "argv", ["download_worker.py", VIDEO_URL, prefix])
+    monkeypatch.setattr(worker, "resolve_douyin", lambda *_args: (_ for _ in ()).throw(
+        worker.DouyinResolveError("private-token", code="http_error", status_code=403,
+                                  error_type="HTTPError")))
+    monkeypatch.setattr(worker, "get_douyin_cookie_status",
+                        lambda: {"configured": False, "stored": False, "count": 0}, raising=False)
+    fallback_calls = []
+    monkeypatch.setattr(worker, "single_video_downloader",
+                        lambda *_args, **_kwargs: fallback_calls.append(True), raising=False)
+    assert worker.main() == 1
+    events = read_events(capsys)
+    assert events[-1]["code"] == "AUTH_REQUIRED"
+    assert fallback_calls == []
+
+
+def test_public_http_403_without_imported_cookies_reports_auth_required(
+        monkeypatch, work_directory, capsys):
+    prefix = str(work_directory / "video")
+    monkeypatch.setattr(worker.sys, "argv", ["download_worker.py", VIDEO_URL, prefix])
+    monkeypatch.setattr(worker, "resolve_douyin", lambda *_args: (_ for _ in ()).throw(
+        worker.DouyinResolveError("private-token", code="http_error", status_code=403,
+                                  error_type="HTTPError")))
+    monkeypatch.setattr(worker, "get_douyin_cookie_status",
+                        lambda: {"configured": False, "stored": False, "count": 0}, raising=False)
+    fallback_calls = []
+    monkeypatch.setattr(worker, "single_video_downloader",
+                        lambda *_args, **_kwargs: fallback_calls.append(True), raising=False)
+
+    assert worker.main() == 1
+    events = read_events(capsys)
+    assert events[-1]["kind"] == "error"
+    assert events[-1]["code"] == "AUTH_REQUIRED"
+    assert "cookie" in events[-1]["message"].lower()
+    assert fallback_calls == []
+    assert "private-token" not in json.dumps(events)
+
+
+def test_public_http_403_with_expired_import_reports_login_required_without_retry(
+        monkeypatch, work_directory, capsys):
+    prefix = str(work_directory / "video")
+    monkeypatch.setattr(worker.sys, "argv", ["download_worker.py", VIDEO_URL, prefix])
+    monkeypatch.setattr(worker, "resolve_douyin", lambda *_args: (_ for _ in ()).throw(
+        worker.DouyinResolveError("private-token", code="http_error", status_code=403,
+                                  error_type="HTTPError")))
+    monkeypatch.setattr(worker, "get_douyin_cookie_status",
+                        lambda: {"configured": False, "stored": True, "count": 0}, raising=False)
+    fallback_calls = []
+    monkeypatch.setattr(worker, "single_video_downloader",
+                        lambda *_args, **_kwargs: fallback_calls.append(True), raising=False)
+
+    assert worker.main() == 1
+    events = read_events(capsys)
+    assert events[-1]["code"] == "LOGIN_REQUIRED"
+    assert "hết hạn" in events[-1]["message"].lower()
+    assert fallback_calls == []
+    assert "private-token" not in json.dumps(events)
+
+
+def test_public_http_403_uses_one_cookie_scoped_ytdlp_attempt(
+        monkeypatch, work_directory, capsys, mp4_bytes):
+    prefix = str(work_directory / "video")
+    monkeypatch.setattr(worker.sys, "argv", ["download_worker.py", VIDEO_URL, prefix])
+    monkeypatch.setattr(worker, "resolve_douyin", lambda *_args: (_ for _ in ()).throw(
+        worker.DouyinResolveError("private-token", code="http_error", status_code=403,
+                                  error_type="HTTPError")))
+    monkeypatch.setattr(worker, "get_douyin_cookie_status",
+                        lambda: {"configured": True, "stored": True, "count": 2}, raising=False)
+    calls = []
+
+    class FakeYDL:
+        def __init__(self, options):
+            self.options = options
+            self.output = Path(options["outtmpl"].replace("%(ext)s", "mp4"))
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def extract_info(self, url, download=True):
+            calls.append((url, download, self.options.get("retries")))
+            self.output.write_bytes(mp4_bytes)
+            return {"title": "Synthetic video", "duration": 0.5}
+
+        def prepare_filename(self, _info):
+            return str(self.output)
+
+    monkeypatch.setattr(worker, "single_video_downloader",
+                        lambda options, url, **_kwargs: FakeYDL(options), raising=False)
+    assert worker.main() == 0
+    events = read_events(capsys)
+    result = next(event["result"] for event in events if event["kind"] == "result")
+    assert calls == [(f"https://www.douyin.com/video/{VIDEO_ID}", True, 0)]
+    assert Path(result["file_path"]).is_file()
+    assert Path(result["file_path"]).read_bytes() == mp4_bytes
+    assert sum(event.get("source") == "douyin-cookie-ytdlp" for event in events) == 1
+    assert "private-token" not in json.dumps(events)
+
+
+@pytest.mark.parametrize(("blocked_text", "code"), [
+    ("CAPTCHA required; sessionid=synthetic-secret", "CAPTCHA_REQUIRED"),
+    ("Please log in; sessionid=synthetic-secret", "LOGIN_REQUIRED"),
+    ("The session has expired; cookies are needed; sessionid=synthetic-secret", "LOGIN_REQUIRED"),
+    ("Signed URL expired; sessionid=synthetic-secret", "SOURCE_EXPIRED"),
+])
+def test_cookie_fallback_stops_on_auth_challenge_with_safe_classification(
+        monkeypatch, work_directory, capsys, blocked_text, code):
+    prefix = str(work_directory / "video")
+    monkeypatch.setattr(worker.sys, "argv", ["download_worker.py", VIDEO_URL, prefix])
+    monkeypatch.setattr(worker, "resolve_douyin", lambda *_args: (_ for _ in ()).throw(
+        worker.DouyinResolveError("private-token", code="http_error", status_code=403,
+                                  error_type="HTTPError")))
+    monkeypatch.setattr(worker, "get_douyin_cookie_status",
+                        lambda: {"configured": True, "stored": True, "count": 1}, raising=False)
+    calls = []
+
+    class BlockedYDL:
+        def __enter__(self): return self
+        def __exit__(self, *_args): return False
+        def extract_info(self, *_args, **_kwargs):
+            calls.append(True)
+            raise RuntimeError(blocked_text)
+
+    monkeypatch.setattr(worker, "single_video_downloader",
+                        lambda *_args, **_kwargs: BlockedYDL(), raising=False)
+    assert worker.main() == 1
+    events = read_events(capsys)
+    assert events[-1]["kind"] == "error" and events[-1]["code"] == code
+    assert calls == [True]
+    assert "synthetic-secret" not in json.dumps(events)
+    assert "private-token" not in json.dumps(events)
+
+
+def test_http_429_honors_retry_after_once_then_stops(monkeypatch, work_directory, mp4_bytes):
+    calls, waits = [], []
+
+    def rate_limited(url, headers=None):
+        calls.append((url, headers))
+        raise worker.DouyinResolveError("private-token", code="http_error", status_code=429,
+            error_type="HTTPError", retry_after=4)
+
+    monkeypatch.setattr(worker, "open_public_media", rate_limited)
+    monkeypatch.setattr(worker.time, "sleep", waits.append)
+    with pytest.raises(worker.MediaDownloadError) as error:
+        worker.download_resolved_video(video_info(), str(work_directory / "video"), lambda _event: None)
+    assert error.value.code == "RATE_LIMITED"
+    assert len(calls) == 2
+    assert waits == [4]
+
+
+def test_cookie_fallback_rate_limit_preserves_retry_after_without_echoing_headers(
+        monkeypatch, work_directory, capsys):
+    prefix = str(work_directory / "video")
+    monkeypatch.setattr(worker.sys, "argv", ["download_worker.py", VIDEO_URL, prefix])
+    monkeypatch.setattr(worker, "resolve_douyin", lambda *_args: (_ for _ in ()).throw(
+        worker.DouyinResolveError("private-token", code="http_error", status_code=403,
+                                  error_type="HTTPError")))
+    monkeypatch.setattr(worker, "get_douyin_cookie_status",
+                        lambda: {"configured": True, "stored": True, "count": 1}, raising=False)
+
+    class RateLimited(RuntimeError):
+        status_code = 429
+        headers = {"Retry-After": "23", "Set-Cookie": "sessionid=synthetic-secret"}
+
+    class BlockedYDL:
+        def __enter__(self): return self
+        def __exit__(self, *_args): return False
+        def extract_info(self, *_args, **_kwargs): raise RateLimited("HTTP Error 429")
+
+    monkeypatch.setattr(worker, "single_video_downloader",
+                        lambda *_args, **_kwargs: BlockedYDL(), raising=False)
+    assert worker.main() == 1
+    events = read_events(capsys)
+    error = events[-1]
+    assert error["code"] == "RATE_LIMITED"
+    assert error["status_code"] == 429 and error["retry_after_seconds"] == 23
+    assert "synthetic-secret" not in json.dumps(events)
+    assert "Set-Cookie" not in json.dumps(events)
+
+
 @pytest.mark.parametrize("status", [403, 429])
 def test_access_restriction_preserves_validated_partial_for_later_resume(
         monkeypatch, work_directory, mp4_bytes, status):
@@ -854,7 +1039,7 @@ def test_adaptive_batch_failure_resumes_only_contiguous_validated_prefix(
 
 
 @pytest.mark.parametrize("status", [403, 429])
-def test_main_resolver_access_limit_does_not_enter_ytdlp_fallback(
+def test_main_resolver_access_limit_without_cookie_does_not_enter_ytdlp_fallback(
         monkeypatch, work_directory, capsys, status):
     prefix = str(work_directory / "video")
     monkeypatch.setattr(worker.sys, "argv", ["download_worker.py", VIDEO_URL, prefix])
@@ -863,9 +1048,11 @@ def test_main_resolver_access_limit_does_not_enter_ytdlp_fallback(
         lambda *_args: (_ for _ in ()).throw(worker.DouyinResolveError(
             "private-token", code="http_error", status_code=status,
             error_type="HTTPError")))
+    monkeypatch.setattr(worker, "get_douyin_cookie_status",
+                        lambda: {"configured": False, "stored": False, "count": 0}, raising=False)
 
     def unexpected_fallback(*_args, **_kwargs):
-        raise AssertionError("403 must not enter yt-dlp fallback")
+        raise AssertionError("Access denial without a cookie must not enter yt-dlp fallback")
 
     monkeypatch.setattr(worker, "single_video_downloader", unexpected_fallback)
     assert worker.main() == 1
@@ -947,6 +1134,8 @@ def test_resolver_failure_retains_validated_source_checkpoint_without_rendition_
     prefix = save_interrupted_checkpoint(monkeypatch, work_directory, mp4_bytes)
     before = {suffix: Path(prefix + suffix).read_bytes() for suffix in (".mp4.part", ".resume.json")}
     monkeypatch.setattr(worker.sys, "argv", ["download_worker.py", VIDEO_URL, prefix])
+    monkeypatch.setattr(worker, "get_douyin_cookie_status",
+                        lambda: {"configured": False, "stored": False, "count": 0}, raising=False)
     error = worker.DouyinResolveError("private-server-url", code="http_error", status_code=status, error_type="HTTPError")
     def resolve(*args):
         raise error
@@ -979,6 +1168,8 @@ def test_resolver_failure_never_hands_unverified_partial_to_ytdlp(monkeypatch, w
     else:
         path.write_text("[", encoding="utf-8")
     monkeypatch.setattr(worker.sys, "argv", ["download_worker.py", VIDEO_URL, prefix])
+    monkeypatch.setattr(worker, "get_douyin_cookie_status",
+                        lambda: {"configured": False, "stored": False, "count": 0}, raising=False)
     def resolve(*args):
         raise worker.DouyinResolveError("Unavailable")
     monkeypatch.setattr(worker, "resolve_douyin", resolve)

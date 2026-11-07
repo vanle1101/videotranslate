@@ -78,6 +78,25 @@ def test_progress_never_invents_percent_from_estimate():
     assert 'Không kết nối được www.douyin.com' in message and '0x000' not in message
 
 
+def test_downloader_preserves_typed_auth_failure_without_logging_cookie_values(tmp_path, monkeypatch, caplog):
+    from core import downloader as module
+
+    payload = {"kind": "error", "code": "AUTH_REQUIRED", "status_code": 403,
+               "message": "Douyin yêu cầu cookie.", "cookie_revision": [1234, 64]}
+
+    class WorkerProcess:
+        stdout = io.StringIO(json.dumps(payload, ensure_ascii=False) + "\n")
+        def poll(self): return 0
+
+    monkeypatch.setattr(module.subprocess, "Popen", lambda *_args, **_kwargs: WorkerProcess())
+    with pytest.raises(VideoDownloadError) as captured:
+        VideoDownloader(tmp_path).download("https://www.douyin.com/video/1234567890123456789")
+    error = captured.value
+    assert (error.code, error.status_code, error.cookie_revision) == ("AUTH_REQUIRED", 403, [1234, 64])
+    assert error.resumable is False
+    assert "1234" not in caplog.text and "64" not in caplog.text
+
+
 @pytest.mark.parametrize('host', ['douyin.com', 'v.douyin.com', 'www.iesdouyin.com'])
 def test_douyin_login_error_explains_studio_session_without_echoing_secrets(host):
     message = friendly_download_error('403 fresh cookies: sessionid=private-session; api_key=private-key', host)

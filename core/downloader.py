@@ -26,6 +26,15 @@ logger = logging.getLogger("pipeline")
 class VideoDownloadError(RuntimeError):
     """An actionable message suitable for the Studio and Tasks views."""
 
+    def __init__(self, message, *, code=None, status_code=None, retry_after_seconds=None,
+                 cookie_revision=None, resumable=False):
+        super().__init__(message)
+        self.code = code
+        self.status_code = status_code
+        self.retry_after_seconds = retry_after_seconds
+        self.cookie_revision = cookie_revision
+        self.resumable = bool(resumable)
+
 
 def friendly_download_error(error, host="trang video"):
     detail = str(error).lower()
@@ -410,7 +419,22 @@ class VideoDownloader:
                                          transport.get("status_code"), transport.get("bytes_received"))
                     return result
                 elif kind == "error":
-                    raise VideoDownloadError(event.get("message") or friendly_download_error("", host))
+                    code = event.get("code")
+                    code = code if isinstance(code, str) and re.fullmatch(r"[A-Z][A-Z0-9_]{1,47}", code) else None
+                    status_code = event.get("status_code")
+                    status_code = status_code if type(status_code) is int and 100 <= status_code <= 599 else None
+                    retry_after = event.get("retry_after_seconds")
+                    retry_after = (float(retry_after) if isinstance(retry_after, (int, float))
+                                   and not isinstance(retry_after, bool) and math.isfinite(retry_after)
+                                   and 0 <= retry_after <= 3601 else None)
+                    cookie_revision = event.get("cookie_revision")
+                    if (not isinstance(cookie_revision, list) or len(cookie_revision) != 2
+                            or any(type(value) is not int or value < 0 for value in cookie_revision)):
+                        cookie_revision = None
+                    raise VideoDownloadError(
+                        event.get("message") or friendly_download_error("", host), code=code,
+                        status_code=status_code, retry_after_seconds=retry_after,
+                        cookie_revision=cookie_revision, resumable=event.get("resumable") is True)
                 elif kind == "eof":
                     raise VideoDownloadError("Trình tải video đã dừng trước khi hoàn tất. Hãy thử lại.")
         except VideoDownloadError as error:

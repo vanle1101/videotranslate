@@ -88,7 +88,7 @@ SESSION_FIELDS = frozenset((
     " _chunk_jobs _visual_scanned_seconds _legacy_visual_prefix _parallel_chunk_planning"
     " _source_file_signature _processing_signature output_incomplete output_missing_segment_ids"
     " status_history status_changed_at translation_chunk_workers run_intent retry_state"
-    " automatic_output _auto_export_attempts"
+    " automatic_output _auto_export_attempts _download_auth_cookie_revision _download_retry_after_until"
 ).split())
 PATH_FIELDS = ("video_path", "ref_audio", "raw_audio_16k", "bgm_audio_path")
 META_FIELDS = frozenset((
@@ -935,6 +935,13 @@ def _validate_project(data, task_id):
     failure_start = fields.get("_source_failure_start")
     if failure_start is not None and (not _finite(failure_start) or failure_start < 0 or failure_start > duration + .1):
         raise ValueError("Mốc lỗi chuẩn bị nguồn đã lưu không hợp lệ.")
+    cookie_revision = fields.get("_download_auth_cookie_revision")
+    if (cookie_revision is not None and (not isinstance(cookie_revision, list) or len(cookie_revision) != 2
+            or any(type(value) is not int or value < 0 for value in cookie_revision))):
+        raise ValueError("Phiên bản cookie tải nguồn đã lưu không hợp lệ.")
+    retry_deadline = fields.get("_download_retry_after_until")
+    if retry_deadline is not None and (not _finite(retry_deadline) or retry_deadline <= 0 or retry_deadline > 10**12):
+        raise ValueError("Thời hạn tải lại nguồn đã lưu không hợp lệ.")
     for key in ("screen_texts", "translation_sources", "warnings", "rolling_context"):
         if not isinstance(fields.get(key, []), list):
             raise ValueError("Dữ liệu dự án không hợp lệ.")
@@ -1469,6 +1476,17 @@ def _availability(data):
             "missing_audio_ids": output_gate["missing_audio_ids"], "output_filename": output_filename}
 
 
+def _download_failure_stage(code):
+    return {
+        "AUTH_REQUIRED": "Douyin yêu cầu đăng nhập. Nhập cookies.txt trong Cài đặt để tiếp tục cùng task.",
+        "CAPTCHA_REQUIRED": "Douyin yêu cầu CAPTCHA; hãy xác minh phiên theo cách thông thường rồi nhập cookie mới.",
+        "LOGIN_REQUIRED": "Phiên Douyin đã hết hạn hoặc chưa đăng nhập. Nhập cookies.txt mới để thử lại task.",
+        "AUTH_REJECTED": "Douyin không chấp nhận phiên cookie hiện tại. Kiểm tra quyền xem và nhập phiên mới.",
+        "SOURCE_EXPIRED": "Link hoặc nguồn video Douyin đã hết hạn. Hãy lấy lại link từ video gốc.",
+        "RATE_LIMITED": "Máy chủ Douyin yêu cầu chờ theo Retry-After trước khi tiếp tục.",
+    }.get(code)
+
+
 def list_saved_sessions(*, excluded_task_ids=()):
     # The task list already has live/runtime rows for these IDs. Skip their
     # manifests before decompression, schema validation and WAV inspection.
@@ -1492,10 +1510,33 @@ def list_saved_sessions(*, excluded_task_ids=()):
             checkpoint_segments = len(data.get("segments") or []) if isinstance(data.get("segments"), list) else 0
             checkpoint_processed = fields.get("_visual_completed_seconds", fields.get("processed_seconds", 0)) or 0
             checkpoint_prepared = fields.get("_source_prepared_seconds", fields.get("source_prepared_seconds", 0)) or 0
+            source_failure_code = fields.get("_source_failure_code")
+            download_can_retry = False
+            if source_failure_code == "AUTH_REQUIRED":
+                try:
+                    from core.douyin_cookies import get_douyin_cookie_status
+                    cookie_status = get_douyin_cookie_status()
+                    download_can_retry = bool(cookie_status.get("configured") is True
+                        and type(cookie_status.get("count")) is int and cookie_status["count"] > 0)
+                except Exception:
+                    download_can_retry = False
+            elif source_failure_code in {"CAPTCHA_REQUIRED", "LOGIN_REQUIRED", "AUTH_REJECTED"}:
+                try:
+                    from core.douyin_cookies import get_douyin_cookie_status, douyin_cookie_revision
+                    cookie_status = get_douyin_cookie_status()
+                    download_can_retry = bool(cookie_status.get("configured") is True
+                        and type(cookie_status.get("count")) is int and cookie_status["count"] > 0
+                        and douyin_cookie_revision() != fields.get("_download_auth_cookie_revision"))
+                except Exception:
+                    download_can_retry = False
+            elif source_failure_code == "RATE_LIMITED":
+                deadline = fields.get("_download_retry_after_until")
+                download_can_retry = bool(_finite(deadline) and time.time() >= deadline)
             result.append({"task_id": path.stem, "title": title, "updated_at": data["updated_at"],
                 "video_path": fields.get("video_path") or "", "source_url": fields.get("source_url") or "",
                 "source_video_url": f"/api/local-file?path={quote(fields['video_path'], safe='')}" if available["source_exists"] else "",
                 "status": available["status"], "can_open": available["source_exists"] or available["pending_download"], "duration": fields.get("total_duration", 0),
+                "can_retry": download_can_retry,
                 "result_status": available["result_status"],
                 "saved": True, "task_type": "Phiên đã lưu", "progress_pct": 100 if available["status"] == "COMPLETED" else None,
                 "checkpoint_initialized": bool(fields.get("initialized")),
@@ -1512,7 +1553,8 @@ def list_saved_sessions(*, excluded_task_ids=()):
                 **{key: available[key] for key in ("media_complete", "source_coverage_complete", "invalid_timing_ids",
                     "output_is_draft", "output_quality_label", "output_review_segment_ids")},
                 **{key: available[key] for key in ("output_incomplete", "output_missing_segment_ids", "output_warning")},
-                "missing_media": available["missing_media"], "stage": available["missing_media"] or "Dự án đã lưu",
+                "missing_media": available["missing_media"],
+                "stage": _download_failure_stage(source_failure_code) or available["missing_media"] or "Dự án đã lưu",
                 "can_translate_full": available["preview_can_continue"], "translation_mode": fields.get("translation_mode", "full"),
                 "processed_seconds": fields.get("_visual_completed_seconds", 0),
                 "output_filename": available["output_filename"],
@@ -1658,6 +1700,8 @@ def _restore_saved_session_owned(task_id, event_callback=None):
     session.output_missing_segment_ids = available["output_missing_segment_ids"]
     review = fields.get("review_filename", "")
     session.output_review_url = f"/api/outputs/{review}" if session.output_filename and _exists(settings.OUTPUT_DIR / review) else ""
+    session._download_auth_cookie_revision = fields.get("_download_auth_cookie_revision")
+    session._download_retry_after_until = fields.get("_download_retry_after_until")
     session.total_processed_duration = sum(s.duration for s in session.segments.values() if s.status in {"READY", "PLAYED"})
     session.current_playback_time = min(session.current_playback_time, session.total_duration)
     session._recalculate_telemetry()
@@ -1688,8 +1732,14 @@ def _restore_saved_session_owned(task_id, event_callback=None):
         session.error = (available["missing_media"] if available["preview_source_unprepared"] else
                         "Dịch video chưa xong; các câu đã dịch và giọng đọc được giữ. Bấm Tiếp tục để xử lý phần còn lại."
                          if visual_incomplete else "Chuẩn bị video bị gián đoạn; bấm Tiếp tục để khôi phục phần đã lưu.")
-        if available["pending_download"]:
-            session._source_downloader = _SavedSourceDownloader()
+    if available["pending_download"]:
+        session._source_downloader = _SavedSourceDownloader()
+        download_failure = fields.get("_source_failure_code")
+        failure_stage = _download_failure_stage(download_failure)
+        if failure_stage:
+            session._startup_failed = True
+            session.error = failure_stage
+            session.progress.update(phase="resolve", stage=failure_stage, status="FAILED", progress_pct=None)
     if available["preview_ready"]:
         session.error = None
         session._startup_failed = False

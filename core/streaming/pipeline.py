@@ -277,6 +277,8 @@ class StreamingPipelineSession:
         self._source_failure_code = None
         self._source_failure_start = None
         self._source_preparation_stage = None
+        self._download_auth_cookie_revision = None
+        self._download_retry_after_until = None
         self._visual_result = None
         self._visual_published_ids = set()
         self._visual_completed_seconds = 0.0
@@ -636,6 +638,32 @@ class StreamingPipelineSession:
         failed = [segment for segment in self.segments.values() if segment.status == "FAILED"]
         if (self._startup_failed and not self.is_running
                 and not self.is_stopped and not self.is_editing and self.error):
+            download_code = getattr(self, "_source_failure_code", None)
+            if download_code in {"AUTH_REQUIRED", "CAPTCHA_REQUIRED", "LOGIN_REQUIRED", "AUTH_REJECTED",
+                                 "SOURCE_EXPIRED", "RATE_LIMITED"} and not (self.video_path and self.video_path.is_file()):
+                if download_code == "SOURCE_EXPIRED":
+                    return False
+                if download_code == "RATE_LIMITED":
+                    deadline = getattr(self, "_download_retry_after_until", None)
+                    return bool(deadline is not None and time.time() >= deadline
+                                and self.source_url and self._source_downloader)
+                try:
+                    from core.douyin_cookies import get_douyin_cookie_status, douyin_cookie_revision
+                    status = get_douyin_cookie_status()
+                    configured = bool(isinstance(status, dict) and status.get("configured") is True
+                                      and type(status.get("count")) is int and status["count"] > 0)
+                    if not configured:
+                        return False
+                    if download_code == "AUTH_REQUIRED":
+                        return bool(self.source_url and self._source_downloader)
+                    current_revision = douyin_cookie_revision()
+                    expected_revision = getattr(self, "_download_auth_cookie_revision", None)
+                    # Older checkpoints predate revision tracking. A valid
+                    # imported cookie can still unlock their explicit resume.
+                    return bool((expected_revision is None or current_revision != expected_revision)
+                                and self.source_url and self._source_downloader)
+                except Exception:
+                    return False
             if not failed and self._source_recovery_exhausted():
                 return False
             return bool((self.video_path and self.video_path.is_file())
@@ -2359,6 +2387,9 @@ class StreamingPipelineSession:
                 self.start_wall_time = time.time()
             self._persist_if_enabled()
             if downloader is not None and (self.video_path is None or not self.video_path.is_file()):
+                self._source_failure_code = None
+                self._download_auth_cookie_revision = None
+                self._download_retry_after_until = None
                 loop = asyncio.get_running_loop()
 
                 def publish_progress(data):
@@ -2404,6 +2435,21 @@ class StreamingPipelineSession:
         except Exception as exc:
             self.is_running = False
             self.error = str(exc)
+            failure_code = getattr(exc, "code", None)
+            if isinstance(failure_code, str) and failure_code in {
+                    "AUTH_REQUIRED", "CAPTCHA_REQUIRED", "LOGIN_REQUIRED", "AUTH_REJECTED",
+                    "SOURCE_EXPIRED", "RATE_LIMITED"}:
+                self._source_failure_code = failure_code
+                revision = getattr(exc, "cookie_revision", None)
+                self._download_auth_cookie_revision = (revision if isinstance(revision, list) and len(revision) == 2
+                                                       and all(type(value) is int and value >= 0 for value in revision)
+                                                       else None)
+                retry_after = getattr(exc, "retry_after_seconds", None)
+                if failure_code == "RATE_LIMITED":
+                    delay = (float(retry_after) if isinstance(retry_after, (int, float))
+                             and not isinstance(retry_after, bool) and math.isfinite(retry_after)
+                             and 0 <= retry_after <= 3601 else 60.0)
+                    self._download_retry_after_until = time.time() + max(1.0, delay)
             self._startup_failed = (not self._visual_prepass_complete if self._chunked_source_started
                                     else self._visual_result is None if self.visual_translation else not self.initialized)
             logging.getLogger("errors").error("[%s] Không thể xử lý video: %s", self.task_id, self.error)

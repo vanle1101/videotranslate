@@ -4916,7 +4916,11 @@ document.addEventListener("DOMContentLoaded", () => {
     }
     if (historyTaskId(task.task_id)) {
       if (task.can_pause) actions += `<button onclick="window.pauseTask('${task.task_id}')" class="history-button history-button-pause">Tạm dừng</button>`;
-      if (runtimeBuildCompatible && (task.can_resume || ((task.can_retry || (task.saved && task.can_open !== false)) && ["STOPPED", "CANCELLED", "FAILED"].includes(task.status)))) actions += `<button onclick="window.resumeTask('${historyTaskId(sessionId) ? sessionId : task.task_id}')" class="history-button history-button-resume">Tiếp tục</button>`;
+      const authBlocked = ["AUTH_REQUIRED", "CAPTCHA_REQUIRED", "LOGIN_REQUIRED", "AUTH_REJECTED", "SOURCE_EXPIRED", "RATE_LIMITED"]
+        .includes(task.source_failure_code || task.result_status);
+      const canContinue = authBlocked ? task.can_retry === true
+        : (task.can_resume || ((task.can_retry || (task.saved && task.can_open !== false)) && ["STOPPED", "CANCELLED", "FAILED"].includes(task.status)));
+      if (runtimeBuildCompatible && canContinue) actions += `<button onclick="window.resumeTask('${historyTaskId(sessionId) ? sessionId : task.task_id}')" class="history-button history-button-resume">Tiếp tục</button>`;
       if (task.can_stop) actions += `<button onclick="window.stopTask('${task.task_id}')" class="history-button history-button-stop">Dừng</button>`;
     }
     const outputUrl = task.status === "COMPLETED" || task.output_incomplete || task.output_is_draft ||
@@ -5374,7 +5378,7 @@ document.addEventListener("DOMContentLoaded", () => {
       if (version !== douyinCookiesVersion) return;
       applyDouyinCookiesStatus(data);
       showDouyinCookiesMessage(data.configured
-        ? "Đã có cookie để thử tải. Chạy lại link Douyin để kiểm tra phiên còn dùng được."
+        ? "Đã có cookie để thử tải. Chạy lại link Douyin để kiểm tra; phiên chỉ được xác nhận khi tải thực tế thành công."
         : data.stored === true
           ? "Nhập tệp mới hoặc xóa phiên cũ trước khi thử lại."
           : "Chọn tệp cookie Douyin để nhập. Đăng nhập Chrome không tự cập nhật mục này.");
@@ -5412,7 +5416,7 @@ document.addEventListener("DOMContentLoaded", () => {
       if (version !== douyinCookiesVersion) return;
       applyDouyinCookiesStatus(data);
       showDouyinCookiesMessage(importing
-        ? "Đã nhập cookie. Chạy lại link Douyin để kiểm tra tải video; phiên đăng nhập chưa được xác minh."
+        ? "Đã nhập cookie. Với tác vụ AUTH_REQUIRED, mở Lịch sử rồi bấm Tiếp tục để thử lại cùng task. Phiên chưa được xác minh."
         : "Đã xóa bản cookie khỏi Studio. Phiên đăng nhập trong Chrome vẫn giữ nguyên.");
     } catch (_) {
       showDouyinCookiesMessage(importing

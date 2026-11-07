@@ -146,6 +146,22 @@ def get_douyin_cookie_status(*, path=None):
             "message": "Chưa nhập cookie Douyin."}
 
 
+def douyin_cookie_revision(*, path=None):
+    """Return local file metadata for detecting an explicit cookie re-import.
+
+    The revision contains no cookie bytes, names, values, or content digest and
+    is only intended for the private project checkpoint, never a UI response.
+    """
+    target = cookie_path() if path is None else Path(path)
+    try:
+        if target.is_symlink() or not target.is_file():
+            return None
+        info = target.stat()
+        return [int(info.st_mtime_ns), int(info.st_size)]
+    except (OSError, OverflowError, ValueError):
+        return None
+
+
 def import_douyin_cookies(content, *, path=None):
     jar = parse_douyin_cookies(content)
     serialized = _serialize(jar)

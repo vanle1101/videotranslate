@@ -10,6 +10,7 @@ import shutil
 import subprocess
 import sys
 import time
+import uuid
 from collections import deque
 from pathlib import Path
 from email.utils import parsedate_to_datetime
@@ -17,7 +18,10 @@ from urllib.parse import urlsplit
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from core.downloader import friendly_download_error
-from core.douyin_cookies import DouyinCookieError, cookie_policy, is_douyin_url, load_douyin_cookiejar
+from core.douyin_cookies import (
+    DouyinCookieError, cookie_policy, douyin_cookie_revision, get_douyin_cookie_status,
+    is_douyin_url, load_douyin_cookiejar,
+)
 from core.douyin_resolver import DouyinResolveError, open_public_media, resolve_douyin, _retry_after_seconds, _video_id
 from core.download_ranges import adaptive_chunks, RangeTransferError
 
@@ -25,10 +29,14 @@ from core.download_ranges import adaptive_chunks, RangeTransferError
 class MediaDownloadError(RuntimeError):
     """A safe message, without signed CDN addresses or credentials."""
 
-    def __init__(self, message, *, resumable=False, code=None):
+    def __init__(self, message, *, resumable=False, code=None, status_code=None,
+                 retry_after_seconds=None, cookie_revision=None):
         super().__init__(message)
         self.resumable = resumable
         self.code = code
+        self.status_code = status_code
+        self.retry_after_seconds = _retry_after_seconds(retry_after_seconds)
+        self.cookie_revision = cookie_revision
 
 
 MAX_MEDIA_RETRIES = 5
@@ -56,6 +64,94 @@ def _disk_error(error):
     if getattr(error, "errno", None) == errno.ENOSPC:
         return MediaDownloadError("Ổ đĩa đã hết dung lượng khi lưu video. Hãy giải phóng dung lượng rồi thử lại.", code="disk_full")
     return MediaDownloadError("Không đọc hoặc ghi được tệp video trên ổ đĩa. Kiểm tra dung lượng và quyền ghi của thư mục tải.", code="disk_error")
+
+
+def _has_imported_douyin_cookies():
+    try:
+        status = get_douyin_cookie_status()
+        return bool(isinstance(status, dict) and status.get("configured") is True
+                    and type(status.get("count")) is int and status["count"] > 0)
+    except Exception:
+        return False
+
+
+def _missing_douyin_cookie_error(*, resumable=False):
+    """Distinguish a never-imported session from an expired saved cookie file."""
+    try:
+        status = get_douyin_cookie_status()
+    except Exception:
+        status = {}
+    code = "LOGIN_REQUIRED" if isinstance(status, dict) and status.get("stored") is True else "AUTH_REQUIRED"
+    return MediaDownloadError(
+        _safe_download_failure(code), resumable=resumable, code=code, status_code=403,
+        cookie_revision=douyin_cookie_revision())
+
+
+def _classify_cookie_download_error(error):
+    """Map downloader diagnostics to safe, stable codes without returning text."""
+    detail = str(error).lower()
+    status = getattr(error, "status_code", None)
+    if status == 429 or "http error 429" in detail or "too many requests" in detail:
+        return "RATE_LIMITED"
+    if any(token in detail for token in ("captcha", "verify you are human", "verification required",
+                                         "complete the verification", "verify you are not")):
+        return "CAPTCHA_REQUIRED"
+    if any(token in detail for token in ("login", "log in", "sign in", "fresh cookies",
+                                         "cookies are needed", "session expired", "session has expired")):
+        return "LOGIN_REQUIRED"
+    if any(token in detail for token in ("signed url expired", "signature expired", "url has expired",
+                                         "link expired", "source expired")):
+        return "SOURCE_EXPIRED"
+    if status == 404 or "http error 404" in detail or "video unavailable" in detail:
+        return "SOURCE_EXPIRED"
+    if status == 403 or "http error 403" in detail or "forbidden" in detail:
+        return "AUTH_REJECTED"
+    return "COOKIE_DOWNLOAD_FAILED"
+
+
+def _retry_after_from_exception(error):
+    """Read only a bounded Retry-After value from a wrapped local error object."""
+    seen = set()
+    current = error
+    for _ in range(8):
+        if current is None or id(current) in seen:
+            break
+        seen.add(id(current))
+        value = getattr(current, "retry_after", None)
+        if value is not None:
+            delay = _retry_after_seconds(value)
+            if delay is not None:
+                return delay
+        headers = getattr(current, "headers", None) or getattr(current, "hdrs", None)
+        response = getattr(current, "response", None)
+        if headers is None and response is not None:
+            headers = getattr(response, "headers", None)
+        if headers is not None:
+            try:
+                value = headers.get("Retry-After") or headers.get("retry-after")
+            except Exception:
+                value = None
+            delay = _retry_after_seconds(value)
+            if delay is not None:
+                return delay
+        current = getattr(current, "__cause__", None) or getattr(current, "__context__", None)
+    return None
+
+
+def _safe_download_failure(code, *, retry_after=None):
+    messages = {
+        "AUTH_REQUIRED": "Douyin yêu cầu phiên đăng nhập. Nhập tệp Netscape cookies.txt trong Cài đặt rồi tiếp tục tác vụ.",
+        "CAPTCHA_REQUIRED": "Douyin vẫn yêu cầu CAPTCHA sau một lượt thử có xác thực. Hãy xác minh phiên bằng cách thông thường rồi nhập lại cookies.txt; Studio không vượt CAPTCHA.",
+        "LOGIN_REQUIRED": "Phiên Douyin hết hạn hoặc chưa đăng nhập. Hãy đăng nhập bằng cách thông thường, xuất cookies.txt mới rồi nhập vào Cài đặt.",
+        "SOURCE_EXPIRED": "Link hoặc địa chỉ video Douyin đã hết hạn/không còn khả dụng. Hãy lấy lại link từ video gốc.",
+        "AUTH_REJECTED": "Douyin không chấp nhận cookie đã nhập hoặc video bị giới hạn quyền truy cập. Kiểm tra phiên đăng nhập và quyền xem video.",
+        "RATE_LIMITED": "Máy chủ Douyin yêu cầu chờ trước khi tải tiếp.",
+        "COOKIE_DOWNLOAD_FAILED": "Một lượt tải Douyin có cookie đã thất bại. Kiểm tra link, phiên đăng nhập và kết nối rồi thử lại.",
+    }
+    message = messages.get(code, "Không tải được video Douyin.")
+    if code == "RATE_LIMITED" and retry_after is not None:
+        message += f" Thử lại sau ít nhất {int(math.ceil(retry_after))} giây."
+    return message
 
 
 def _diagnostic(send, error, attempt, downloaded_bytes=0):
@@ -301,6 +397,7 @@ def download_resolved_video(info, prefix, send):
     # to another signed URL on every 429 can turn a temporary server decision
     # into a burst against all mirrors and also discard a useful Retry-After.
     retry_url_index = None
+    rate_limit_retry_used = False
     for attempt in range(MAX_MEDIA_RETRIES + 1):
         retry_count = attempt
         if total and downloaded == total:
@@ -466,39 +563,45 @@ def download_resolved_video(info, prefix, send):
                                             format_identity=format_identity, total=total, downloaded=downloaded,
                                             validators=validators, digest=digest)
                 raise MediaDownloadError(
-                    "Máy chủ Douyin từ chối truy cập video (HTTP 403). Hãy kiểm tra quyền truy cập hoặc cookie rồi thử lại.",
-                    resumable=resumable, code="http_error") from None
+                    "Máy chủ Douyin từ chối truy cập video (HTTP 403).", resumable=resumable,
+                    code="http_error", status_code=403) from None
             if status_code == 429:
-                retry_url_index = current_url_index
-            if isinstance(error, RangeTransferError) or strategy == "parallel-range":
-                range_enabled = False
-                strategy, connections = "single-stream", 1
-            last_code, last_status = _diagnostic(send, error, attempt, downloaded)
-            if last_status == 429:
+                _diagnostic(send, error, attempt, downloaded)
+                resumable = _save_checkpoint(checkpoint_path, partial, video_id=info["id"],
+                                            format_identity=format_identity, total=total, downloaded=downloaded,
+                                            validators=validators, digest=digest)
                 sleep_after = getattr(error, "retry_after", None)
-            resumable = _save_checkpoint(checkpoint_path, partial, video_id=info["id"],
-                                        format_identity=format_identity, total=total, downloaded=downloaded,
-                                        validators=validators, digest=digest)
-            if sleep_after is not None and sleep_after > 60:
-                raise MediaDownloadError(
-                    "Máy chủ yêu cầu chờ trước khi tải tiếp (HTTP 429). Đã dừng kết nối; hãy thử lại sau thời gian máy chủ quy định.",
-                    resumable=resumable, code="http_error") from None
-            if attempt == MAX_MEDIA_RETRIES:
-                if last_code in {"read_timeout", "connection_timeout"}:
-                    message = "Máy chủ video phản hồi quá chậm sau nhiều lần kết nối lại."
-                elif last_code == "http_error":
-                    message = f"Máy chủ video từ chối tải (HTTP {last_status})." if last_status else "Máy chủ video chưa chấp nhận tải."
-                elif last_code in {"range_invalid", "resource_changed", "content_type", "length_mismatch"}:
-                    message = "Máy chủ video trả dữ liệu không khớp nên chưa thể tải hoàn tất."
-                else:
-                    message = "Luồng tải từ máy chủ video bị ngắt sau nhiều lần kết nối lại."
-                if resumable:
-                    message += f" Đã giữ {downloaded / 1024**2:,.1f} MB; bấm Bắt đầu dịch để thử tải tiếp."
-                else:
-                    message += " Hãy thử lại sau; máy chủ chưa cho phép nối tiếp an toàn."
-                raise MediaDownloadError(message, resumable=resumable) from None
-            kept = f"giữ {downloaded / 1024**2:,.1f} MB đã tải" if resumable else "sẽ tải lại từ đầu để bảo đảm tệp đúng"
-            report(f"Đang kết nối lại {attempt + 1}/{MAX_MEDIA_RETRIES}; {kept}…", waiting=True)
+                if (rate_limit_retry_used or sleep_after is None or sleep_after > 60):
+                    raise MediaDownloadError(
+                        _safe_download_failure("RATE_LIMITED", retry_after=sleep_after) + " (HTTP 429)",
+                        resumable=resumable, code="RATE_LIMITED", status_code=429,
+                        retry_after_seconds=sleep_after) from None
+                rate_limit_retry_used = True
+                retry_url_index = current_url_index
+            else:
+                if isinstance(error, RangeTransferError) or strategy == "parallel-range":
+                    range_enabled = False
+                    strategy, connections = "single-stream", 1
+                last_code, last_status = _diagnostic(send, error, attempt, downloaded)
+                resumable = _save_checkpoint(checkpoint_path, partial, video_id=info["id"],
+                                            format_identity=format_identity, total=total, downloaded=downloaded,
+                                            validators=validators, digest=digest)
+                if attempt == MAX_MEDIA_RETRIES:
+                    if last_code in {"read_timeout", "connection_timeout"}:
+                        message = "Máy chủ video phản hồi quá chậm sau nhiều lần kết nối lại."
+                    elif last_code == "http_error":
+                        message = f"Máy chủ video từ chối tải (HTTP {last_status})." if last_status else "Máy chủ video chưa chấp nhận tải."
+                    elif last_code in {"range_invalid", "resource_changed", "content_type", "length_mismatch"}:
+                        message = "Máy chủ video trả dữ liệu không khớp nên chưa thể tải hoàn tất."
+                    else:
+                        message = "Luồng tải từ máy chủ video bị ngắt sau nhiều lần kết nối lại."
+                    if resumable:
+                        message += f" Đã giữ {downloaded / 1024**2:,.1f} MB; bấm Bắt đầu dịch để thử tải tiếp."
+                    else:
+                        message += " Hãy thử lại sau; máy chủ chưa cho phép nối tiếp an toàn."
+                    raise MediaDownloadError(message, resumable=resumable) from None
+                kept = f"giữ {downloaded / 1024**2:,.1f} MB đã tải" if resumable else "sẽ tải lại từ đầu để bảo đảm tệp đúng"
+                report(f"Đang kết nối lại {attempt + 1}/{MAX_MEDIA_RETRIES}; {kept}…", waiting=True)
         finally:
             if response is not None:
                 response.close()
@@ -550,10 +653,10 @@ def progress_payload(data):
     return result
 
 
-def single_video_downloader(options, url=None):
+def single_video_downloader(options, url=None, *, use_imported_douyin_cookies=True):
     import yt_dlp
 
-    use_douyin_cookies = is_douyin_url(url) if url else False
+    use_douyin_cookies = bool(use_imported_douyin_cookies and is_douyin_url(url)) if url else False
 
     class SingleVideoYoutubeDL(yt_dlp.YoutubeDL):
         def build_request_director(self, handlers, preferences=None):
@@ -586,6 +689,64 @@ def single_video_downloader(options, url=None):
             downloader.close()
             raise
     return downloader
+
+
+def _download_with_imported_douyin_cookies(url, prefix, options, send):
+    """Make exactly one yt-dlp attempt using only the imported Douyin cookie jar."""
+    if not _has_imported_douyin_cookies():
+        raise _missing_douyin_cookie_error()
+
+    revision = douyin_cookie_revision()
+    temporary_prefix = Path(f"{prefix}.cookie-{uuid.uuid4().hex}")
+    target_prefix = Path(prefix)
+    fallback_options = {
+        **options,
+        "outtmpl": str(temporary_prefix) + ".%(ext)s",
+        "retries": 0,
+        "extractor_retries": 0,
+        "fragment_retries": 0,
+        "file_access_retries": 0,
+        "continuedl": False,
+        "overwrites": False,
+    }
+    send({"kind": "progress", "source": "douyin-cookie-ytdlp", "phase": "resolve",
+          "stage": "Nguồn công khai yêu cầu quyền truy cập; đang thử một lượt bằng cookie Douyin đã nhập…",
+          "progress_pct": None})
+    try:
+        with single_video_downloader(fallback_options, url, use_imported_douyin_cookies=True) as ydl:
+            info = ydl.extract_info(url, download=True)
+            if not isinstance(info, dict) or info.get("_type") in {"playlist", "multi_video"}:
+                raise ValueError("unsupported url")
+            prepared = Path(ydl.prepare_filename(info))
+            candidates = [prepared]
+            if not prepared.exists():
+                candidates.extend(temporary_prefix.parent.glob(temporary_prefix.name + ".*"))
+            output = next((path for path in candidates
+                           if path.is_file() and not path.is_symlink()
+                           and path.resolve().parent == temporary_prefix.parent.resolve()
+                           and path.name.startswith(temporary_prefix.name + ".")
+                           and not path.name.endswith((".part", ".ytdl", ".tmp"))), None)
+            if output is None or output.stat().st_size <= 0:
+                raise ValueError("video output missing")
+        duration = verify_video(output)
+        suffix = output.suffix.lower() if re.fullmatch(r"\.[a-z0-9]{1,8}", output.suffix.lower()) else ".mp4"
+        # Keep the canonical video_<id>.<ext> name so VideoDownloader can
+        # validate and index the result for restart-safe cache reuse.
+        published = target_prefix.with_suffix(suffix)
+        if published.exists() or published.is_symlink():
+            raise OSError("fallback output already exists")
+        output.replace(published)
+        return {"file_path": str(published), "title": str(info.get("title") or f"Douyin {output.stem}")[:2000],
+                "duration": duration, "source": "douyin-cookie-ytdlp"}
+    except Exception as error:
+        code = _classify_cookie_download_error(error)
+        retry_after = _retry_after_from_exception(error)
+        error_status = getattr(error, "status_code", None)
+        if type(error_status) is not int or not 100 <= error_status <= 599:
+            error_status = 429 if code == "RATE_LIMITED" else 403 if code == "AUTH_REJECTED" else None
+        raise MediaDownloadError(_safe_download_failure(code, retry_after=retry_after), code=code,
+                                 status_code=error_status,
+                                 retry_after_seconds=retry_after, cookie_revision=revision) from None
 
 
 def main():
@@ -625,6 +786,38 @@ def main():
                 info = resolve_douyin(url, lambda data: send({"kind": "progress", "source": "douyin-public", **data}))
             except DouyinResolveError as error:
                 partial, checkpoint_path = Path(prefix + ".mp4.part"), Path(prefix + ".resume.json")
+                if error.status_code == 403:
+                    resumable = False
+                    downloaded = 0
+                    if partial.exists() or checkpoint_path.exists():
+                        send({"kind": "progress", "phase": "prepare", "source": "douyin-public",
+                              "stage": "Chưa lấy được nguồn; đang kiểm tra phần tải đã giữ…", "progress_pct": None})
+                        checkpoint = None
+                        if not partial.is_symlink() and not checkpoint_path.is_symlink():
+                            checkpoint, _ = _load_checkpoint(checkpoint_path, partial)
+                        downloaded = checkpoint["downloaded_bytes"] if checkpoint else 0
+                        resumable = checkpoint is not None
+                    _diagnostic(send, error, 0, downloaded)
+                    if _has_imported_douyin_cookies():
+                        fallback_video_id = _video_id(url)
+                        fallback_url = (f"https://www.douyin.com/video/{fallback_video_id}"
+                                        if fallback_video_id else url)
+                        result = _download_with_imported_douyin_cookies(fallback_url, prefix, options, send)
+                        send({"kind": "result", "result": result})
+                        return 0
+                    raise _missing_douyin_cookie_error(resumable=resumable) from None
+                if error.status_code == 429:
+                    partial, checkpoint_path = Path(prefix + ".mp4.part"), Path(prefix + ".resume.json")
+                    checkpoint = None
+                    if partial.exists() and checkpoint_path.exists() and not partial.is_symlink() and not checkpoint_path.is_symlink():
+                        checkpoint, _ = _load_checkpoint(checkpoint_path, partial)
+                    downloaded = checkpoint["downloaded_bytes"] if checkpoint else 0
+                    _diagnostic(send, error, 0, downloaded)
+                    delay = _retry_after_seconds(error.retry_after)
+                    raise MediaDownloadError(
+                        _safe_download_failure("RATE_LIMITED", retry_after=delay),
+                        resumable=checkpoint is not None, code="RATE_LIMITED", status_code=429,
+                        retry_after_seconds=delay) from None
                 if partial.exists() or checkpoint_path.exists():
                     # A resumed public-source file must never enter yt-dlp's
                     # automatic .part append against a different rendition.
@@ -638,30 +831,33 @@ def main():
                     downloaded = checkpoint["downloaded_bytes"] if checkpoint else 0
                     _diagnostic(send, error, 0, downloaded)
                     if checkpoint:
-                        restriction = (f"Douyin chưa cho phép truy cập video (HTTP {error.status_code}). "
-                                       if error.status_code in {403, 429} else "Chưa lấy lại được thông tin bản video đã chọn. ")
+                        restriction = "Chưa lấy lại được thông tin bản video đã chọn. "
                         raise MediaDownloadError(
                             restriction + f"Đã giữ {downloaded / 1024**2:,.1f} MB; hãy thử lại khi nguồn cho phép tải tiếp.",
                             resumable=True,
                         ) from None
                     raise MediaDownloadError("Chưa lấy lại được nguồn và phần tải cũ không đủ điều kiện nối tiếp. Hãy thử lại để tải từ đầu.") from None
-                # Respect feed-level access/rate decisions without losing
-                # the storage-validated resume state checked above.
-                if error.status_code in {403, 429}:
-                    _diagnostic(send, error, 0)
-                    raise MediaDownloadError(
-                        f"Douyin chưa cho phép truy cập video (HTTP {error.status_code}). Hãy chờ và kiểm tra quyền truy cập rồi thử lại.",
-                        code="http_error") from None
                 _diagnostic(send, error, 0)
                 send({"kind": "progress", "phase": "resolve", "source": "yt-dlp",
                       "stage": "API công khai chưa lấy được video; đang thử trình tải dự phòng…", "progress_pct": None})
             else:
-                result = download_resolved_video(info, prefix, send)
+                try:
+                    result = download_resolved_video(info, prefix, send)
+                except MediaDownloadError as error:
+                    if error.status_code != 403:
+                        raise
+                    if not _has_imported_douyin_cookies():
+                        raise _missing_douyin_cookie_error(resumable=error.resumable) from None
+                    fallback_video_id = _video_id(url)
+                    fallback_url = (f"https://www.douyin.com/video/{fallback_video_id}"
+                                    if fallback_video_id else url)
+                    result = _download_with_imported_douyin_cookies(fallback_url, prefix, options, send)
                 send({"kind": "result", "result": result})
                 return 0
         video_id = _video_id(url) if is_douyin_url(url) else None
         fallback_url = f"https://www.douyin.com/video/{video_id}" if video_id else url
-        with single_video_downloader(options, fallback_url) as ydl:
+        with single_video_downloader(options, fallback_url,
+                                     use_imported_douyin_cookies=False) as ydl:
             info = ydl.extract_info(fallback_url, download=True)
             if not info or info.get("_type") in {"playlist", "multi_video"}:
                 raise ValueError("unsupported url")
@@ -676,6 +872,14 @@ def main():
         if isinstance(error, MediaDownloadError) and error.code in {"disk_full", "disk_error"}:
             _diagnostic(send, error, 0, getattr(error, "downloaded_bytes", 0))
         event = {"kind": "error", "message": str(error)}
+        if isinstance(error, MediaDownloadError) and isinstance(error.code, str):
+            event["code"] = error.code
+        if isinstance(error, MediaDownloadError) and type(error.status_code) is int:
+            event["status_code"] = error.status_code
+        if isinstance(error, MediaDownloadError) and error.retry_after_seconds is not None:
+            event["retry_after_seconds"] = error.retry_after_seconds
+        if isinstance(error, MediaDownloadError) and error.cookie_revision is not None:
+            event["cookie_revision"] = error.cookie_revision
         if isinstance(error, MediaDownloadError) and error.resumable:
             event["resumable"] = True
         send(event)

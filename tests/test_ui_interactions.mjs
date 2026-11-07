@@ -2735,6 +2735,37 @@ test('history distinguishes a translated project from a published video', async 
   assert.match(ui.el('tasks-table-body').children[1].innerHTML,/ĐÃ XUẤT VIDEO/);
 });
 
+test('Douyin AUTH_REQUIRED history has no Retry until a cookie is imported', async () => {
+  const ui = studio(); await ui.flush();
+  const blocked = {task_id:'douyin-auth', status:'FAILED', result_status:'AUTH_REQUIRED',
+    source_failure_code:'AUTH_REQUIRED', stage:'Douyin yêu cầu phiên đăng nhập. Nhập cookies.txt trong Cài đặt.',
+    saved:true, can_open:true, can_retry:false, can_resume:false, duration:0};
+  ui.replies.set('/api/tasks', {tasks:[blocked]});
+  await ui.el('btn-refresh-tasks').click();
+  let row = ui.el('tasks-table-body').children[0].innerHTML;
+  assert.match(row, /AUTH_REQUIRED|yêu cầu phiên đăng nhập/);
+  assert.doesNotMatch(row, /history-button-resume|resumeTask\('douyin-auth'\)/);
+
+  ui.replies.set('/api/tasks', {tasks:[{...blocked, can_retry:true,
+    stage:'Đã nhập cookie Douyin mới. Bấm Tiếp tục để tải nguồn.'}]});
+  await ui.el('btn-refresh-tasks').click();
+  row = ui.el('tasks-table-body').children[0].innerHTML;
+  assert.match(row, /history-button-resume/);
+  assert.match(row, /resumeTask\('douyin-auth'\)/);
+
+  const rejected = {...blocked, task_id:'douyin-captcha', result_status:'CAPTCHA_REQUIRED',
+    source_failure_code:'CAPTCHA_REQUIRED', stage:'Douyin yêu cầu xác minh phiên.', can_retry:false};
+  ui.replies.set('/api/tasks', {tasks:[rejected]});
+  await ui.el('btn-refresh-tasks').click();
+  row = ui.el('tasks-table-body').children[0].innerHTML;
+  assert.doesNotMatch(row, /history-button-resume|resumeTask\('douyin-captcha'\)/);
+  ui.replies.set('/api/tasks', {tasks:[{...rejected, can_retry:true,
+    stage:'Cookie đã được cập nhật; có thể tiếp tục tác vụ.'}]});
+  await ui.el('btn-refresh-tasks').click();
+  row = ui.el('tasks-table-body').children[0].innerHTML;
+  assert.match(row, /resumeTask\('douyin-captcha'\)/);
+});
+
 test('video history renders one source row while raw live, saved and export tasks still reconcile Studio', async () => {
   const ui = studio(); await ui.start();
   const raw = {task_id: 'fixture', status: 'RUNNING', phase: 'review', stage: 'Đang rà lời thoại',
