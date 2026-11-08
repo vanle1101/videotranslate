@@ -97,6 +97,36 @@ def test_downloader_preserves_typed_auth_failure_without_logging_cookie_values(t
     assert "1234" not in caplog.text and "64" not in caplog.text
 
 
+def test_downloader_logs_only_safe_authenticated_failure_diagnostics(tmp_path, monkeypatch, caplog):
+    from core import downloader as module
+
+    diagnostics = {
+        "stage": "authenticated_http", "error_type": "HTTPError", "http_status": 403,
+        "endpoint_host": "www.douyin.com", "endpoint_path": "/aweme/v1/web/aweme/detail/",
+        "authenticated_attempted": True,
+    }
+    payload = {
+        "kind": "error", "code": "AUTH_REJECTED", "status_code": 403,
+        "message": "Douyin từ chối phiên.", "authenticated_attempted": True,
+        "diagnostics": diagnostics,
+    }
+
+    class WorkerProcess:
+        stdout = io.StringIO(json.dumps(payload, ensure_ascii=False) + "\n")
+        def poll(self): return 0
+
+    monkeypatch.setattr(module.subprocess, "Popen", lambda *_args, **_kwargs: WorkerProcess())
+    with pytest.raises(VideoDownloadError) as captured:
+        VideoDownloader(tmp_path).download("https://www.douyin.com/video/1234567890123456789")
+
+    assert captured.value.diagnostics == diagnostics
+    assert captured.value.authenticated_attempted is True
+    assert "authenticated_http" in caplog.text
+    assert "www.douyin.com/aweme/v1/web/aweme/detail/" in caplog.text
+    assert "HTTP 403" in caplog.text
+    assert "session_token" not in caplog.text and "synthetic-secret" not in caplog.text
+
+
 @pytest.mark.parametrize('host', ['douyin.com', 'v.douyin.com', 'www.iesdouyin.com'])
 def test_douyin_login_error_explains_studio_session_without_echoing_secrets(host):
     message = friendly_download_error('403 fresh cookies: sessionid=private-session; api_key=private-key', host)

@@ -5,6 +5,7 @@ import errno
 import shutil
 import subprocess
 import tempfile
+from urllib.error import HTTPError
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -1073,6 +1074,102 @@ def test_cookie_fallback_stops_on_auth_challenge_with_safe_classification(
     assert calls == [True]
     assert "synthetic-secret" not in json.dumps(events)
     assert "private-token" not in json.dumps(events)
+
+
+def test_cookie_challenge_phrase_is_not_mislabeled_as_expired_login(
+        monkeypatch, work_directory, capsys):
+    prefix = str(work_directory / "video")
+    monkeypatch.setattr(worker.sys, "argv", ["download_worker.py", VIDEO_URL, prefix])
+    monkeypatch.setattr(worker, "resolve_douyin", lambda *_args: (_ for _ in ()).throw(
+        worker.DouyinResolveError("public denied", code="http_error", status_code=403,
+                                  error_type="HTTPError")))
+    monkeypatch.setattr(worker, "get_douyin_cookie_status",
+                        lambda: {"configured": True, "stored": True, "count": 66}, raising=False)
+
+    class ChallengeYDL:
+        def __enter__(self): return self
+        def __exit__(self, *_args): return False
+        def extract_info(self, *_args, **_kwargs):
+            raise RuntimeError("Sign in to confirm you're not a bot; sessionid=synthetic-secret")
+
+    monkeypatch.setattr(worker, "single_video_downloader",
+                        lambda *_args, **_kwargs: ChallengeYDL(), raising=False)
+    assert worker.main() == 1
+    events = read_events(capsys)
+    assert events[-1]["code"] == "CAPTCHA_REQUIRED"
+    assert "synthetic-secret" not in json.dumps(events)
+
+
+def test_cookie_http_error_keeps_redacted_status_and_endpoint_diagnostics(
+        monkeypatch, work_directory, capsys):
+    prefix = str(work_directory / "video")
+    monkeypatch.setattr(worker.sys, "argv", ["download_worker.py", VIDEO_URL, prefix])
+    monkeypatch.setattr(worker, "resolve_douyin", lambda *_args: (_ for _ in ()).throw(
+        worker.DouyinResolveError("public denied", code="http_error", status_code=403,
+                                  error_type="HTTPError")))
+    monkeypatch.setattr(worker, "get_douyin_cookie_status",
+                        lambda: {"configured": True, "stored": True, "count": 66}, raising=False)
+
+    class ForbiddenYDL:
+        def __enter__(self): return self
+        def __exit__(self, *_args): return False
+        def extract_info(self, *_args, **_kwargs):
+            raise HTTPError(
+                "https://www.douyin.com/aweme/v1/web/aweme/detail/?session_token=synthetic-secret",
+                403, "Forbidden", {}, None)
+
+    monkeypatch.setattr(worker, "single_video_downloader",
+                        lambda *_args, **_kwargs: ForbiddenYDL(), raising=False)
+    assert worker.main() == 1
+    event = read_events(capsys)[-1]
+    assert event["kind"] == "error" and event["code"] == "AUTH_REJECTED"
+    assert event["status_code"] == 403
+    assert event["authenticated_attempted"] is True
+    assert event["diagnostics"] == {
+        "stage": "authenticated_http", "error_type": "HTTPError", "http_status": 403,
+        "endpoint_host": "www.douyin.com", "endpoint_path": "/aweme/v1/web/aweme/detail/",
+        "authenticated_attempted": True,
+    }
+    assert "synthetic-secret" not in json.dumps(event)
+
+
+def test_cookie_extractor_message_does_not_invent_an_http_status(
+        monkeypatch, work_directory, capsys):
+    prefix = str(work_directory / "video")
+    monkeypatch.setattr(worker.sys, "argv", ["download_worker.py", VIDEO_URL, prefix])
+    monkeypatch.setattr(worker, "resolve_douyin", lambda *_args: (_ for _ in ()).throw(
+        worker.DouyinResolveError("public denied", code="http_error", status_code=403,
+                                  error_type="HTTPError")))
+    monkeypatch.setattr(worker, "get_douyin_cookie_status",
+                        lambda: {"configured": True, "stored": True, "count": 66}, raising=False)
+
+    class ExtractorYDL:
+        def __enter__(self): return self
+        def __exit__(self, *_args): return False
+        def extract_info(self, *_args, **_kwargs):
+            raise RuntimeError("HTTP Error 403: Forbidden; session_token=synthetic-secret")
+
+    monkeypatch.setattr(worker, "single_video_downloader",
+                        lambda *_args, **_kwargs: ExtractorYDL(), raising=False)
+    assert worker.main() == 1
+    event = read_events(capsys)[-1]
+    assert event["kind"] == "error" and event["code"] == "AUTH_REJECTED"
+    assert "status_code" not in event
+    assert event["authenticated_attempted"] is True
+    assert event["diagnostics"] == {
+        "stage": "authenticated_extractor", "error_type": "RuntimeError", "http_status": None,
+        "endpoint_host": None, "endpoint_path": None, "authenticated_attempted": True,
+    }
+    assert "synthetic-secret" not in json.dumps(event)
+
+
+@pytest.mark.parametrize(("error", "expected"), [
+    (TimeoutError("connect timeout"), "NETWORK_TIMEOUT"),
+    (ConnectionError("connection reset"), "NETWORK_CONNECTION_FAILURE"),
+    (RuntimeError("No suitable extractor found"), "UNSUPPORTED_SOURCE"),
+])
+def test_cookie_fallback_distinguishes_transport_and_extractor_failures(error, expected):
+    assert worker._classify_cookie_download_error(error) == expected
 
 
 def test_http_429_honors_retry_after_once_then_stops(monkeypatch, work_directory, mp4_bytes):

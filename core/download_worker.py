@@ -7,6 +7,8 @@ import math
 import os
 import re
 import shutil
+import socket
+import ssl
 import subprocess
 import sys
 import time
@@ -14,6 +16,7 @@ import uuid
 from collections import deque
 from pathlib import Path
 from email.utils import parsedate_to_datetime
+from urllib.error import HTTPError as UrllibHTTPError
 from urllib.parse import urlsplit
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
@@ -30,13 +33,14 @@ class MediaDownloadError(RuntimeError):
     """A safe message, without signed CDN addresses or credentials."""
 
     def __init__(self, message, *, resumable=False, code=None, status_code=None,
-                 retry_after_seconds=None, cookie_revision=None):
+                 retry_after_seconds=None, cookie_revision=None, diagnostics=None):
         super().__init__(message)
         self.resumable = resumable
         self.code = code
         self.status_code = status_code
         self.retry_after_seconds = _retry_after_seconds(retry_after_seconds)
         self.cookie_revision = cookie_revision
+        self.diagnostics = diagnostics if isinstance(diagnostics, dict) else None
 
 
 MAX_MEDIA_RETRIES = 5
@@ -81,27 +85,143 @@ def _has_imported_douyin_cookies():
         return False
 
 
-def _missing_douyin_cookie_error(*, resumable=False):
+def _missing_douyin_cookie_error(*, resumable=False, status_code=None, error_type="DouyinResolveError"):
     """Distinguish a never-imported session from an expired saved cookie file."""
     try:
         status = get_douyin_cookie_status()
     except Exception:
         status = {}
     code = "LOGIN_REQUIRED" if isinstance(status, dict) and status.get("stored") is True else "AUTH_REQUIRED"
+    status_code = status_code if type(status_code) is int and 100 <= status_code <= 599 else None
     return MediaDownloadError(
-        _safe_download_failure(code), resumable=resumable, code=code, status_code=403,
-        cookie_revision=douyin_cookie_revision())
+        _safe_download_failure(code), resumable=resumable, code=code, status_code=status_code,
+        cookie_revision=douyin_cookie_revision(), diagnostics={
+            "stage": "public_auth_gate",
+            "error_type": (error_type if re.fullmatch(r"[A-Za-z][A-Za-z0-9_]{0,47}", str(error_type))
+                           else "DouyinResolveError"),
+            "http_status": status_code,
+            "endpoint_host": None, "endpoint_path": None, "authenticated_attempted": False})
 
 
-def _classify_cookie_download_error(error):
+def _safe_cookie_endpoint(value):
+    """Keep a known HTTPS Douyin route; redact unknown path components and all query data."""
+    if not isinstance(value, str) or len(value) > 8192:
+        return None, None
+    try:
+        parsed = urlsplit(value)
+        if parsed.scheme.lower() != "https" or not is_douyin_url(value):
+            return None, None
+        path = parsed.path or "/"
+    except (TypeError, ValueError):
+        return None, None
+    path = re.sub(r"/\d{8,}(?=/|$)", "/{video_id}", path)
+    if path not in {"/aweme/v1/web/aweme/detail", "/aweme/v1/web/aweme/detail/"}:
+        video_route = re.fullmatch(r"/video/([^/]+)/?", path)
+        if video_route:
+            path = "/video/{video_id}"
+        else:
+            path = "/{redacted}"
+    return parsed.hostname.lower(), path
+
+
+def _exception_chain(error):
+    """Walk common downloader wrapper links without inspecting or emitting their text."""
+    chain, pending, seen = [], [error], set()
+    while pending and len(chain) < 16:
+        current = pending.pop(0)
+        if not isinstance(current, BaseException) or id(current) in seen:
+            continue
+        seen.add(id(current))
+        chain.append(current)
+        # __context__ is deliberately excluded: cookie fallback runs inside the
+        # public resolver's exception handler, so Python otherwise chains that
+        # earlier public 403 onto unrelated yt-dlp failures.
+        for name in ("__cause__", "cause", "reason", "orig"):
+            nested = getattr(current, name, None)
+            if isinstance(nested, BaseException) and id(nested) not in seen:
+                pending.append(nested)
+        exc_info = getattr(current, "exc_info", None)
+        if isinstance(exc_info, tuple) and len(exc_info) >= 2:
+            nested = exc_info[1]
+            if isinstance(nested, BaseException) and id(nested) not in seen:
+                pending.append(nested)
+    return chain
+
+
+def _cookie_failure_diagnostics(error):
+    """Extract typed HTTP/transport details without retaining raw URLs or exception text."""
+    status_code = None
+    endpoint_host = endpoint_path = None
+    chain = _exception_chain(error)
+    for current in chain:
+        for name in ("status_code", "status"):
+            value = getattr(current, name, None)
+            if type(value) is int and 100 <= value <= 599:
+                status_code = value
+                break
+        if status_code is None and isinstance(current, UrllibHTTPError):
+            value = current.code
+            if type(value) is int and 100 <= value <= 599:
+                status_code = value
+        response = getattr(current, "response", None)
+        if response is not None and status_code is None:
+            for name in ("status_code", "status"):
+                value = getattr(response, name, None)
+                if type(value) is int and 100 <= value <= 599:
+                    status_code = value
+                    break
+        candidates = [getattr(current, "url", None), getattr(current, "full_url", None)]
+        request = getattr(current, "request", None)
+        if request is not None:
+            candidates.extend((getattr(request, "full_url", None), getattr(request, "url", None)))
+        if response is not None:
+            candidates.append(getattr(response, "url", None))
+            geturl = getattr(response, "geturl", None)
+            if callable(geturl):
+                try:
+                    candidates.append(geturl())
+                except Exception:
+                    pass
+        for candidate in candidates:
+            endpoint_host, endpoint_path = _safe_cookie_endpoint(candidate)
+            if endpoint_host:
+                break
+        if status_code is not None and endpoint_host:
+            break
+
+    root = error
+    error_type = type(root).__name__
+    if status_code is not None:
+        stage = "authenticated_http"
+    elif any(isinstance(item, socket.gaierror) for item in chain):
+        stage = "authenticated_dns"
+    elif any(isinstance(item, ssl.SSLError) for item in chain):
+        stage = "authenticated_tls"
+    elif any(isinstance(item, (TimeoutError, socket.timeout)) for item in chain):
+        stage = "authenticated_timeout"
+    elif any(isinstance(item, (ConnectionError, OSError)) for item in chain):
+        stage = "authenticated_connect"
+    else:
+        stage = "authenticated_extractor"
+    return {"stage": stage, "error_type": error_type[:48], "http_status": status_code,
+            "endpoint_host": endpoint_host, "endpoint_path": endpoint_path,
+            "authenticated_attempted": True}
+
+
+def _classify_cookie_download_error(error, diagnostics=None):
     """Map downloader diagnostics to safe, stable codes without returning text."""
     detail = str(error).lower()
-    status = getattr(error, "status_code", None)
+    diagnostics = diagnostics if isinstance(diagnostics, dict) else _cookie_failure_diagnostics(error)
+    status = diagnostics.get("http_status")
+    error_types = {type(item).__name__.lower() for item in _exception_chain(error)}
     if status == 429 or "http error 429" in detail or "too many requests" in detail:
         return "RATE_LIMITED"
-    if any(token in detail for token in ("captcha", "verify you are human", "verification required",
-                                         "complete the verification", "verify you are not")):
+    if any(token in detail for token in ("captcha", "challenge required", "verification required",
+                                         "complete the verification", "verify you are", "not a bot",
+                                         "robot check", "security check", "验证码", "人机验证")):
         return "CAPTCHA_REQUIRED"
+    if status == 401:
+        return "LOGIN_REQUIRED"
     if any(token in detail for token in ("login", "log in", "sign in", "fresh cookies",
                                          "cookies are needed", "session expired", "session has expired")):
         return "LOGIN_REQUIRED"
@@ -114,17 +234,27 @@ def _classify_cookie_download_error(error):
         return "AUTH_REJECTED"
     if "requested video identity mismatch" in detail:
         return "SOURCE_IDENTITY_MISMATCH"
+    if "gaierror" in error_types or "dns" in detail or "name resolution" in detail or "getaddrinfo" in detail:
+        return "NETWORK_DNS_FAILURE"
+    if "sslerror" in error_types or "sslcertverificationerror" in error_types or "certificate verify failed" in detail or "tls" in detail:
+        return "NETWORK_TLS_FAILURE"
+    if ("timeouterror" in error_types or "socket.timeout" in error_types
+            or "timed out" in detail or "timeout" in detail):
+        return "NETWORK_TIMEOUT"
+    if any(name in error_types for name in ("connectionerror", "connectionrefusederror", "connectionreseterror")):
+        return "NETWORK_CONNECTION_FAILURE"
+    if any(token in detail for token in ("no suitable extractor", "unsupported extractor", "unsupported url")):
+        return "UNSUPPORTED_SOURCE"
+    if any(name in error_types for name in ("unsupportederror", "noextractorerror")):
+        return "UNSUPPORTED_SOURCE"
+    if status is not None and 500 <= status <= 599:
+        return "SERVER_UNAVAILABLE"
     return "COOKIE_DOWNLOAD_FAILED"
 
 
 def _retry_after_from_exception(error):
     """Read only a bounded Retry-After value from a wrapped local error object."""
-    seen = set()
-    current = error
-    for _ in range(8):
-        if current is None or id(current) in seen:
-            break
-        seen.add(id(current))
+    for current in _exception_chain(error):
         value = getattr(current, "retry_after", None)
         if value is not None:
             delay = _retry_after_seconds(value)
@@ -142,7 +272,6 @@ def _retry_after_from_exception(error):
             delay = _retry_after_seconds(value)
             if delay is not None:
                 return delay
-        current = getattr(current, "__cause__", None) or getattr(current, "__context__", None)
     return None
 
 
@@ -835,11 +964,10 @@ def _download_with_imported_douyin_cookies(url, prefix, options, send):
                 "downloader_strategy": "yt-dlp-cookie", "authenticated_attempted": True,
                 "media_sha256": digest.hexdigest(), "cache_hit": False}
     except Exception as error:
-        code = _classify_cookie_download_error(error)
+        diagnostics = _cookie_failure_diagnostics(error)
+        code = _classify_cookie_download_error(error, diagnostics)
         retry_after = _retry_after_from_exception(error)
-        error_status = getattr(error, "status_code", None)
-        if type(error_status) is not int or not 100 <= error_status <= 599:
-            error_status = 429 if code == "RATE_LIMITED" else 403 if code == "AUTH_REJECTED" else None
+        error_status = diagnostics.get("http_status")
         for artifact in temporary_prefix.parent.glob(temporary_prefix.name + ".*"):
             if artifact.is_file() and not artifact.is_symlink():
                 try:
@@ -847,8 +975,8 @@ def _download_with_imported_douyin_cookies(url, prefix, options, send):
                 except OSError:
                     pass
         raise MediaDownloadError(_safe_download_failure(code, retry_after=retry_after), code=code,
-                                 status_code=error_status,
-                                 retry_after_seconds=retry_after, cookie_revision=revision) from None
+                                 status_code=error_status, retry_after_seconds=retry_after,
+                                 cookie_revision=revision, diagnostics=diagnostics) from None
 
 
 def main():
@@ -918,7 +1046,9 @@ def main():
                     # an extractor silently select a different post.
 
                 if auth_required and not _has_imported_douyin_cookies():
-                    raise _missing_douyin_cookie_error(resumable=checkpoint is not None) from None
+                    raise _missing_douyin_cookie_error(resumable=checkpoint is not None,
+                                                       status_code=error.status_code,
+                                                       error_type=error.error_type or "DouyinResolveError") from None
                 raise _resolver_error_as_download_error(error, resumable=checkpoint is not None) from None
             else:
                 requested_id = _video_id(url)
@@ -933,7 +1063,8 @@ def main():
                     if error.status_code != 403:
                         raise
                     if not _has_imported_douyin_cookies():
-                        raise _missing_douyin_cookie_error(resumable=error.resumable) from None
+                        raise _missing_douyin_cookie_error(resumable=error.resumable,
+                                                           status_code=error.status_code) from None
                     # Use the identity established by the public resolver.
                     # A short URL has no locally verifiable ID, and passing it
                     # to the authenticated extractor would make that fallback
@@ -977,6 +1108,9 @@ def main():
             event["retry_after_seconds"] = error.retry_after_seconds
         if isinstance(error, MediaDownloadError) and error.cookie_revision is not None:
             event["cookie_revision"] = error.cookie_revision
+        if isinstance(error, MediaDownloadError) and isinstance(error.diagnostics, dict):
+            event["diagnostics"] = error.diagnostics
+            event["authenticated_attempted"] = error.diagnostics.get("authenticated_attempted") is True
         if isinstance(error, MediaDownloadError) and error.resumable:
             event["resumable"] = True
         send(event)
