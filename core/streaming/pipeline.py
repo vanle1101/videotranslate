@@ -257,6 +257,8 @@ class StreamingPipelineSession:
         self.initialized = False
         self._download_info: Optional[Dict[str, Any]] = None
         self._download_metrics: Dict[str, Any] = {}
+        self.source_download_provenance: Dict[str, Any] = {}
+        self.force_live_download = False
         self.source_url = None
         self._source_downloader = None
         self._startup_failed = False
@@ -2122,6 +2124,8 @@ class StreamingPipelineSession:
                 round(max(0., time.time() - end_to_end_started), 1))
         if self._download_metrics:
             snapshot["download_metrics"] = dict(self._download_metrics)
+        if self.source_download_provenance:
+            snapshot["source_download_provenance"] = dict(self.source_download_provenance)
         snapshot["phase_timings_seconds"] = self._stage_profiler.snapshot(
             now=self._run_finished_at if self._run_finished_at is not None else time.monotonic())
         snapshot["stage_work_timings"] = self._stage_profiler.work_snapshot()
@@ -2407,6 +2411,21 @@ class StreamingPipelineSession:
                         url, progress_callback=lambda data: loop.call_soon_threadsafe(publish_progress, dict(data)),
                         cancel_check=lambda: self.is_stopped,
                     )
+                    info = self._download_info
+                    method = info.get("source_method")
+                    self.source_download_provenance = {
+                        "source_method": method if method in {"live_download", "verified_cache", "local_upload"} else "unknown",
+                        "downloaded_from_network": info.get("downloaded_from_network") is True,
+                        "download_attempted": info.get("download_attempted") is True,
+                        "download_verified": info.get("download_verified") is True,
+                        "source_identity_verified": info.get("source_identity_verified") is True,
+                        "bytes_received_from_network": (info.get("bytes_received_from_network")
+                            if type(info.get("bytes_received_from_network")) is int and info["bytes_received_from_network"] >= 0 else 0),
+                        "downloader_strategy": info.get("downloader_strategy") if isinstance(info.get("downloader_strategy"), str) else "unknown",
+                        "authenticated_attempted": info.get("authenticated_attempted") is True,
+                        "media_sha256": info.get("media_sha256") if isinstance(info.get("media_sha256"), str) else None,
+                        "cache_hit": info.get("cache_hit") is True,
+                    }
                     return self._download_info
 
                 await self.report_progress("resolve", "Đang nhận diện link video...")

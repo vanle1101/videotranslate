@@ -468,6 +468,32 @@ def test_url_returns_task_before_download_finishes_and_stop_reaps_it(isolated, m
     asyncio.run(run())
 
 
+def test_force_live_download_creates_cache_bypassing_task(isolated, monkeypatch):
+    captured = []
+    monkeypatch.setattr(main.downloader, "output_dir", isolated)
+
+    async def start_from_url(self, source_downloader, url):
+        captured.append((source_downloader, url))
+
+    async def restore_must_not_run(**_kwargs):
+        raise AssertionError("A forced live source must not restore a cached task")
+
+    monkeypatch.setattr(StreamingPipelineSession, "start_from_url", start_from_url)
+    monkeypatch.setattr(main, "_restore_matching_saved_project", restore_must_not_run)
+
+    async def run():
+        result = await main.start_streaming_url(main.StreamUrlRequest(
+            url="https://www.douyin.com/video/1234567890123456789", force_live_download=True))
+        await asyncio.sleep(0)
+        task = main.active_streaming_sessions[result["task_id"]]
+        assert task.force_live_download is True
+        assert len(captured) == 1 and captured[0][1] == "https://www.douyin.com/video/1234567890123456789"
+        assert captured[0][0].bypass_source_cache is True
+        assert Path(captured[0][0].output_dir) == isolated
+
+    asyncio.run(run())
+
+
 def test_download_failure_is_persisted_for_task_and_late_websocket(isolated, monkeypatch):
     monkeypatch.setattr(main.downloader, "download", Mock(side_effect=RuntimeError("Douyin yêu cầu đăng nhập")))
 

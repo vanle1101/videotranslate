@@ -197,6 +197,7 @@ def parse_upload_workers(value):
 
 class StreamUrlRequest(PerVideoWorkerRequest):
     url: str
+    force_live_download: bool = Field(default=False, strict=True)
     initial_buffer_seconds: Optional[float] = Field(default=None, gt=0, le=120)
     voice: Optional[str] = None
     voice_id: Optional[str] = None
@@ -1537,10 +1538,20 @@ async def _start_streaming_url_owned(req: StreamUrlRequest, request_started_at=N
 
     engine, voice = validated_voice(req.voice_id, req.tts_engine, req.voice)
     config_signature = _retry_configuration_signature()
+    # A cold-live request owns a fresh task namespace and must never attach to
+    # a cached source or completed task. Active duplicate downloads still have
+    # one owner at a time.
+    if req.force_live_download and any(
+            existing.is_running and getattr(existing, "source_url", None)
+            and downloader.source_identity(existing.source_url) == downloader.source_identity(url)
+            for existing in active_streaming_sessions.values()):
+        raise HTTPException(status_code=409, detail="Video này đang được tải hoặc xử lý. Hãy chờ tác vụ hiện tại kết thúc.")
+
     # The same source/config must not silently create another download when the
     # previous attempt only failed in ASR/OCR/translation. Retry its saved state.
     for existing in reversed(list(active_streaming_sessions.values())):
-        if (not getattr(existing, "source_url", None)
+        if (req.force_live_download
+                or not getattr(existing, "source_url", None)
                 or downloader.source_identity(existing.source_url) != downloader.source_identity(url)
                 or existing.voice != voice or existing.tts_engine_name != engine
                 or existing.asr_engine_name != (req.asr_engine or settings.ASR_ENGINE)
@@ -1565,12 +1576,15 @@ async def _start_streaming_url_owned(req: StreamUrlRequest, request_started_at=N
     # The runtime registry is empty after a desktop restart.  Reattach the
     # newest durable project before creating anything, even when the UI sends
     # its default preview mode for a project that was already promoted to full.
-    restored, resumed = await _restore_matching_saved_project(
-        source_url=url, voice=voice, engine=engine,
-        asr_engine=req.asr_engine or settings.ASR_ENGINE,
-        visual_translation=req.visual_translation,
-        translation_mode=req.translation_mode,
-        source_downloader=downloader)
+    if req.force_live_download:
+        restored, resumed = None, False
+    else:
+        restored, resumed = await _restore_matching_saved_project(
+            source_url=url, voice=voice, engine=engine,
+            asr_engine=req.asr_engine or settings.ASR_ENGINE,
+            visual_translation=req.visual_translation,
+            translation_mode=req.translation_mode,
+            source_downloader=downloader)
     if restored is not None:
         restored.auto_export_result = True
         persist_session(restored)
@@ -1581,6 +1595,10 @@ async def _start_streaming_url_owned(req: StreamUrlRequest, request_started_at=N
                 "progress": restored.get_progress(), "status": "started",
                 "resumed": resumed, "restored": True}
     task_id = str(uuid.uuid4())[:8]
+    source_downloader = downloader
+    if req.force_live_download:
+        from core.downloader import VideoDownloader
+        source_downloader = VideoDownloader(downloader.output_dir, bypass_source_cache=True)
 
     # Create session
     session = create_streaming_session(
@@ -1598,13 +1616,14 @@ async def _start_streaming_url_owned(req: StreamUrlRequest, request_started_at=N
         session.translation_chunk_workers = req.translation_chunk_workers
     session.auto_export_result = True
     session.start_wall_time = getattr(session, "start_wall_time", None) or request_started_at
-    session.source_url, session._source_downloader = url, downloader
+    session.source_url, session._source_downloader = url, source_downloader
+    session.force_live_download = req.force_live_download
     session._retry_config_signature = config_signature
     session._processing_signature = processing_signature()
 
     async def start_source():
         try:
-            await session.start_from_url(downloader, url)
+            await session.start_from_url(source_downloader, url)
         except Exception:
             # The session persists and broadcasts actionable startup errors.
             pass

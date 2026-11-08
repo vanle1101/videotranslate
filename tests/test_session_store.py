@@ -69,7 +69,6 @@ def test_cookie_blocked_download_can_retry_after_cookie_file_changes(persisted, 
     persisted._download_auth_cookie_revision = [1000, 64]
     persisted.persist()
     active_streaming_sessions.pop(persisted.task_id, None)
-
     monkeypatch.setattr(douyin_cookies, "get_douyin_cookie_status",
                         lambda: {"configured": True, "stored": True, "count": 1})
     monkeypatch.setattr(douyin_cookies, "douyin_cookie_revision", lambda: [1000, 64], raising=False)
@@ -84,6 +83,29 @@ def test_cookie_blocked_download_can_retry_after_cookie_file_changes(persisted, 
     assert restored.can_retry is True
     history = next(row for row in list_saved_sessions() if row["task_id"] == persisted.task_id)
     assert history["can_retry"] is True
+    active_streaming_sessions.pop(persisted.task_id, None)
+
+
+def test_source_download_provenance_and_cold_mode_survive_restart(persisted):
+    provenance = {
+        "source_method": "live_download", "downloaded_from_network": True,
+        "download_attempted": True, "download_verified": True,
+        "source_identity_verified": True, "bytes_received_from_network": 4096,
+        "downloader_strategy": "single-stream", "authenticated_attempted": True,
+        "media_sha256": "a" * 64, "cache_hit": False,
+    }
+    persisted.video_path = None
+    persisted.source_url = "https://www.douyin.com/video/1234567890123456789"
+    persisted.source_download_provenance = provenance
+    persisted.force_live_download = True
+    persisted.persist()
+    active_streaming_sessions.pop(persisted.task_id, None)
+
+    restored = restore_saved_session(persisted.task_id)
+    assert restored.source_download_provenance == provenance
+    assert restored.force_live_download is True
+    assert restored.get_progress()["source_download_provenance"] == provenance
+    assert restored._source_downloader.bypass_source_cache is True
     active_streaming_sessions.pop(persisted.task_id, None)
 
 

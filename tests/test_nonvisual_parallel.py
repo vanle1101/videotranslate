@@ -114,6 +114,33 @@ def test_local_ollama_translation_does_not_chain_unverified_prior_drafts(make_se
                for row in session.segments.values())
 
 
+def test_ollama_preflight_failure_does_not_mark_rows_as_translation_failures(make_session, monkeypatch):
+    from core.engines.translation.ollama_client import OllamaClientError
+    from core.engines.translation.semantic_translator import SemanticTranslator
+
+    monkeypatch.setattr(settings, "LLM_PROVIDER", "ollama")
+    session = make_session("ollama-preflight", 1, 1)
+    translator = SemanticTranslator("ollama")
+    error = OllamaClientError("Ollama local chưa chạy.", code="provider_unavailable")
+    calls = []
+
+    def unavailable():
+        calls.append(True)
+        raise error
+
+    translator.ensure_provider_ready = unavailable
+    session.translator = translator
+    row = session.segments[0]
+
+    with pytest.raises(OllamaClientError) as raised:
+        asyncio.run(translate_nonvisual_rows(session, [row]))
+
+    assert raised.value.code == "provider_unavailable"
+    assert calls == [True]
+    assert row.status == "WAITING"
+    assert not row.error
+
+
 def test_local_ollama_uses_sixteen_source_grounded_rows_per_request(make_session):
     from core.engines.translation.semantic_translator import SemanticTranslator
 

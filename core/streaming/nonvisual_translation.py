@@ -60,6 +60,12 @@ async def translate_nonvisual_rows(session, rows):
             if session.segments.get(row.id) is not row or row.revision != revision or (row.verification or {}).get("status") == "manual":
                 continue
             await failure(row, error)
+    if (eligible and getattr(session.translator, "provider", None) == "ollama"
+            and any(not native_language(row.to_dict()) for row in eligible)):
+        # Detect a stopped local runner or missing model once before changing
+        # any target row to TRANSLATING/FAILED. The provider boundary keeps the
+        # same guard for other entry points and for later resumed work.
+        await session._run_blocking(session.translator.ensure_provider_ready)
     references = deepcopy([row.to_dict() for row in session.segments.values()])
     jobs, speech = asyncio.Queue(), asyncio.Queue()
     pending = len(eligible)

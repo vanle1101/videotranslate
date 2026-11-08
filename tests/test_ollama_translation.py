@@ -9,6 +9,48 @@ from core.engines.translation.semantic_translator import SemanticTranslator, _co
 
 
 class OllamaClientTests(unittest.TestCase):
+    def test_preflight_confirms_configured_model_is_available_locally(self):
+        response = io.BytesIO(json.dumps({"models": [{"name": "qwen3:4b-no-think"}]}).encode())
+        response.status = 200
+        client = OllamaClient("qwen3:4b-no-think", "http://127.0.0.1:11434", timeout=10)
+        with patch("core.engines.translation.ollama_client.urlopen", return_value=response) as open_url:
+            self.assertTrue(client.preflight())
+        request = open_url.call_args.args[0]
+        self.assertEqual(request.full_url, "http://127.0.0.1:11434/api/tags")
+        self.assertEqual(request.get_method(), "GET")
+
+    def test_preflight_reports_configured_model_missing_without_starting_translation(self):
+        response = io.BytesIO(json.dumps({"models": [{"name": "other:latest"}]}).encode())
+        response.status = 200
+        client = OllamaClient("qwen3:4b-no-think", "http://127.0.0.1:11434", timeout=10)
+        with patch("core.engines.translation.ollama_client.urlopen", return_value=response):
+            with self.assertRaises(OllamaClientError) as raised:
+                client.preflight()
+        self.assertEqual(raised.exception.code, "model_not_loaded")
+
+    def test_text_translation_fails_fast_when_local_ollama_is_unavailable(self):
+        translator = SemanticTranslator("ollama")
+        unavailable = OllamaClientError("Ollama local chưa chạy.", code="provider_unavailable")
+        with patch("core.engines.translation.ollama_client.OllamaClient.preflight",
+                   side_effect=unavailable) as preflight, \
+             patch("core.engines.translation.ollama_client.OllamaClient.translate",
+                   side_effect=AssertionError("chat request must not start")) as translate:
+            with self.assertRaises(OllamaClientError) as raised:
+                translator._ollama_text_request("system", "prompt", max_tokens=128)
+        self.assertEqual(raised.exception.code, "provider_unavailable")
+        preflight.assert_called_once()
+        translate.assert_not_called()
+
+    def test_text_translation_reuses_successful_preflight_for_same_local_model(self):
+        translator = SemanticTranslator("ollama")
+        with patch("core.engines.translation.ollama_client.OllamaClient.preflight") as preflight, \
+             patch("core.engines.translation.ollama_client.OllamaClient.translate",
+                   return_value="Lời dịch") as translate:
+            translator._ollama_text_request("system", "first", max_tokens=64)
+            translator._ollama_text_request("system", "second", max_tokens=64)
+        preflight.assert_called_once()
+        self.assertEqual(translate.call_count, 2)
+
     def test_posts_json_to_local_model_without_retry(self):
         response = io.BytesIO(json.dumps({"message": {"content": '{"final_vi":"Xin chào"}'},
             "load_duration": 100_000_000, "prompt_eval_count": 120,

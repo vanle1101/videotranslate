@@ -91,8 +91,21 @@ def test_resolver_selects_exact_requested_id_and_preserves_signed_media_url(monk
 
 def test_recommendations_never_replace_requested_video(monkeypatch):
     serve_json(monkeypatch, {"status_code": 0, "aweme_list": [item("7688769264395767000")]})
-    with pytest.raises(resolver.DouyinResolveError):
+    with pytest.raises(resolver.DouyinResolveError) as captured:
         resolver.resolve_douyin(VIDEO_URL)
+    assert captured.value.code == "public_unavailable"
+
+
+def test_dns_failure_is_preserved_as_non_authentication_failure(monkeypatch):
+    def fail_dns(*_args, **_kwargs):
+        raise socket.gaierror("synthetic DNS detail")
+    monkeypatch.setattr(socket, "getaddrinfo", fail_dns)
+    monkeypatch.setattr(resolver, "_request_once", REQUEST_ONCE)
+    with pytest.raises(resolver.DouyinResolveError) as captured:
+        resolver.resolve_douyin(VIDEO_URL)
+    assert captured.value.code == "dns_failure"
+    assert captured.value.stage == "dns"
+    assert "synthetic DNS detail" not in str(captured.value)
 
 
 @pytest.mark.parametrize("url", [
@@ -228,8 +241,11 @@ def test_stream_failure_reports_safe_specific_cause(failure, code, error_type):
     assert error.__suppress_context__
 
 
-@pytest.mark.parametrize("status", [403, 416, 429, 500, 503])
-def test_media_http_failure_reports_status_without_signed_url_or_response(monkeypatch, status):
+@pytest.mark.parametrize("status,category", [
+    (403, "access_denied"), (416, "http_error"), (429, "rate_limited"),
+    (500, "server_error"), (503, "server_error"),
+])
+def test_media_http_failure_reports_status_without_signed_url_or_response(monkeypatch, status, category):
     response = Response(SECRET.encode(), status=status, url=MEDIA_URL)
     monkeypatch.setattr(resolver, "_request_once", lambda *args: response)
     with pytest.raises(resolver.DouyinResolveError) as captured:
@@ -237,6 +253,7 @@ def test_media_http_failure_reports_status_without_signed_url_or_response(monkey
     error = captured.value
     assert response.closed
     assert (error.code, error.status_code, error.stage) == ("http_error", status, "http")
+    assert error.category == category
     assert f"HTTP {status}" in str(error)
     assert SECRET not in str(error) + repr(vars(error))
     assert MEDIA_URL not in str(error) + repr(vars(error))
@@ -293,12 +310,15 @@ def test_json_size_limit_applies_to_declared_and_actual_response(monkeypatch, de
     assert response.closed
 
 
-@pytest.mark.parametrize("status", [401, 403, 429, 500])
-def test_http_errors_hide_upstream_body_and_close_response(status):
+@pytest.mark.parametrize("status,category", [
+    (401, "login_required"), (403, "access_denied"), (429, "rate_limited"), (500, "server_error")
+])
+def test_http_errors_hide_upstream_body_and_close_response(status, category):
     response = Response(SECRET.encode(), status=status)
     with pytest.raises(resolver.DouyinResolveError) as captured:
         resolver._read_json(response)
     assert SECRET not in str(captured.value) and response.closed
+    assert captured.value.category == category
 
 
 def test_formats_prefer_compatible_codec_and_filter_duplicate_unsafe_urls(monkeypatch):

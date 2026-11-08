@@ -56,9 +56,10 @@ class VideoDownloader:
     _active_guard = threading.Lock()
     _active_sources = set()
 
-    def __init__(self, output_dir: Optional[Path] = None):
+    def __init__(self, output_dir: Optional[Path] = None, *, bypass_source_cache=False):
         self.output_dir = Path(output_dir or settings.INPUT_DIR)
         self.output_dir.mkdir(parents=True, exist_ok=True)
+        self.bypass_source_cache = bool(bypass_source_cache)
 
     @staticmethod
     def normalize_url(text: str) -> str:
@@ -127,10 +128,13 @@ class VideoDownloader:
             raise VideoDownloadError("Tệp video đã tải không hợp lệ để sử dụng lại.")
         duration = verify_video(output)
         stat = output.stat()
+        media_sha256 = result.get("media_sha256")
+        if not isinstance(media_sha256, str) or not re.fullmatch(r"[a-f0-9]{64}", media_sha256):
+            media_sha256 = None
         record = {"version": 1, "source_identity": self.source_identity(clean_url),
                   "file_name": output.name, "size": stat.st_size, "mtime_ns": stat.st_mtime_ns,
                   "duration": duration, "title": str(result.get("title") or output.stem)[:2000],
-                  "source": str(result.get("source") or "douyin")[:64]}
+                  "source": str(result.get("source") or "douyin")[:64], "media_sha256": media_sha256}
         result.update(duration=duration, reusable_source=True, owned_paths=[])
         self._write_index(root / f".source-{self.source_hash(clean_url)}.json", record)
         return result
@@ -162,7 +166,14 @@ class VideoDownloader:
                 return None
             return {"id": output.stem[6:], "file_path": str(output), "title": record.get("title") or output.stem,
                     "duration": duration, "source": record.get("source") or "douyin", "is_local": False,
-                    "reused_source": True, "reusable_source": True, "owned_paths": []}
+                    "reused_source": True, "reusable_source": True, "owned_paths": [],
+                    "source_method": "verified_cache", "downloaded_from_network": False,
+                    "download_attempted": False, "download_verified": True,
+                    "source_identity_verified": True, "bytes_received_from_network": 0,
+                    "downloader_strategy": "verified-cache", "authenticated_attempted": False,
+                    "media_sha256": record.get("media_sha256") if isinstance(record.get("media_sha256"), str)
+                    and re.fullmatch(r"[a-f0-9]{64}", record["media_sha256"]) else None,
+                    "cache_hit": True}
         except (OSError, ValueError, TypeError, AttributeError, MediaDownloadError):
             return None
 
@@ -216,7 +227,12 @@ class VideoDownloader:
             local_path = Path(url_or_path)
             if local_path.is_file() and local_path.suffix.lower() in {".mp4", ".mkv", ".mov", ".webm", ".avi"}:
                 return {"id": uuid.uuid4().hex, "file_path": str(local_path.resolve()),
-                        "title": local_path.stem, "duration": None, "is_local": True}
+                        "title": local_path.stem, "duration": None, "is_local": True,
+                        "source_method": "local_upload", "downloaded_from_network": False,
+                        "download_attempted": False, "download_verified": False,
+                        "source_identity_verified": False, "bytes_received_from_network": 0,
+                        "downloader_strategy": "local-input", "authenticated_attempted": False,
+                        "media_sha256": None, "cache_hit": False}
         clean_url = self.normalize_url(url_or_path)
         source_key = (str(self.output_dir.resolve()), self.source_hash(clean_url))
         with self._active_guard:
@@ -226,7 +242,7 @@ class VideoDownloader:
         try:
             if cancel_check and cancel_check():
                 raise VideoDownloadError("Đã hủy tải video.")
-            cached = self._completed_source(clean_url, source_key[1])
+            cached = None if self.bypass_source_cache else self._completed_source(clean_url, source_key[1])
             if cached:
                 if cancel_check and cancel_check():
                     raise VideoDownloadError("Đã hủy tải video.")
@@ -237,16 +253,18 @@ class VideoDownloader:
                 logger.info("[%s] run_id=%s Dùng lại video gốc đã kiểm tra (%s byte).", cached["id"][:8],
                             current_execution_context().run_id, size)
                 return cached
-            return self._download_remote(clean_url, source_key[1], progress_callback, cancel_check)
+            return self._download_remote(clean_url, source_key[1], progress_callback, cancel_check,
+                                         bypass_source_cache=self.bypass_source_cache)
         finally:
             with self._active_guard:
                 self._active_sources.discard(source_key)
 
-    def _download_remote(self, clean_url, source_hash, progress_callback, cancel_check):
+    def _download_remote(self, clean_url, source_hash, progress_callback, cancel_check, *, bypass_source_cache=False):
         host = urlsplit(clean_url).hostname
         task_id = uuid.uuid4().hex
         prefix = self.output_dir.resolve() / f"video_{task_id}"
-        resume_index = prefix.parent / f".download-{source_hash}.json" if is_douyin_url(clean_url) else None
+        resume_index = (prefix.parent / f".download-{source_hash}.json"
+                        if is_douyin_url(clean_url) and not bypass_source_cache else None)
         resume_candidate = False
         # Prior releases indexed the literal URL. Adopt that checkpoint once,
         # then publish the canonical key before launching the next worker.
@@ -374,14 +392,26 @@ class VideoDownloader:
                     code = code if isinstance(code, str) and re.fullmatch(r"[a-zA-Z0-9_-]{1,48}", code) else "unknown"
                     error_type = event.get("error_type")
                     allowed_types = {"TimeoutError", "ConnectionResetError", "IncompleteRead", "RemoteDisconnected",
-                                     "SSLError", "TransportError", "HTTPError", "OSError", "DouyinResolveError", "MediaResponseError"}
+                                     "SSLError", "TransportError", "HTTPError", "OSError", "DouyinResolveError", "MediaResponseError",
+                                     "DNSLookupError", "TLSCertificateError", "TLSHandshakeError", "ConnectionRefusedError",
+                                     "ConnectionError", "InvalidResponse", "PublicUnavailable", "APIResponse"}
                     error_type = error_type if isinstance(error_type, str) and error_type in allowed_types else "unknown"
                     status, count, attempt = event.get("status_code"), event.get("downloaded_bytes"), event.get("attempt")
                     status = status if type(status) is int and 100 <= status <= 599 else "unknown"
                     count = count if type(count) is int and count >= 0 else "unknown"
                     attempt = attempt if type(attempt) is int and 1 <= attempt <= 100 else "unknown"
-                    logger.warning("[%s] run_id=%s Tải video: %s; loại lỗi %s; HTTP %s; đã nhận %s byte; lần thử %s.",
-                                   task_id[:8], run_id, code, error_type, status, count, attempt)
+                    stage = event.get("stage")
+                    stage = stage if stage in {"validate", "redirect", "dns", "connect", "read", "http", "response", "resolve"} else "unknown"
+                    category = event.get("category")
+                    category = category if isinstance(category, str) and re.fullmatch(r"[a-z_]{2,40}", category) else "unknown"
+                    elapsed_ms = event.get("elapsed_ms")
+                    elapsed_ms = elapsed_ms if type(elapsed_ms) is int and 0 <= elapsed_ms <= 3_600_000 else "unknown"
+                    attempts = event.get("resolver_attempts")
+                    attempts = attempts if type(attempts) is int and 0 <= attempts <= 100 else "unknown"
+                    logger.warning("[%s] run_id=%s Tải video: %s; loại lỗi %s; HTTP %s; đã nhận %s byte; lần thử %s; "
+                                   "category=%s; stage=%s; resolver_attempts=%s; elapsed_ms=%s; strategy=public-resolver.",
+                                   task_id[:8], run_id, code, error_type, status, count, attempt,
+                                   category, stage, attempts, elapsed_ms)
                 elif kind == "result":
                     result = event["result"]
                     output = Path(result["file_path"])
@@ -391,6 +421,16 @@ class VideoDownloader:
                         raise VideoDownloadError("Trình tải chưa tạo được tệp video hoàn chỉnh.")
                     result.update(id=task_id, is_local=False, owned_prefix=str(prefix),
                                   owned_paths=[str(p) for p in prefix.parent.glob(prefix.name + ".*") if p.is_file()])
+                    if is_douyin_url(clean_url):
+                        result.setdefault("source_method", "live_download")
+                        result.setdefault("downloaded_from_network", True)
+                        result.setdefault("download_attempted", True)
+                        result.setdefault("download_verified", True)
+                        result.setdefault("source_identity_verified", False)
+                        result.setdefault("bytes_received_from_network", 0)
+                        result.setdefault("downloader_strategy", "unknown")
+                        result.setdefault("authenticated_attempted", False)
+                        result.setdefault("cache_hit", False)
                     if resume_index:
                         try:
                             self.register_completed(clean_url, result)

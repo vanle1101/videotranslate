@@ -54,16 +54,44 @@ class OllamaClient:
         return True
 
     def verify_model(self) -> bool:
+        try:
+            self.preflight()
+            return True
+        except OllamaClientError:
+            return False
+
+    def preflight(self) -> bool:
+        """Check the local service and configured model before translation work starts."""
         request = Request(self.base_url + "/api/tags", headers={"Accept": "application/json"}, method="GET")
         try:
             with urlopen(request, timeout=min(self.timeout, 5.0)) as response:
-                data = json.loads(response.read(1_000_001).decode("utf-8"))
-        except (HTTPError, URLError, TimeoutError, socket.timeout, UnicodeDecodeError,
-                json.JSONDecodeError, OSError):
-            return False
+                if response.status != 200:
+                    raise OllamaClientError("Ollama local chưa sẵn sàng để dịch.",
+                                            code="provider_unavailable")
+                raw = response.read(1_000_001)
+            if len(raw) > 1_000_000:
+                raise OllamaClientError("Ollama trả danh sách model không hợp lệ.",
+                                        code="provider_invalid_response")
+            data = json.loads(raw.decode("utf-8"))
+        except HTTPError as error:
+            raise OllamaClientError(
+                "Ollama local chưa sẵn sàng để dịch.", code="provider_unavailable") from None
+        except (URLError, TimeoutError, socket.timeout, OSError):
+            raise OllamaClientError(
+                "Không kết nối được Ollama local. Hãy khởi động Ollama rồi tiếp tục tác vụ.",
+                retryable=True, code="provider_unavailable") from None
+        except (UnicodeDecodeError, json.JSONDecodeError, TypeError, ValueError):
+            raise OllamaClientError("Ollama trả danh sách model không hợp lệ.",
+                                    code="provider_invalid_response") from None
         models = data.get("models") if isinstance(data, dict) else None
-        return isinstance(models, list) and any(
-            isinstance(item, dict) and item.get("name") == self.model for item in models)
+        if not isinstance(models, list):
+            raise OllamaClientError("Ollama trả danh sách model không hợp lệ.",
+                                    code="provider_invalid_response")
+        if any(isinstance(item, dict) and item.get("name") == self.model for item in models):
+            return True
+        raise OllamaClientError(
+            f"Model Ollama '{self.model}' chưa được cài trong Ollama local. Chọn model đã có rồi tiếp tục.",
+            code="model_not_loaded")
 
     def translate(self, prompt: str, system: str | None = None, max_tokens: int = 4096,
                   response_format: str | dict = "json", temperature: float = 0.2, **_options) -> str:

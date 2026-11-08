@@ -283,9 +283,24 @@ class SemanticTranslator(TranslationEngine):
     def __init__(self, provider: Optional[str] = None):
         self.provider = provider or settings.LLM_PROVIDER
         self.allow_uncertain_pacing = self.provider == "ollama"
+        self._ollama_preflight_signature = None
         if self.provider == "ollama":
             # One local rewrite avoids queueing several generations on one runner.
             self.max_pacing_proposals = 1
+
+    def ensure_provider_ready(self):
+        """Preflight the selected Ollama model once before translating rows."""
+        if self.provider != "ollama":
+            return True
+        from core.engines.translation.ollama_client import OllamaClient
+        client = OllamaClient(model=settings.OLLAMA_MODEL, base_url=settings.OLLAMA_BASE_URL,
+                              timeout=settings.OLLAMA_TIMEOUT)
+        signature = (client.base_url, client.model)
+        if self._ollama_preflight_signature == signature:
+            return True
+        client.preflight()
+        self._ollama_preflight_signature = signature
+        return True
 
     def _api_keys(self):
         # Only the selected provider may receive transcript data or incur usage.
@@ -338,6 +353,8 @@ class SemanticTranslator(TranslationEngine):
                     task_kind=contract["task_kind"], max_tokens=contract["max_tokens"])
             elif contract is not None and self.provider == "ollama":
                 options["max_tokens"] = contract["max_tokens"]
+            if self.provider == "ollama":
+                self.ensure_provider_ready()
             raw = client.translate(user_prompt, **options)
             if (contract is not None and type(client) is OpenCodeZenClient
                     and user_prompt != contract["original_prompt"]
@@ -372,6 +389,7 @@ class SemanticTranslator(TranslationEngine):
         from core.engines.translation.ollama_client import OllamaClient
         client = OllamaClient(model=settings.OLLAMA_MODEL, base_url=settings.OLLAMA_BASE_URL,
                               timeout=settings.OLLAMA_TIMEOUT)
+        self.ensure_provider_ready()
         return client.translate(prompt, system=system, max_tokens=max_tokens,
                                 response_format=response_format, temperature=0.0)
 

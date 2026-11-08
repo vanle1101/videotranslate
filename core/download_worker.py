@@ -46,10 +46,16 @@ _MEDIA_TYPES = {"video/mp4", "application/octet-stream", "binary/octet-stream"}
 _SAFE_CAUSES = {"read_timeout", "connection_timeout", "connection_reset", "incomplete_read",
                 "connection_closed", "tls_error", "transport_error", "http_error", "range_invalid",
                 "range_ignored", "resource_changed", "content_type", "length_mismatch", "checkpoint_invalid",
-                "disk_full", "disk_error", "resolve_failed", "resume_validators_missing"}
+                "disk_full", "disk_error", "resolve_failed", "resume_validators_missing", "dns_failure",
+                "invalid_dns_answer", "tcp_connection_failure", "tls_certificate_failure",
+                "tls_handshake_failure", "invalid_url", "unsupported_source", "redirect_failure",
+                "invalid_video_id", "invalid_response", "public_unavailable", "api_rejected",
+                "login_required", "captcha_required"}
 _SAFE_ERROR_TYPES = {"TimeoutError", "ConnectionResetError", "IncompleteRead", "RemoteDisconnected",
                      "SSLError", "TransportError", "HTTPError", "OSError", "DouyinResolveError",
-                     "MediaResponseError"}
+                     "MediaResponseError", "DNSLookupError", "TLSCertificateError", "TLSHandshakeError",
+                     "ConnectionRefusedError", "ConnectionError", "InvalidResponse", "PublicUnavailable",
+                     "APIResponse"}
 
 
 class _TransferIssue(Exception):
@@ -106,6 +112,8 @@ def _classify_cookie_download_error(error):
         return "SOURCE_EXPIRED"
     if status == 403 or "http error 403" in detail or "forbidden" in detail:
         return "AUTH_REJECTED"
+    if "requested video identity mismatch" in detail:
+        return "SOURCE_IDENTITY_MISMATCH"
     return "COOKIE_DOWNLOAD_FAILED"
 
 
@@ -147,6 +155,19 @@ def _safe_download_failure(code, *, retry_after=None):
         "AUTH_REJECTED": "Douyin không chấp nhận cookie đã nhập hoặc video bị giới hạn quyền truy cập. Kiểm tra phiên đăng nhập và quyền xem video.",
         "RATE_LIMITED": "Máy chủ Douyin yêu cầu chờ trước khi tải tiếp.",
         "COOKIE_DOWNLOAD_FAILED": "Một lượt tải Douyin có cookie đã thất bại. Kiểm tra link, phiên đăng nhập và kết nối rồi thử lại.",
+        "SOURCE_UNAVAILABLE": "API công khai không cung cấp media cho video này và chưa có bằng chứng video cần xác thực.",
+        "SERVER_UNAVAILABLE": "Máy chủ Douyin đang lỗi hoặc chưa phản hồi. Tác vụ được giữ để có thể thử lại sau.",
+        "NETWORK_DNS_FAILURE": "Không phân giải được máy chủ Douyin. Kiểm tra kết nối mạng rồi thử lại.",
+        "NETWORK_CONNECTION_FAILURE": "Không kết nối được máy chủ Douyin. Kiểm tra kết nối mạng rồi thử lại.",
+        "NETWORK_TLS_FAILURE": "Không xác minh được kết nối bảo mật tới Douyin. Studio đã dừng để bảo vệ phiên đăng nhập.",
+        "NETWORK_TIMEOUT": "Kết nối tới Douyin quá thời gian chờ. Tác vụ được giữ để có thể tiếp tục sau.",
+        "INVALID_SOURCE_URL": "Link video Douyin không hợp lệ hoặc không thuộc miền được hỗ trợ.",
+        "INVALID_VIDEO_ID": "Không xác định được mã video từ link Douyin. Hãy sao chép link Chia sẻ của video cụ thể.",
+        "UNSUPPORTED_SOURCE": "Nguồn này chưa được hỗ trợ bởi downloader Douyin.",
+        "INVALID_SOURCE_RESPONSE": "Douyin trả phản hồi không đúng định dạng video. Không thử tải dự phòng để tránh lấy nhầm nội dung.",
+        "VIDEO_UNAVAILABLE": "Video không còn khả dụng công khai hoặc đã bị gỡ.",
+        "CAPTCHA_REQUIRED": "Douyin yêu cầu CAPTCHA. Studio dừng tại đây và không vượt qua bước xác minh.",
+        "SOURCE_IDENTITY_MISMATCH": "Trình tải dự phòng trả về video không khớp link được yêu cầu. Studio đã loại bỏ kết quả này.",
     }
     message = messages.get(code, "Không tải được video Douyin.")
     if code == "RATE_LIMITED" and retry_after is not None:
@@ -175,8 +196,60 @@ def _diagnostic(send, error, attempt, downloaded_bytes=0):
     if (isinstance(retry_after, (int, float)) and not isinstance(retry_after, bool)
             and 0 <= retry_after <= 3601):
         event["retry_after_seconds"] = retry_after
+    stage = getattr(error, "stage", None)
+    if isinstance(stage, str) and stage in {"validate", "redirect", "dns", "connect", "read", "http", "response", "resolve"}:
+        event["stage"] = stage
+    elapsed_ms = getattr(error, "elapsed_ms", None)
+    if isinstance(elapsed_ms, (int, float)) and not isinstance(elapsed_ms, bool) and math.isfinite(elapsed_ms):
+        event["elapsed_ms"] = max(0, min(3_600_000, int(elapsed_ms)))
+    attempts = getattr(error, "attempts", None)
+    if type(attempts) is int and 0 <= attempts <= 100:
+        event["resolver_attempts"] = attempts
+    category = getattr(error, "category", None)
+    if isinstance(category, str) and re.fullmatch(r"[a-z_]{2,40}", category):
+        event["category"] = category
     send(event)
     return code, event.get("status_code")
+
+
+def _resolver_error_as_download_error(error, *, resumable=False):
+    """Translate a typed public-resolver failure without exposing its cause."""
+    if error.status_code == 429 or error.category == "rate_limited":
+        code = "RATE_LIMITED"
+    elif error.category == "login_required":
+        code = "LOGIN_REQUIRED"
+    elif error.category == "captcha_required":
+        code = "CAPTCHA_REQUIRED"
+    elif error.category == "access_denied" or error.status_code in {401, 403}:
+        code = "AUTH_REQUIRED"
+    elif error.status_code is not None and 500 <= error.status_code <= 599:
+        code = "SERVER_UNAVAILABLE"
+    elif error.code == "dns_failure" or error.code == "invalid_dns_answer":
+        code = "NETWORK_DNS_FAILURE"
+    elif error.code == "tcp_connection_failure":
+        code = "NETWORK_CONNECTION_FAILURE"
+    elif error.code in {"tls_certificate_failure", "tls_handshake_failure"}:
+        code = "NETWORK_TLS_FAILURE"
+    elif error.code in {"connection_timeout", "read_timeout", "connection_reset", "connection_closed"}:
+        code = "NETWORK_TIMEOUT" if error.code in {"connection_timeout", "read_timeout"} else "NETWORK_CONNECTION_FAILURE"
+    elif error.code in {"invalid_url", "unsupported_source"}:
+        code = "INVALID_SOURCE_URL" if error.code == "invalid_url" else "UNSUPPORTED_SOURCE"
+    elif error.code in {"invalid_video_id", "redirect_failure"}:
+        code = "INVALID_VIDEO_ID"
+    elif error.code == "public_unavailable":
+        code = "SOURCE_UNAVAILABLE"
+    elif error.code == "api_rejected":
+        code = "SOURCE_UNAVAILABLE"
+    elif error.code == "invalid_response":
+        code = "INVALID_SOURCE_RESPONSE"
+    elif error.status_code == 404 or error.category == "video_unavailable":
+        code = "VIDEO_UNAVAILABLE"
+    else:
+        code = "SERVER_UNAVAILABLE" if error.code == "http_error" else "SOURCE_UNAVAILABLE"
+    retry_after = _retry_after_seconds(error.retry_after)
+    return MediaDownloadError(_safe_download_failure(code, retry_after=retry_after),
+                              code=code, status_code=error.status_code,
+                              retry_after_seconds=retry_after, resumable=resumable)
 
 
 def _positive_int(value):
@@ -618,6 +691,13 @@ def download_resolved_video(info, prefix, send):
     expected_duration = info.get("duration")
     if expected_duration and abs(duration - expected_duration) > max(5, expected_duration * 0.01):
         raise MediaDownloadError("Thời lượng video tải về không khớp nguồn. Hãy thử lại.")
+    digest = hashlib.sha256()
+    try:
+        with partial.open("rb") as source:
+            for block in iter(lambda: source.read(1024 * 1024), b""):
+                digest.update(block)
+    except OSError as error:
+        raise _disk_error(error) from None
     try:
         partial.replace(output)
         checkpoint_path.unlink(missing_ok=True)
@@ -625,7 +705,10 @@ def download_resolved_video(info, prefix, send):
         raise _disk_error(error) from None
     elapsed = max(time.monotonic() - transfer_started, .01)
     return {"file_path": str(output), "title": info.get("title") or f"Douyin {info['id']}",
-            "duration": duration, "source": "douyin-public",
+            "duration": duration, "source": "douyin-public", "source_method": "live_download",
+            "downloaded_from_network": True, "download_attempted": True, "download_verified": True,
+            "bytes_received_from_network": transfer_bytes, "downloader_strategy": strategy,
+            "authenticated_attempted": False, "media_sha256": digest.hexdigest(), "cache_hit": False,
             "download_metrics": {"downloaded_bytes": transfer_bytes, "file_bytes": downloaded,
                                  "elapsed_seconds": transfer_elapsed, "end_to_end_seconds": elapsed,
                                  "network_read_seconds": network_seconds,
@@ -717,6 +800,10 @@ def _download_with_imported_douyin_cookies(url, prefix, options, send):
             info = ydl.extract_info(url, download=True)
             if not isinstance(info, dict) or info.get("_type") in {"playlist", "multi_video"}:
                 raise ValueError("unsupported url")
+            requested_id = _video_id(url)
+            received_id = str(info.get("id") or info.get("display_id") or "")
+            if not requested_id or received_id != requested_id:
+                raise ValueError("requested video identity mismatch")
             prepared = Path(ydl.prepare_filename(info))
             candidates = [prepared]
             if not prepared.exists():
@@ -729,6 +816,11 @@ def _download_with_imported_douyin_cookies(url, prefix, options, send):
             if output is None or output.stat().st_size <= 0:
                 raise ValueError("video output missing")
         duration = verify_video(output)
+        size = output.stat().st_size
+        digest = hashlib.sha256()
+        with output.open("rb") as source:
+            for block in iter(lambda: source.read(1024 * 1024), b""):
+                digest.update(block)
         suffix = output.suffix.lower() if re.fullmatch(r"\.[a-z0-9]{1,8}", output.suffix.lower()) else ".mp4"
         # Keep the canonical video_<id>.<ext> name so VideoDownloader can
         # validate and index the result for restart-safe cache reuse.
@@ -737,13 +829,23 @@ def _download_with_imported_douyin_cookies(url, prefix, options, send):
             raise OSError("fallback output already exists")
         output.replace(published)
         return {"file_path": str(published), "title": str(info.get("title") or f"Douyin {output.stem}")[:2000],
-                "duration": duration, "source": "douyin-cookie-ytdlp"}
+                "duration": duration, "source": "douyin-cookie-ytdlp", "source_method": "live_download",
+                "downloaded_from_network": True, "download_attempted": True, "download_verified": True,
+                "source_identity_verified": True, "bytes_received_from_network": size,
+                "downloader_strategy": "yt-dlp-cookie", "authenticated_attempted": True,
+                "media_sha256": digest.hexdigest(), "cache_hit": False}
     except Exception as error:
         code = _classify_cookie_download_error(error)
         retry_after = _retry_after_from_exception(error)
         error_status = getattr(error, "status_code", None)
         if type(error_status) is not int or not 100 <= error_status <= 599:
             error_status = 429 if code == "RATE_LIMITED" else 403 if code == "AUTH_REJECTED" else None
+        for artifact in temporary_prefix.parent.glob(temporary_prefix.name + ".*"):
+            if artifact.is_file() and not artifact.is_symlink():
+                try:
+                    artifact.unlink(missing_ok=True)
+                except OSError:
+                    pass
         raise MediaDownloadError(_safe_download_failure(code, retry_after=retry_after), code=code,
                                  status_code=error_status,
                                  retry_after_seconds=retry_after, cookie_revision=revision) from None
@@ -786,61 +888,45 @@ def main():
                 info = resolve_douyin(url, lambda data: send({"kind": "progress", "source": "douyin-public", **data}))
             except DouyinResolveError as error:
                 partial, checkpoint_path = Path(prefix + ".mp4.part"), Path(prefix + ".resume.json")
-                if error.status_code == 403:
-                    resumable = False
-                    downloaded = 0
-                    if partial.exists() or checkpoint_path.exists():
-                        send({"kind": "progress", "phase": "prepare", "source": "douyin-public",
-                              "stage": "Chưa lấy được nguồn; đang kiểm tra phần tải đã giữ…", "progress_pct": None})
-                        checkpoint = None
-                        if not partial.is_symlink() and not checkpoint_path.is_symlink():
-                            checkpoint, _ = _load_checkpoint(checkpoint_path, partial)
-                        downloaded = checkpoint["downloaded_bytes"] if checkpoint else 0
-                        resumable = checkpoint is not None
-                    _diagnostic(send, error, 0, downloaded)
-                    if _has_imported_douyin_cookies():
-                        fallback_video_id = _video_id(url)
-                        fallback_url = (f"https://www.douyin.com/video/{fallback_video_id}"
-                                        if fallback_video_id else url)
+                checkpoint = None
+                if (partial.exists() or checkpoint_path.exists()) and not partial.is_symlink() and not checkpoint_path.is_symlink():
+                    send({"kind": "progress", "phase": "prepare", "source": "douyin-public",
+                          "stage": "Chưa lấy được nguồn; đang kiểm tra phần tải đã giữ…", "progress_pct": None})
+                    checkpoint, _ = _load_checkpoint(checkpoint_path, partial)
+                downloaded = checkpoint["downloaded_bytes"] if checkpoint else 0
+                _diagnostic(send, error, 0, downloaded)
+
+                if error.status_code == 429 or error.category == "rate_limited":
+                    delay = _retry_after_seconds(error.retry_after)
+                    raise MediaDownloadError(
+                        _safe_download_failure("RATE_LIMITED", retry_after=delay), resumable=checkpoint is not None,
+                        code="RATE_LIMITED", status_code=429, retry_after_seconds=delay) from None
+
+                auth_required = (error.status_code in {401, 403}
+                                 or error.category in {"access_denied", "login_required"}
+                                 or error.code == "login_required")
+                cookie_retry_allowed = auth_required or error.code == "public_unavailable"
+                if cookie_retry_allowed and _has_imported_douyin_cookies():
+                    fallback_video_id = error.source_id or _video_id(url)
+                    if fallback_video_id:
+                        fallback_url = f"https://www.douyin.com/video/{fallback_video_id}"
                         result = _download_with_imported_douyin_cookies(fallback_url, prefix, options, send)
                         send({"kind": "result", "result": result})
                         return 0
-                    raise _missing_douyin_cookie_error(resumable=resumable) from None
-                if error.status_code == 429:
-                    partial, checkpoint_path = Path(prefix + ".mp4.part"), Path(prefix + ".resume.json")
-                    checkpoint = None
-                    if partial.exists() and checkpoint_path.exists() and not partial.is_symlink() and not checkpoint_path.is_symlink():
-                        checkpoint, _ = _load_checkpoint(checkpoint_path, partial)
-                    downloaded = checkpoint["downloaded_bytes"] if checkpoint else 0
-                    _diagnostic(send, error, 0, downloaded)
-                    delay = _retry_after_seconds(error.retry_after)
-                    raise MediaDownloadError(
-                        _safe_download_failure("RATE_LIMITED", retry_after=delay),
-                        resumable=checkpoint is not None, code="RATE_LIMITED", status_code=429,
-                        retry_after_seconds=delay) from None
-                if partial.exists() or checkpoint_path.exists():
-                    # A resumed public-source file must never enter yt-dlp's
-                    # automatic .part append against a different rendition.
-                    # Verify storage integrity now; source identity is checked
-                    # again against fresh resolution before any later append.
-                    send({"kind": "progress", "phase": "prepare", "source": "douyin-public",
-                          "stage": "Chưa lấy được nguồn; đang kiểm tra phần tải đã giữ…", "progress_pct": None})
-                    checkpoint = None
-                    if not partial.is_symlink() and not checkpoint_path.is_symlink():
-                        checkpoint, _ = _load_checkpoint(checkpoint_path, partial)
-                    downloaded = checkpoint["downloaded_bytes"] if checkpoint else 0
-                    _diagnostic(send, error, 0, downloaded)
-                    if checkpoint:
-                        restriction = "Chưa lấy lại được thông tin bản video đã chọn. "
-                        raise MediaDownloadError(
-                            restriction + f"Đã giữ {downloaded / 1024**2:,.1f} MB; hãy thử lại khi nguồn cho phép tải tiếp.",
-                            resumable=True,
-                        ) from None
-                    raise MediaDownloadError("Chưa lấy lại được nguồn và phần tải cũ không đủ điều kiện nối tiếp. Hãy thử lại để tải từ đầu.") from None
-                _diagnostic(send, error, 0)
-                send({"kind": "progress", "phase": "resolve", "source": "yt-dlp",
-                      "stage": "API công khai chưa lấy được video; đang thử trình tải dự phòng…", "progress_pct": None})
+                    # A short link blocked before its identity was resolved is
+                    # insufficient evidence for a cookie download. Do not let
+                    # an extractor silently select a different post.
+
+                if auth_required and not _has_imported_douyin_cookies():
+                    raise _missing_douyin_cookie_error(resumable=checkpoint is not None) from None
+                raise _resolver_error_as_download_error(error, resumable=checkpoint is not None) from None
             else:
+                requested_id = _video_id(url)
+                resolved_id = str(info.get("id") or "") if isinstance(info, dict) else ""
+                if (not re.fullmatch(r"\d{15,22}", resolved_id)
+                        or (requested_id is not None and requested_id != resolved_id)):
+                    raise MediaDownloadError(_safe_download_failure("SOURCE_IDENTITY_MISMATCH"),
+                                             code="SOURCE_IDENTITY_MISMATCH")
                 try:
                     result = download_resolved_video(info, prefix, send)
                 except MediaDownloadError as error:
@@ -848,10 +934,21 @@ def main():
                         raise
                     if not _has_imported_douyin_cookies():
                         raise _missing_douyin_cookie_error(resumable=error.resumable) from None
-                    fallback_video_id = _video_id(url)
-                    fallback_url = (f"https://www.douyin.com/video/{fallback_video_id}"
-                                    if fallback_video_id else url)
+                    # Use the identity established by the public resolver.
+                    # A short URL has no locally verifiable ID, and passing it
+                    # to the authenticated extractor would make that fallback
+                    # resolve the source a second time without this evidence.
+                    fallback_url = f"https://www.douyin.com/video/{resolved_id}"
                     result = _download_with_imported_douyin_cookies(fallback_url, prefix, options, send)
+                result.update(source_method="live_download", downloaded_from_network=True,
+                              download_attempted=True, download_verified=True,
+                              source_identity_verified=True,
+                              bytes_received_from_network=(result.get("download_metrics") or {}).get(
+                                  "downloaded_bytes", result.get("bytes_received_from_network", 0)),
+                              downloader_strategy=(result.get("download_metrics") or {}).get(
+                                  "strategy", result.get("downloader_strategy", "yt-dlp-cookie")),
+                              authenticated_attempted=result.get("authenticated_attempted") is True,
+                              cache_hit=False)
                 send({"kind": "result", "result": result})
                 return 0
         video_id = _video_id(url) if is_douyin_url(url) else None

@@ -44,7 +44,8 @@ class DouyinResolveError(RuntimeError):
     """A sanitized message that can be shown in Studio."""
 
     def __init__(self, message, *, code="resolve_failed", status_code=None,
-                 error_type=None, stage=None, retry_after=None):
+                 error_type=None, stage=None, retry_after=None, category=None,
+                 elapsed_ms=None, attempts=None, source_id=None):
         super().__init__(message)
         # Only fixed diagnostic labels are supplied here, never a raw upstream
         # exception, response body, or signed media URL.
@@ -52,6 +53,12 @@ class DouyinResolveError(RuntimeError):
         self.status_code = status_code
         self.error_type = error_type
         self.stage = stage
+        self.category = category
+        self.source_id = source_id if isinstance(source_id, str) and re.fullmatch(r"\d{15,22}", source_id) else None
+        self.elapsed_ms = (max(0, min(3_600_000, int(elapsed_ms)))
+                           if isinstance(elapsed_ms, (int, float)) and not isinstance(elapsed_ms, bool)
+                           and math.isfinite(elapsed_ms) else None)
+        self.attempts = attempts if type(attempts) is int and 0 <= attempts <= 100 else None
         # Keep restrictions numeric and bounded. The worker honors short
         # waits and defers long waits rather than sleeping beyond its watchdog.
         self.retry_after = _retry_after_seconds(retry_after)
@@ -100,11 +107,23 @@ def _http_protocol(response):
 
 def _transport_error(error, stage):
     """Keep the useful cause without serializing upstream exception text."""
-    if isinstance(error, TimeoutError):
+    if isinstance(error, socket.gaierror):
+        code, error_type = "dns_failure", "DNSLookupError"
+        message = "Không phân giải được tên máy chủ Douyin. Kiểm tra kết nối mạng rồi thử lại."
+    elif isinstance(error, ssl.CertificateError):
+        code, error_type = "tls_certificate_failure", "TLSCertificateError"
+        message = "Chứng chỉ bảo mật của máy chủ Douyin không hợp lệ. Không thể tải an toàn."
+    elif isinstance(error, ssl.SSLError):
+        code, error_type = "tls_handshake_failure", "TLSHandshakeError"
+        message = "Không thiết lập được kết nối bảo mật tới máy chủ Douyin. Hãy thử lại."
+    elif isinstance(error, TimeoutError):
         code = "read_timeout" if stage == "read" else "connection_timeout"
         message = ("Máy chủ video Douyin phản hồi quá chậm khi tải. Hãy thử lại."
                    if stage == "read" else "Hết thời gian chờ kết nối máy chủ Douyin. Hãy thử lại.")
         error_type = "TimeoutError"
+    elif isinstance(error, ConnectionRefusedError):
+        code, error_type = "tcp_connection_failure", "ConnectionRefusedError"
+        message = "Máy chủ Douyin từ chối kết nối mạng. Hãy kiểm tra mạng rồi thử lại."
     elif isinstance(error, http.client.RemoteDisconnected):
         code, error_type = "connection_closed", "RemoteDisconnected"
         message = "Máy chủ video Douyin đóng kết nối trước khi trả dữ liệu. Hãy thử lại."
@@ -114,13 +133,14 @@ def _transport_error(error, stage):
     elif isinstance(error, http.client.IncompleteRead):
         code, error_type = "incomplete_read", "IncompleteRead"
         message = "Máy chủ video Douyin ngắt luồng trước khi tải đủ tệp. Hãy thử lại."
-    elif isinstance(error, ssl.SSLError):
-        code, error_type = "tls_error", "SSLError"
-        message = "Không thiết lập được kết nối bảo mật tới máy chủ Douyin. Hãy thử lại."
+    elif isinstance(error, ConnectionError):
+        code, error_type = "tcp_connection_failure", "ConnectionError"
+        message = "Không thiết lập được kết nối mạng tới máy chủ Douyin. Hãy thử lại."
     else:
-        code, error_type = "transport_error", "TransportError"
+        code, error_type = ("tcp_connection_failure", "OSError") if stage == "connect" else ("transport_error", "TransportError")
         message = "Kết nối đến máy chủ video Douyin bị gián đoạn. Hãy thử lại."
-    return DouyinResolveError(message, code=code, error_type=error_type, stage=stage)
+    return DouyinResolveError(message, code=code, error_type=error_type, stage=stage,
+                              category=code)
 
 
 class PublicResponse:
@@ -188,21 +208,25 @@ class PublicResponse:
 def _validated_url(url, allowed_hosts, allowed_roots=()):
     """Validate every hop before a request; preserve signed paths and queries."""
     if not isinstance(url, str) or len(url) > 16384 or re.search(r"[\x00-\x20\x7f\\]", url):
-        raise DouyinResolveError("Địa chỉ tải Douyin không hợp lệ.")
+        raise DouyinResolveError("Địa chỉ tải Douyin không hợp lệ.", code="invalid_url", stage="validate")
     try:
         parsed = urlsplit(url)
         host = (parsed.hostname or "").lower()
         valid_host = host in allowed_hosts or any(
             host == root or host.endswith("." + root) for root in allowed_roots
         )
-        if (parsed.scheme.lower() not in {"http", "https"} or not valid_host
-                or parsed.username is not None or parsed.password is not None
+        if parsed.scheme.lower() not in {"http", "https"} or not valid_host:
+            raise DouyinResolveError("Địa chỉ video không thuộc miền Douyin được hỗ trợ.",
+                                     code="unsupported_source", stage="validate")
+        if (parsed.username is not None or parsed.password is not None
                 or parsed.port not in (None, 80 if parsed.scheme.lower() == "http" else 443)
                 or not re.fullmatch(r"[a-z0-9](?:[a-z0-9.-]*[a-z0-9])?", host)
                 or ".." in host):
-            raise ValueError
+            raise DouyinResolveError("Địa chỉ tải Douyin không hợp lệ.", code="invalid_url", stage="validate")
+    except DouyinResolveError:
+        raise
     except (ValueError, UnicodeError):
-        raise DouyinResolveError("Địa chỉ tải Douyin không thuộc nguồn được hỗ trợ.") from None
+        raise DouyinResolveError("Địa chỉ tải Douyin không hợp lệ.", code="invalid_url", stage="validate") from None
     return urlunsplit(("https", host, parsed.path or "/", parsed.query, ""))
 
 
@@ -211,10 +235,17 @@ def _public_addresses(host):
         records = socket.getaddrinfo(host, 443, type=socket.SOCK_STREAM)
         addresses = list(dict.fromkeys(record[4][0] for record in records))
         if not addresses or any(not ipaddress.ip_address(address).is_global for address in addresses):
-            raise ValueError
+            raise DouyinResolveError("Máy chủ Douyin phân giải tới địa chỉ mạng không được phép.",
+                                     code="invalid_dns_answer", error_type="DNSLookupError", stage="dns")
         return addresses
+    except socket.gaierror:
+        raise DouyinResolveError("Không phân giải được tên máy chủ Douyin. Kiểm tra kết nối mạng rồi thử lại.",
+                                 code="dns_failure", error_type="DNSLookupError", stage="dns") from None
+    except DouyinResolveError:
+        raise
     except (OSError, ValueError):
-        raise DouyinResolveError("Không kết nối được máy chủ Douyin qua địa chỉ mạng công khai.") from None
+        raise DouyinResolveError("Không nhận được địa chỉ mạng hợp lệ cho máy chủ Douyin.",
+                                 code="dns_failure", error_type="DNSLookupError", stage="dns") from None
 
 
 def _request_once(url, headers):
@@ -321,10 +352,13 @@ def open_public_media(url, headers=None):
     if response.status not in (200, 206):
         retry_after = _retry_after_seconds(response.headers.get("Retry-After"))
         response.close()
+        category = ({401: "login_required", 403: "access_denied", 404: "video_unavailable",
+                     429: "rate_limited"}.get(response.status)
+                    or ("server_error" if 500 <= response.status <= 599 else "http_error"))
         raise DouyinResolveError(
             f"Máy chủ video Douyin trả HTTP {response.status}, chưa tải được tệp. Hãy thử lại.",
             code="http_error", status_code=response.status, error_type="HTTPError", stage="http",
-            retry_after=retry_after)
+            retry_after=retry_after, category=category)
     if isinstance(response, PublicResponse):
         try:
             response.set_read_timeout(MEDIA_READ_TIMEOUT)
@@ -337,10 +371,13 @@ def open_public_media(url, headers=None):
 def _read_json(response):
     try:
         if response.status != 200:
+            category = ({401: "login_required", 403: "access_denied", 404: "video_unavailable",
+                         429: "rate_limited"}.get(response.status)
+                        or ("server_error" if 500 <= response.status <= 599 else "http_error"))
             raise DouyinResolveError(
                 "Douyin chưa trả dữ liệu video. Hãy thử lại sau.", code="http_error",
                 status_code=response.status, error_type="HTTPError", stage="http",
-                retry_after=_retry_after_seconds(response.headers.get("Retry-After")))
+                retry_after=_retry_after_seconds(response.headers.get("Retry-After")), category=category)
         raw_length = response.headers.get("Content-Length")
         if raw_length and int(raw_length) > MAX_JSON_BYTES:
             raise DouyinResolveError("Dữ liệu Douyin vượt giới hạn xử lý.")
@@ -358,7 +395,8 @@ def _read_json(response):
             raise ValueError
         return result
     except (ValueError, TypeError, UnicodeError, RecursionError):
-        raise DouyinResolveError("Dữ liệu Douyin trả về chưa hợp lệ.") from None
+        raise DouyinResolveError("Phản hồi từ Douyin chưa đúng định dạng video.",
+                                 code="invalid_response", error_type="InvalidResponse", stage="response") from None
     finally:
         response.close()
 
@@ -377,6 +415,7 @@ def _video_id(url):
 
 def _resolve_id(url):
     url = _validated_url(url, SHARE_HOSTS)
+    saw_redirect = False
     for hop in range(MAX_REDIRECTS + 1):
         video_id = _video_id(url)
         if video_id:
@@ -384,12 +423,29 @@ def _resolve_id(url):
         response = _open_url(url, SHARE_HOSTS, follow_redirects=False)
         try:
             location = response.headers.get("Location")
-            if response.status not in (301, 302, 303, 307, 308) or not location or hop >= MAX_REDIRECTS:
+            if response.status not in (301, 302, 303, 307, 308):
+                if response.status != 200:
+                    retry_after = _retry_after_seconds(response.headers.get("Retry-After"))
+                    category = ({401: "login_required", 403: "access_denied", 404: "video_unavailable",
+                                 429: "rate_limited"}.get(response.status)
+                                or ("server_error" if 500 <= response.status <= 599 else "http_error"))
+                    raise DouyinResolveError(
+                        f"Douyin không cho phép mở link video (HTTP {response.status}).",
+                        code="http_error", status_code=response.status, error_type="HTTPError",
+                        stage="redirect", retry_after=retry_after, category=category)
                 break
-            url = _validated_url(urljoin(url, location), SHARE_HOSTS)
+            if not location or hop >= MAX_REDIRECTS:
+                break
+            if response.status in (301, 302, 303, 307, 308) and location:
+                saw_redirect = True
+                url = _validated_url(urljoin(url, location), SHARE_HOSTS)
+                continue
         finally:
             response.close()
-    raise DouyinResolveError("Không tìm thấy mã video trong link Douyin. Hãy sao chép lại link Chia sẻ.")
+    code = "redirect_failure" if saw_redirect else "invalid_video_id"
+    message = ("Không thể hoàn tất chuyển hướng tới video Douyin." if saw_redirect
+               else "Không tìm thấy mã video trong link Douyin. Hãy sao chép lại link Chia sẻ.")
+    raise DouyinResolveError(message, code=code, stage="redirect")
 
 
 def _number(value, maximum=10**15):
@@ -452,26 +508,51 @@ def _formats(video):
 
 def resolve_douyin(url, progress=None):
     """Resolve a cleaned public video URL; never substitute another feed item."""
-    video_id = _resolve_id(url)
+    started = time.monotonic()
+    try:
+        video_id = _resolve_id(url)
+    except DouyinResolveError as error:
+        error.elapsed_ms = round(max(0.0, (time.monotonic() - started) * 1000))
+        error.attempts = max(1, error.attempts or 0)
+        error.source_id = _video_id(url)
+        raise
     if progress:
         progress({"phase": "resolve", "stage": "Đang lấy thông tin video Douyin…", "progress_pct": None})
     last_error = None
+    attempts = 0
+    public_unavailable = False
     for endpoint in FEED_ENDPOINTS:
         try:
+            attempts += 1
             response = _open_url(endpoint + "?" + urlencode({"aweme_id": video_id, "aid": "1128"}),
                                  FEED_HOSTS, headers={"Accept": "application/json"})
             payload = _read_json(response)
             if payload.get("status_code", 0) != 0:
+                status_text = str(payload.get("status_msg") or payload.get("message") or "").lower()
+                category = ("captcha_required" if "captcha" in status_text or "验证码" in status_text
+                            else "login_required" if "login" in status_text or "登录" in status_text
+                            else "api_rejected")
+                last_error = DouyinResolveError(
+                    "Douyin yêu cầu xác minh phiên trước khi trả thông tin video." if category in {"captcha_required", "login_required"}
+                    else "API công khai Douyin đã từ chối yêu cầu video.",
+                    code=category, error_type="APIResponse", stage="resolve", category=category)
+                if category in {"captcha_required", "login_required"}:
+                    break
                 continue
             items = payload.get("aweme_list")
             if not isinstance(items, list):
+                last_error = DouyinResolveError(
+                    "Phản hồi API Douyin chưa có danh sách video hợp lệ.", code="invalid_response",
+                    error_type="InvalidResponse", stage="response", category="invalid_response")
                 continue
             item = next((item for item in items if isinstance(item, dict)
                          and str(item.get("aweme_id", "")) == video_id), None)
             if item is None or not isinstance(item.get("video"), dict):
+                public_unavailable = True
                 continue
             formats = _formats(item["video"])
             if not formats:
+                public_unavailable = True
                 continue
             return {"id": video_id, "title": str(item.get("desc") or "Video Douyin")[:2000],
                     "duration": _number(item["video"].get("duration") or item.get("duration")) / 1000,
@@ -481,9 +562,24 @@ def resolve_douyin(url, progress=None):
             # A forbidden response is an access decision, not a transient
             # endpoint failure. Do not immediately repeat the same request on
             # another feed host (which can trigger additional rate limiting).
-            if error.status_code in {403, 429}:
+            if (error.status_code in {401, 403, 429} or error.code in {
+                    "dns_failure", "invalid_dns_answer", "tcp_connection_failure", "tls_certificate_failure",
+                    "tls_handshake_failure", "connection_timeout", "read_timeout", "invalid_url",
+                    "unsupported_source", "redirect_failure", "invalid_video_id"}):
                 break
             continue
-    if last_error is not None and last_error.status_code in {403, 429, 503}:
+    elapsed_ms = round(max(0.0, (time.monotonic() - started) * 1000))
+    if last_error is not None:
+        last_error.elapsed_ms = elapsed_ms
+        last_error.attempts = max(1, attempts)
+        last_error.source_id = video_id
         raise last_error
-    raise DouyinResolveError("Douyin chưa cung cấp video công khai cho link này. Hãy thử lại sau hoặc chọn tệp trên máy.")
+    if public_unavailable:
+        raise DouyinResolveError(
+            "API công khai Douyin không cung cấp media cho đúng video này.", code="public_unavailable",
+            error_type="PublicUnavailable", stage="resolve", category="public_unavailable",
+            elapsed_ms=elapsed_ms, attempts=max(1, attempts), source_id=video_id)
+    raise DouyinResolveError(
+        "API công khai Douyin chưa trả media cho video này.", code="public_unavailable",
+        error_type="PublicUnavailable", stage="resolve", category="public_unavailable",
+        elapsed_ms=elapsed_ms, attempts=max(1, attempts), source_id=video_id)

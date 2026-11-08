@@ -382,14 +382,42 @@ def test_download_logs_safe_run_id_mapping(tmp_path, monkeypatch, caplog):
 def test_completed_source_survives_new_downloader_and_canonical_alias(tmp_path, owned_video, monkeypatch):
     url = 'https://www.douyin.com/jingxuan?modal_id=7688978448627473651&tracking=ignored'
     VideoDownloader(tmp_path).register_completed(url, {'file_path': str(owned_video), 'title': 'Original'})
-    monkeypatch.setattr(VideoDownloader, '_download_remote', lambda *args: pytest.fail('must not download cached source'))
+    monkeypatch.setattr(VideoDownloader, '_download_remote', lambda *args, **_kwargs: pytest.fail('must not download cached source'))
     events = []
     result = VideoDownloader(tmp_path).download('https://www.douyin.com/video/7688978448627473651', events.append)
     assert result['file_path'] == str(owned_video)
     assert result['title'] == 'Original' and result['duration'] > 0
     assert result['reused_source'] and result['reusable_source'] and result['owned_paths'] == []
+    assert result['source_method'] == 'verified_cache' and result['cache_hit'] is True
+    assert result['downloaded_from_network'] is False and result['download_attempted'] is False
+    assert result['download_verified'] is True and result['source_identity_verified'] is True
+    assert result['bytes_received_from_network'] == 0
     assert events[-1]['downloaded_bytes'] == owned_video.stat().st_size
     assert 'không tải lại' in events[-1]['stage']
+
+
+def test_force_live_download_bypasses_cache_and_preserves_existing_index(tmp_path, owned_video, monkeypatch):
+    url = 'https://www.douyin.com/video/7688978448627473651'
+    cached = VideoDownloader(tmp_path)
+    cached.register_completed(url, {'file_path': str(owned_video), 'title': 'Cached'})
+    index = next(tmp_path.glob('.source-*.json'))
+    saved_index = index.read_bytes()
+    calls = []
+
+    def fresh(clean_url, source_hash, progress_callback, cancel_check, *, bypass_source_cache=False):
+        calls.append((clean_url, source_hash, bypass_source_cache))
+        return {"file_path": str(owned_video), "source_method": "live_download",
+                "downloaded_from_network": True, "download_attempted": True,
+                "download_verified": True, "source_identity_verified": True,
+                "bytes_received_from_network": 123, "downloader_strategy": "test-stream",
+                "authenticated_attempted": False, "media_sha256": None, "cache_hit": False}
+
+    downloader = VideoDownloader(tmp_path, bypass_source_cache=True)
+    monkeypatch.setattr(downloader, '_download_remote', fresh)
+    result = downloader.download(url)
+    assert calls == [(url, VideoDownloader.source_hash(url), True)]
+    assert result['source_method'] == 'live_download' and result['cache_hit'] is False
+    assert index.read_bytes() == saved_index
 
 
 @pytest.mark.parametrize('damage', ['deleted', 'truncated', 'nonvideo', 'external', 'wrong-id', 'duration', 'oversized'])
@@ -414,7 +442,7 @@ def test_invalid_completed_source_cannot_be_reported_as_reused(tmp_path, owned_v
         record['duration'] = 900
     index.write_text(json.dumps(record) if damage != 'oversized' else ' ' * 17000)
     calls = []
-    monkeypatch.setattr(downloader, '_download_remote', lambda *args: calls.append(args) or {'new_request': True})
+    monkeypatch.setattr(downloader, '_download_remote', lambda *args, **_kwargs: calls.append(args) or {'new_request': True})
     assert downloader.download(url) == {'new_request': True}
     assert len(calls) == 1
 

@@ -89,6 +89,7 @@ SESSION_FIELDS = frozenset((
     " _source_file_signature _processing_signature output_incomplete output_missing_segment_ids"
     " status_history status_changed_at translation_chunk_workers run_intent retry_state"
     " automatic_output _auto_export_attempts _download_auth_cookie_revision _download_retry_after_until"
+    " source_download_provenance force_live_download"
 ).split())
 PATH_FIELDS = ("video_path", "ref_audio", "raw_audio_16k", "bgm_audio_path")
 META_FIELDS = frozenset((
@@ -108,6 +109,9 @@ META_FIELDS = frozenset((
     "mode input_duration output_duration sample_rate channels elapsed_seconds rtf "
     "diagnostic audio_evidence audio_consensus audio_context_evidence audio_context_consensus audio_audit_status review_gate_revision missing_translation_recovery"
     " state attempts input_hash error_code updated_at focus_ids source_ambiguity"
+    " source_download_provenance downloaded_from_network download_attempted download_verified"
+    " source_identity_verified bytes_received_from_network downloader_strategy authenticated_attempted"
+    " media_sha256 cache_hit"
     " scope_id confirmation_id code required_seconds available_seconds max_speed remedy"
     " source_language source_language_probability source_language_uncertain multilingual_review roles_verified semantic_verdict draft_allowed source_quote"
     " speaker_evidence speaker_confirmation utterance_id utterance_evidence source_asr_row_id source_asr_start source_asr_end source_piece_index source_piece_count"
@@ -1733,7 +1737,8 @@ def _restore_saved_session_owned(task_id, event_callback=None):
                         "Dịch video chưa xong; các câu đã dịch và giọng đọc được giữ. Bấm Tiếp tục để xử lý phần còn lại."
                          if visual_incomplete else "Chuẩn bị video bị gián đoạn; bấm Tiếp tục để khôi phục phần đã lưu.")
     if available["pending_download"]:
-        session._source_downloader = _SavedSourceDownloader()
+        session._source_downloader = _SavedSourceDownloader(
+            bypass_source_cache=getattr(session, "force_live_download", False) is True)
         download_failure = fields.get("_source_failure_code")
         failure_stage = _download_failure_stage(download_failure)
         if failure_stage:
@@ -1756,8 +1761,11 @@ def _restore_saved_session_owned(task_id, event_callback=None):
 
 
 class _SavedSourceDownloader:
+    def __init__(self, *, bypass_source_cache=False):
+        self.bypass_source_cache = bool(bypass_source_cache)
+
     def download(self, *args, **kwargs):
         # Restoring history never contacts a network service. Resolve the normal
         # downloader only after the user explicitly resumes a pending download.
         from core.downloader import VideoDownloader
-        return VideoDownloader().download(*args, **kwargs)
+        return VideoDownloader(bypass_source_cache=self.bypass_source_cache).download(*args, **kwargs)
