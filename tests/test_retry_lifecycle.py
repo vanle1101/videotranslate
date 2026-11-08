@@ -118,6 +118,17 @@ def test_durable_local_ollama_failure_uses_short_backoff(session, monkeypatch):
     assert 2.0 <= delay <= 3.0
 
 
+def test_durable_local_ollama_recovery_exhausts_after_bounded_attempts(session):
+    from core.engines.translation.ollama_client import OllamaClientError
+    session._persistence_enabled = True
+    error = OllamaClientError("local service unavailable", retryable=True, code="provider_transport")
+
+    delays = [session._recovery_delay(attempt, error) for attempt in range(1, 5)]
+
+    assert all(delay is not None and delay > 0 for delay in delays[:3])
+    assert delays[3] is None
+
+
 def test_application_shutdown_preserves_intent_but_user_stop_clears_it(session, monkeypatch):
     monkeypatch.setattr(session, "_persist_if_enabled", lambda: None)
     session.run_intent = "running"

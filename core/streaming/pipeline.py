@@ -3118,6 +3118,8 @@ class StreamingPipelineSession:
             while current is not None and id(current) not in seen:
                 seen.add(id(current))
                 if type(current).__name__ == "OllamaClientError":
+                    if not 0 < attempt <= len(AUTOMATIC_RECOVERY_DELAYS):
+                        return None
                     from core.provider_retry import transient_delay
                     return transient_delay(max(0, attempt - 1), _retry_after_delay(error))
                 current = current.__cause__ or current.__context__
