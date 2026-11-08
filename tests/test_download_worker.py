@@ -1053,6 +1053,50 @@ def test_public_ytdlp_403_uses_exactly_one_cookie_fallback(
     assert "fixture-secret" not in json.dumps(events)
 
 
+def test_public_and_authenticated_fallback_diagnostics_are_both_preserved(
+        monkeypatch, work_directory, capsys):
+    prefix = str(work_directory / "video")
+    monkeypatch.setattr(worker.sys, "argv", ["download_worker.py", VIDEO_URL, prefix])
+    monkeypatch.setattr(worker, "resolve_douyin", lambda *_args: (_ for _ in ()).throw(
+        worker.DouyinResolveError("no public media", code="public_unavailable",
+                                  category="public_unavailable", source_id=VIDEO_ID)))
+    monkeypatch.setattr(worker, "get_douyin_cookie_status",
+                        lambda: {"configured": True, "stored": True, "count": 61}, raising=False)
+
+    class AttemptYDL:
+        def __init__(self, authenticated): self.authenticated = authenticated
+        def __enter__(self): return self
+        def __exit__(self, *_args): return False
+        def extract_info(self, _url, **_kwargs):
+            if self.authenticated:
+                raise worker.UrllibHTTPError(
+                    "https://www.douyin.com/aweme/v1/web/aweme/detail/?token=auth-secret",
+                    403, "Forbidden", {}, None)
+            raise worker.UrllibHTTPError(
+                "https://www.douyin.com/aweme/v1/web/aweme/detail/?signature=public-secret",
+                403, "Forbidden", {}, None)
+
+    monkeypatch.setattr(
+        worker, "single_video_downloader",
+        lambda _options, _url, *, use_imported_douyin_cookies:
+            AttemptYDL(use_imported_douyin_cookies), raising=False)
+
+    assert worker.main() == 1
+    event = read_events(capsys)[-1]
+    assert event["code"] == "AUTH_REJECTED"
+    assert event["diagnostics"]["stage"] == "authenticated_http"
+    assert event["diagnostic_history"] == [
+        {"stage": "public_http", "error_type": "HTTPError", "http_status": 403,
+         "endpoint_host": "www.douyin.com", "endpoint_path": "/aweme/v1/web/aweme/detail/",
+         "authenticated_attempted": False},
+        {"stage": "authenticated_http", "error_type": "HTTPError", "http_status": 403,
+         "endpoint_host": "www.douyin.com", "endpoint_path": "/aweme/v1/web/aweme/detail/",
+         "authenticated_attempted": True},
+    ]
+    serialized = json.dumps(event)
+    assert "auth-secret" not in serialized and "public-secret" not in serialized
+
+
 def test_public_ytdlp_429_stops_without_cookie_fallback(
         monkeypatch, work_directory, capsys):
     prefix = str(work_directory / "video")
@@ -1216,6 +1260,8 @@ def test_dns_failure_does_not_attempt_authenticated_or_anonymous_ytdlp(
     ("CAPTCHA required; sessionid=synthetic-secret", "CAPTCHA_REQUIRED"),
     ("Please log in; sessionid=synthetic-secret", "LOGIN_REQUIRED"),
     ("The session has expired; cookies are needed; sessionid=synthetic-secret", "LOGIN_REQUIRED"),
+    ("Fresh cookies (not necessarily logged in) are needed; sessionid=synthetic-secret",
+     "DOUYIN_VERIFICATION_REQUIRED"),
     ("Signed URL expired; sessionid=synthetic-secret", "SOURCE_EXPIRED"),
 ])
 def test_cookie_fallback_stops_on_auth_challenge_with_safe_classification(
@@ -1346,6 +1392,44 @@ def test_403_without_login_evidence_is_not_classified_as_login_required():
     error = RuntimeError("HTTP Error 403: Forbidden")
     assert worker._classify_cookie_download_error(error) == "AUTH_REJECTED"
     assert worker._cookie_failure_diagnostics(error)["http_status"] is None
+
+
+def test_fresh_cookies_extractor_message_does_not_claim_login_expired():
+    error = RuntimeError("Fresh cookies (not necessarily logged in) are needed")
+    assert worker._classify_cookie_download_error(error) == "DOUYIN_VERIFICATION_REQUIRED"
+
+
+def test_public_ytdlp_fresh_cookie_gate_allows_one_scoped_cookie_attempt(
+        monkeypatch, work_directory, capsys):
+    prefix = str(work_directory / "video")
+    monkeypatch.setattr(worker.sys, "argv", ["download_worker.py", VIDEO_URL, prefix])
+    monkeypatch.setattr(worker, "resolve_douyin", lambda *_args: (_ for _ in ()).throw(
+        worker.DouyinResolveError("public detail unavailable", code="public_unavailable",
+                                  category="public_unavailable", source_id=VIDEO_ID)))
+    monkeypatch.setattr(worker, "get_douyin_cookie_status",
+                        lambda: {"configured": True, "stored": True, "count": 61}, raising=False)
+    attempts = []
+
+    class FreshCookieYDL:
+        def __init__(self, authenticated): self.authenticated = authenticated
+        def __enter__(self): return self
+        def __exit__(self, *_args): return False
+        def extract_info(self, _url, **_kwargs):
+            attempts.append(self.authenticated)
+            raise RuntimeError("Fresh cookies (not necessarily logged in) are needed")
+
+    monkeypatch.setattr(
+        worker, "single_video_downloader",
+        lambda _options, _url, *, use_imported_douyin_cookies:
+            FreshCookieYDL(use_imported_douyin_cookies), raising=False)
+
+    assert worker.main() == 1
+    event = read_events(capsys)[-1]
+    assert attempts == [False, True]
+    assert event["code"] == "DOUYIN_VERIFICATION_REQUIRED"
+    assert event["authenticated_attempted"] is True
+    assert event["diagnostics"]["http_status"] is None
+    assert "không chứng minh tài khoản đã đăng xuất" in event["message"].lower()
 
 
 def test_http_429_honors_retry_after_once_then_stops(monkeypatch, work_directory, mp4_bytes):

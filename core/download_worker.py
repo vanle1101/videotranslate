@@ -33,7 +33,8 @@ class MediaDownloadError(RuntimeError):
     """A safe message, without signed CDN addresses or credentials."""
 
     def __init__(self, message, *, resumable=False, code=None, status_code=None,
-                 retry_after_seconds=None, cookie_revision=None, diagnostics=None):
+                 retry_after_seconds=None, cookie_revision=None, diagnostics=None,
+                 diagnostic_history=None):
         super().__init__(message)
         self.resumable = resumable
         self.code = code
@@ -41,6 +42,7 @@ class MediaDownloadError(RuntimeError):
         self.retry_after_seconds = _retry_after_seconds(retry_after_seconds)
         self.cookie_revision = cookie_revision
         self.diagnostics = diagnostics if isinstance(diagnostics, dict) else None
+        self.diagnostic_history = _safe_diagnostic_history(diagnostic_history)
 
 
 MAX_MEDIA_RETRIES = 5
@@ -118,6 +120,38 @@ def _safe_cookie_endpoint(value):
         else:
             path = "/{redacted}"
     return parsed.hostname.lower(), path
+
+
+def _safe_diagnostic_history(values):
+    """Retain only bounded, redacted yt-dlp attempt facts."""
+    if not isinstance(values, (list, tuple)):
+        return []
+    allowed_stages = {
+        "public_http", "public_dns", "public_tls", "public_timeout", "public_connect", "public_extractor",
+        "authenticated_http", "authenticated_dns", "authenticated_tls", "authenticated_timeout",
+        "authenticated_connect", "authenticated_extractor", "public_auth_gate",
+    }
+    safe = []
+    for value in values[:4]:
+        if not isinstance(value, dict) or value.get("stage") not in allowed_stages:
+            continue
+        error_type = value.get("error_type")
+        error_type = (error_type if isinstance(error_type, str)
+                      and re.fullmatch(r"[A-Za-z][A-Za-z0-9_]{0,47}", error_type) else "unknown")
+        status = value.get("http_status")
+        status = status if type(status) is int and 100 <= status <= 599 else None
+        host = value.get("endpoint_host")
+        if (not isinstance(host, str) or not re.fullmatch(
+                r"(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)*(?:douyin|iesdouyin)\.com", host)):
+            host = None
+        path = value.get("endpoint_path")
+        if path not in {"/aweme/v1/web/aweme/detail", "/aweme/v1/web/aweme/detail/",
+                        "/video/{video_id}", "/{redacted}"}:
+            path = "/{redacted}" if path else None
+        safe.append({"stage": value["stage"], "error_type": error_type, "http_status": status,
+                     "endpoint_host": host, "endpoint_path": path,
+                     "authenticated_attempted": value.get("authenticated_attempted") is True})
+    return safe
 
 
 def _exception_chain(error):
@@ -219,9 +253,10 @@ def _classify_cookie_download_error(error, diagnostics=None):
         return "CAPTCHA_REQUIRED"
     if status == 401:
         return "LOGIN_REQUIRED"
-    if any(token in detail for token in ("login", "log in", "sign in", "fresh cookies",
-                                         "cookies are needed", "session expired", "session has expired")):
+    if any(token in detail for token in ("login", "log in", "sign in", "session expired", "session has expired")):
         return "LOGIN_REQUIRED"
+    if any(token in detail for token in ("fresh cookies", "cookies are needed")):
+        return "DOUYIN_VERIFICATION_REQUIRED"
     if any(token in detail for token in ("signed url expired", "signature expired", "url has expired",
                                          "link expired", "source expired")):
         return "SOURCE_EXPIRED"
@@ -275,6 +310,7 @@ def _retry_after_from_exception(error):
 def _safe_download_failure(code, *, retry_after=None):
     messages = {
         "AUTH_REQUIRED": "Douyin yêu cầu phiên đăng nhập. Nhập tệp Netscape cookies.txt trong Cài đặt rồi tiếp tục tác vụ.",
+        "DOUYIN_VERIFICATION_REQUIRED": "Extractor Douyin yêu cầu cookie mới hoặc xác minh bổ sung; phản hồi này không chứng minh tài khoản đã đăng xuất. Kiểm tra video bằng quy trình thông thường của Douyin rồi cập nhật cookies nếu cần.",
         "CAPTCHA_REQUIRED": "Douyin vẫn yêu cầu CAPTCHA sau một lượt thử có xác thực. Hãy xác minh phiên bằng cách thông thường rồi nhập lại cookies.txt; Studio không vượt CAPTCHA.",
         "LOGIN_REQUIRED": "Phiên Douyin hết hạn hoặc chưa đăng nhập. Hãy đăng nhập bằng cách thông thường, xuất cookies.txt mới rồi nhập vào Cài đặt.",
         "SOURCE_EXPIRED": "Link hoặc địa chỉ video Douyin đã hết hạn/không còn khả dụng. Hãy lấy lại link từ video gốc.",
@@ -1077,17 +1113,31 @@ def main():
                     try:
                         result = _download_with_public_douyin_ytdlp(fallback_url, prefix, options, send)
                     except MediaDownloadError as public_error:
+                        public_history = _safe_diagnostic_history(
+                            public_error.diagnostic_history or [public_error.diagnostics])
+                        public_error.diagnostic_history = public_history
                         cookie_auth_gate = (public_error.status_code in {401, 403}
-                                            or public_error.code == "LOGIN_REQUIRED")
+                                            or public_error.code in {"LOGIN_REQUIRED", "DOUYIN_VERIFICATION_REQUIRED"})
                         if public_error.code in {"CAPTCHA_REQUIRED", "RATE_LIMITED"}:
                             raise
                         if cookie_auth_gate and _has_imported_douyin_cookies():
-                            result = _download_with_imported_douyin_cookies(
-                                fallback_url, prefix, options, send)
+                            try:
+                                result = _download_with_imported_douyin_cookies(
+                                    fallback_url, prefix, options, send)
+                            except MediaDownloadError as authenticated_error:
+                                authenticated_history = _safe_diagnostic_history(
+                                    authenticated_error.diagnostic_history
+                                    or [authenticated_error.diagnostics])
+                                authenticated_error.diagnostic_history = _safe_diagnostic_history(
+                                    public_history + authenticated_history)
+                                raise
                         elif cookie_auth_gate:
-                            raise _missing_douyin_cookie_error(
+                            auth_error = _missing_douyin_cookie_error(
                                 resumable=checkpoint is not None,
-                                status_code=public_error.status_code) from None
+                                status_code=public_error.status_code)
+                            auth_error.diagnostic_history = _safe_diagnostic_history(
+                                public_history + [auth_error.diagnostics])
+                            raise auth_error from None
                         else:
                             raise
                     send({"kind": "result", "result": result})
@@ -1154,6 +1204,9 @@ def main():
         if isinstance(error, MediaDownloadError) and isinstance(error.diagnostics, dict):
             event["diagnostics"] = error.diagnostics
             event["authenticated_attempted"] = error.diagnostics.get("authenticated_attempted") is True
+            history = _safe_diagnostic_history(error.diagnostic_history or [error.diagnostics])
+            if history:
+                event["diagnostic_history"] = history
         if isinstance(error, MediaDownloadError) and error.resumable:
             event["resumable"] = True
         send(event)

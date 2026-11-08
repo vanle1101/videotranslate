@@ -28,7 +28,7 @@ class VideoDownloadError(RuntimeError):
 
     def __init__(self, message, *, code=None, status_code=None, retry_after_seconds=None,
                  cookie_revision=None, resumable=False, authenticated_attempted=False,
-                 diagnostics=None):
+                 diagnostics=None, diagnostic_history=None):
         super().__init__(message)
         self.code = code
         self.status_code = status_code
@@ -37,6 +37,7 @@ class VideoDownloadError(RuntimeError):
         self.resumable = bool(resumable)
         self.authenticated_attempted = authenticated_attempted is True
         self.diagnostics = _safe_download_diagnostics(diagnostics)
+        self.diagnostic_history = _safe_download_diagnostics_history(diagnostic_history)
 
 
 def _safe_download_diagnostics(value):
@@ -69,6 +70,18 @@ def _safe_download_diagnostics(value):
     return {"stage": stage, "error_type": error_type, "http_status": status,
             "endpoint_host": host, "endpoint_path": path,
             "authenticated_attempted": value.get("authenticated_attempted") is True}
+
+
+def _safe_download_diagnostics_history(value):
+    """Sanitize a bounded sequence of public and authenticated attempt facts."""
+    if not isinstance(value, (list, tuple)):
+        return []
+    safe = []
+    for item in value[:4]:
+        diagnostic = _safe_download_diagnostics(item)
+        if diagnostic is not None:
+            safe.append(diagnostic)
+    return safe
 
 
 def friendly_download_error(error, host="trang video"):
@@ -507,28 +520,29 @@ class VideoDownloader:
                             or any(type(value) is not int or value < 0 for value in cookie_revision)):
                         cookie_revision = None
                     diagnostics = _safe_download_diagnostics(event.get("diagnostics"))
+                    diagnostic_history = _safe_download_diagnostics_history(event.get("diagnostic_history"))
                     raise VideoDownloadError(
                         event.get("message") or friendly_download_error("", host), code=code,
                         status_code=status_code, retry_after_seconds=retry_after,
                         cookie_revision=cookie_revision, resumable=event.get("resumable") is True,
                         authenticated_attempted=(event.get("authenticated_attempted") is True
                                                   or bool(diagnostics and diagnostics["authenticated_attempted"])),
-                        diagnostics=diagnostics)
+                        diagnostics=diagnostics, diagnostic_history=diagnostic_history)
                 elif kind == "eof":
                     raise VideoDownloadError("Trình tải video đã dừng trước khi hoàn tất. Hãy thử lại.")
         except VideoDownloadError as error:
             logger.warning("Tải video từ %s: %s", host, error)
-            if error.diagnostics is not None:
-                diagnostic = error.diagnostics
+            diagnostics = error.diagnostic_history or ([error.diagnostics] if error.diagnostics else [])
+            for index, diagnostic in enumerate(diagnostics, 1):
                 status = diagnostic["http_status"] if diagnostic["http_status"] is not None else "unknown"
                 endpoint = diagnostic["endpoint_host"] or "unknown"
                 if diagnostic["endpoint_path"]:
                     endpoint += diagnostic["endpoint_path"]
-                logger.warning("run_id=%s Douyin cookie fallback: code=%s; HTTP %s; endpoint=%s; "
+                logger.warning("run_id=%s Douyin downloader attempt %s/%s: code=%s; HTTP %s; endpoint=%s; "
                                "stage=%s; error_type=%s; authenticated_attempted=%s.",
-                               run_id, error.code or "unknown", status, endpoint,
+                               run_id, index, len(diagnostics), error.code or "unknown", status, endpoint,
                                diagnostic["stage"], diagnostic["error_type"],
-                               error.authenticated_attempted)
+                               diagnostic["authenticated_attempted"])
             raise
         finally:
             try:

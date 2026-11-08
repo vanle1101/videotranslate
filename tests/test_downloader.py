@@ -105,10 +105,15 @@ def test_downloader_logs_only_safe_authenticated_failure_diagnostics(tmp_path, m
         "endpoint_host": "www.douyin.com", "endpoint_path": "/aweme/v1/web/aweme/detail/",
         "authenticated_attempted": True,
     }
+    diagnostic_history = [
+        {"stage": "public_extractor", "error_type": "DownloadError", "http_status": None,
+         "endpoint_host": None, "endpoint_path": None, "authenticated_attempted": False},
+        diagnostics,
+    ]
     payload = {
         "kind": "error", "code": "AUTH_REJECTED", "status_code": 403,
         "message": "Douyin từ chối phiên.", "authenticated_attempted": True,
-        "diagnostics": diagnostics,
+        "diagnostics": diagnostics, "diagnostic_history": diagnostic_history,
     }
 
     class WorkerProcess:
@@ -120,11 +125,35 @@ def test_downloader_logs_only_safe_authenticated_failure_diagnostics(tmp_path, m
         VideoDownloader(tmp_path).download("https://www.douyin.com/video/1234567890123456789")
 
     assert captured.value.diagnostics == diagnostics
+    assert captured.value.diagnostic_history == diagnostic_history
     assert captured.value.authenticated_attempted is True
-    assert "authenticated_http" in caplog.text
+    assert "public_extractor" in caplog.text and "authenticated_http" in caplog.text
     assert "www.douyin.com/aweme/v1/web/aweme/detail/" in caplog.text
     assert "HTTP 403" in caplog.text
     assert "session_token" not in caplog.text and "synthetic-secret" not in caplog.text
+
+
+def test_downloader_sanitizes_public_and_authenticated_diagnostics_as_bounded_history():
+    from core.downloader import _safe_download_diagnostics_history
+
+    diagnostics = [
+        {"stage": "public_http", "error_type": "HTTPError", "http_status": 403,
+         "endpoint_host": "www.douyin.com", "endpoint_path": "/aweme/v1/web/aweme/detail/?token=private",
+         "authenticated_attempted": False, "secret": "private"},
+        {"stage": "authenticated_http", "error_type": "HTTPError", "http_status": 403,
+         "endpoint_host": "www.douyin.com", "endpoint_path": "/aweme/v1/web/aweme/detail/",
+         "authenticated_attempted": True},
+    ]
+    result = _safe_download_diagnostics_history(diagnostics)
+    assert result == [
+        {"stage": "public_http", "error_type": "HTTPError", "http_status": 403,
+         "endpoint_host": "www.douyin.com", "endpoint_path": "/{redacted}",
+         "authenticated_attempted": False},
+        {"stage": "authenticated_http", "error_type": "HTTPError", "http_status": 403,
+         "endpoint_host": "www.douyin.com", "endpoint_path": "/aweme/v1/web/aweme/detail/",
+         "authenticated_attempted": True},
+    ]
+    assert "private" not in json.dumps(result)
 
 
 @pytest.mark.parametrize('host', ['douyin.com', 'v.douyin.com', 'www.iesdouyin.com'])
