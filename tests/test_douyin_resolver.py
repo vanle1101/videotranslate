@@ -96,6 +96,25 @@ def test_recommendations_never_replace_requested_video(monkeypatch):
     assert captured.value.code == "public_unavailable"
 
 
+@pytest.mark.parametrize(("status_msg", "expected"), [
+    ("upstream temporarily unavailable", "api_rejected"),
+    ("access denied: private video", "access_denied"),
+    ("permission denied", "access_denied"),
+    ("video has been deleted", "video_unavailable"),
+    ("login required", "login_required"),
+    ("captcha verification", "captcha_required"),
+])
+def test_api_rejection_preserves_access_and_verification_decisions(monkeypatch, status_msg, expected):
+    calls = serve_json(monkeypatch, {"status_code": 8, "status_msg": status_msg})
+    with pytest.raises(resolver.DouyinResolveError) as captured:
+        resolver.resolve_douyin(VIDEO_URL)
+    assert captured.value.code == expected
+    assert captured.value.category == expected
+    if expected in {"access_denied", "login_required", "captcha_required", "video_unavailable"}:
+        assert len(calls) == 1
+    assert "status_msg" not in str(captured.value)
+
+
 def test_dns_failure_is_preserved_as_non_authentication_failure(monkeypatch):
     def fail_dns(*_args, **_kwargs):
         raise socket.gaierror("synthetic DNS detail")

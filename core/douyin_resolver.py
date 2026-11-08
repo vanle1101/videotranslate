@@ -529,14 +529,27 @@ def resolve_douyin(url, progress=None):
             payload = _read_json(response)
             if payload.get("status_code", 0) != 0:
                 status_text = str(payload.get("status_msg") or payload.get("message") or "").lower()
-                category = ("captcha_required" if "captcha" in status_text or "验证码" in status_text
-                            else "login_required" if "login" in status_text or "登录" in status_text
-                            else "api_rejected")
+                if any(token in status_text for token in ("captcha", "verification", "not a bot", "验证码", "人机验证")):
+                    category = "captcha_required"
+                elif any(token in status_text for token in ("login", "log in", "sign in", "登录", "未登录")):
+                    category = "login_required"
+                elif any(token in status_text for token in (
+                        "private", "permission", "access denied", "forbidden", "not authorized",
+                        "no permission", "not allowed", "权限", "无权", "私密", "拒绝访问")):
+                    category = "access_denied"
+                elif any(token in status_text for token in (
+                        "video unavailable", "deleted", "removed", "not found", "does not exist",
+                        "已删除", "已下架", "不存在", "不可用")):
+                    category = "video_unavailable"
+                else:
+                    category = "api_rejected"
                 last_error = DouyinResolveError(
                     "Douyin yêu cầu xác minh phiên trước khi trả thông tin video." if category in {"captcha_required", "login_required"}
-                    else "API công khai Douyin đã từ chối yêu cầu video.",
+                    else "Douyin từ chối quyền truy cập video." if category == "access_denied"
+                    else "Video Douyin không còn khả dụng." if category == "video_unavailable"
+                    else "API công khai Douyin chưa trả dữ liệu video.",
                     code=category, error_type="APIResponse", stage="resolve", category=category)
-                if category in {"captcha_required", "login_required"}:
+                if category != "api_rejected":
                     break
                 continue
             items = payload.get("aweme_list")

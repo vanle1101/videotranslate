@@ -819,7 +819,7 @@ def test_public_http_403_without_imported_cookies_reports_auth_required(
     assert "private-token" not in json.dumps(events)
 
 
-def test_public_http_403_with_expired_import_reports_login_required_without_retry(
+def test_public_http_403_without_usable_import_reports_auth_required_without_claiming_expiry(
         monkeypatch, work_directory, capsys):
     prefix = str(work_directory / "video")
     monkeypatch.setattr(worker.sys, "argv", ["download_worker.py", VIDEO_URL, prefix])
@@ -834,8 +834,8 @@ def test_public_http_403_with_expired_import_reports_login_required_without_retr
 
     assert worker.main() == 1
     events = read_events(capsys)
-    assert events[-1]["code"] == "LOGIN_REQUIRED"
-    assert "hết hạn" in events[-1]["message"].lower()
+    assert events[-1]["code"] == "AUTH_REQUIRED"
+    assert "yêu cầu phiên đăng nhập" in events[-1]["message"].lower()
     assert fallback_calls == []
     assert "private-token" not in json.dumps(events)
 
@@ -888,6 +888,45 @@ def test_public_http_403_uses_one_cookie_scoped_ytdlp_attempt(
     assert "private-token" not in json.dumps(events)
 
 
+def test_failed_authenticated_fallback_stops_after_exactly_one_attempt(
+        monkeypatch, work_directory, capsys):
+    prefix = str(work_directory / "video")
+    monkeypatch.setattr(worker.sys, "argv", ["download_worker.py", VIDEO_URL, prefix])
+    monkeypatch.setattr(worker, "resolve_douyin", lambda *_args: (_ for _ in ()).throw(
+        worker.DouyinResolveError("private-token", code="http_error", status_code=403,
+                                  error_type="HTTPError")))
+    monkeypatch.setattr(worker, "get_douyin_cookie_status",
+                        lambda: {"configured": True, "stored": True, "count": 61}, raising=False)
+    attempts = []
+
+    class RejectedAuthenticatedYDL:
+        def __enter__(self): return self
+        def __exit__(self, *_args): return False
+
+        def extract_info(self, url, **_kwargs):
+            attempts.append((url, True))
+            raise worker.UrllibHTTPError(
+                "https://www.douyin.com/aweme/v1/web/aweme/detail/?token=fixture-secret",
+                403, "Forbidden", {}, None)
+
+    def make_downloader(_options, url, *, use_imported_douyin_cookies):
+        attempts.append((url, use_imported_douyin_cookies))
+        assert use_imported_douyin_cookies is True
+        return RejectedAuthenticatedYDL()
+
+    monkeypatch.setattr(worker, "single_video_downloader", make_downloader, raising=False)
+    assert worker.main() == 1
+    events = read_events(capsys)
+    assert events[-1]["kind"] == "error"
+    assert events[-1]["code"] == "AUTH_REJECTED"
+    assert events[-1]["authenticated_attempted"] is True
+    assert len(attempts) == 2
+    assert attempts[0] == (f"https://www.douyin.com/video/{VIDEO_ID}", True)
+    assert attempts[1] == (f"https://www.douyin.com/video/{VIDEO_ID}", True)
+    assert "fixture-secret" not in json.dumps(events)
+    assert "private-token" not in json.dumps(events)
+
+
 def test_http_403_after_short_link_resolution_uses_resolved_identity_for_cookie_fallback(
         monkeypatch, work_directory, capsys):
     prefix = str(work_directory / "video")
@@ -915,29 +954,154 @@ def test_http_403_after_short_link_resolution_uses_resolved_identity_for_cookie_
     assert events[-1]["result"]["authenticated_attempted"] is True
 
 
-def test_public_api_unavailable_uses_one_imported_cookie_attempt(
-        monkeypatch, work_directory, capsys, mp4_bytes):
+@pytest.mark.parametrize(("code", "category"), [
+    ("public_unavailable", "public_unavailable"),
+    ("api_rejected", "api_rejected"),
+    ("invalid_response", "invalid_response"),
+])
+def test_soft_public_resolver_errors_restore_anonymous_ytdlp_before_cookie(
+        monkeypatch, work_directory, capsys, mp4_bytes, code, category):
     prefix = str(work_directory / "video")
     monkeypatch.setattr(worker.sys, "argv", ["download_worker.py", VIDEO_URL, prefix])
     monkeypatch.setattr(worker, "resolve_douyin", lambda *_args: (_ for _ in ()).throw(
-        worker.DouyinResolveError("public API has no matching media", code="public_unavailable",
-                                  stage="resolve", error_type="PublicUnavailable")))
+        worker.DouyinResolveError("soft public API failure", code=code,
+                                  stage="resolve", error_type="InvalidResponse",
+                                  category=category)))
     monkeypatch.setattr(worker, "get_douyin_cookie_status",
                         lambda: {"configured": True, "stored": True, "count": 61}, raising=False)
     calls = []
-    output = Path(prefix + ".mp4")
+
+    class PublicYDL:
+        def __init__(self, options):
+            self.output = Path(options["outtmpl"].replace("%(ext)s", "mp4"))
+
+        def __enter__(self): return self
+        def __exit__(self, *_args): return False
+
+        def extract_info(self, url, download=True):
+            calls.append((url, download, "public"))
+            self.output.write_bytes(mp4_bytes)
+            return {"id": VIDEO_ID, "title": "Public fixture", "duration": .5}
+
+        def prepare_filename(self, _info): return str(self.output)
+
+    monkeypatch.setattr(worker, "verify_video", lambda _path: .5)
+    monkeypatch.setattr(worker, "friendly_download_error",
+                        lambda error, _host: f"{type(error).__name__}: {error}")
+    monkeypatch.setattr(worker, "single_video_downloader",
+                        lambda options, url, **kwargs: (
+                            calls.append((url, kwargs.get("use_imported_douyin_cookies"))),
+                            PublicYDL(options))[1], raising=False)
+    monkeypatch.setattr(worker, "_download_with_imported_douyin_cookies",
+                        lambda *_args: (_ for _ in ()).throw(AssertionError("Cookie fallback must not precede public")))
+
+    assert worker.main() == 0
+    events = read_events(capsys)
+    assert calls == [
+        (f"https://www.douyin.com/video/{VIDEO_ID}", False),
+        (f"https://www.douyin.com/video/{VIDEO_ID}", True, "public"),
+    ]
+    result = events[-1]["result"]
+    assert events[-1]["kind"] == "result"
+    assert result["source"] == "douyin-public-ytdlp"
+    assert Path(result["file_path"]).is_file()
+    assert Path(result["file_path"]).read_bytes() == mp4_bytes
+    assert result["bytes_received_from_network"] == len(mp4_bytes)
+    assert result["authenticated_attempted"] is False
+    assert result["source_identity_verified"] is True
+    assert result["cache_hit"] is False
+
+
+def test_public_ytdlp_403_uses_exactly_one_cookie_fallback(
+        monkeypatch, work_directory, capsys):
+    prefix = str(work_directory / "video")
+    monkeypatch.setattr(worker.sys, "argv", ["download_worker.py", VIDEO_URL, prefix])
+    monkeypatch.setattr(worker, "resolve_douyin", lambda *_args: (_ for _ in ()).throw(
+        worker.DouyinResolveError("no public media", code="public_unavailable",
+                                  category="public_unavailable", source_id=VIDEO_ID)))
+    monkeypatch.setattr(worker, "get_douyin_cookie_status",
+                        lambda: {"configured": True, "stored": True, "count": 61}, raising=False)
+    public_calls, cookie_calls = [], []
+
+    class DeniedPublicYDL:
+        def __enter__(self): return self
+        def __exit__(self, *_args): return False
+        def extract_info(self, url, **_kwargs):
+            public_calls.append(url)
+            raise worker.UrllibHTTPError(
+                "https://www.douyin.com/aweme/v1/web/aweme/detail/?token=fixture-secret",
+                403, "Forbidden", {}, None)
+
+    def public_downloader(_options, _url, **kwargs):
+        assert kwargs["use_imported_douyin_cookies"] is False
+        return DeniedPublicYDL()
 
     def authenticated(url, actual_prefix, _options, _send):
-        calls.append((url, actual_prefix))
-        output.write_bytes(mp4_bytes)
-        return {"file_path": str(output), "duration": .5, "source": "douyin-cookie-ytdlp"}
+        cookie_calls.append((url, actual_prefix))
+        return {"file_path": actual_prefix + ".mp4", "duration": .5,
+                "source": "douyin-cookie-ytdlp", "authenticated_attempted": True}
 
+    monkeypatch.setattr(worker, "single_video_downloader", public_downloader, raising=False)
     monkeypatch.setattr(worker, "_download_with_imported_douyin_cookies", authenticated)
     assert worker.main() == 0
     events = read_events(capsys)
-    assert calls == [(VIDEO_URL.replace("/video/", "/video/"), prefix)]
+    canonical = f"https://www.douyin.com/video/{VIDEO_ID}"
+    assert public_calls == [canonical]
+    assert cookie_calls == [(canonical, prefix)]
     assert events[-1]["kind"] == "result"
-    assert events[-1]["result"]["source"] == "douyin-cookie-ytdlp"
+    assert events[-1]["result"]["authenticated_attempted"] is True
+    assert "fixture-secret" not in json.dumps(events)
+
+
+def test_public_ytdlp_429_stops_without_cookie_fallback(
+        monkeypatch, work_directory, capsys):
+    prefix = str(work_directory / "video")
+    monkeypatch.setattr(worker.sys, "argv", ["download_worker.py", VIDEO_URL, prefix])
+    monkeypatch.setattr(worker, "resolve_douyin", lambda *_args: (_ for _ in ()).throw(
+        worker.DouyinResolveError("no public media", code="public_unavailable",
+                                  category="public_unavailable", source_id=VIDEO_ID)))
+    monkeypatch.setattr(worker, "get_douyin_cookie_status",
+                        lambda: {"configured": True, "stored": True, "count": 61}, raising=False)
+    calls = []
+
+    class RateLimitedYDL:
+        def __enter__(self): return self
+        def __exit__(self, *_args): return False
+        def extract_info(self, _url, **_kwargs):
+            raise worker.UrllibHTTPError("https://www.douyin.com/aweme/v1/web/aweme/detail/",
+                                         429, "Too Many Requests", {"Retry-After": "120"}, None)
+
+    monkeypatch.setattr(worker, "single_video_downloader",
+                        lambda *_args, **kwargs: (calls.append(kwargs.get("use_imported_douyin_cookies")),
+                                                  RateLimitedYDL())[1], raising=False)
+    monkeypatch.setattr(worker, "_download_with_imported_douyin_cookies",
+                        lambda *_args: calls.append("cookie"))
+    assert worker.main() == 1
+    events = read_events(capsys)
+    assert events[-1]["code"] == "RATE_LIMITED"
+    assert events[-1]["status_code"] == 429
+    assert events[-1]["retry_after_seconds"] == 120
+    assert calls == [False]
+
+
+def test_api_access_denial_does_not_fall_through_to_public_or_cookie_extractor(
+        monkeypatch, work_directory, capsys):
+    prefix = str(work_directory / "video")
+    monkeypatch.setattr(worker.sys, "argv", ["download_worker.py", VIDEO_URL, prefix])
+    monkeypatch.setattr(worker, "resolve_douyin", lambda *_args: (_ for _ in ()).throw(
+        worker.DouyinResolveError("access denied for private video", code="api_rejected",
+                                  category="access_denied", stage="resolve")))
+    monkeypatch.setattr(worker, "get_douyin_cookie_status",
+                        lambda: {"configured": True, "stored": True, "count": 61}, raising=False)
+    calls = []
+    monkeypatch.setattr(worker, "single_video_downloader",
+                        lambda *_args, **_kwargs: calls.append("public"), raising=False)
+    monkeypatch.setattr(worker, "_download_with_imported_douyin_cookies",
+                        lambda *_args: calls.append("cookie"))
+    assert worker.main() == 1
+    events = read_events(capsys)
+    assert events[-1]["code"] == "AUTH_REJECTED"
+    assert calls == []
 
 
 def test_cookie_fallback_rejects_a_different_video_id(monkeypatch, work_directory, mp4_bytes):
@@ -1012,11 +1176,17 @@ def test_public_unavailable_without_cookies_is_not_mislabeled_auth_required(
     monkeypatch.setattr(worker, "get_douyin_cookie_status",
                         lambda: {"configured": False, "stored": False, "count": 0}, raising=False)
     calls = []
-    monkeypatch.setattr(worker, "single_video_downloader", lambda *_args, **_kwargs: calls.append(True))
-    assert worker.main() == 1
+    monkeypatch.setattr(worker, "_download_with_public_douyin_ytdlp",
+                        lambda url, actual_prefix, _options, _send: (
+                            calls.append((url, actual_prefix)),
+                            {"file_path": actual_prefix + ".mp4", "source": "douyin-public-ytdlp",
+                             "authenticated_attempted": False})[1])
+    assert worker.main() == 0
     events = read_events(capsys)
-    assert events[-1]["code"] == "SOURCE_UNAVAILABLE"
-    assert calls == []
+    assert events[-1]["kind"] == "result"
+    assert events[-1]["result"]["source"] == "douyin-public-ytdlp"
+    assert events[-1]["result"]["authenticated_attempted"] is False
+    assert calls == [(VIDEO_URL, prefix)]
 
 
 def test_dns_failure_does_not_attempt_authenticated_or_anonymous_ytdlp(
@@ -1170,6 +1340,12 @@ def test_cookie_extractor_message_does_not_invent_an_http_status(
 ])
 def test_cookie_fallback_distinguishes_transport_and_extractor_failures(error, expected):
     assert worker._classify_cookie_download_error(error) == expected
+
+
+def test_403_without_login_evidence_is_not_classified_as_login_required():
+    error = RuntimeError("HTTP Error 403: Forbidden")
+    assert worker._classify_cookie_download_error(error) == "AUTH_REJECTED"
+    assert worker._cookie_failure_diagnostics(error)["http_status"] is None
 
 
 def test_http_429_honors_retry_after_once_then_stops(monkeypatch, work_directory, mp4_bytes):

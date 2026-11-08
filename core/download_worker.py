@@ -86,12 +86,8 @@ def _has_imported_douyin_cookies():
 
 
 def _missing_douyin_cookie_error(*, resumable=False, status_code=None, error_type="DouyinResolveError"):
-    """Distinguish a never-imported session from an expired saved cookie file."""
-    try:
-        status = get_douyin_cookie_status()
-    except Exception:
-        status = {}
-    code = "LOGIN_REQUIRED" if isinstance(status, dict) and status.get("stored") is True else "AUTH_REQUIRED"
+    """Report an auth gate without claiming a stored-but-untried cookie expired."""
+    code = "AUTH_REQUIRED"
     status_code = status_code if type(status_code) is int and 100 <= status_code <= 599 else None
     return MediaDownloadError(
         _safe_download_failure(code), resumable=resumable, code=code, status_code=status_code,
@@ -148,7 +144,7 @@ def _exception_chain(error):
     return chain
 
 
-def _cookie_failure_diagnostics(error):
+def _cookie_failure_diagnostics(error, *, authenticated_attempted=True):
     """Extract typed HTTP/transport details without retaining raw URLs or exception text."""
     status_code = None
     endpoint_host = endpoint_path = None
@@ -191,21 +187,22 @@ def _cookie_failure_diagnostics(error):
 
     root = error
     error_type = type(root).__name__
+    prefix = "authenticated" if authenticated_attempted else "public"
     if status_code is not None:
-        stage = "authenticated_http"
+        stage = f"{prefix}_http"
     elif any(isinstance(item, socket.gaierror) for item in chain):
-        stage = "authenticated_dns"
+        stage = f"{prefix}_dns"
     elif any(isinstance(item, ssl.SSLError) for item in chain):
-        stage = "authenticated_tls"
+        stage = f"{prefix}_tls"
     elif any(isinstance(item, (TimeoutError, socket.timeout)) for item in chain):
-        stage = "authenticated_timeout"
+        stage = f"{prefix}_timeout"
     elif any(isinstance(item, (ConnectionError, OSError)) for item in chain):
-        stage = "authenticated_connect"
+        stage = f"{prefix}_connect"
     else:
-        stage = "authenticated_extractor"
+        stage = f"{prefix}_extractor"
     return {"stage": stage, "error_type": error_type[:48], "http_status": status_code,
             "endpoint_host": endpoint_host, "endpoint_path": endpoint_path,
-            "authenticated_attempted": True}
+            "authenticated_attempted": authenticated_attempted is True}
 
 
 def _classify_cookie_download_error(error, diagnostics=None):
@@ -349,8 +346,10 @@ def _resolver_error_as_download_error(error, *, resumable=False):
         code = "LOGIN_REQUIRED"
     elif error.category == "captcha_required":
         code = "CAPTCHA_REQUIRED"
-    elif error.category == "access_denied" or error.status_code in {401, 403}:
+    elif error.status_code in {401, 403}:
         code = "AUTH_REQUIRED"
+    elif error.category == "access_denied":
+        code = "AUTH_REJECTED"
     elif error.status_code is not None and 500 <= error.status_code <= 599:
         code = "SERVER_UNAVAILABLE"
     elif error.code == "dns_failure" or error.code == "invalid_dns_answer":
@@ -903,13 +902,15 @@ def single_video_downloader(options, url=None, *, use_imported_douyin_cookies=Tr
     return downloader
 
 
-def _download_with_imported_douyin_cookies(url, prefix, options, send):
-    """Make exactly one yt-dlp attempt using only the imported Douyin cookie jar."""
-    if not _has_imported_douyin_cookies():
+def _download_with_douyin_ytdlp(url, prefix, options, send, *, use_imported_cookies):
+    """Run one yt-dlp attempt with either no cookies or the imported Douyin jar."""
+    if use_imported_cookies and not _has_imported_douyin_cookies():
         raise _missing_douyin_cookie_error()
 
-    revision = douyin_cookie_revision()
-    temporary_prefix = Path(f"{prefix}.cookie-{uuid.uuid4().hex}")
+    revision = douyin_cookie_revision() if use_imported_cookies else None
+    source_name = "douyin-cookie-ytdlp" if use_imported_cookies else "douyin-public-ytdlp"
+    strategy = "yt-dlp-cookie" if use_imported_cookies else "yt-dlp-public"
+    temporary_prefix = Path(f"{prefix}.{('cookie' if use_imported_cookies else 'public')}-{uuid.uuid4().hex}")
     target_prefix = Path(prefix)
     fallback_options = {
         **options,
@@ -921,11 +922,13 @@ def _download_with_imported_douyin_cookies(url, prefix, options, send):
         "continuedl": False,
         "overwrites": False,
     }
-    send({"kind": "progress", "source": "douyin-cookie-ytdlp", "phase": "resolve",
-          "stage": "Nguồn công khai yêu cầu quyền truy cập; đang thử một lượt bằng cookie Douyin đã nhập…",
+    stage = ("Nguồn yêu cầu phiên đăng nhập; đang thử một lượt bằng cookie Douyin đã nhập…"
+             if use_imported_cookies else "Đang thử trình tải Douyin công khai, không gửi cookie…")
+    send({"kind": "progress", "source": source_name, "phase": "resolve", "stage": stage,
           "progress_pct": None})
     try:
-        with single_video_downloader(fallback_options, url, use_imported_douyin_cookies=True) as ydl:
+        with single_video_downloader(fallback_options, url,
+                                     use_imported_douyin_cookies=use_imported_cookies) as ydl:
             info = ydl.extract_info(url, download=True)
             if not isinstance(info, dict) or info.get("_type") in {"playlist", "multi_video"}:
                 raise ValueError("unsupported url")
@@ -947,8 +950,8 @@ def _download_with_imported_douyin_cookies(url, prefix, options, send):
         duration = verify_video(output)
         size = output.stat().st_size
         digest = hashlib.sha256()
-        with output.open("rb") as source:
-            for block in iter(lambda: source.read(1024 * 1024), b""):
+        with output.open("rb") as source_file:
+            for block in iter(lambda: source_file.read(1024 * 1024), b""):
                 digest.update(block)
         suffix = output.suffix.lower() if re.fullmatch(r"\.[a-z0-9]{1,8}", output.suffix.lower()) else ".mp4"
         # Keep the canonical video_<id>.<ext> name so VideoDownloader can
@@ -958,13 +961,13 @@ def _download_with_imported_douyin_cookies(url, prefix, options, send):
             raise OSError("fallback output already exists")
         output.replace(published)
         return {"file_path": str(published), "title": str(info.get("title") or f"Douyin {output.stem}")[:2000],
-                "duration": duration, "source": "douyin-cookie-ytdlp", "source_method": "live_download",
+                "duration": duration, "source": source_name, "source_method": "live_download",
                 "downloaded_from_network": True, "download_attempted": True, "download_verified": True,
                 "source_identity_verified": True, "bytes_received_from_network": size,
-                "downloader_strategy": "yt-dlp-cookie", "authenticated_attempted": True,
+                "downloader_strategy": strategy, "authenticated_attempted": use_imported_cookies,
                 "media_sha256": digest.hexdigest(), "cache_hit": False}
     except Exception as error:
-        diagnostics = _cookie_failure_diagnostics(error)
+        diagnostics = _cookie_failure_diagnostics(error, authenticated_attempted=use_imported_cookies)
         code = _classify_cookie_download_error(error, diagnostics)
         retry_after = _retry_after_from_exception(error)
         error_status = diagnostics.get("http_status")
@@ -977,6 +980,15 @@ def _download_with_imported_douyin_cookies(url, prefix, options, send):
         raise MediaDownloadError(_safe_download_failure(code, retry_after=retry_after), code=code,
                                  status_code=error_status, retry_after_seconds=retry_after,
                                  cookie_revision=revision, diagnostics=diagnostics) from None
+
+
+def _download_with_public_douyin_ytdlp(url, prefix, options, send):
+    return _download_with_douyin_ytdlp(url, prefix, options, send, use_imported_cookies=False)
+
+
+def _download_with_imported_douyin_cookies(url, prefix, options, send):
+    """Make exactly one yt-dlp attempt using only the imported Douyin cookie jar."""
+    return _download_with_douyin_ytdlp(url, prefix, options, send, use_imported_cookies=True)
 
 
 def main():
@@ -1031,10 +1043,9 @@ def main():
                         code="RATE_LIMITED", status_code=429, retry_after_seconds=delay) from None
 
                 auth_required = (error.status_code in {401, 403}
-                                 or error.category in {"access_denied", "login_required"}
+                                 or error.category == "login_required"
                                  or error.code == "login_required")
-                cookie_retry_allowed = auth_required or error.code == "public_unavailable"
-                if cookie_retry_allowed and _has_imported_douyin_cookies():
+                if auth_required and _has_imported_douyin_cookies():
                     fallback_video_id = error.source_id or _video_id(url)
                     if fallback_video_id:
                         fallback_url = f"https://www.douyin.com/video/{fallback_video_id}"
@@ -1049,6 +1060,38 @@ def main():
                     raise _missing_douyin_cookie_error(resumable=checkpoint is not None,
                                                        status_code=error.status_code,
                                                        error_type=error.error_type or "DouyinResolveError") from None
+
+                # These errors establish no login, access-denial, CAPTCHA or
+                # rate-limit decision. Preserve the old public yt-dlp path,
+                # explicitly without cookies. Never use it after a hard gate.
+                public_fallback_allowed = (
+                    error.status_code is None
+                    and error.category not in {"access_denied", "login_required", "captcha_required", "rate_limited"}
+                    and error.code in {"public_unavailable", "api_rejected", "invalid_response"}
+                )
+                if public_fallback_allowed:
+                    fallback_video_id = error.source_id or _video_id(url)
+                    if not fallback_video_id:
+                        raise _resolver_error_as_download_error(error, resumable=checkpoint is not None) from None
+                    fallback_url = f"https://www.douyin.com/video/{fallback_video_id}"
+                    try:
+                        result = _download_with_public_douyin_ytdlp(fallback_url, prefix, options, send)
+                    except MediaDownloadError as public_error:
+                        cookie_auth_gate = (public_error.status_code in {401, 403}
+                                            or public_error.code == "LOGIN_REQUIRED")
+                        if public_error.code in {"CAPTCHA_REQUIRED", "RATE_LIMITED"}:
+                            raise
+                        if cookie_auth_gate and _has_imported_douyin_cookies():
+                            result = _download_with_imported_douyin_cookies(
+                                fallback_url, prefix, options, send)
+                        elif cookie_auth_gate:
+                            raise _missing_douyin_cookie_error(
+                                resumable=checkpoint is not None,
+                                status_code=public_error.status_code) from None
+                        else:
+                            raise
+                    send({"kind": "result", "result": result})
+                    return 0
                 raise _resolver_error_as_download_error(error, resumable=checkpoint is not None) from None
             else:
                 requested_id = _video_id(url)

@@ -44,7 +44,8 @@ def _safe_download_diagnostics(value):
     if not isinstance(value, dict):
         return None
     stages = {
-        "public_auth_gate", "authenticated_http", "authenticated_dns", "authenticated_tls",
+        "public_auth_gate", "public_http", "public_dns", "public_tls", "public_timeout",
+        "public_connect", "public_extractor", "authenticated_http", "authenticated_dns", "authenticated_tls",
         "authenticated_timeout", "authenticated_connect", "authenticated_extractor",
     }
     stage = value.get("stage")
