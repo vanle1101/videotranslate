@@ -25,7 +25,7 @@ ADDRESS_FALLBACK_BUDGET = TIMEOUT * 2
 MAX_JSON_BYTES = 2 * 1024 * 1024
 MAX_REDIRECTS = 4
 SHARE_HOSTS = frozenset({"douyin.com", "www.douyin.com", "v.douyin.com",
-                         "m.douyin.com", "www.iesdouyin.com"})
+                         "m.douyin.com", "iesdouyin.com", "www.iesdouyin.com"})
 FEED_HOSTS = frozenset({"api5-normal-c-hl.amemv.com", "aweme.snssdk.com"})
 MEDIA_HOSTS = frozenset({"api-play-hl.amemv.com", "api-hl.amemv.com", "www.iesdouyin.com"})
 MEDIA_ROOTS = ("douyinvod.com", "zjcdn.com")

@@ -369,6 +369,26 @@ def test_short_link_redirect_finds_exact_video_without_reading_page(monkeypatch)
     assert VIDEO_URL not in calls
 
 
+def test_iesdouyin_apex_share_video_url_resolves_exact_video(monkeypatch):
+    serve_json(monkeypatch, {"status_code": 0, "aweme_list": [item()]})
+    shared_url = f"https://iesdouyin.com/share/video/{VIDEO_ID}"
+
+    result = resolver.resolve_douyin(shared_url)
+
+    assert result["id"] == VIDEO_ID
+    assert result["formats"]
+
+
+@pytest.mark.parametrize("path", [
+    f"/video/{VIDEO_ID}",
+    f"/jingxuan?modal_id={VIDEO_ID}",
+    f"/share/video/{VIDEO_ID}",
+    f"/share/note/{VIDEO_ID}",
+])
+def test_supported_post_paths_keep_the_requested_video_identity(path):
+    assert resolver._video_id("https://www.douyin.com" + path) == VIDEO_ID
+
+
 def test_transport_pins_public_ip_and_keeps_original_tls_hostname(monkeypatch):
     calls = {}
 
