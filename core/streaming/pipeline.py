@@ -2107,6 +2107,18 @@ class StreamingPipelineSession:
     def get_progress(self) -> Dict[str, Any]:
         snapshot = dict(self.progress)
         output_gate = self._final_output_metadata()
+        published_output = bool(getattr(self, "output_filename", "") and not self.caption_output_outdated)
+        resume_errors = {
+            "Dịch video chưa xong; các câu đã dịch và giọng đọc được giữ. Bấm Tiếp tục để xử lý phần còn lại.",
+            "Chuẩn bị video bị gián đoạn; bấm Tiếp tục để khôi phục phần đã lưu.",
+        }
+        published_source_gap_draft = bool(
+            published_output
+            and output_gate.get("output_is_draft")
+            and self._source_failure_code == "source_speech_unrecognized"
+            and getattr(self, "_startup_failed", False)
+            and self.error in resume_errors
+        )
         snapshot.update(output_gate)
         snapshot.update(self._processing_progress_metadata())
         from core.streaming.recovery import segment_state
@@ -2180,6 +2192,10 @@ class StreamingPipelineSession:
                 stage="Đang dừng xử lý; chờ tác vụ đang chạy trả quyền điều khiển…", can_pause=False)
         elif self.is_stopped:
             snapshot.update(status="STOPPED", phase="stopped", stage="Đã dừng bởi người dùng")
+        elif self.error and published_source_gap_draft:
+            snapshot.update(status="PREPARED", phase="prepared", progress_pct=None,
+                stage=(f"{output_gate['output_quality_label']}. MP4 bản nháp đã xuất; "
+                       "các khoảng nguồn chưa xác minh vẫn được giữ riêng."))
         elif self.error:
             if getattr(self, "_restored_interrupted", False):
                 snapshot.update(status="STOPPED", phase="restored", stage=self.error)
@@ -2233,7 +2249,6 @@ class StreamingPipelineSession:
         snapshot["can_resume"] = bool(self.initialized and self.is_running and snapshot["status"] == "PAUSED")
         snapshot["can_stop"] = (snapshot["status"] in {"RUNNING", "PAUSED"}
                                 or bool(self.edit_tasks) and not getattr(self, "_stop_draining", False))
-        published_output = bool(getattr(self, "output_filename", "") and not self.caption_output_outdated)
         if published_output and (output_gate.get("output_is_draft") or self.output_incomplete
                                  or output_gate.get("media_complete") is not True):
             snapshot["result_status"] = "DRAFT"

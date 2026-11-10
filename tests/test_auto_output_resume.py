@@ -235,6 +235,23 @@ def test_source_gap_draft_resume_requires_complete_source_and_media_evidence(rea
     assert not lifecycle.has_pending_auto_output(session)
 
 
+def test_published_source_gap_draft_is_prepared_not_failed(ready_output):
+    session = _mark_complete_source_gap_draft(ready_output)
+    session.run_intent = "idle"
+    session.review_summary = {"status": "incomplete"}
+    session.error = "Dịch video chưa xong; các câu đã dịch và giọng đọc được giữ. Bấm Tiếp tục để xử lý phần còn lại."
+    session._startup_failed = True
+    session.output_filename = "source-gap-draft.mp4"
+    session.output_incomplete = True
+
+    progress = session.get_progress()
+
+    assert progress["status"] == "PREPARED"
+    assert progress["result_status"] == "DRAFT"
+    assert progress["output_is_draft"] is True
+    assert progress["progress_pct"] is None
+
+
 def test_no_backend_callback_preserves_pending_intent(ready_output):
     assert asyncio.run(lifecycle.resume_interrupted_sessions()) == []
     assert _read(ready_output.task_id)["session"]["run_intent"] == "running"
