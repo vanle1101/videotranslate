@@ -148,6 +148,93 @@ def test_restart_dispatches_finished_without_websocket_or_retranslation(ready_ou
     assert _read(ready_output.task_id)["session"]["run_intent"] == "idle"
 
 
+def test_complete_source_gap_draft_resumes_after_restart_without_retranslation(ready_output):
+    session = _mark_complete_source_gap_draft(ready_output)
+    session.review_summary = {"status": "incomplete"}
+    session.automatic_output = None
+    session.persist()
+    events = []
+
+    async def run():
+        owners = await lifecycle.resume_interrupted_sessions(
+            lambda task_id: lambda event, data: events.append((task_id, event)))
+        assert len(owners) == 1
+        await asyncio.gather(*owners)
+
+    asyncio.run(run())
+
+    assert events == [(session.task_id, "finished")]
+    StreamingPipelineSession.retry_failed_synthesis.assert_not_awaited()
+
+
+def test_idle_source_gap_draft_resumes_after_restart_without_retranslation(ready_output):
+    session = _mark_complete_source_gap_draft(ready_output)
+    session.run_intent = "idle"
+    session.review_summary = {"status": "incomplete"}
+    session.automatic_output = None
+    session.persist()
+    events = []
+
+    async def run():
+        owners = await lifecycle.resume_interrupted_sessions(
+            lambda task_id: lambda event, data: events.append((task_id, event)))
+        assert len(owners) == 1
+        await asyncio.gather(*owners)
+
+    asyncio.run(run())
+
+    assert events == [(session.task_id, "finished")]
+    StreamingPipelineSession.retry_failed_synthesis.assert_not_awaited()
+
+
+def test_idle_incomplete_source_gap_remains_inert(ready_output):
+    session = _mark_complete_source_gap_draft(ready_output)
+    session.run_intent = "idle"
+    session._source_scanned_seconds -= 1
+    session._source_coverage_intervals[-1]["end"] -= 1
+    session.persist()
+    callback = AsyncMock()
+
+    assert asyncio.run(lifecycle.resume_interrupted_sessions(lambda _task: callback)) == []
+    callback.assert_not_awaited()
+
+
+def _mark_complete_source_gap_draft(session):
+    session._chunked_source_started = True
+    session._visual_incremental_started = True
+    session._visual_prepass_complete = False
+    session._visual_completed_seconds = 0.8
+    session._source_prepared_seconds = session.total_duration
+    session._source_scanned_seconds = session.total_duration
+    session._source_missing_speech_spans = [[0.8, 0.928]]
+    session._source_failure_code = "source_speech_unrecognized"
+    session._source_failure_start = 0.8
+    session._source_coverage_intervals = [
+        {"start": 0.0, "end": 0.8, "state": "prepared", "missing_speech_spans": [], "error_code": None},
+        {"start": 0.8, "end": 0.928, "state": "unresolved",
+         "missing_speech_spans": [[0.8, 0.928]], "error_code": "source_speech_unrecognized"},
+        {"start": 0.928, "end": 2.0, "state": "prepared", "missing_speech_spans": [], "error_code": None},
+    ]
+    session._chunk_jobs = []
+    return session
+
+
+@pytest.mark.parametrize("damage", ["unscanned_tail", "incomplete_chunk", "wrong_gap_code", "visual_incomplete"])
+def test_source_gap_draft_resume_requires_complete_source_and_media_evidence(ready_output, damage):
+    session = _mark_complete_source_gap_draft(ready_output)
+    if damage == "unscanned_tail":
+        session._source_scanned_seconds = session.total_duration - 1
+    elif damage == "incomplete_chunk":
+        session._chunk_jobs = [{"state": "FAILED"}]
+    elif damage == "wrong_gap_code":
+        session._source_coverage_intervals[1]["error_code"] = "source_missing"
+    else:
+        session.visual_translation = True
+        session._visual_completed_seconds = session.total_duration - 1
+
+    assert not lifecycle.has_pending_auto_output(session)
+
+
 def test_no_backend_callback_preserves_pending_intent(ready_output):
     assert asyncio.run(lifecycle.resume_interrupted_sessions()) == []
     assert _read(ready_output.task_id)["session"]["run_intent"] == "running"

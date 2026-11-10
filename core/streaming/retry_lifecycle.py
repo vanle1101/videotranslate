@@ -88,12 +88,74 @@ def sync_retry_deadlines(session, *, now=None, resuming=False):
         row.update(remaining_seconds=remaining, next_attempt_at=now + remaining)
 
 
-def _auto_output_media_ready(session):
+def _source_gap_draft_media_ready(session, gate):
+    """Allow restart export only when every source interval is classified.
+
+    A recognized unresolved source gap can make full coverage incomplete while
+    all known speech rows still have valid narration. That case may resume the
+    existing DRAFT path, but an unscanned tail, missing WAV, failed row, or
+    unrelated source error must not be published as if complete.
+    """
+    if getattr(session, "_source_failure_code", None) != "source_speech_unrecognized":
+        return False
+    if (gate.get("source_coverage_complete") is not False
+            or gate.get("missing_speech_ids") or gate.get("missing_audio_ids")
+            or gate.get("invalid_timing_ids")):
+        return False
+    if not session.segments or any(row.status not in {"READY", "PLAYED"}
+                                   for row in session.segments.values()):
+        return False
+    total = getattr(session, "total_duration", 0)
+    scanned = getattr(session, "_source_scanned_seconds", 0)
+    if (type(total) not in (int, float) or not math.isfinite(total) or total <= 0
+            or type(scanned) not in (int, float) or not math.isfinite(scanned)
+            or scanned + .05 < total):
+        return False
+    intervals = getattr(session, "_source_coverage_intervals", None) or []
+    if not intervals:
+        return False
+    cursor = 0.0
+    has_unresolved = False
+    for interval in sorted(intervals, key=lambda item: item.get("start", -1)):
+        if not isinstance(interval, dict):
+            return False
+        start, end = interval.get("start"), interval.get("end")
+        if (type(start) not in (int, float) or type(end) not in (int, float)
+                or not math.isfinite(start) or not math.isfinite(end)
+                or start < 0 or end <= start or end > total + .05
+                or start > cursor + .05):
+            return False
+        state = interval.get("state")
+        if state == "unresolved":
+            if (interval.get("error_code") != "source_speech_unrecognized"
+                    or not interval.get("missing_speech_spans")):
+                return False
+            has_unresolved = True
+        elif state != "prepared":
+            return False
+        cursor = max(cursor, end)
+    if not has_unresolved or cursor + .05 < total:
+        return False
+    if any(row.get("state") != "COMPLETED" for row in (getattr(session, "_chunk_jobs", []) or [])):
+        return False
+    if getattr(session, "visual_translation", False) and (
+            not getattr(session, "_visual_prepass_complete", False)
+            or getattr(session, "_visual_completed_seconds", 0) + .05 < total):
+        return False
+    error = getattr(session, "error", None)
+    resume_errors = {
+        "Dịch video chưa xong; các câu đã dịch và giọng đọc được giữ. Bấm Tiếp tục để xử lý phần còn lại.",
+        "Chuẩn bị video bị gián đoạn; bấm Tiếp tục để khôi phục phần đã lưu.",
+    }
+    return not error or (getattr(session, "_startup_failed", False) and error in resume_errors)
+
+
+def _auto_output_media_ready(session, *, allow_source_gap_draft=False):
     if (getattr(session, "run_intent", "idle") != "running"
             or getattr(session, "auto_export_result", False) is not True
             or any(getattr(session, field, False) for field in (
-                "is_stopped", "is_paused", "is_running", "is_editing", "error", "_stop_draining",
-                "_restored_source_missing", "_persistence_capacity_failed", "_source_failure_code",
+                "is_stopped", "is_paused", "is_running", "is_editing", "_stop_draining",
+                "_restored_source_missing", "_persistence_capacity_failed",
                 "output_filename", "output_video_url"))
             or getattr(session, "translation_mode", "full") != "full"
             or not getattr(session, "segments", None)
@@ -104,26 +166,36 @@ def _auto_output_media_ready(session):
             getattr(session, "review_task", None), getattr(session, "export_task", None),
             getattr(session, "auto_export_task", None))):
         return False
-    if (getattr(session, "_chunked_source_started", False)
-            or getattr(session, "_visual_incremental_started", False)) and not getattr(
-                session, "_visual_prepass_complete", False):
+    source = getattr(session, "video_path", None)
+    if source is None or not source.is_file():
         return False
-    if (getattr(session, "_visual_incremental_started", False)
+    gate = session._final_output_metadata()
+    source_gap_draft = bool(allow_source_gap_draft
+                            and _source_gap_draft_media_ready(session, gate))
+    if not source_gap_draft and (
+            (getattr(session, "_chunked_source_started", False)
+             or getattr(session, "_visual_incremental_started", False)) and not getattr(
+                session, "_visual_prepass_complete", False)):
+        return False
+    if not source_gap_draft and (getattr(session, "_visual_incremental_started", False)
             and getattr(session, "_visual_completed_seconds", 0) + .001 < session.total_duration):
         return False
     from core.streaming.native_audit_lifecycle import has_pending
     if has_pending(session) or any(row.status not in {"READY", "PLAYED"} for row in session.segments.values()):
         return False
-    source = getattr(session, "video_path", None)
-    if source is None or not source.is_file():
+    if (getattr(session, "error", None) and not source_gap_draft) or (
+            getattr(session, "_source_failure_code", None) and not source_gap_draft):
         return False
-    gate = session._final_output_metadata()
-    return gate.get("media_complete") is True and gate.get("final_output_blocked") is False
+    return source_gap_draft or (gate.get("media_complete") is True
+                                and gate.get("final_output_blocked") is False)
 
 
 def has_pending_auto_output(session):
-    return ((getattr(session, "review_summary", {}) or {}).get("status") == "completed"
-            and _auto_output_media_ready(session))
+    if not _auto_output_media_ready(session, allow_source_gap_draft=True):
+        return False
+    if (getattr(session, "review_summary", {}) or {}).get("status") == "completed":
+        return True
+    return _source_gap_draft_media_ready(session, session._final_output_metadata())
 
 
 def prepare_auto_review(session):
@@ -186,11 +258,33 @@ async def resume_interrupted_sessions(event_callback_factory=None):
             continue
         try:
             data = await asyncio.to_thread(_read, path.stem)
-            if data["session"].get("run_intent") != "running":
+            saved = data["session"]
+            saved_intent = saved.get("run_intent")
+            saved_output_state = (saved.get("automatic_output") or {}).get("status")
+            idle_source_gap_candidate = bool(
+                saved_intent == "idle" and event_callback_factory is not None
+                and saved.get("auto_export_result") is True
+                and saved.get("translation_mode", "full") == "full"
+                and saved.get("_source_failure_code") == "source_speech_unrecognized"
+                and not saved.get("output_filename")
+                and saved_output_state not in {
+                    "skipped", "blocked", "failed", "completed", "cancelled"
+                }
+            )
+            if saved_intent != "running" and not idle_source_gap_candidate:
                 continue
             callback = event_callback_factory(path.stem) if event_callback_factory else None
             session = await asyncio.to_thread(restore_saved_session, path.stem, callback)
-            if session.run_intent != "running":
+            if idle_source_gap_candidate:
+                if not _source_gap_draft_media_ready(session, session._final_output_metadata()):
+                    active_streaming_sessions.pop(path.stem, None)
+                    continue
+                # A fully scanned source-gap draft can be safely auto-exported
+                # even when its worker retired with idle intent before export.
+                session.run_intent = "running"
+                session._persist_if_enabled()
+            elif session.run_intent != "running":
+                active_streaming_sessions.pop(path.stem, None)
                 continue
             session.is_stopped = False
             from core.streaming.native_audit_lifecycle import has_pending, ensure_native_audit_retry
@@ -200,16 +294,17 @@ async def resume_interrupted_sessions(event_callback_factory=None):
                     if owner is not None:
                         owners.append(owner)
                     continue
-                attempts = getattr(session, "_auto_export_attempts", None)
-                if (not data["session"].get("output_filename")
-                        and (attempts is None or attempts[1] < 2)
-                        and (has_pending_auto_output(session) or has_pending_auto_review(session))):
-                    if callback is not None:
-                        owner = asyncio.create_task(_resume_auto_output(session),
-                                                    name=f"resume-output-{session.task_id}")
-                        session.start_task = owner
-                        owners.append(owner)
-                    continue
+            attempts = getattr(session, "_auto_export_attempts", None)
+            if (not data["session"].get("output_filename")
+                    and (attempts is None or attempts[1] < 2)
+                    and (has_pending_auto_output(session) or has_pending_auto_review(session))):
+                if callback is not None:
+                    owner = asyncio.create_task(_resume_auto_output(session),
+                                                name=f"resume-output-{session.task_id}")
+                    session.start_task = owner
+                    owners.append(owner)
+                continue
+            if not session.can_retry:
                 if session.run_intent == "running" and not session.is_paused:
                     session.run_intent = "idle"
                     session._persist_if_enabled()
