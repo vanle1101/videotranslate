@@ -15,6 +15,20 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from core.services.service_manager import service_manager
 
 
+def test_startup_worker_allows_saved_project_recovery_time(monkeypatch):
+    import desktop_app
+
+    started = Mock(return_value=54001)
+    warmed = Mock(return_value={})
+    monkeypatch.setattr(desktop_app.service_manager, "start_backend", started)
+    monkeypatch.setattr(desktop_app.service_manager, "prewarm_components", warmed)
+
+    desktop_app.StartupWorker().run()
+
+    started.assert_called_once_with(timeout=60.0)
+    warmed.assert_called_once()
+
+
 @pytest.fixture
 def fullscreen_window_factory(qt_app, qt_objects):
     # These windows never load the backend or touch the user's Studio instance.

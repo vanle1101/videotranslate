@@ -72,6 +72,18 @@ def test_preview_readiness_never_proves_empty_source_speech_is_completed(omitted
     assert all(row.to_dict()["preview_is_draft"] for row in sess.segments.values())
 
 
+def test_exhausted_source_gap_progress_handles_unpublished_output(monkeypatch):
+    session = StreamingPipelineSession("gap-without-output-name", None)
+    session._source_missing_speech_spans = [(12.02, 12.844)]
+    monkeypatch.setattr(session, "_source_recovery_exhausted", lambda: True)
+
+    progress = session.get_progress()
+
+    assert progress["status"] == "PREPARED"
+    assert "chưa có MP4" in progress["stage"]
+    assert "12.02–12.84s" in progress["stage"]
+
+
 @pytest.mark.parametrize("source_field", ["text_zh", "asr_text"])
 @pytest.mark.parametrize("needs_review", [True, False])
 def test_source_speech_cannot_become_implicit_silence_when_flags_are_missing(source_field, needs_review):

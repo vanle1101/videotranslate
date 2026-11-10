@@ -323,6 +323,9 @@ class StreamingPipelineSession:
         from core.subtitle_cues import CAPTION_RENDERER_VERSION
         self.caption_renderer_version = CAPTION_RENDERER_VERSION
         self.caption_output_outdated = False
+        self.output_video_url = ""
+        self.output_filename = ""
+        self.output_review_url = ""
         self.output_incomplete = False
         self.output_missing_segment_ids = []
         self.translation_sources: List[Dict[str, str]] = []

@@ -183,7 +183,11 @@ class StartupWorker(QThread):
         try:
             self.progress.emit(5, "Khởi động Internal Backend...")
             # 1. Start FastAPI backend on random free port
-            port = service_manager.start_backend()
+            # Startup's health probe waits for the FastAPI lifespan hook,
+            # which validates saved project manifests before serving routes.
+            # Large local histories can exceed the service manager's short
+            # default even though startup is making progress.
+            port = service_manager.start_backend(timeout=60.0)
             self.progress.emit(15, "Backend đã kết nối thành công")
 
             # 2. Prewarm models & components
